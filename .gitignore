@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.dex
+*.apk
+*.zip
+*.jar

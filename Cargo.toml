@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/asc-dex",
+    "crates/asc-dalvik",
+    "crates/asc-findrefs",
+    "crates/asc-rebuild",
+    "crates/asc-smali",
+    "crates/asc-apk",
+    "crates/asc-cache",
+    "crates/asc-axml",
+    "crates/asc-engine",
+    "crates/asc-cli",
+    "crates/asc-gui",
+    "crates/asc-fixture",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/MG1937/ASC"
+rust-version = "1.85"
+
+[workspace.dependencies]
+asc-dex = { path = "crates/asc-dex" }
+asc-dalvik = { path = "crates/asc-dalvik" }
+asc-findrefs = { path = "crates/asc-findrefs" }
+asc-rebuild = { path = "crates/asc-rebuild" }
+asc-smali = { path = "crates/asc-smali" }
+asc-apk = { path = "crates/asc-apk" }
+asc-cache = { path = "crates/asc-cache" }
+asc-axml = { path = "crates/asc-axml" }
+asc-engine = { path = "crates/asc-engine" }
+asc-fixture = { path = "crates/asc-fixture" }
+
+thiserror = "2"
+memmap2 = "0.9"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+regex = "1.11"
+memchr = "2.7"
+clap = { version = "4.5", features = ["derive"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+tempfile = "3"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
+egui = "0.33"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+opt-level = 3
+
+[profile.bench]
+inherits = "release"

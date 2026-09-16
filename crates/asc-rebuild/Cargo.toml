@@ -1,0 +1,16 @@
+[package]
+name = "asc-rebuild"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Extracts one class and its dependencies from a DEX and rebuilds a minimal, self-consistent DEX in memory (Droid ASC)."
+
+[dependencies]
+asc-dex.workspace = true
+asc-dalvik.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+asc-fixture.workspace = true

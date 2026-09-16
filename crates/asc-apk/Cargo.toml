@@ -1,0 +1,25 @@
+[package]
+name = "asc-apk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Memory-mapped APK access for Droid ASC: central-directory scan, root-level DEX enumeration and (cancellable) Deflate extraction."
+
+[features]
+default = ["libdeflate"]
+# Use libdeflate (C) for whole-buffer inflation; roughly 1.5-2x faster than
+# zlib-rs. Cancellation is then checked per entry instead of every 512 KiB.
+libdeflate = ["dep:libdeflater"]
+
+[dependencies]
+memmap2.workspace = true
+flate2.workspace = true
+libdeflater = { version = "1.26", optional = true }
+memchr.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+asc-fixture.workspace = true
+tempfile.workspace = true

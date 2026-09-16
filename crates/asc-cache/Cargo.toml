@@ -1,0 +1,16 @@
+[package]
+name = "asc-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Inflated-DEX caches for Droid ASC: an on-disk cache shared across processes and an in-memory LRU for long-running hosts."
+
+[dependencies]
+asc-apk.workspace = true
+memmap2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

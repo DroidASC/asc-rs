@@ -1,0 +1,17 @@
+[package]
+name = "asc-smali"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "baksmali-style disassembler for a single class of a DEX (Droid ASC's built-in decompile backend)."
+
+[dependencies]
+asc-dex.workspace = true
+asc-dalvik.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+asc-fixture.workspace = true
+asc-rebuild.workspace = true

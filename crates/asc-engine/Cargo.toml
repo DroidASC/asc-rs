@@ -1,0 +1,22 @@
+[package]
+name = "asc-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "High-level Droid ASC engine: parallel APK class lookup, cross-DEX reference search, single-class rebuild + disassembly, manifest decoding."
+
+[dependencies]
+asc-dex.workspace = true
+asc-apk.workspace = true
+asc-cache.workspace = true
+asc-findrefs.workspace = true
+asc-rebuild.workspace = true
+asc-smali.workspace = true
+asc-axml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+asc-fixture.workspace = true
+tempfile.workspace = true
