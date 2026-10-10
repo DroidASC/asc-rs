@@ -84,7 +84,11 @@ modules and where the port deliberately differs.
 * **Threads instead of processes** for `findrefs`; results still stream per DEX as they
   complete. `getclass` returns as soon as one worker finds the class; workers still
   inflating another DEX finish in the background.
-* Global `--debug` / `--threads` flags can appear anywhere on the command line.
+* Global `--debug` / `--threads` flags can appear anywhere on the command line;
+  `--threads 0` runs one worker (Python's `listclass` rejects it).
+* Every root-level `*.dex` is a DEX entry (Python prefers `classes*` names), and a
+  duplicated entry name resolves to its last central-directory record (Python: the
+  first). This holds for `getclass`, `findrefs` and `listclass` alike.
 * `invoke-polymorphic` method and proto operands are remapped during rebuild
   (the Python version leaves them dangling); `invoke-custom` / method handles are still not
   rebuilt. A class that cannot be rebuilt (undefined opcode, `invoke-custom`) is still

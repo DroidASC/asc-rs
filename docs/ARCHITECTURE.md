@@ -92,16 +92,29 @@ labels for branches, switch payloads, `fill-array-data` and try/catch blocks. Th
   it starts (Python takes the item where it ends, via the next NUL), and `regex` keeps
   its Unicode semantics, so `.`/`\w`/`\xNN` do not match arbitrary bytes the way Python's
   byte-`re` does. An empty `string` pattern matches nothing rather than everything.
+  Patterns are UTF-8 while the data is MUTF-8: a literal supplementary character
+  (`😀`, stored as a surrogate pair) never matches, exactly as in Python, and `.` matches
+  one *UTF-8* character — it can match a 2- or 3-byte BMP character (Python's byte `.`
+  cannot) but not either half of a surrogate pair (Python's can, byte by byte). Spell a
+  supplementary character as its surrogate bytes (`\xED\xA0\xBD\xED\xB8\x80`, with
+  `(?-u)`) to find it.
 * Member queries: with a precise class, the member name is a **substring** match; with a
   fuzzy or absent class the member name is a regex against the string table.
   `MemberQuery::exact_name` (`--exact`, and the GUI's "references to this member") makes
   it a whole-name equality under any class constraint, as the Python GUI's exact-member
-  xref does; names are compared as MUTF-8 bytes (decoded only for non-ASCII strings).
+  xref does. Without a class the name string is one binary search over the sorted string
+  table; within a class's members names are compared as MUTF-8 bytes (decoded only for
+  non-ASCII strings).
 * Exact descriptors (`getclass`, a precise member-query class) are MUTF-8 encoded before
   the binary search over the type table, so class names with supplementary characters
-  (stored as surrogate pairs) are found; MUTF-8 byte order is UTF-16 code-unit order, the
-  order the DEX sorts its strings in. Python compares decoded code points and needs a
-  linear fallback for the same case.
+  (stored as surrogate pairs) are found. The search compares in UTF-16 code-unit order
+  (`asc_dex::mutf8::cmp_utf16`, ART's comparison), the order the DEX sorts its strings in;
+  raw MUTF-8 byte order agrees except for `U+0000` (`C0 80`). Python compares decoded
+  code points and needs a linear fallback for the same case.
+* Rebuilt string data is re-encoded as canonical MUTF-8 with a recounted `utf16_size`
+  (as the Python builder now does): an input whose declared length is wrong (accepted on
+  read, see `Dex::string_item_at`) or that holds 4-byte UTF-8 does not carry the defect
+  into the output.
 * Bucket resolution is fuzzy by design; every hit is verified by walking instruction
   lengths from the method start (or the previously verified offset) to the hit. That
   walk treats the leading `nop` of a switch / array payload as a one-unit instruction
@@ -130,6 +143,28 @@ package tree) also runs largest first, but puts each entry's classes back in its
 central-directory slot, so the listing is in DEX order like the Python `list_classes`.
 `list_classes` fails on the first unreadable entry or bad `class_def`; the GUI keeps the
 classes of the other entries and reports the broken ones.
+
+A DEX 041 container is split lazily (`asc_dex::container::logical_dex_iter`): every
+logical DEX after the first is a full copy of the container with its header moved to
+offset 0, so the uncached paths hold one such copy at a time. The memory cache keeps all
+of them (`CachedEntry::logical`, accounted in `resident_bytes`).
+
+### Entry selection (kept the same in every command)
+
+These differ from the Python CLI on purpose and apply to `getclass`, `findrefs` and
+`listclass` alike:
+
+* Every root-level `*.dex` entry is a DEX entry. Python's central-directory scan keys
+  on the substring `classes` and only falls back to all root `*.dex` when nothing
+  matches, so an extra `foo.dex` next to `classes.dex` is ignored there.
+* A duplicated entry name resolves to its **last** central-directory record (as zip
+  readers and `Apk::find_entry` do); Python keeps the first (or, in its fallback path,
+  both).
+* `--threads 0` is accepted and runs one worker (the flag is global); Python's
+  `listclass` rejects it.
+* The GUI package tree labels a class defined by several DEX files with the first one in
+  central-directory order; `getclass` opens whichever entry answers its parallel probe
+  first (smallest entries are probed first), which can be another of them.
 
 ### Caches
 
