@@ -45,7 +45,8 @@ impl Default for Options {
 
 /// Disassemble the class with the given descriptor.
 pub fn disassemble_class(dex: &Dex<'_>, descriptor: &str, opts: Options) -> Result<String> {
-    let (index, _) = dex.find_class_def(descriptor.as_bytes())?.ok_or_else(|| SmaliError::ClassNotFound(descriptor.to_string()))?;
+    let (index, _) =
+        dex.find_class_def(&asc_dex::mutf8::encode(descriptor))?.ok_or_else(|| SmaliError::ClassNotFound(descriptor.to_string()))?;
     disassemble_class_def(dex, index, opts)
 }
 

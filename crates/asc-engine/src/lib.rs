@@ -542,7 +542,9 @@ impl Engine {
         if entries.is_empty() {
             return Ok(None);
         }
-        let target: Arc<Vec<u8>> = Arc::new(descriptor.as_bytes().to_vec());
+        // DEX descriptors are MUTF-8: a supplementary character is a surrogate pair,
+        // not the 4-byte UTF-8 sequence `as_bytes` would compare against.
+        let target: Arc<Vec<u8>> = Arc::new(asc_dex::mutf8::encode(descriptor));
         let next = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let workers = self.threads.min(entries.len()).max(1);

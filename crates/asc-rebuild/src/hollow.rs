@@ -28,7 +28,8 @@ pub(crate) struct Hollow<'a> {
 
 impl<'a> Hollow<'a> {
     pub fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Hollow<'a>> {
-        let (_, def) = dex.find_class_def(descriptor.as_bytes())?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
+        let (_, def) =
+            dex.find_class_def(&asc_dex::mutf8::encode(descriptor))?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
         let buf = dex.buf();
         let class_data = dex.class_data(def.class_data_off)?;
         let interfaces = dex.type_list(def.interfaces_off)?;

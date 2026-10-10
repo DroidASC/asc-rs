@@ -9,7 +9,8 @@ use regex::bytes::Regex;
 
 /// Class constraint of a member query, ready to run.
 pub(crate) enum CompiledClass {
-    /// Exact descriptor, looked up with a binary search over the type table.
+    /// Exact descriptor (MUTF-8 encoded), looked up with a binary search over
+    /// the type table.
     Precise(Vec<u8>),
     /// Regex over the descriptor strings.
     Fuzzy(Regex),
@@ -91,7 +92,7 @@ fn compile_opt(pattern: &str) -> Result<Option<Regex>> {
 fn compile_member(m: &MemberQuery) -> Result<CompiledMember> {
     let class = match m.class.as_ref().filter(|c| !c.pattern.is_empty()) {
         None => None,
-        Some(ClassQuery { pattern, precise: true }) => Some(CompiledClass::Precise(pattern.as_bytes().to_vec())),
+        Some(ClassQuery { pattern, precise: true }) => Some(CompiledClass::Precise(asc_dex::mutf8::encode(pattern))),
         Some(ClassQuery { pattern, precise: false }) => Some(CompiledClass::Fuzzy(Regex::new(pattern)?)),
     };
     let name = match m.name.as_deref().filter(|n| !n.is_empty()) {

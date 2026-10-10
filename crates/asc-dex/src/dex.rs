@@ -156,14 +156,19 @@ impl<'a> Dex<'a> {
     /// Parse the `string_data_item` located at `data_off`.
     ///
     /// The terminating NUL is searched for within `3 * utf16_len + 1` bytes
-    /// (every UTF-16 code unit is at most three MUTF-8 bytes), so a corrupt
-    /// item cannot make the search sweep the rest of the buffer.
+    /// first (every UTF-16 code unit is at most three MUTF-8 bytes). Some
+    /// tools wrote a code-point or byte count instead, so when that window
+    /// holds no NUL the search continues to the end of the buffer before the
+    /// item is reported as unterminated.
     pub fn string_item_at(&self, data_off: u32) -> Result<StringItem<'a>> {
         let (utf16_len, n) = leb128::read_uleb128(self.buf, data_off as usize)?;
         let start = data_off as usize + n;
         let rest = self.buf.get(start..).ok_or(DexError::Truncated { what: "string_data", offset: start })?;
         let bound = (utf16_len as usize).saturating_mul(3).saturating_add(1).min(rest.len());
-        let end = rest[..bound].iter().position(|&b| b == 0).ok_or(DexError::UnterminatedString(data_off as usize))?;
+        let end = match rest[..bound].iter().position(|&b| b == 0) {
+            Some(end) => end,
+            None => bound + rest[bound..].iter().position(|&b| b == 0).ok_or(DexError::UnterminatedString(data_off as usize))?,
+        };
         Ok(StringItem { data_off, utf16_len, bytes: &rest[..end] })
     }
 
@@ -207,6 +212,10 @@ impl<'a> Dex<'a> {
     }
 
     /// Binary search the sorted type table for an exact descriptor.
+    ///
+    /// `descriptor` must be MUTF-8 (see [`mutf8::encode`]): string ids are
+    /// sorted by UTF-16 code units, which is the byte order of MUTF-8 but not
+    /// of UTF-8 once a supplementary character is involved.
     pub fn find_type_idx(&self, descriptor: &[u8]) -> Result<Option<u32>> {
         let size = self.header.type_ids.size;
         if size == 0 {
@@ -384,7 +393,7 @@ mod tests {
     use asc_fixture::make_dex;
 
     #[test]
-    fn string_items_are_bounded_by_their_declared_length() {
+    fn string_items_find_their_terminator() {
         let data = make_dex();
         let dex = Dex::parse(&data).unwrap();
         assert_eq!(dex.string(5).unwrap(), "token");
@@ -392,17 +401,17 @@ mod tests {
         let off = dex.string_data_off(5).unwrap() as usize;
         assert_eq!(data[off], 5); // uleb128 utf16_len
 
-        // Terminator missing (and no other NUL within 3 * len + 1 bytes): the
-        // search stops there instead of sweeping on.
-        let mut broken = data.clone();
-        broken[off + 1 + 5..off + 1 + 16].fill(b'x');
-        let dex = Dex::parse(&broken).unwrap();
-        assert_eq!(dex.string_item(5), Err(DexError::UnterminatedString(off)));
-
-        // Declared length too short for the payload: also rejected.
+        // Declared length too short for the payload (a code-point or byte count
+        // written by an older tool): the terminator past the window is used.
         let mut short = data.clone();
         short[off] = 1;
         let dex = Dex::parse(&short).unwrap();
+        assert_eq!(dex.string(5).unwrap(), "token");
+
+        // No NUL anywhere up to the end of the buffer: rejected.
+        let mut broken = data.clone();
+        broken[off + 1 + 5..].fill(b'x');
+        let dex = Dex::parse(&broken).unwrap();
         assert_eq!(dex.string_item(5), Err(DexError::UnterminatedString(off)));
 
         // A generous declared length still finds the real terminator.
