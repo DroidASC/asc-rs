@@ -9,6 +9,7 @@ directly from the compressed artifact in milliseconds, without building any glob
 usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] <COMMAND>
 
   getclass     Locate the target class in APK, extract one DEX in memory, then disassemble.
+  listclass    List classes across all DEX entries (--prefix com.poc to filter).
   getmanifest  Decode AndroidManifest.xml from APK and print it as XML.
   findrefs     Find code references for string/type/method/field across all DEX entries in APK.
   gui          Launch the graphical browser.
@@ -23,6 +24,7 @@ examples:
   droidasc app.apk --gui
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16 --dump-dex Main.dex
+  droidasc listclass app.apk --prefix com.poc -o classes.txt
   droidasc getmanifest app.apk -o AndroidManifest.xml
   droidasc findrefs app.apk string token -o string_refs.txt
   droidasc findrefs app.apk type com.poc.Main

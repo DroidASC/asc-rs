@@ -24,7 +24,7 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
 
 | Python | Rust |
 |---|---|
-| `asc_client/apk_handler.py` (EOCD / central directory scan, chunked inflate with stop event, thread pool with early exit, process pool for findrefs) | `asc-apk` (zip + inflate) and `asc-engine` (`get_class_dex`, `find_refs`) |
+| `asc_client/apk_handler.py` (EOCD / central directory scan, chunked inflate with stop event, thread pool with early exit, process pool for findrefs, `list_classes`) | `asc-apk` (zip + inflate) and `asc-engine` (`get_class_dex`, `find_refs`, `list_classes` / `scan_classes`) |
 | `asc_client/dex_container.py` (DEX 041 logical DEX split) | `asc_dex::container` |
 | `asc_client/asc_handler.py` (`getclass`, `findrefs` line formatting) | `asc_engine::{decompile_dex_class, find_refs_in_dex, RefResult::line}` |
 | `asc_client/manifest_handler.py` (androguard AXMLPrinter) | `asc-axml` |
@@ -117,7 +117,11 @@ be abandoned mid-way, so a worker that is already inflating finishes in the back
 the zlib-rs fallback path polls the flag every 512 KiB). `find_refs` uses scoped threads
 and an mpsc channel and hands out the largest entries first (every entry must be searched,
 so the longest inflate should start immediately); batches reach the caller in completion
-order, exactly like the Python process pool.
+order, exactly like the Python process pool. `scan_classes` (behind `listclass` and the GUI
+package tree) also runs largest first, but puts each entry's classes back in its
+central-directory slot, so the listing is in DEX order like the Python `list_classes`.
+`list_classes` fails on the first unreadable entry or bad `class_def`; the GUI keeps the
+classes of the other entries and reports the broken ones.
 
 ### Caches
 

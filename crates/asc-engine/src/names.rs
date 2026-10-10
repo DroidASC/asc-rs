@@ -38,6 +38,19 @@ pub fn dalvik_to_dot(name: &str) -> String {
     }
 }
 
+/// Normalise a `listclass` prefix: `com.poc` / `com/poc` become `Lcom/poc`,
+/// a prefix already starting with `L` is used as is (like the Python tool).
+pub fn class_prefix(prefix: &str) -> Result<String> {
+    let p = prefix.trim();
+    if p.is_empty() {
+        return Err(EngineError::Query("Class prefix cannot be empty".into()));
+    }
+    if p.starts_with('L') {
+        return Ok(p.to_string());
+    }
+    Ok(format!("L{}", p.replace('.', "/")))
+}
+
 /// Normalise a class query: fuzzy patterns only get their dots swapped for
 /// slashes, precise names become full descriptors.
 pub fn normalize_class_query(name: &str, fuzzy: bool) -> Result<String> {
@@ -77,6 +90,11 @@ mod tests {
         assert_eq!(normalize_class_query("com.poc", true).unwrap(), "com/poc");
         assert_eq!(normalize_class_query("poc", true).unwrap(), "poc");
         assert!(format_class_name("").is_err());
+        for p in ["com.xxx", "com/xxx", "Lcom/xxx", " com.xxx\t"] {
+            assert_eq!(class_prefix(p).unwrap(), "Lcom/xxx");
+        }
+        assert_eq!(class_prefix("a").unwrap(), "La");
+        assert_eq!(class_prefix(" ").unwrap_err().to_string(), "Class prefix cannot be empty");
         assert!(member_query("method", None, false, None).is_err());
         let q = member_query("method", Some("com.poc.Main"), false, Some("on")).unwrap();
         assert_eq!(q.class.unwrap(), ClassQuery { pattern: "Lcom/poc/Main;".into(), precise: true });

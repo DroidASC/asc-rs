@@ -227,13 +227,19 @@ impl Apk {
     /// parallel scan finishes the cheap ones early). Duplicate names keep the
     /// last occurrence, like [`Apk::find_entry`] (and `zipfile`).
     pub fn dex_entries(&self) -> Result<Vec<Entry>> {
+        let mut entries = self.dex_entries_in_order()?;
+        entries.sort_by_key(|e| e.comp_size);
+        Ok(entries)
+    }
+
+    /// The entries of [`Apk::dex_entries`] in central-directory order.
+    pub fn dex_entries_in_order(&self) -> Result<Vec<Entry>> {
         let mut entries = self.entries_filtered(|n| n.ends_with(b".dex") && !n.contains(&b'/'))?;
         // Last occurrence wins: walk from the back keeping first-seen names.
         entries.reverse();
         let mut seen = std::collections::HashSet::with_capacity(entries.len());
         entries.retain(|e| seen.insert(e.name.clone()));
         entries.reverse();
-        entries.sort_by_key(|e| e.comp_size);
         Ok(entries)
     }
 
@@ -614,6 +620,9 @@ mod tests {
         let dup = entries.iter().find(|e| e.name == "classes.dex").unwrap();
         assert_eq!(apk.read_entry(dup).unwrap().as_ref(), b.as_slice());
         assert_eq!(apk.find_entry("classes.dex").unwrap().unwrap(), *dup);
+        // Central-directory order, the duplicate at its last position.
+        let ordered: Vec<String> = apk.dex_entries_in_order().unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(ordered, ["classes2.dex", "classes.dex"]);
     }
 
     #[test]

@@ -7,15 +7,13 @@
 //! class events carry a request id for the same reason. A panicking worker
 //! is caught and reported as an error event so nothing stays at "loading".
 
-use asc_dex::container::logical_dex_buffers;
-use asc_dex::Dex;
 use asc_engine::{Engine, RefResult};
 use asc_findrefs::Query;
 use std::collections::{BTreeMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// A class known to the index.
@@ -195,48 +193,27 @@ impl Store {
     }
 
     fn enumerate_classes(&self) -> Result<LoadedIndex, String> {
-        let apk = self.engine.open().map_err(|e| e.to_string())?;
-        let entries = apk.dex_entries().map_err(|e| e.to_string())?;
-        let key = self.engine.apk_key(&apk);
-        let total = entries.len();
-        let next = AtomicUsize::new(0);
-        let done = AtomicUsize::new(0);
-        let all: Mutex<Vec<ClassEntry>> = Mutex::new(Vec::new());
-        let failed: Mutex<Vec<String>> = Mutex::new(Vec::new());
-        std::thread::scope(|s| {
-            for _ in 0..self.engine.threads().min(total.max(1)) {
-                let (apk, entries, next, done, all, failed, key) = (&apk, &entries, &next, &done, &all, &failed, key.as_ref());
-                s.spawn(move || loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(entry) = entries.get(i) else { break };
-                    match self.engine.entry_bytes(apk, key, entry) {
-                        Ok(data) => {
-                            let mut local = Vec::new();
-                            let mut bad = Vec::new();
-                            for (name, buf) in logical_dex_buffers(&entry.name, &data) {
-                                match Dex::with_name(&buf, &name) {
-                                    Ok(dex) => {
-                                        for def in dex.class_defs().flatten() {
-                                            if let Ok(desc) = dex.type_descriptor(def.class_idx) {
-                                                local.push(ClassEntry { descriptor: desc, dex_name: name.clone() });
-                                            }
-                                        }
-                                    }
-                                    Err(e) => bad.push(format!("{name}: {e}")),
-                                }
-                            }
-                            all.lock().unwrap().extend(local);
-                            failed.lock().unwrap().extend(bad);
+        let scanned =
+            self.engine.scan_classes(None, |done, total| self.send(Event::LoadProgress { done, total })).map_err(|e| e.to_string())?;
+        let total = scanned.len();
+        let mut all = Vec::new();
+        let mut failed = Vec::new();
+        for entry in scanned {
+            match entry.result {
+                // Unreadable `class_def`s are skipped silently, as before.
+                Ok(dexes) => {
+                    for dex in dexes {
+                        match dex.error {
+                            Some(e) => failed.push(format!("{}: {e}", dex.dex_name)),
+                            None => all.extend(
+                                dex.descriptors.into_iter().map(|descriptor| ClassEntry { descriptor, dex_name: dex.dex_name.clone() }),
+                            ),
                         }
-                        Err(e) => failed.lock().unwrap().push(format!("{}: {e}", entry.name)),
                     }
-                    let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    self.send(Event::LoadProgress { done: d, total });
-                });
+                }
+                Err(e) => failed.push(format!("{}: {e}", entry.entry_name)),
             }
-        });
-        let all = all.into_inner().unwrap();
-        let mut failed = failed.into_inner().unwrap();
+        }
         failed.sort();
         if all.is_empty() && !failed.is_empty() {
             return Err(failed.join("\n"));
