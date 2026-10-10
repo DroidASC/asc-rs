@@ -8,6 +8,7 @@
 //! preferences persist across runs.
 
 mod app;
+mod members;
 mod prefs;
 mod search;
 mod store;

@@ -4,15 +4,15 @@
 //! while drawing and the actions are applied once the frame is laid out, so
 //! any part of the UI can trigger any operation without borrow gymnastics.
 
+use crate::members::{char_to_byte, member_at, member_spans_in_line, MemberKind, MemberSpan};
 use crate::prefs::{row_cap_label, Prefs, ROW_CAPS};
 use crate::search::{SearchKind, SearchPanel};
 use crate::store::{ClassEntry, ClassIndex, Event, LoadedIndex, PackageNode, Store};
-use crate::tabs::{
-    active_after_close, const_string_in_line, descriptors_in_line, member_refs_in_line, regex_escape, short_name, Tab, TabContent,
-};
+use crate::tabs::{active_after_close, const_string_in_line, descriptors_in_line, regex_escape, short_name, Jump, Tab, TabContent};
 use asc_engine::{names, Engine};
 use asc_findrefs::{ClassQuery, MemberQuery, Query};
-use egui::{Color32, Key, Modifiers, RichText, TextStyle};
+use egui::text::{CCursor, LayoutJob, TextFormat};
+use egui::{Color32, Key, Modifiers, RichText, Stroke, TextStyle};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -28,18 +28,33 @@ Ctrl+F   find in the current tab\n\
 F3 / Shift+F3   next / previous find match\n\
 Ctrl+W   close the current tab\n\
 Esc      close the find bar\n\
+X        find references to the method / field under the cursor\n\
+Ctrl+click   go to the declaration of a method / field\n\
 \n\
+Click a source line to place the cursor; hold Ctrl to show member links.\n\
 Right-click a class, a source line or a result row for actions.\n\
 Double-click a result row to open the method.\n\
 Type two or more characters in the class field for suggestions.";
 
 /// Deferred UI operations (see module docs).
 enum Action {
-    OpenClass { descriptor: String, method: Option<String> },
+    OpenClass {
+        descriptor: String,
+        jump: Option<Jump>,
+    },
+    /// Open the declaring class of a referenced member at its declaration.
+    GotoMember(MemberSpan),
     OpenManifest,
     RetryTab(String),
     RetryLoad,
-    Search { kind: SearchKind, value: String, class: String, fuzzy: bool },
+    /// `exact`: match the member name as a whole (member kinds only).
+    Search {
+        kind: SearchKind,
+        value: String,
+        class: String,
+        fuzzy: bool,
+        exact: bool,
+    },
     Copy(String),
     CloseTab(usize),
     CloseSearch(usize),
@@ -49,11 +64,20 @@ enum Action {
 impl Action {
     /// A type-reference search for one exact descriptor.
     fn find_type(descriptor: &str) -> Action {
-        Action::Search { kind: SearchKind::Type, value: regex_escape(descriptor), class: String::new(), fuzzy: false }
+        Action::Search { kind: SearchKind::Type, value: regex_escape(descriptor), class: String::new(), fuzzy: false, exact: false }
     }
 
-    fn open(descriptor: &str, method: Option<String>) -> Action {
-        Action::OpenClass { descriptor: descriptor.to_string(), method }
+    /// A reference search for exactly this member of exactly this class.
+    fn find_member(m: &MemberSpan) -> Action {
+        let kind = match m.kind {
+            MemberKind::Method => SearchKind::Method,
+            MemberKind::Field => SearchKind::Field,
+        };
+        Action::Search { kind, value: m.name.clone(), class: m.class.clone(), fuzzy: false, exact: true }
+    }
+
+    fn open(descriptor: &str, jump: Option<Jump>) -> Action {
+        Action::OpenClass { descriptor: descriptor.to_string(), jump }
     }
 }
 
@@ -93,6 +117,8 @@ pub struct AscApp {
     next_class_req: u64,
     search_value: String,
     search_class: String,
+    /// Match member names exactly (set by "find references" on a member).
+    exact_name: bool,
     suggest_open: bool,
     search: SearchPanel,
     show_find: bool,
@@ -133,6 +159,7 @@ impl AscApp {
             next_class_req: 0,
             search_value: String::new(),
             search_class: String::new(),
+            exact_name: false,
             suggest_open: false,
             search: SearchPanel::default(),
             show_find: false,
@@ -182,8 +209,8 @@ impl AscApp {
                             tab.subtitle = format!("{descriptor}  [{}]", src.dex_name);
                             let unresolved = tab.set_text(&src.source);
                             let msg = format!("Opened {descriptor} from {} in {} ms", src.dex_name, src.scan_ms);
-                            if let Some(m) = unresolved {
-                                self.note(format!("{m} is not declared in {descriptor}"));
+                            if let Some(j) = unresolved {
+                                self.note(unresolved_note(&descriptor, &j));
                             }
                             if let Some(w) = src.warning {
                                 self.note(format!("{descriptor}: {w}"));
@@ -253,7 +280,8 @@ impl AscApp {
     fn apply_actions(&mut self) {
         for action in std::mem::take(&mut self.actions) {
             match action {
-                Action::OpenClass { descriptor, method } => self.open_class(&descriptor, method),
+                Action::OpenClass { descriptor, jump } => self.open_class(&descriptor, jump),
+                Action::GotoMember(m) => self.goto_member(m),
                 Action::OpenManifest => self.open_manifest(),
                 Action::RetryTab(id) => {
                     if id == MANIFEST_TAB {
@@ -268,9 +296,12 @@ impl AscApp {
                     self.note("Reloading class index...");
                     self.store.load_index();
                 }
-                Action::Search { kind, value, class, fuzzy } => {
+                Action::Search { kind, value, class, fuzzy, exact } => {
                     self.prefs.search_kind = kind;
                     self.prefs.fuzzy_class = fuzzy;
+                    if kind.is_member() {
+                        self.exact_name = exact;
+                    }
                     self.search_value = value;
                     self.search_class = class;
                     self.suggest_open = false;
@@ -305,8 +336,9 @@ impl AscApp {
         self.store.open_class(tab.id.clone(), tab.req);
     }
 
-    /// Open (or focus) the tab for `descriptor`, optionally jumping to `method`.
-    fn open_class(&mut self, descriptor: &str, method: Option<String>) {
+    /// Open (or focus) the tab for `descriptor`, optionally jumping to a
+    /// declaration.
+    fn open_class(&mut self, descriptor: &str, jump: Option<Jump>) {
         let descriptor = match names::format_class_name(descriptor) {
             Ok(d) => d,
             Err(e) => {
@@ -319,27 +351,50 @@ impl AscApp {
             let tab = &mut self.tabs[i];
             match tab.content {
                 TabContent::Text(_) => {
-                    if let Some(m) = method {
-                        if !tab.jump_to_method(&m) {
-                            self.note(format!("{m} is not declared in {descriptor}"));
+                    if let Some(j) = jump {
+                        if !tab.jump_to(&j) {
+                            self.note(unresolved_note(&descriptor, &j));
                         }
                     }
                 }
                 // Already being extracted: just remember where to jump.
-                TabContent::Loading => tab.pending_jump = method,
+                TabContent::Loading => tab.pending_jump = jump,
                 TabContent::Error(_) => {
-                    tab.pending_jump = method;
+                    tab.pending_jump = jump;
                     self.request_class(i);
                 }
             }
             return;
         }
         let mut tab = Tab::loading(descriptor.clone(), short_name(&descriptor), descriptor.clone());
-        tab.pending_jump = method;
+        tab.pending_jump = jump;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.note(format!("Extracting {descriptor}..."));
         self.request_class(self.active);
+    }
+
+    /// Ctrl+click on a member reference: open its class at the declaration.
+    fn goto_member(&mut self, m: MemberSpan) {
+        if self.index.as_ref().is_some_and(|ix| !ix.contains(&m.class)) {
+            self.note(format!("Declaration class is not present in this APK: {}", names::dalvik_to_dot(&m.class)));
+            return;
+        }
+        let jump = Jump::Member { kind: m.kind, name: m.name, descriptor: m.descriptor };
+        self.open_class(&m.class, Some(jump));
+    }
+
+    /// The `X` shortcut: search references to the member under the caret.
+    fn find_member_at_caret(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if tab.id == MANIFEST_TAB || !matches!(tab.content, TabContent::Text(_)) {
+            return;
+        }
+        let member = tab.caret.and_then(|(line, col)| tab.lines().get(line).and_then(|l| member_at(l, &tab.id, col)));
+        match member {
+            Some(m) => self.actions.push(Action::find_member(&m)),
+            None => self.note("Place the cursor on a method or field name to find its references"),
+        }
     }
 
     fn open_manifest(&mut self) {
@@ -365,7 +420,13 @@ impl AscApp {
             SearchKind::String => Query::String(value.clone()),
             SearchKind::Type => Query::Type(value.clone()),
             SearchKind::Method | SearchKind::Field => {
-                let q = match names::member_query(kind.as_str(), Some(class.as_str()), self.prefs.fuzzy_class, Some(value.as_str())) {
+                let q = match names::member_query(
+                    kind.as_str(),
+                    Some(class.as_str()),
+                    self.prefs.fuzzy_class,
+                    Some(value.as_str()),
+                    self.exact_name,
+                ) {
                     Ok(q) => q,
                     Err(e) => {
                         self.note(e.to_string());
@@ -386,11 +447,12 @@ impl AscApp {
         let title = match &query {
             Query::String(v) => format!("string: {v}"),
             Query::Type(v) => format!("type: {v}"),
-            Query::Method(MemberQuery { class, name }) | Query::Field(MemberQuery { class, name }) => format!(
-                "{}: {}{}",
+            Query::Method(MemberQuery { class, name, exact_name }) | Query::Field(MemberQuery { class, name, exact_name }) => format!(
+                "{}: {}{}{}",
                 kind.as_str(),
                 class.as_ref().map(|c: &ClassQuery| format!("{}{}->", c.pattern, if c.precise { "" } else { "*" })).unwrap_or_default(),
-                name.clone().unwrap_or_default()
+                name.clone().unwrap_or_default(),
+                if *exact_name && name.is_some() { " (exact)" } else { "" }
             ),
         };
         let (gen, cancel) = self.search.begin(title.clone(), self.prefs.cap());
@@ -409,6 +471,12 @@ impl AscApp {
                 i.key_pressed(Key::Escape),
             )
         });
+        // A bare letter is a shortcut only while no text field has focus
+        // (source lines are not focusable, see `source_view`).
+        let xref = !ctx.wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::X));
+        if xref {
+            self.find_member_at_caret();
+        }
         if find {
             self.show_find = true;
             self.focus_find = true;
@@ -442,6 +510,7 @@ impl AscApp {
             let hint = match kind {
                 SearchKind::String => "string pattern (regex)",
                 SearchKind::Type => "type descriptor or pattern (regex)",
+                _ if self.exact_name => "member name (exact)",
                 _ => "member name (regex)",
             };
             let value = ui.add(egui::TextEdit::singleline(&mut self.search_value).hint_text(hint).desired_width(260.0));
@@ -461,6 +530,8 @@ impl AscApp {
                 self.suggestions(ui, &class, SuggestTarget::Class);
                 ui.checkbox(&mut self.prefs.fuzzy_class, "fuzzy class")
                     .on_hover_text("Match the class field as a substring / regex instead of an exact descriptor");
+                ui.checkbox(&mut self.exact_name, "exact name")
+                    .on_hover_text("Match the member name as a whole instead of as a regex (substring with an exact class)");
             }
             if ui.button("Search").clicked() {
                 submit = true;
@@ -471,6 +542,7 @@ impl AscApp {
                     value: self.search_value.clone(),
                     class: self.search_class.clone(),
                     fuzzy: self.prefs.fuzzy_class,
+                    exact: self.exact_name,
                 });
             }
             ui.separator();
@@ -766,17 +838,17 @@ impl AscApp {
                 let resp = ui.add(egui::Label::new(label).sense(egui::Sense::click()).wrap_mode(egui::TextWrapMode::Extend));
                 // `Lcls;->name(...)` -> (`Lcls;`, `name(...)`), only when needed.
                 let target = || match r.method.split_once("->") {
-                    Some((c, m)) => (c.to_string(), Some(m.to_string())),
+                    Some((c, m)) => (c.to_string(), Some(Jump::Method(m.to_string()))),
                     None => (r.method.clone(), None),
                 };
                 if resp.double_clicked() {
-                    let (class, method) = target();
-                    actions.push(Action::OpenClass { descriptor: class, method });
+                    let (class, jump) = target();
+                    actions.push(Action::OpenClass { descriptor: class, jump });
                 }
                 resp.context_menu(|ui| {
-                    let (class, method) = target();
+                    let (class, jump) = target();
                     if ui.button(format!("Open {}", r.method)).clicked() {
-                        actions.push(Action::OpenClass { descriptor: class.clone(), method });
+                        actions.push(Action::OpenClass { descriptor: class.clone(), jump });
                         ui.close();
                     }
                     if ui.button(format!("Open {}", names::dalvik_to_dot(&class))).clicked() {
@@ -875,8 +947,62 @@ fn pill(ui: &mut egui::Ui, text: String) -> egui::Response {
         .response
 }
 
-/// The virtualised disassembly / XML view with find highlights and the
-/// per-line context menu.
+/// How a part of a source line is drawn on top of the line's own style.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// Ctrl is held and Ctrl+click would open the member's declaration.
+    Link,
+    /// The member under the caret.
+    Caret,
+}
+
+/// Colours shared by every line of one [`source_view`] pass.
+struct LineStyle {
+    font: egui::FontId,
+    text: Color32,
+    link: Color32,
+    caret_bg: Color32,
+}
+
+/// One source line as a layout job: the line-number `prefix`, then `line`
+/// cut at the `marks` boundaries (byte ranges on char boundaries).
+fn line_job(prefix: &str, line: &str, bg: Color32, marks: &[(usize, usize, Mark)], st: &LineStyle) -> LayoutJob {
+    let base = TextFormat { font_id: st.font.clone(), color: st.text, background: bg, ..Default::default() };
+    let mut job = LayoutJob::default();
+    job.append(prefix, 0.0, base.clone());
+    let mut cuts = vec![0, line.len()];
+    for &(s, e, _) in marks {
+        cuts.push(s.min(line.len()));
+        cuts.push(e.min(line.len()));
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let mut f = base.clone();
+        for &(s, e, m) in marks {
+            if s <= a && b <= e {
+                match m {
+                    Mark::Link => {
+                        f.color = st.link;
+                        f.underline = Stroke::new(1.0_f32, st.link);
+                    }
+                    Mark::Caret => f.background = st.caret_bg,
+                }
+            }
+        }
+        job.append(&line[a..b], 0.0, f);
+    }
+    job
+}
+
+/// The virtualised disassembly / XML view with find highlights, the caret,
+/// member links while Ctrl is held and the per-line context menu.
+///
+/// Lines sense clicks but are not focusable, so a click only places the
+/// caret and the `X` shortcut keeps working (see `AscApp::shortcuts`). The
+/// view is read-only and shows the text as-is, so a caret column is a plain
+/// byte offset into its line.
 fn source_view(ui: &mut egui::Ui, tab: &mut Tab, index: Option<&ClassIndex>, actions: &mut Vec<Action>) {
     let row_height = ui.text_style_height(&TextStyle::Monospace);
     let row_stride = row_height + ui.spacing().item_spacing.y;
@@ -892,22 +1018,85 @@ fn source_view(ui: &mut egui::Ui, tab: &mut Tab, index: Option<&ClassIndex>, act
     let match_bg = ui.visuals().selection.bg_fill;
     let current_bg = Color32::from_rgb(200, 120, 0);
     let jump_bg = match_bg.gamma_multiply(0.5);
+    let st = LineStyle {
+        font: TextStyle::Monospace.resolve(ui.style()),
+        text: ui.visuals().text_color(),
+        link: ui.visuals().hyperlink_color,
+        caret_bg: ui.visuals().widgets.hovered.weak_bg_fill,
+    };
+    // The manifest has no members; a class tab's id is its descriptor.
+    let class = (tab.id != MANIFEST_TAB).then_some(tab.id.as_str());
+    let ctrl = ui.input(|i| i.modifiers.command);
+    let linkable = |m: &MemberSpan| !m.declaration && index.is_some_and(|ix| ix.contains(&m.class));
+    let mut caret = tab.caret;
     scroll.show_rows(ui, row_height, lines.len(), |ui, range| {
         for i in range {
             let line = &lines[i];
-            let mut text = RichText::new(format!("{:>width$}  {line}", i + 1)).monospace();
-            if tab.is_find_match(i) {
-                text = text.background_color(if Some(i) == current { current_bg } else { match_bg });
+            let bg = if tab.is_find_match(i) {
+                if Some(i) == current {
+                    current_bg
+                } else {
+                    match_bg
+                }
             } else if Some(i) == jump {
-                text = text.background_color(jump_bg);
+                jump_bg
+            } else {
+                Color32::TRANSPARENT
+            };
+            let caret_col = caret.filter(|c| c.0 == i).map(|c| c.1);
+            let spans = match class {
+                Some(c) if ctrl || caret_col.is_some() => member_spans_in_line(line, c),
+                _ => Vec::new(),
+            };
+            let mut marks = Vec::new();
+            if let Some(m) = caret_col.and_then(|col| spans.iter().find(|m| m.contains(col))) {
+                marks.push((m.start, m.end, Mark::Caret));
             }
-            let resp = ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend).sense(egui::Sense::click()));
-            resp.context_menu(|ui| line_menu(ui, line, index, actions));
+            if ctrl {
+                marks.extend(spans.iter().filter(|m| linkable(m)).map(|m| (m.start, m.end, Mark::Link)));
+            }
+            let prefix = format!("{:>width$}  ", i + 1);
+            let galley = ui.fonts_mut(|f| f.layout_job(line_job(&prefix, line, bg, &marks, &st)));
+            let resp = ui.add(egui::Label::new(galley.clone()).sense(egui::Sense::CLICK));
+            let origin = resp.rect.min;
+            // Byte column of `line` under a screen position.
+            let col_at = |pos: egui::Pos2| char_to_byte(line, galley.cursor_from_pos(pos - origin).index.saturating_sub(prefix.len()));
+            if let Some(col) = caret_col {
+                let x = galley.pos_from_cursor(CCursor::new(prefix.len() + line[..col.min(line.len())].chars().count())).min.x;
+                ui.painter().vline(origin.x + x, resp.rect.y_range(), Stroke::new(1.5_f32, st.text));
+            }
+            if ctrl {
+                let hovered = resp.hover_pos().zip(class).and_then(|(p, c)| member_at(line, c, col_at(p)));
+                if hovered.is_some_and(|m| linkable(&m)) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+            }
+            if resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let col = col_at(pos);
+                    caret = Some((i, col));
+                    if ctrl {
+                        if let Some(m) = class.and_then(|c| member_at(line, c, col)).filter(|m| !m.declaration) {
+                            actions.push(Action::GotoMember(m));
+                        }
+                    }
+                }
+            }
+            resp.context_menu(|ui| line_menu(ui, line, class.unwrap_or_default(), index, actions));
         }
     });
+    tab.caret = caret;
 }
 
-fn line_menu(ui: &mut egui::Ui, line: &str, index: Option<&ClassIndex>, actions: &mut Vec<Action>) {
+/// Status message for a jump whose declaration is not in class `descriptor`.
+fn unresolved_note(descriptor: &str, jump: &Jump) -> String {
+    match jump {
+        Jump::Method(m) => format!("{m} is not declared in {descriptor}"),
+        Jump::Member { name, .. } => format!("Declaration not found: {}->{name}", names::dalvik_to_dot(descriptor)),
+    }
+}
+
+fn line_menu(ui: &mut egui::Ui, line: &str, class: &str, index: Option<&ClassIndex>, actions: &mut Vec<Action>) {
     let mut any = false;
     for d in descriptors_in_line(line) {
         let dotted = names::dalvik_to_dot(&d);
@@ -921,10 +1110,20 @@ fn line_menu(ui: &mut egui::Ui, line: &str, index: Option<&ClassIndex>, actions:
         }
         any = true;
     }
-    for m in member_refs_in_line(line) {
-        let kind = if m.is_method { SearchKind::Method } else { SearchKind::Field };
-        if ui.button(format!("Find references to {}->{}", short_name(&m.class), m.name)).clicked() {
-            actions.push(Action::Search { kind, value: m.name.clone(), class: m.class.clone(), fuzzy: false });
+    let spans = member_spans_in_line(line, class);
+    let mut seen: Vec<&MemberSpan> = Vec::new();
+    for m in &spans {
+        if seen.iter().any(|s| (s.kind, &s.class, &s.name, &s.descriptor) == (m.kind, &m.class, &m.name, &m.descriptor)) {
+            continue;
+        }
+        seen.push(m);
+        let linkable = !m.declaration && index.is_some_and(|ix| ix.contains(&m.class));
+        if linkable && ui.button(format!("Go to {}->{}", short_name(&m.class), m.name)).on_hover_text("Ctrl+click").clicked() {
+            actions.push(Action::GotoMember(m.clone()));
+            ui.close();
+        }
+        if ui.button(format!("Find references to {}->{}", short_name(&m.class), m.name)).on_hover_text("X").clicked() {
+            actions.push(Action::find_member(m));
             ui.close();
         }
         any = true;
@@ -937,7 +1136,13 @@ fn line_menu(ui: &mut egui::Ui, line: &str, index: Option<&ClassIndex>, actions:
             format!("Find string references \"{shown}\"")
         };
         if ui.button(label).clicked() {
-            actions.push(Action::Search { kind: SearchKind::String, value: regex_escape(&s), class: String::new(), fuzzy: false });
+            actions.push(Action::Search {
+                kind: SearchKind::String,
+                value: regex_escape(&s),
+                class: String::new(),
+                fuzzy: false,
+                exact: false,
+            });
             ui.close();
         }
         any = true;
@@ -973,11 +1178,23 @@ fn class_menu(ui: &mut egui::Ui, descriptor: &str, actions: &mut Vec<Action>) {
         ui.close();
     }
     if ui.button("Find calls to its methods").clicked() {
-        actions.push(Action::Search { kind: SearchKind::Method, value: String::new(), class: descriptor.to_string(), fuzzy: false });
+        actions.push(Action::Search {
+            kind: SearchKind::Method,
+            value: String::new(),
+            class: descriptor.to_string(),
+            fuzzy: false,
+            exact: false,
+        });
         ui.close();
     }
     if ui.button("Find accesses to its fields").clicked() {
-        actions.push(Action::Search { kind: SearchKind::Field, value: String::new(), class: descriptor.to_string(), fuzzy: false });
+        actions.push(Action::Search {
+            kind: SearchKind::Field,
+            value: String::new(),
+            class: descriptor.to_string(),
+            fuzzy: false,
+            exact: false,
+        });
         ui.close();
     }
     ui.separator();

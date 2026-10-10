@@ -63,7 +63,7 @@ fn supplementary_class_names_are_found() {
 
         for kind in ["method", "field"] {
             let name = if kind == "method" { "m" } else { "f" };
-            let q = names::member_query(kind, Some(CLASS), false, Some(name)).unwrap();
+            let q = names::member_query(kind, Some(CLASS), false, Some(name), false).unwrap();
             let q = if kind == "method" { Query::Method(q) } else { Query::Field(q) };
             let found = lines(&engine, &q);
             assert_eq!(found.len(), 1, "{kind} deflate={deflate}: {found:?}");

@@ -1,5 +1,17 @@
 //! Editor tabs: one per opened class or manifest, with in-tab find and the
-//! line-level parsing behind the source context menu. Pure logic, no egui.
+//! line-level parsing behind the source context menu (member spans live in
+//! [`crate::members`]). Pure logic, no egui.
+
+use crate::members::{declaration_line, MemberKind};
+
+/// Where to scroll once a class tab has its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Jump {
+    /// The first `.method` named so (search results carry no prototype).
+    Method(String),
+    /// One exact declaration: kind, name and prototype / field type.
+    Member { kind: MemberKind, name: String, descriptor: String },
+}
 
 /// What a tab currently shows.
 pub enum TabContent {
@@ -30,8 +42,10 @@ pub struct Tab {
     /// Line highlighted as the navigation target (e.g. a method opened from a
     /// search result).
     pub jump_line: Option<usize>,
-    /// Method to jump to once the text arrives.
-    pub pending_jump: Option<String>,
+    /// Declaration to jump to once the text arrives.
+    pub pending_jump: Option<Jump>,
+    /// `(line, byte column)` last clicked: the "cursor" of the read-only view.
+    pub caret: Option<(usize, usize)>,
 }
 
 impl Tab {
@@ -49,6 +63,7 @@ impl Tab {
             scroll_to: None,
             jump_line: None,
             pending_jump: None,
+            caret: None,
         }
     }
 
@@ -75,20 +90,21 @@ impl Tab {
     }
 
     /// Replace the content with `text`; re-applies an active find and any
-    /// pending method jump. Returns the pending method if it is not declared
+    /// pending jump. Returns the pending jump if its target is not declared
     /// in the new text.
-    pub fn set_text(&mut self, text: &str) -> Option<String> {
+    pub fn set_text(&mut self, text: &str) -> Option<Jump> {
         let lines: Vec<String> = text.lines().map(str::to_string).collect();
         self.lower = lines.iter().map(|l| l.to_lowercase()).collect();
         self.content = TabContent::Text(lines);
         self.jump_line = None;
         self.scroll_to = None;
+        self.caret = None;
         self.refresh_find();
-        let name = self.pending_jump.take()?;
-        if self.jump_to_method(&name) {
+        let jump = self.pending_jump.take()?;
+        if self.jump_to(&jump) {
             None
         } else {
-            Some(name)
+            Some(jump)
         }
     }
 
@@ -103,6 +119,7 @@ impl Tab {
     }
 
     fn clear_text_state(&mut self) {
+        self.caret = None;
         self.lower = Vec::new();
         self.find_matches.clear();
         self.find_cursor = 0;
@@ -137,13 +154,18 @@ impl Tab {
         self.scroll_to = Some(self.find_matches[self.find_cursor]);
     }
 
-    /// Scroll to and highlight the `.method` line named `name`. Returns false
-    /// when the method is not in this class (e.g. inherited).
-    pub fn jump_to_method(&mut self, name: &str) -> bool {
-        match method_line(self.lines(), name) {
+    /// Scroll to and highlight the declaration `jump` names. Returns false
+    /// when it is not in this class (e.g. inherited).
+    pub fn jump_to(&mut self, jump: &Jump) -> bool {
+        let line = match jump {
+            Jump::Method(name) => method_line(self.lines(), name),
+            Jump::Member { kind, name, descriptor } => declaration_line(self.lines(), &self.id, *kind, name, Some(descriptor)),
+        };
+        match line {
             Some(i) => {
                 self.jump_line = Some(i);
                 self.scroll_to = Some(i);
+                self.caret = None;
                 true
             }
             None => false,
@@ -197,50 +219,6 @@ pub fn descriptors_in_line(line: &str) -> Vec<String> {
             }
         }
         i += 1;
-    }
-    out
-}
-
-/// A method or field reference on a line: `Lcls;->name(` or `Lcls;->name:`.
-#[derive(Debug, PartialEq, Eq)]
-pub struct MemberRef {
-    pub class: String,
-    pub name: String,
-    pub is_method: bool,
-}
-
-/// Every distinct member reference on a line.
-pub fn member_refs_in_line(line: &str) -> Vec<MemberRef> {
-    let mut out = Vec::new();
-    let mut rest = line;
-    while let Some(pos) = rest.find(";->") {
-        let (head, tail) = rest.split_at(pos + 1);
-        // Walk back from the ';' to the descriptor start.
-        let hb = head.as_bytes();
-        let mut start = head.len() - 1;
-        while start > 0 && is_descriptor_byte(hb[start - 1]) {
-            start -= 1;
-        }
-        let class = &head[start..];
-        let body = &tail[2..];
-        let name_len = body.bytes().take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'-' | b'<' | b'>')).count();
-        let name = &body[..name_len];
-        let kind = body.as_bytes().get(name_len).copied();
-        if class.starts_with('L') && class.len() > 2 && !name.is_empty() {
-            let is_method = match kind {
-                Some(b'(') => true,
-                Some(b':') => false,
-                _ => {
-                    rest = body;
-                    continue;
-                }
-            };
-            let r = MemberRef { class: class.to_string(), name: name.to_string(), is_method };
-            if !out.contains(&r) {
-                out.push(r);
-            }
-        }
-        rest = body;
     }
     out
 }
@@ -363,15 +341,34 @@ mod tests {
     #[test]
     fn pending_jump_applies_when_text_arrives() {
         let mut tab = Tab::loading("a".into(), "a".into(), "a".into());
-        tab.pending_jump = Some("onCreate".into());
+        tab.pending_jump = Some(Jump::Method("onCreate".into()));
         let unresolved = tab.set_text(".class Lx;\n.method public onCreate(Landroid/os/Bundle;)V\n    return-void\n.end method");
         assert_eq!(unresolved, None);
         assert_eq!(tab.jump_line, Some(1));
         assert_eq!(tab.scroll_to, Some(1));
         assert!(tab.pending_jump.is_none());
-        assert!(!tab.jump_to_method("missing"));
-        tab.pending_jump = Some("missing".into());
-        assert_eq!(tab.set_text(".class Lx;").as_deref(), Some("missing"));
+        assert!(!tab.jump_to(&Jump::Method("missing".into())));
+        tab.pending_jump = Some(Jump::Method("missing".into()));
+        assert_eq!(tab.set_text(".class Lx;"), Some(Jump::Method("missing".into())));
+    }
+
+    #[test]
+    fn member_jump_picks_the_overload_and_clears_the_caret() {
+        let mut tab = Tab::loading("Lx;".into(), "x".into(), "Lx;".into());
+        let text = ".class Lx;\n.field f:I\n.method run()V\n.end method\n.method run(I)V\n.end method";
+        tab.pending_jump = Some(Jump::Member { kind: MemberKind::Method, name: "run".into(), descriptor: "(I)V".into() });
+        assert_eq!(tab.set_text(text), None);
+        assert_eq!(tab.jump_line, Some(4));
+        tab.caret = Some((1, 3));
+        assert!(tab.jump_to(&Jump::Member { kind: MemberKind::Field, name: "f".into(), descriptor: "I".into() }));
+        assert_eq!((tab.jump_line, tab.caret), (Some(1), None));
+        let missing = Jump::Member { kind: MemberKind::Field, name: "f".into(), descriptor: "J".into() };
+        assert!(!tab.jump_to(&missing));
+        tab.pending_jump = Some(missing.clone());
+        assert_eq!(tab.set_text(text), Some(missing));
+        tab.caret = Some((0, 0));
+        tab.set_loading();
+        assert_eq!(tab.caret, None);
     }
 
     #[test]
@@ -388,14 +385,6 @@ mod tests {
         assert_eq!(d, vec!["Lcom/x/Y$Z;", "Ljava/lang/String;", "Ljava/lang/Long;"]);
         assert!(descriptors_in_line("    const/4 v0, 0x1").is_empty());
         assert_eq!(descriptors_in_line(".class public LMain;"), vec!["LMain;"]);
-    }
-
-    #[test]
-    fn member_refs_distinguish_methods_and_fields() {
-        let refs = member_refs_in_line("    iget-object v0, p0, Lcom/x/Y;->name:Ljava/lang/String;");
-        assert_eq!(refs, vec![MemberRef { class: "Lcom/x/Y;".into(), name: "name".into(), is_method: false }]);
-        let refs = member_refs_in_line("    invoke-direct {p0}, Lcom/x/Y;-><init>()V");
-        assert_eq!(refs, vec![MemberRef { class: "Lcom/x/Y;".into(), name: "<init>".into(), is_method: true }]);
     }
 
     #[test]

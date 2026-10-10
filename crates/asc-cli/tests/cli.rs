@@ -112,6 +112,27 @@ fn member_query_needs_a_class_or_a_name() {
 }
 
 #[test]
+fn exact_flag_matches_whole_member_names() {
+    let dex = asc_fixture::make_static_field_dex();
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex)], false));
+    let run = |args: &[&str]| {
+        let mut all = vec!["findrefs", path(apk.path()), "field"];
+        all.extend_from_slice(args);
+        let out = droidasc(&all);
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    let hit = "classes.dex | Lexample/Statics;->getSecond | matched=(Lexample/Statics;->SECOND)\n";
+    assert_eq!(run(&["SECON"]), hit);
+    assert_eq!(run(&["SECOND", "--exact"]), hit);
+    assert_eq!(run(&["SECOND", "--exact", "--class", "example.Statics"]), hit);
+    assert_eq!(run(&["SECOND", "--exact", "--class", "Statics", "--fuzzy-class"]), hit);
+    for args in [&["SECON", "--exact"][..], &["SECON", "--exact", "--class", "example.Statics"], &["SEC.ND", "--exact"]] {
+        assert_eq!(run(args), "", "{args:?}");
+    }
+}
+
+#[test]
 fn output_flag_writes_the_file() {
     let apk = temp_apk();
     let dir = tempfile::tempdir().unwrap();

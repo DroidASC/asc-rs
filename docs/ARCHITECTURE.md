@@ -94,6 +94,9 @@ labels for branches, switch payloads, `fill-array-data` and try/catch blocks. Th
   byte-`re` does. An empty `string` pattern matches nothing rather than everything.
 * Member queries: with a precise class, the member name is a **substring** match; with a
   fuzzy or absent class the member name is a regex against the string table.
+  `MemberQuery::exact_name` (`--exact`, and the GUI's "references to this member") makes
+  it a whole-name equality under any class constraint, as the Python GUI's exact-member
+  xref does; names are compared as MUTF-8 bytes (decoded only for non-ASCII strings).
 * Exact descriptors (`getclass`, a precise member-query class) are MUTF-8 encoded before
   the binary search over the type table, so class names with supplementary characters
   (stored as surrogate pairs) are found; MUTF-8 byte order is UTF-16 code-unit order, the
