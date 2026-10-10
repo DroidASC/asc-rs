@@ -61,8 +61,28 @@ fn lookup_follows_utf16_sort_order() {
         let (_, def) = dex.find_class_def(&mutf8::encode(name)).unwrap().unwrap_or_else(|| panic!("{name}"));
         assert_eq!(dex.type_descriptor(def.class_idx).unwrap(), name);
     }
-    // The UTF-8 form of a supplementary character is not what the DEX stores.
-    assert!(dex.find_type_idx(names[0].as_bytes()).unwrap().is_none());
+    // The UTF-8 form of a supplementary character is not what the DEX stores,
+    // but it names the same code units, so the lookup still finds it.
+    assert_eq!(dex.find_type_idx(names[0].as_bytes()).unwrap(), dex.find_type_idx(&mutf8::encode(names[0])).unwrap());
+}
+
+#[test]
+fn lookup_sorts_nul_first() {
+    // `U+0000` is `C0 80`: above `/` as bytes, below everything in UTF-16.
+    // A byte-order search walks the wrong way and misses its neighbours.
+    for names in [["LA;", "La\0;", "La/;"], ["La\0;", "La/;", "Lb;"]] {
+        let data = class_dex(&names);
+        let dex = Dex::parse(&data).unwrap();
+        for name in names {
+            let enc = mutf8::encode(name);
+            let (_, def) = dex.find_class_def(&enc).unwrap().unwrap_or_else(|| panic!("{name:?} in {names:?}"));
+            assert_eq!(dex.type_descriptor(def.class_idx).unwrap(), name);
+            assert!(asc_dex::quick::dex_defines_class(&data, &enc).unwrap(), "{name:?} in {names:?}");
+            let s = dex.find_string_idx(&enc).unwrap().unwrap();
+            assert_eq!(dex.string(s).unwrap(), name);
+        }
+        assert_eq!(dex.find_string_idx(b"La;").unwrap(), None);
+    }
 }
 
 #[test]

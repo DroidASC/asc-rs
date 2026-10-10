@@ -15,7 +15,8 @@ fn string_data_bytes(buf: &[u8], str_off: usize) -> Result<&[u8]> {
     Ok(&rest[..end])
 }
 
-/// Binary search the type table for `target` (raw descriptor bytes).
+/// Binary search the type table for `target` (MUTF-8 descriptor bytes,
+/// compared in the table's UTF-16 order).
 pub fn find_type_idx(buf: &[u8], target: &[u8]) -> Result<Option<u32>> {
     if buf.len() < HEADER_SIZE || &buf[..3] != b"dex" {
         return Ok(None);
@@ -45,7 +46,7 @@ pub fn find_type_idx(buf: &[u8], target: &[u8]) -> Result<Option<u32>> {
             return Err(DexError::BadRange { what: "string_data_off", offset: str_off });
         }
         let cls = string_data_bytes(buf, str_off)?;
-        match cls.cmp(target) {
+        match crate::mutf8::cmp_utf16(cls, target) {
             std::cmp::Ordering::Equal => return Ok(Some(mid as u32)),
             std::cmp::Ordering::Less => left = mid as i64 + 1,
             std::cmp::Ordering::Greater => right = mid as i64 - 1,

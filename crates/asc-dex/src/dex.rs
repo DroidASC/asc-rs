@@ -190,6 +190,13 @@ impl<'a> Dex<'a> {
         Ok(mutf8::decode(self.string_bytes(idx)?))
     }
 
+    /// Binary search the sorted string table for `s` (MUTF-8 bytes, compared
+    /// by UTF-16 code units like the table is sorted, see
+    /// [`mutf8::cmp_utf16`]).
+    pub fn find_string_idx(&self, s: &[u8]) -> Result<Option<u32>> {
+        binary_search(self.header.string_ids.size, |mid| Ok(mutf8::cmp_utf16(self.string_bytes(mid)?, s)))
+    }
+
     // ---- types -----------------------------------------------------------
 
     /// `descriptor_idx` of type `idx`.
@@ -214,24 +221,11 @@ impl<'a> Dex<'a> {
     /// Binary search the sorted type table for an exact descriptor.
     ///
     /// `descriptor` must be MUTF-8 (see [`mutf8::encode`]): string ids are
-    /// sorted by UTF-16 code units, which is the byte order of MUTF-8 but not
-    /// of UTF-8 once a supplementary character is involved.
+    /// sorted by UTF-16 code units, which MUTF-8 byte order follows except
+    /// for `U+0000` ([`mutf8::cmp_utf16`] handles that), while UTF-8 byte
+    /// order diverges once a supplementary character is involved.
     pub fn find_type_idx(&self, descriptor: &[u8]) -> Result<Option<u32>> {
-        let size = self.header.type_ids.size;
-        if size == 0 {
-            return Ok(None);
-        }
-        let (mut left, mut right) = (0i64, size as i64 - 1);
-        while left <= right {
-            let mid = ((left + right) >> 1) as u32;
-            let bytes = self.type_bytes(mid)?;
-            match bytes.cmp(descriptor) {
-                std::cmp::Ordering::Equal => return Ok(Some(mid)),
-                std::cmp::Ordering::Less => left = mid as i64 + 1,
-                std::cmp::Ordering::Greater => right = mid as i64 - 1,
-            }
-        }
-        Ok(None)
+        binary_search(self.header.type_ids.size, |mid| Ok(mutf8::cmp_utf16(self.type_bytes(mid)?, descriptor)))
     }
 
     // ---- protos ----------------------------------------------------------
@@ -385,6 +379,21 @@ impl<'a> Dex<'a> {
         }
         None
     }
+}
+
+/// Binary search over `size` sorted items; `cmp(mid)` orders item `mid`
+/// against the target.
+fn binary_search(size: u32, mut cmp: impl FnMut(u32) -> Result<std::cmp::Ordering>) -> Result<Option<u32>> {
+    let (mut left, mut right) = (0u32, size);
+    while left < right {
+        let mid = left + (right - left) / 2;
+        match cmp(mid)? {
+            std::cmp::Ordering::Equal => return Ok(Some(mid)),
+            std::cmp::Ordering::Less => left = mid + 1,
+            std::cmp::Ordering::Greater => right = mid,
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

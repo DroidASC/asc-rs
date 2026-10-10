@@ -238,20 +238,11 @@ impl MemberLocator {
                         self.ids_by_name(s, &mut out);
                     }
                 }
-                Some(CompiledName::Exact { name, bytes }) => {
-                    // Walk the distinct name strings rather than regex-searching
-                    // the string data: equality needs no escaping and the walk
-                    // is bounded by the id table.
-                    let mut last: Option<(u32, bool)> = None;
-                    for &(n, id) in &self.by_name {
-                        let matched = match last {
-                            Some((l, m)) if l == n => m,
-                            _ => exact_name_matches(dex, n, name, bytes),
-                        };
-                        last = Some((n, matched));
-                        if matched {
-                            out.insert(id);
-                        }
+                Some(CompiledName::Exact { bytes, .. }) => {
+                    // The string table is sorted and unique: one binary search
+                    // gives the only name string, then its members.
+                    if let Some(s) = dex.find_string_idx(bytes)? {
+                        self.ids_by_name(s, &mut out);
                     }
                 }
                 _ => {}
