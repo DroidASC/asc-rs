@@ -117,7 +117,9 @@ pub struct AscApp {
     next_class_req: u64,
     search_value: String,
     search_class: String,
-    /// Match member names exactly (set by "find references" on a member).
+    /// The "exact name" box: match member names as a whole in searches
+    /// submitted from the top bar ("find references" on a member is always
+    /// exact and leaves it alone).
     exact_name: bool,
     suggest_open: bool,
     search: SearchPanel,
@@ -129,6 +131,10 @@ pub struct AscApp {
 
 impl AscApp {
     pub fn new(cc: &eframe::CreationContext<'_>, apk: PathBuf, threads: usize, debug: bool, cache: bool) -> AscApp {
+        Self::with_context(cc.egui_ctx.clone(), Prefs::load(cc.storage), apk, threads, debug, cache)
+    }
+
+    fn with_context(ctx: egui::Context, prefs: Prefs, apk: PathBuf, threads: usize, debug: bool, cache: bool) -> AscApp {
         let mut engine = Engine::new(&apk).with_threads(threads).with_debug(debug).with_logger(|m| eprintln!("{m}"));
         // Keep inflated DEX files and their locator tables resident: the
         // browser fires many queries against the same archive.
@@ -139,13 +145,13 @@ impl AscApp {
         });
         let engine = Arc::new(engine);
         let (tx, rx) = channel();
-        let store = Arc::new(Store { engine, tx, ctx: cc.egui_ctx.clone() });
+        let store = Arc::new(Store { engine, tx, ctx });
         store.load_index();
         let mut app = AscApp {
             store,
             rx,
             debug,
-            prefs: Prefs::load(cc.storage),
+            prefs,
             log: VecDeque::new(),
             index: None,
             load_progress: (0, 0),
@@ -299,13 +305,13 @@ impl AscApp {
                 Action::Search { kind, value, class, fuzzy, exact } => {
                     self.prefs.search_kind = kind;
                     self.prefs.fuzzy_class = fuzzy;
-                    if kind.is_member() {
-                        self.exact_name = exact;
-                    }
                     self.search_value = value;
                     self.search_class = class;
                     self.suggest_open = false;
-                    self.start_search();
+                    // `exact` applies to this search only (as in the Python
+                    // GUI): the "exact name" box keeps what the user set, so
+                    // a later hand-typed regex is not silently taken literally.
+                    self.start_search(exact && kind.is_member());
                 }
                 Action::Copy(text) => self.store.ctx.copy_text(text),
                 Action::CloseTab(i) => self.close_tab(i),
@@ -357,10 +363,18 @@ impl AscApp {
                         }
                     }
                 }
-                // Already being extracted: just remember where to jump.
-                TabContent::Loading => tab.pending_jump = jump,
+                // Already being extracted: just remember where to jump. A
+                // plain re-open (tree, search result) keeps an earlier
+                // Ctrl+click target instead of dropping it.
+                TabContent::Loading => {
+                    if jump.is_some() {
+                        tab.pending_jump = jump;
+                    }
+                }
                 TabContent::Error(_) => {
-                    tab.pending_jump = jump;
+                    if jump.is_some() {
+                        tab.pending_jump = jump;
+                    }
                     self.request_class(i);
                 }
             }
@@ -412,7 +426,9 @@ impl AscApp {
         self.store.open_manifest();
     }
 
-    fn start_search(&mut self) {
+    /// Run the search described by the top bar; `exact` matches member names
+    /// as a whole.
+    fn start_search(&mut self, exact: bool) {
         let kind = self.prefs.search_kind;
         let value = self.search_value.trim().to_string();
         let class = self.search_class.trim().to_string();
@@ -420,13 +436,8 @@ impl AscApp {
             SearchKind::String => Query::String(value.clone()),
             SearchKind::Type => Query::Type(value.clone()),
             SearchKind::Method | SearchKind::Field => {
-                let q = match names::member_query(
-                    kind.as_str(),
-                    Some(class.as_str()),
-                    self.prefs.fuzzy_class,
-                    Some(value.as_str()),
-                    self.exact_name,
-                ) {
+                let q = match names::member_query(kind.as_str(), Some(class.as_str()), self.prefs.fuzzy_class, Some(value.as_str()), exact)
+                {
                     Ok(q) => q,
                     Err(e) => {
                         self.note(e.to_string());
@@ -455,6 +466,14 @@ impl AscApp {
                 if *exact_name && name.is_some() { " (exact)" } else { "" }
             ),
         };
+        // The same query still running (e.g. `X` pressed twice): show it
+        // instead of starting a duplicate that would push history out.
+        if let Some(i) = self.search.running_titled(&title) {
+            self.search.active = i;
+            self.search.open = true;
+            self.note(format!("Already searching {title}"));
+            return;
+        }
         let (gen, cancel) = self.search.begin(title.clone(), self.prefs.cap());
         self.note(format!("Searching {title}..."));
         self.store.search(query, gen, cancel);
@@ -473,7 +492,16 @@ impl AscApp {
         });
         // A bare letter is a shortcut only while no text field has focus
         // (source lines are not focusable, see `source_view`).
-        let xref = !ctx.wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::X));
+        // Auto-repeat events of a held key are ignored: each would start
+        // another whole-APK search.
+        let xref = !ctx.wants_keyboard_input()
+            && ctx.input_mut(|i| {
+                let fresh = i.events.iter().any(|e| {
+                    matches!(e, egui::Event::Key { key: Key::X, pressed: true, repeat: false, modifiers, .. }
+                        if modifiers.matches_logically(Modifiers::NONE))
+                });
+                i.consume_key(Modifiers::NONE, Key::X) && fresh
+            });
         if xref {
             self.find_member_at_caret();
         }
@@ -1268,5 +1296,124 @@ impl eframe::App for AscApp {
         // before the process exits; land queued disk-cache writes here and stop
         // a still-running search from starting a writer that exit would kill.
         self.store.engine.close_cache_writes();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLS: &str = "Lcom/x/Foo;";
+    const TEXT: &str = ".class Lcom/x/Foo;\n.method public run()V\n    invoke-static {}, Lcom/x/Bar;->go()V\n.end method";
+
+    /// An app over a missing APK: the index load and every search fail in
+    /// the background, and as their events are never drained here a search
+    /// stays "running" for the whole test.
+    fn app() -> AscApp {
+        let apk = PathBuf::from("/nonexistent/asc-gui-test.apk");
+        AscApp::with_context(egui::Context::default(), Prefs::default(), apk, 1, false, false)
+    }
+
+    fn with_class_tab(text: &str) -> AscApp {
+        let mut app = app();
+        let mut tab = Tab::loading(CLS.into(), "Foo".into(), CLS.into());
+        tab.set_text(text);
+        app.tabs.push(tab);
+        app.active = 0;
+        app
+    }
+
+    fn key_x(repeat: bool) -> egui::Event {
+        egui::Event::Key { key: Key::X, physical_key: None, pressed: true, repeat, modifiers: Modifiers::NONE }
+    }
+
+    /// One frame that only runs the shortcuts, then applies the actions.
+    fn frame(app: &mut AscApp, events: Vec<egui::Event>) {
+        let ctx = app.store.ctx.clone();
+        let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| app.shortcuts(ctx));
+        app.apply_actions();
+    }
+
+    fn titles(app: &AscApp) -> Vec<&str> {
+        app.search.states.iter().map(|s| s.title.as_str()).collect()
+    }
+
+    fn caret_on_go(app: &mut AscApp) {
+        app.tabs[0].caret = Some((2, TEXT.lines().nth(2).unwrap().find("go").unwrap()));
+    }
+
+    #[test]
+    fn held_x_starts_one_search() {
+        let mut app = with_class_tab(TEXT);
+        caret_on_go(&mut app);
+        frame(&mut app, vec![key_x(false)]);
+        assert_eq!(titles(&app), vec!["method: Lcom/x/Bar;->go (exact)"]);
+        let already = |app: &AscApp| app.log.iter().filter(|m| m.starts_with("Already searching")).count();
+        // Auto-repeat while the key is held does not even ask for a search.
+        frame(&mut app, vec![key_x(true), key_x(true)]);
+        frame(&mut app, vec![key_x(true)]);
+        assert_eq!((app.search.states.len(), already(&app)), (1, 0));
+        // A fresh press while the same search still runs reuses it.
+        let release = egui::Event::Key { key: Key::X, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
+        frame(&mut app, vec![release]);
+        frame(&mut app, vec![key_x(false)]);
+        assert_eq!((app.search.states.len(), already(&app)), (1, 1));
+    }
+
+    #[test]
+    fn member_xref_is_exact_for_that_search_only() {
+        let mut app = with_class_tab(TEXT);
+        caret_on_go(&mut app);
+        frame(&mut app, vec![key_x(false)]);
+        assert!(!app.exact_name, "the exact-name box is left as the user set it");
+        assert_eq!((app.search_value.as_str(), app.search_class.as_str()), ("go", "Lcom/x/Bar;"));
+        // Submitting the top bar again is a regex / substring search.
+        app.actions.push(Action::Search {
+            kind: app.prefs.search_kind,
+            value: app.search_value.clone(),
+            class: app.search_class.clone(),
+            fuzzy: app.prefs.fuzzy_class,
+            exact: app.exact_name,
+        });
+        app.apply_actions();
+        assert_eq!(titles(&app), vec!["method: Lcom/x/Bar;->go (exact)", "method: Lcom/x/Bar;->go"]);
+    }
+
+    #[test]
+    fn x_right_after_a_jump_finds_the_declared_member() {
+        let mut app = with_class_tab(TEXT);
+        app.tabs[0].caret = Some((2, 4));
+        app.actions.push(Action::GotoMember(MemberSpan {
+            start: 0,
+            end: 0,
+            kind: MemberKind::Method,
+            class: CLS.into(),
+            name: "run".into(),
+            descriptor: "()V".into(),
+            declaration: false,
+        }));
+        app.apply_actions();
+        assert_eq!(app.tabs[0].caret, Some((1, ".method public ".len())));
+        frame(&mut app, vec![key_x(false)]);
+        assert_eq!(titles(&app), vec!["method: Lcom/x/Foo;->run (exact)"]);
+    }
+
+    #[test]
+    fn reopening_a_loading_class_keeps_the_pending_jump() {
+        let mut app = app();
+        let jump = Jump::Member { kind: MemberKind::Method, name: "go".into(), descriptor: "()V".into() };
+        app.open_class("Lcom/x/Bar;", Some(jump.clone()));
+        assert!(app.tabs[0].is_loading());
+        // e.g. the class picked again in the tree while it is extracted
+        app.open_class("com.x.Bar", None);
+        assert_eq!(app.tabs[0].pending_jump, Some(jump.clone()));
+        app.tabs[0].set_error("boom".into());
+        app.open_class("Lcom/x/Bar;", None);
+        assert!(app.tabs[0].is_loading());
+        assert_eq!(app.tabs[0].pending_jump, Some(jump));
+        let other = Jump::Method("other".into());
+        app.open_class("Lcom/x/Bar;", Some(other.clone()));
+        assert_eq!(app.tabs[0].pending_jump, Some(other));
+        assert_eq!(app.tabs.len(), 1);
     }
 }

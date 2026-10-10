@@ -226,6 +226,11 @@ impl SearchPanel {
     pub fn any_running(&self) -> bool {
         self.states.iter().any(SearchState::running)
     }
+
+    /// Index of a still-running search with this title.
+    pub fn running_titled(&self, title: &str) -> Option<usize> {
+        self.states.iter().position(|s| s.running() && s.title == title)
+    }
 }
 
 #[cfg(test)]
