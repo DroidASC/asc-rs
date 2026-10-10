@@ -1,7 +1,7 @@
 //! Class enumeration (`listclass` and the GUI package tree).
 
 use crate::{load_entry, names, Engine, EngineError, Result};
-use asc_dex::container::logical_dex_buffers;
+use asc_dex::container::logical_dex_iter;
 use asc_dex::{mutf8, Dex, DexError};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -158,9 +158,8 @@ impl Engine {
                     while let Some(&i) = order.get(next.fetch_add(1, Ordering::Relaxed)) {
                         let entry = &entries[i];
                         let result = load_entry(apk, key, entry, self.cache.as_deref(), &self.stats, None).map(|(loaded, _)| {
-                            logical_dex_buffers(&entry.name, loaded.bytes())
-                                .iter()
-                                .map(|(name, buf)| dex_classes_with(name, buf, prefix, strict))
+                            logical_dex_iter(&entry.name, loaded.bytes())
+                                .map(|(name, buf)| dex_classes_with(&name, &buf, prefix, strict))
                                 .collect()
                         });
                         *slots[i].lock().unwrap() = Some(EntryClasses { entry_name: entry.name.clone(), result });

@@ -21,7 +21,7 @@ pub mod names;
 
 use asc_apk::{Apk, Entry};
 use asc_cache::{ApkKey, DexData, DiskCache, MemoryCache};
-use asc_dex::container::{dex041_logical_offsets, logical_dex_buffers};
+use asc_dex::container::{dex041_logical_offsets, logical_dex_buffers, logical_dex_iter};
 use asc_dex::Dex;
 use asc_findrefs::{CompiledQuery, FindRefs, Hit, Query, RefKind, SearchState};
 use asc_rebuild::Rebuilt;
@@ -352,7 +352,7 @@ enum Loaded<'a> {
     Cached(Arc<CachedEntry>),
 }
 
-impl Loaded<'_> {
+impl<'a> Loaded<'a> {
     fn bytes(&self) -> &[u8] {
         match self {
             Loaded::Borrowed(c) => c,
@@ -361,17 +361,24 @@ impl Loaded<'_> {
     }
 
     /// Logical DEX buffers, moving the inflated bytes instead of copying them
-    /// when the entry is a plain (non-container) DEX.
-    fn into_logical(self, entry_name: &str) -> Vec<(String, DexBytes)> {
+    /// when the entry is a plain (non-container) DEX. A container's logical
+    /// DEXes are copied one at a time, as the caller reaches them.
+    fn into_logical(self, entry_name: &str) -> Box<dyn Iterator<Item = (String, DexBytes)> + 'a> {
         match self {
-            Loaded::Cached(e) => e.logical().iter().map(|l| (l.name.clone(), Arc::clone(&l.data))).collect(),
+            Loaded::Cached(e) => {
+                let logical: Vec<_> = e.logical().iter().map(|l| (l.name.clone(), Arc::clone(&l.data))).collect();
+                Box::new(logical.into_iter())
+            }
             Loaded::Borrowed(c) => {
-                let bufs = logical_dex_buffers(entry_name, &c);
-                if matches!(bufs.as_slice(), [(_, Cow::Borrowed(b))] if b.len() == c.len()) {
-                    drop(bufs);
-                    return vec![(entry_name.to_string(), Arc::new(DexData::Owned(c.into_owned())))];
+                let offsets = dex041_logical_offsets(&c);
+                if offsets.len() <= 1 {
+                    return Box::new(std::iter::once((entry_name.to_string(), Arc::new(DexData::Owned(c.into_owned())))));
                 }
-                bufs.into_iter().map(|(n, b)| (n, Arc::new(DexData::Owned(b.into_owned())))).collect()
+                let name = entry_name.to_string();
+                Box::new(offsets.into_iter().enumerate().map(move |(i, off)| {
+                    let data = asc_dex::container::normalize_dex041_logical(&c, off).into_owned();
+                    (format!("{name}!classes{}.dex", i + 1), Arc::new(DexData::Owned(data)))
+                }))
             }
         }
     }
@@ -960,7 +967,7 @@ fn search_entry(
             }
         }
         Loaded::Borrowed(_) => {
-            for (name, buf) in logical_dex_buffers(&entry.name, loaded.bytes()) {
+            for (name, buf) in logical_dex_iter(&entry.name, loaded.bytes()) {
                 match find_refs_in_dex_compiled(&name, &buf, query, aggregate) {
                     Ok(mut r) => batch.results.append(&mut r),
                     Err(e) => batch.note_error(&name, e),
