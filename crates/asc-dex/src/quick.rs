@@ -11,7 +11,7 @@ fn skip_uleb128(buf: &[u8], off: usize) -> Result<usize> {
 fn string_data_bytes(buf: &[u8], str_off: usize) -> Result<&[u8]> {
     let ptr = skip_uleb128(buf, str_off)?;
     let rest = buf.get(ptr..).ok_or(DexError::Truncated { what: "string_data", offset: ptr })?;
-    let end = rest.iter().position(|&b| b == 0).ok_or(DexError::UnterminatedString(str_off))?;
+    let end = memchr::memchr(0, rest).ok_or(DexError::UnterminatedString(str_off))?;
     Ok(&rest[..end])
 }
 

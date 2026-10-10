@@ -81,6 +81,9 @@ pub struct Dex<'a> {
     buf: &'a [u8],
     header: Header,
     name: String,
+    /// Offset of the last NUL byte: no `string_data_item` starting after it
+    /// can be terminated.
+    last_nul: Option<usize>,
 }
 
 impl<'a> Dex<'a> {
@@ -92,7 +95,9 @@ impl<'a> Dex<'a> {
     /// Parse the header of `buf` and remember a display name for it.
     pub fn with_name(buf: &'a [u8], name: impl Into<String>) -> Result<Self> {
         let header = Header::parse(buf)?;
-        Ok(Dex { buf, header, name: name.into() })
+        // A DEX ends with its map list (or zero padding): this stops at once.
+        let last_nul = memchr::memrchr(0, buf);
+        Ok(Dex { buf, header, name: name.into(), last_nul })
     }
 
     #[inline]
@@ -158,16 +163,21 @@ impl<'a> Dex<'a> {
     /// The terminating NUL is searched for within `3 * utf16_len + 1` bytes
     /// first (every UTF-16 code unit is at most three MUTF-8 bytes). Some
     /// tools wrote a code-point or byte count instead, so when that window
-    /// holds no NUL the search continues to the end of the buffer before the
-    /// item is reported as unterminated.
+    /// holds no NUL the search continues up to the last NUL of the buffer;
+    /// an item that starts past it is reported as unterminated at once, so a
+    /// NUL-free tail costs nothing however many ids point into it.
     pub fn string_item_at(&self, data_off: u32) -> Result<StringItem<'a>> {
         let (utf16_len, n) = leb128::read_uleb128(self.buf, data_off as usize)?;
         let start = data_off as usize + n;
         let rest = self.buf.get(start..).ok_or(DexError::Truncated { what: "string_data", offset: start })?;
         let bound = (utf16_len as usize).saturating_mul(3).saturating_add(1).min(rest.len());
-        let end = match rest[..bound].iter().position(|&b| b == 0) {
+        let end = match memchr::memchr(0, &rest[..bound]) {
             Some(end) => end,
-            None => bound + rest[bound..].iter().position(|&b| b == 0).ok_or(DexError::UnterminatedString(data_off as usize))?,
+            None => {
+                let unterminated = DexError::UnterminatedString(data_off as usize);
+                let last = self.last_nul.filter(|&l| l >= start + bound).ok_or(unterminated.clone())?;
+                bound + memchr::memchr(0, &rest[bound..=last - start]).ok_or(unterminated)?
+            }
         };
         Ok(StringItem { data_off, utf16_len, bytes: &rest[..end] })
     }
