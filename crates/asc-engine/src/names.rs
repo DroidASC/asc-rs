@@ -4,11 +4,13 @@ use crate::{EngineError, Result};
 use asc_findrefs::{ClassQuery, MemberQuery};
 
 /// Turn `com.poc.Main` / `com/poc/Main` / `Lcom/poc/Main;` into a Dalvik descriptor.
+/// Array descriptors (`[Ljava/lang/Object;`, whose methods such as `clone`
+/// are referenced like any class's) are kept as they are.
 pub fn format_class_name(name: &str) -> Result<String> {
     if name.is_empty() {
         return Err(EngineError::Query("Class name cannot be empty".into()));
     }
-    if name.starts_with('L') && name.ends_with(';') && name.contains('/') {
+    if (name.starts_with('L') && name.ends_with(';') && name.contains('/')) || name.starts_with('[') {
         return Ok(name.to_string());
     }
     let mut n = name.replace('.', "/");
@@ -50,8 +52,9 @@ pub fn normalize_class_query(name: &str, fuzzy: bool) -> Result<String> {
     format_class_name(name)
 }
 
-/// Build a member (method/field) query from CLI-style arguments.
-pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Option<&str>) -> Result<MemberQuery> {
+/// Build a member (method/field) query from CLI-style arguments; `exact_name`
+/// matches the member name as a whole instead of as a substring / regex.
+pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Option<&str>, exact_name: bool) -> Result<MemberQuery> {
     let class = class.filter(|c| !c.is_empty());
     let name = name.filter(|n| !n.is_empty());
     if class.is_none() && name.is_none() {
@@ -61,7 +64,7 @@ pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Op
         Some(c) => Some(ClassQuery { pattern: normalize_class_query(c, fuzzy_class)?, precise: !fuzzy_class }),
         None => None,
     };
-    Ok(MemberQuery { class, name: name.map(String::from) })
+    Ok(MemberQuery { class, name: name.map(String::from), exact_name })
 }
 
 #[cfg(test)]
@@ -73,12 +76,15 @@ mod tests {
         assert_eq!(format_class_name("com.poc.Main").unwrap(), "Lcom/poc/Main;");
         assert_eq!(format_class_name("Lcom/poc/Main;").unwrap(), "Lcom/poc/Main;");
         assert_eq!(format_class_name("com/poc/Main").unwrap(), "Lcom/poc/Main;");
+        assert_eq!(format_class_name("[Ljava/lang/Object;").unwrap(), "[Ljava/lang/Object;");
         assert_eq!(dalvik_to_dot("Lcom/poc/Main;"), "com.poc.Main");
         assert_eq!(normalize_class_query("com.poc", true).unwrap(), "com/poc");
         assert_eq!(normalize_class_query("poc", true).unwrap(), "poc");
         assert!(format_class_name("").is_err());
-        assert!(member_query("method", None, false, None).is_err());
-        let q = member_query("method", Some("com.poc.Main"), false, Some("on")).unwrap();
+        assert!(member_query("method", None, false, None, false).is_err());
+        let q = member_query("method", Some("com.poc.Main"), false, Some("on"), false).unwrap();
+        assert!(!q.exact_name);
         assert_eq!(q.class.unwrap(), ClassQuery { pattern: "Lcom/poc/Main;".into(), precise: true });
+        assert!(member_query("field", None, false, Some("f"), true).unwrap().exact_name);
     }
 }

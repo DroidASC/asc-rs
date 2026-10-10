@@ -184,6 +184,11 @@ impl MemberLocator {
         Ok(MemberLocator { table_off: base, count, by_name, by_class: (!sorted).then_some(by_class) })
     }
 
+    /// `name_idx` of member `id`.
+    fn name_idx(&self, buf: &[u8], id: u32) -> Result<u32> {
+        Ok(asc_dex::read_u32(buf, self.table_off + id as usize * 8 + 4)?)
+    }
+
     fn ids_by_name(&self, name_idx: u32, out: &mut BTreeSet<u32>) {
         let start = self.by_name.partition_point(|&(n, _)| n < name_idx);
         for &(n, id) in &self.by_name[start..] {
@@ -222,22 +227,34 @@ impl MemberLocator {
         }
     }
 
-    fn locate(
-        &self,
-        dex: &Dex<'_>,
-        strings: &StringLocator,
-        types: &TypeLocator,
-        query: &CompiledMember,
-        member_name: &dyn Fn(u32) -> Result<String>,
-    ) -> Result<BTreeSet<u32>> {
+    fn locate(&self, dex: &Dex<'_>, strings: &StringLocator, types: &TypeLocator, query: &CompiledMember) -> Result<BTreeSet<u32>> {
         let buf = dex.buf();
         let mut out = BTreeSet::new();
         let Some(class) = &query.class else {
             // No class constraint: every member whose name matches.
-            if let Some(CompiledName::Regex(re)) = &query.name {
-                for s in strings.locate(buf, re) {
-                    self.ids_by_name(s, &mut out);
+            match &query.name {
+                Some(CompiledName::Regex(re)) => {
+                    for s in strings.locate(buf, re) {
+                        self.ids_by_name(s, &mut out);
+                    }
                 }
+                Some(CompiledName::Exact { name, bytes }) => {
+                    // Walk the distinct name strings rather than regex-searching
+                    // the string data: equality needs no escaping and the walk
+                    // is bounded by the id table.
+                    let mut last: Option<(u32, bool)> = None;
+                    for &(n, id) in &self.by_name {
+                        let matched = match last {
+                            Some((l, m)) if l == n => m,
+                            _ => exact_name_matches(dex, n, name, bytes),
+                        };
+                        last = Some((n, matched));
+                        if matched {
+                            out.insert(id);
+                        }
+                    }
+                }
+                _ => {}
             }
             return Ok(out);
         };
@@ -263,7 +280,15 @@ impl MemberLocator {
             Some(CompiledName::Substring(name)) => {
                 // Substring match on the member name, as the Python version does.
                 for id in class_members {
-                    if member_name(id)?.contains(name.as_str()) {
+                    if dex.string(self.name_idx(buf, id)?)?.contains(name.as_str()) {
+                        out.insert(id);
+                    }
+                }
+                Ok(out)
+            }
+            Some(CompiledName::Exact { name, bytes }) => {
+                for id in class_members {
+                    if exact_name_matches(dex, self.name_idx(buf, id)?, name, bytes) {
                         out.insert(id);
                     }
                 }
@@ -278,6 +303,18 @@ impl MemberLocator {
                 Ok(out)
             }
         }
+    }
+}
+
+/// Whether string `name_idx` is exactly `name` (`bytes` is its MUTF-8
+/// encoding). Equal bytes are the common case; a non-ASCII string is also
+/// compared decoded so a non-canonical encoding (e.g. a 4-byte UTF-8
+/// sequence instead of a surrogate pair) still matches. An unreadable string
+/// never matches, like a regex over the string data would not.
+fn exact_name_matches(dex: &Dex<'_>, name_idx: u32, name: &str, bytes: &[u8]) -> bool {
+    match dex.string_bytes(name_idx) {
+        Ok(raw) => raw == bytes || (!raw.is_ascii() && asc_dex::mutf8::decode(raw) == name),
+        Err(_) => false,
     }
 }
 
@@ -304,9 +341,7 @@ impl MethodLocator {
         query: &CompiledQuery,
     ) -> Result<BTreeSet<u32>> {
         match query.parts() {
-            Parts::Member(m) if query.kind() == crate::RefKind::Method => {
-                self.0.locate(dex, strings, types, m, &|id| Ok(dex.string(dex.method_id(id)?.name_idx)?))
-            }
+            Parts::Member(m) if query.kind() == crate::RefKind::Method => self.0.locate(dex, strings, types, m),
             _ => Ok(BTreeSet::new()),
         }
     }
@@ -335,9 +370,7 @@ impl FieldLocator {
         query: &CompiledQuery,
     ) -> Result<BTreeSet<u32>> {
         match query.parts() {
-            Parts::Member(m) if query.kind() == crate::RefKind::Field => {
-                self.0.locate(dex, strings, types, m, &|id| Ok(dex.string(dex.field_id(id)?.name_idx)?))
-            }
+            Parts::Member(m) if query.kind() == crate::RefKind::Field => self.0.locate(dex, strings, types, m),
             _ => Ok(BTreeSet::new()),
         }
     }

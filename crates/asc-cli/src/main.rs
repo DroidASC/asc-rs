@@ -20,6 +20,7 @@ const EXAMPLES: &str = "examples:
   droidasc findrefs app.apk type com.poc.Main
   droidasc findrefs app.apk method onCreate --class com.poc.Main
   droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
+  droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
   droidasc cache stats
@@ -170,6 +171,9 @@ enum Find {
         /// Treat --class as fuzzy match.
         #[arg(long)]
         fuzzy_class: bool,
+        /// Match the name exactly instead of as a substring / regex.
+        #[arg(long)]
+        exact: bool,
     },
     /// Find references to fields.
     Field {
@@ -183,6 +187,9 @@ enum Find {
         /// Treat --class as fuzzy match.
         #[arg(long)]
         fuzzy_class: bool,
+        /// Match the name exactly instead of as a substring / regex.
+        #[arg(long)]
+        exact: bool,
     },
 }
 
@@ -335,15 +342,17 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             let (query, output) = match find {
                 Find::String { output, value } => (Query::String(value), output),
                 Find::Type { output, value } => (Query::Type(value), output),
-                Find::Method { output, name, class_name, fuzzy_class } => (
+                Find::Method { output, name, class_name, fuzzy_class, exact } => (
                     Query::Method(
-                        names::member_query("method", class_name.as_deref(), fuzzy_class, name.as_deref()).map_err(|e| e.to_string())?,
+                        names::member_query("method", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
+                            .map_err(|e| e.to_string())?,
                     ),
                     output,
                 ),
-                Find::Field { output, name, class_name, fuzzy_class } => (
+                Find::Field { output, name, class_name, fuzzy_class, exact } => (
                     Query::Field(
-                        names::member_query("field", class_name.as_deref(), fuzzy_class, name.as_deref()).map_err(|e| e.to_string())?,
+                        names::member_query("field", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
+                            .map_err(|e| e.to_string())?,
                     ),
                     output,
                 ),

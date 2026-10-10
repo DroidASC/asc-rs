@@ -56,8 +56,11 @@ pub struct ClassQuery {
 pub struct MemberQuery {
     pub class: Option<ClassQuery>,
     /// Fuzzy member name (regex when `class` is absent or fuzzy, substring
-    /// when the class is precise).
+    /// when the class is precise), or the exact name when `exact_name` is set.
     pub name: Option<String>,
+    /// Match `name` exactly (whatever the class constraint) instead of as a
+    /// regex / substring; used for "references to this member" lookups.
+    pub exact_name: bool,
 }
 
 /// A reference search request.

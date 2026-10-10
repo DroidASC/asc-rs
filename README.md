@@ -28,6 +28,7 @@ examples:
   droidasc findrefs app.apk type com.poc.Main
   droidasc findrefs app.apk method onCreate --class com.poc.Main
   droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
+  droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
   droidasc cache stats
@@ -63,7 +64,7 @@ Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is he
 | `asc-axml` | Android binary XML → text XML for `AndroidManifest.xml`. |
 | `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding. |
 | `asc-cli` | `droidasc` binary (clap). |
-| `asc-gui` | egui browser: package tree with context menus, tabbed disassembly with find and jump-to-method, streaming reference searches kept as a history panel, class-name suggestions, manifest view; panel sizes, theme and search preferences persist across runs. |
+| `asc-gui` | egui browser: package tree with context menus, tabbed disassembly with find and jump-to-method, `X` for references to the member under the cursor and Ctrl+click to its declaration, streaming reference searches kept as a history panel, class-name suggestions, manifest view; panel sizes, theme and search preferences persist across runs. |
 | `asc-fixture` | Synthetic DEX/APK fixtures shared by the tests. |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces map onto the Python

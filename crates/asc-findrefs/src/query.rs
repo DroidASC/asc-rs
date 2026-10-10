@@ -21,6 +21,8 @@ pub(crate) enum CompiledName {
     Substring(String),
     /// Regex over the raw string table.
     Regex(Regex),
+    /// Whole-name equality; `bytes` is the MUTF-8 encoding of `name`.
+    Exact { name: String, bytes: Vec<u8> },
 }
 
 /// Member (method / field) query with its patterns compiled.
@@ -39,7 +41,7 @@ pub(crate) enum Parts {
 ///
 /// The string/type pattern, a fuzzy class pattern and a member name used as a
 /// regex are compiled here; a member name matched as a substring (precise
-/// class) is kept as the plain string. Empty patterns are kept as "no
+/// class) or exactly (`exact_name`) is kept as the plain string. Empty patterns are kept as "no
 /// constraint" exactly as [`FindRefs::locate`](crate::FindRefs::locate)
 /// treats them.
 pub struct CompiledQuery {
@@ -96,6 +98,7 @@ fn compile_member(m: &MemberQuery) -> Result<CompiledMember> {
     };
     let name = match m.name.as_deref().filter(|n| !n.is_empty()) {
         None => None,
+        Some(n) if m.exact_name => Some(CompiledName::Exact { name: n.to_string(), bytes: asc_dex::mutf8::encode(n) }),
         // With a precise class the member name is a substring match (as the
         // Python implementation does); otherwise it is a regex.
         Some(n) if matches!(class, Some(CompiledClass::Precise(_))) => Some(CompiledName::Substring(n.to_string())),
@@ -120,6 +123,7 @@ mod tests {
         let q = Query::Method(MemberQuery {
             class: Some(ClassQuery { pattern: "Lexample/Test;".into(), precise: true }),
             name: Some("(".into()), // invalid regex, but a substring here
+            exact_name: false,
         });
         let c = CompiledQuery::new(&q).unwrap();
         assert_eq!(c.kind(), RefKind::Method);
@@ -128,16 +132,33 @@ mod tests {
         assert!(matches!(m.class, Some(CompiledClass::Precise(_))));
         assert!(matches!(m.name, Some(CompiledName::Substring(_))));
 
-        let q = Query::Field(MemberQuery { class: None, name: Some("(".into()) });
+        // An exact name is never compiled as a regex, whatever the class.
+        for class in [None, Some(ClassQuery { pattern: "Lexample/Test;".into(), precise: true })] {
+            let q = Query::Field(MemberQuery { class, name: Some("a(".into()), exact_name: true });
+            let c = CompiledQuery::new(&q).unwrap();
+            let Parts::Member(m) = c.parts() else { panic!() };
+            assert!(matches!(&m.name, Some(CompiledName::Exact { name, bytes }) if name == "a(" && bytes == b"a("));
+        }
+        let q = Query::Method(MemberQuery { class: None, name: Some("\u{1F600}".into()), exact_name: true });
+        let c = CompiledQuery::new(&q).unwrap();
+        let Parts::Member(m) = c.parts() else { panic!() };
+        assert!(matches!(&m.name, Some(CompiledName::Exact { bytes, .. }) if bytes == &[0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]));
+
+        let q = Query::Field(MemberQuery { class: None, name: Some("(".into()), exact_name: false });
         assert!(CompiledQuery::new(&q).is_err());
-        let q = Query::Field(MemberQuery { class: Some(ClassQuery { pattern: "(".into(), precise: false }), name: None });
+        let q =
+            Query::Field(MemberQuery { class: Some(ClassQuery { pattern: "(".into(), precise: false }), name: None, exact_name: false });
         assert!(CompiledQuery::new(&q).is_err());
         let q = Query::String("[".into());
         assert!(CompiledQuery::new(&q).is_err());
 
         let c = CompiledQuery::new(&Query::Type(String::new())).unwrap();
         assert!(matches!(c.parts(), Parts::Pattern(None)));
-        let q = Query::Method(MemberQuery { class: Some(ClassQuery { pattern: String::new(), precise: false }), name: None });
+        let q = Query::Method(MemberQuery {
+            class: Some(ClassQuery { pattern: String::new(), precise: false }),
+            name: None,
+            exact_name: false,
+        });
         let c = CompiledQuery::new(&q).unwrap();
         let Parts::Member(m) = c.parts() else { panic!() };
         assert!(m.class.is_none() && m.name.is_none());

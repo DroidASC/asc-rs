@@ -94,6 +94,9 @@ labels for branches, switch payloads, `fill-array-data` and try/catch blocks. Th
   byte-`re` does. An empty `string` pattern matches nothing rather than everything.
 * Member queries: with a precise class, the member name is a **substring** match; with a
   fuzzy or absent class the member name is a regex against the string table.
+  `MemberQuery::exact_name` (`--exact`, and the GUI's "references to this member") makes
+  it a whole-name equality under any class constraint, as the Python GUI's exact-member
+  xref does; names are compared as MUTF-8 bytes (decoded only for non-ASCII strings).
 * Bucket resolution is fuzzy by design; every hit is verified by walking instruction
   lengths from the method start (or the previously verified offset) to the hit. That
   walk treats the leading `nop` of a switch / array payload as a one-unit instruction
