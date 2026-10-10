@@ -5,7 +5,8 @@
 //! `Lcls;->name(params)ret` / `Lcls;->name:type`, declarations are
 //! `.method <flags> name(params)ret` / `.field <flags> name:type [= value]`.
 //! Member names cannot contain `(` or `:`, so a name runs up to the first of
-//! them and may hold any other (non-ASCII) character.
+//! them and may hold any other character, including Unicode or (DEX 040+)
+//! ASCII spaces. The writer only separates tokens with ASCII spaces.
 
 /// Method or field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +69,9 @@ fn proto_len(s: &str) -> Option<usize> {
 fn member_tail(s: &str) -> Option<(MemberKind, usize, usize)> {
     let name_len = s.find(['(', ':'])?;
     let name = &s[..name_len];
-    if name.is_empty() || name.contains(|c: char| c.is_whitespace() || matches!(c, ',' | '{' | '}' | ';' | '"' | ')')) {
+    // No whitespace check: U+3000 and friends are valid in every DEX version,
+    // ASCII spaces from 040 on. These characters never are.
+    if name.is_empty() || name.contains(['\n', ',', '{', '}', ';', '"', ')']) {
         return None;
     }
     let rest = &s[name_len..];
@@ -106,25 +109,57 @@ fn string_literals(line: &str) -> Vec<(usize, usize)> {
     out
 }
 
-/// Characters that end a class descriptor when walking back from its `;`.
+/// Characters that end a class descriptor when walking back from its end.
+/// Only ASCII whitespace separates tokens: a class name may hold U+3000 etc.
 fn ends_descriptor(c: char) -> bool {
-    c.is_whitespace() || matches!(c, ',' | '{' | '}' | '(' | ')' | '"' | '=' | ':' | ';')
+    c.is_ascii_whitespace() || matches!(c, ',' | '{' | '}' | '(' | ')' | '"' | '=' | ':' | ';')
+}
+
+/// Access-flag words `asc-smali` writes before a field / method name, in its
+/// emission order (`FIELD_FLAGS` / `METHOD_FLAGS` there).
+const FIELD_FLAG_WORDS: &[&str] = &["public", "private", "protected", "static", "final", "volatile", "transient", "synthetic", "enum"];
+const METHOD_FLAG_WORDS: &[&str] = &[
+    "public",
+    "private",
+    "protected",
+    "static",
+    "final",
+    "synchronized",
+    "bridge",
+    "varargs",
+    "native",
+    "abstract",
+    "strictfp",
+    "synthetic",
+    "constructor",
+    "declared-synchronized",
+];
+
+/// Byte offset of the name in `rest` (the text after `.method ` / `.field `):
+/// skips the flag words, each at most once and in emission order, so a name
+/// holding spaces (`my test`) is kept whole.
+fn skip_flags(rest: &str, words: &[&str]) -> usize {
+    let mut at = 0;
+    for w in words {
+        if rest[at..].strip_prefix(w).is_some_and(|r| r.starts_with(' ')) {
+            at += w.len() + 1;
+        }
+    }
+    at
 }
 
 /// The declaration on a `.method` / `.field` line of `class`.
-fn declaration(line: &str, class: &str) -> Option<MemberSpan> {
+pub(crate) fn declaration(line: &str, class: &str) -> Option<MemberSpan> {
     let body = line.trim_start();
     let indent = line.len() - body.len();
-    let (delim, kind) = if body.starts_with(".method ") {
-        ('(', MemberKind::Method)
+    let (head, kind, words) = if body.starts_with(".method ") {
+        (".method ", MemberKind::Method, METHOD_FLAG_WORDS)
     } else if body.starts_with(".field ") {
-        (':', MemberKind::Field)
+        (".field ", MemberKind::Field, FIELD_FLAG_WORDS)
     } else {
         return None;
     };
-    // Flags never contain the delimiter, so the name is the word before it.
-    let at = body.find(delim)?;
-    let start = body[..at].rfind(' ')? + 1;
+    let start = head.len() + skip_flags(&body[head.len()..], words);
     let (k, name_len, len) = member_tail(&body[start..])?;
     if k != kind {
         return None;
@@ -140,6 +175,14 @@ fn declaration(line: &str, class: &str) -> Option<MemberSpan> {
     })
 }
 
+/// Whether `class` is a whole member-receiver descriptor: `Lcls;` or an
+/// array of any element type (`[I`, `[[Lcls;`).
+fn is_receiver(class: &str) -> bool {
+    let element = class.trim_start_matches('[');
+    let object = element.starts_with('L') && element.len() >= 3;
+    (object || class.starts_with('[')) && type_descriptor_len(class) == Some(class.len())
+}
+
 /// Every member reference and declaration on a line, in order. `class` is the
 /// descriptor of the class the line belongs to (declarations name no class).
 pub fn member_spans_in_line(line: &str, class: &str) -> Vec<MemberSpan> {
@@ -147,17 +190,18 @@ pub fn member_spans_in_line(line: &str, class: &str) -> Vec<MemberSpan> {
     let literals = string_literals(line);
     let in_literal = |pos: usize| literals.iter().any(|&(s, e)| s <= pos && pos < e);
     let mut from = 0;
-    while let Some(rel) = line[from..].find(";->") {
-        let semi = from + rel;
-        let arrow_end = semi + 3;
+    while let Some(rel) = line[from..].find("->") {
+        let arrow = from + rel;
+        let arrow_end = arrow + 2;
         from = arrow_end;
-        if in_literal(semi) {
+        if in_literal(arrow) {
             continue;
         }
-        let start = line[..semi].char_indices().rev().find(|&(_, c)| ends_descriptor(c)).map_or(0, |(i, c)| i + c.len_utf8());
-        let class = &line[start..=semi];
-        let element = class.trim_start_matches('[');
-        if !element.starts_with('L') || element.len() < 3 {
+        // An object class ends in `;`; a primitive array (`[I`) does not.
+        let scan_end = if line[..arrow].ends_with(';') { arrow - 1 } else { arrow };
+        let start = line[..scan_end].char_indices().rev().find(|&(_, c)| ends_descriptor(c)).map_or(0, |(i, c)| i + c.len_utf8());
+        let class = &line[start..arrow];
+        if !is_receiver(class) {
             continue;
         }
         let Some((kind, name_len, len)) = member_tail(&line[arrow_end..]) else { continue };
@@ -265,8 +309,55 @@ mod tests {
         assert!(member_spans_in_line("    Lcom/x/Bar;->run(Q)V", CLS).is_empty());
         assert!(member_spans_in_line("    Lcom/x/Bar;->f:", CLS).is_empty());
         assert!(member_spans_in_line("    Lcom/x/Bar;->(I)V", CLS).is_empty());
-        assert!(member_spans_in_line("    Lcom/x/Bar;-> run()V", CLS).is_empty());
         assert!(member_spans_in_line("    L;->run()V", CLS).is_empty());
+        // Switch payload targets and arrows without a receiver.
+        assert!(member_spans_in_line("        0x1 -> :sswitch_0", CLS).is_empty());
+        assert!(member_spans_in_line("    a->b()V", CLS).is_empty());
+        assert!(member_spans_in_line("    [Q->clone()V", CLS).is_empty());
+        assert!(member_spans_in_line("    [->clone()V", CLS).is_empty());
+    }
+
+    #[test]
+    fn primitive_array_receivers() {
+        let line = "    invoke-virtual {v0}, [I->clone()Ljava/lang/Object;";
+        let s = one(line);
+        assert_eq!(
+            (s.kind, s.class.as_str(), s.name.as_str(), s.descriptor.as_str()),
+            (MemberKind::Method, "[I", "clone", "()Ljava/lang/Object;")
+        );
+        assert_eq!(&line[s.start..s.end], "[I->clone()Ljava/lang/Object;");
+        assert_eq!(one("    invoke-virtual {v1}, [[J->clone()Ljava/lang/Object;").class, "[[J");
+        assert_eq!(one("    invoke-virtual {v1}, [[Ljava/lang/String;->clone()Ljava/lang/Object;").class, "[[Ljava/lang/String;");
+        assert_eq!(one("    iget v0, v1, [F->length:I").name, "length");
+    }
+
+    #[test]
+    fn names_with_spaces_and_unicode_whitespace() {
+        // U+3000 / U+1680 are valid SimpleName characters in every DEX version.
+        let s = one("    sget v0, Lcom/x/a\u{3000}b;->f:I");
+        assert_eq!((s.class.as_str(), s.name.as_str()), ("Lcom/x/a\u{3000}b;", "f"));
+        let s = one("    sget v0, Lcom/x/Bar;->\u{3000}:I");
+        assert_eq!(s.name, "\u{3000}");
+        assert_eq!(one("    sget v0, Lcom/x/Bar;->a\u{1680}b:I").name, "a\u{1680}b");
+        // ASCII spaces (DEX 040+, Kotlin backtick names).
+        let line = "    invoke-static {}, Lcom/x/Bar;->my test()V";
+        let s = one(line);
+        assert_eq!((s.name.as_str(), &line[s.start..s.end]), ("my test", "Lcom/x/Bar;->my test()V"));
+        assert_eq!(one("    invoke-static {}, Lcom/x/Bar;-> run()V").name, " run");
+
+        let s = one(".field public a b:I");
+        assert_eq!((s.name.as_str(), s.descriptor.as_str(), s.declaration), ("a b", "I", true));
+        let line = ".method public final my test()V";
+        let s = one(line);
+        assert_eq!((s.name.as_str(), &line[s.start..s.end]), ("my test", "my test()V"));
+        assert_eq!(one(".method \u{3000}()V").name, "\u{3000}");
+        assert_eq!(one(".field private static a\u{00a0}b:I = 0x1").name, "a\u{00a0}b");
+        // A name equal to a flag word is not a flag when no space follows it.
+        assert_eq!(one(".method public final()V").name, "final");
+        assert_eq!(one(".method public declared-synchronized go()V").name, "go");
+        let l = lines(".class Lcom/x/Foo;\n.method public final my test()V\n.end method\n.method public test()V");
+        assert_eq!(declaration_line(&l, CLS, MemberKind::Method, "test", None), Some(3));
+        assert_eq!(declaration_line(&l, CLS, MemberKind::Method, "my test", Some("()V")), Some(1));
     }
 
     #[test]
