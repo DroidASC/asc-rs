@@ -246,6 +246,65 @@ pub fn make_short_static_values_dex() -> Vec<u8> {
     b.finish([(8, string_ids), (5, type_ids), (0, 0), (3, field_ids), (0, 0), (1, class_defs)], data_off)
 }
 
+/// A DEX holding only strings, types and class_defs: class `i` is
+/// `descriptors[i]` (kept in the given order, unsorted). With `version041`
+/// every offset is relative to `base`, the position of this logical DEX in a
+/// container (see [`make_dex041_container`]). Ported from `test_listclass.py`.
+pub fn make_class_only_dex(descriptors: &[&str], base: u32, version041: bool) -> Vec<u8> {
+    let header_size = if version041 { 0x78 } else { 0x70 };
+    let n = descriptors.len();
+    let mut buf = vec![0u8; header_size];
+    let put = |buf: &mut Vec<u8>, off: usize, v: u32| buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    let string_ids = buf.len();
+    buf.resize(buf.len() + 4 * n, 0);
+    let type_ids = buf.len();
+    buf.resize(buf.len() + 4 * n, 0);
+    let class_defs = buf.len();
+    buf.resize(buf.len() + 32 * n, 0);
+    let data_off = buf.len();
+    for (i, d) in descriptors.iter().enumerate() {
+        let string_off = base + buf.len() as u32;
+        put(&mut buf, string_ids + 4 * i, string_off);
+        put(&mut buf, type_ids + 4 * i, i as u32);
+        let def = pack_u32s(&[i as u32, 1, NO_INDEX, 0, NO_INDEX, 0, 0, 0]);
+        buf[class_defs + 32 * i..class_defs + 32 * (i + 1)].copy_from_slice(&def);
+        buf.extend(uleb(d.encode_utf16().count() as u32));
+        buf.extend(mutf8::encode(d));
+        buf.push(0);
+    }
+    buf[..8].copy_from_slice(if version041 { b"dex\n041\0" } else { b"dex\n035\0" });
+    let len = buf.len() as u32;
+    put(&mut buf, 0x20, len);
+    put(&mut buf, 0x24, header_size as u32);
+    put(&mut buf, 0x28, 0x12345678);
+    // (size, off) of string, type, proto, field, method and class_def ids.
+    let ids = [n, string_ids, n, type_ids, 0, 0, 0, 0, 0, 0, n, class_defs];
+    for (k, v) in ids.iter().enumerate() {
+        // Sizes stay as they are; offsets are relative to the container.
+        let v = if k % 2 == 1 && *v != 0 { base + *v as u32 } else { *v as u32 };
+        put(&mut buf, 0x38 + 4 * k, v);
+    }
+    put(&mut buf, 0x68, len - data_off as u32);
+    put(&mut buf, 0x6C, base + data_off as u32);
+    if version041 {
+        put(&mut buf, 0x74, base);
+    }
+    buf
+}
+
+/// A DEX 041 container of two logical DEXes:
+/// `[Lalpha/First;, Lshared/Duplicate;]` and `[Lbeta/Second;, Lshared/Duplicate;]`.
+pub fn make_dex041_container() -> Vec<u8> {
+    let first = make_class_only_dex(&["Lalpha/First;", "Lshared/Duplicate;"], 0, true);
+    let second = make_class_only_dex(&["Lbeta/Second;", "Lshared/Duplicate;"], first.len() as u32, true);
+    let mut data = [first.as_slice(), second.as_slice()].concat();
+    let total = data.len() as u32;
+    for header in [0, first.len()] {
+        data[header + 0x70..header + 0x74].copy_from_slice(&total.to_le_bytes());
+    }
+    data
+}
+
 // ---------------------------------------------------------------------------
 // General two-phase builder
 // ---------------------------------------------------------------------------

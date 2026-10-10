@@ -15,6 +15,8 @@ const EXAMPLES: &str = "examples:
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16
   droidasc getclass app.apk com.poc.Main --dump-dex Main.dex
+  droidasc listclass app.apk -o classes.txt
+  droidasc listclass app.apk --prefix com.poc
   droidasc getmanifest app.apk -o AndroidManifest.xml
   droidasc findrefs app.apk string token -o string_refs.txt
   droidasc findrefs app.apk type com.poc.Main
@@ -34,7 +36,7 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
 
-const SUBCOMMANDS: [&str; 5] = ["getclass", "getmanifest", "findrefs", "gui", "cache"];
+const SUBCOMMANDS: [&str; 6] = ["getclass", "listclass", "getmanifest", "findrefs", "gui", "cache"];
 
 fn default_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
@@ -101,6 +103,17 @@ enum Command {
         apk_path: PathBuf,
         /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
         dalvik_class: String,
+    },
+    /// List classes across all DEX entries; use --prefix to filter by package/class prefix.
+    Listclass {
+        /// Only list classes with this package/class prefix (e.g., com.poc or Lcom/poc).
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Write class names to this file instead of stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
     },
     /// Decode AndroidManifest.xml from APK and print it as XML.
     Getmanifest {
@@ -321,6 +334,23 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             }
             write_output(output.as_ref(), &src.source)?;
             emit(&src.source)?;
+        }
+        Command::Listclass { prefix, output, apk_path } => {
+            let engine = common.engine(&apk_path);
+            let classes = engine.list_classes(prefix.as_deref()).map_err(|e| e.to_string())?;
+            let mut text = String::with_capacity(classes.iter().map(|c| c.descriptor.len() + 1).sum());
+            for c in &classes {
+                text.push_str(&c.descriptor);
+                text.push('\n');
+            }
+            match &output {
+                Some(p) => std::fs::write(p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?,
+                None if text.is_empty() => {}
+                None => emit(&text)?,
+            }
+            if common.debug {
+                eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+            }
         }
         Command::Getmanifest { output, apk_path } => {
             let engine = common.engine(&apk_path);

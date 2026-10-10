@@ -1,6 +1,6 @@
 //! End-to-end tests of the `droidasc` binary against a synthetic APK.
 
-use asc_fixture::{make_apk, make_dex};
+use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_dex041_container, make_static_field_dex};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -207,4 +207,90 @@ fn class_that_cannot_be_rebuilt_is_still_disassembled() {
     let out = droidasc(&["getclass", path(f.path()), "Lexample/Broken;", "--dump-dex", path(&dir.path().join("b.dex"))]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).contains("not rebuilt"), "{}", stderr(&out));
+}
+
+// ---- listclass (ported from the Python `test_listclass.py`) -------------
+
+#[test]
+fn listclass_filters_a_normalized_prefix() {
+    let dex = make_class_only_dex(&["Lcom/xxx/First;", "Lcom/xxx/internal/Second;", "Lorg/example/Other;"], 0, false);
+    for deflate in [false, true] {
+        let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex)], deflate));
+        for prefix in ["com.xxx", "com/xxx", "Lcom/xxx"] {
+            let out = droidasc(&["listclass", path(apk.path()), "--prefix", prefix]);
+            assert!(out.status.success(), "{}", stderr(&out));
+            assert_eq!(stdout(&out), "Lcom/xxx/First;\nLcom/xxx/internal/Second;\n", "{prefix} deflate={deflate}");
+        }
+        let out = droidasc(&["listclass", path(apk.path()), "--prefix", "net"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out), "");
+    }
+}
+
+#[test]
+fn listclass_keeps_dex_order_and_writes_only_the_file_with_output() {
+    let (a, b) = (make_dex(), make_static_field_dex());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("classes.txt");
+    for deflate in [false, true] {
+        let apk = temp_apk_from(&make_apk(&[("classes.dex", &a), ("classes2.dex", &b), ("classes3.dex", &a)], deflate));
+        let out = droidasc(&["listclass", path(apk.path()), "--threads", "2", "-o", path(&file)]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out), "");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "Lexample/Test;\nLexample/Statics;\nLexample/Test;\n");
+    }
+}
+
+#[test]
+fn listclass_lists_a_large_deflated_dex() {
+    let mut dex = make_dex();
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    dex.extend((0..1 << 20).map(|_| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x as u8
+    }));
+    let len = dex.len() as u32;
+    dex[0x20..0x24].copy_from_slice(&len.to_le_bytes());
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex)], true));
+    let out = droidasc(&["listclass", path(apk.path())]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Lexample/Test;\n");
+}
+
+#[test]
+fn listclass_lists_every_logical_dex_of_a_041_container() {
+    let container = make_dex041_container();
+    for deflate in [false, true] {
+        let apk = temp_apk_from(&make_apk(&[("classes.dex", &container)], deflate));
+        let out = droidasc(&["listclass", path(apk.path()), "--threads", "1"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out), "Lalpha/First;\nLshared/Duplicate;\nLbeta/Second;\nLshared/Duplicate;\n");
+    }
+}
+
+#[test]
+fn listclass_bad_class_type_index_is_a_clean_error() {
+    let mut dex = make_dex();
+    let off = u32::from_le_bytes(dex[0x64..0x68].try_into().unwrap()) as usize;
+    dex[off..off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex)], false));
+    let out = droidasc(&["listclass", path(apk.path())]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.starts_with("Error: classes.dex: class_def 0: type index 4294967295 out of range"), "{err}");
+}
+
+#[test]
+fn listclass_rejects_an_empty_prefix_and_accepts_zero_threads() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_dex())], false));
+    let out = droidasc(&["listclass", path(apk.path()), "--prefix", " "]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Error: Class prefix cannot be empty"), "{}", stderr(&out));
+    // Like every other subcommand, `--threads 0` means one worker.
+    let out = droidasc(&["listclass", path(apk.path()), "--threads", "0"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "Lexample/Test;\n");
 }

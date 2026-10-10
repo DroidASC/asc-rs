@@ -141,3 +141,59 @@ fn getclass_keeps_looking_after_a_broken_entry() {
         assert!(engine.get_class_dex("Lexample/Missing;").is_err());
     }
 }
+
+#[test]
+fn list_classes_follows_central_directory_order() {
+    let (a, b) = (make_dex(), asc_fixture::make_static_field_dex());
+    let container = asc_fixture::make_dex041_container();
+    // Sizes differ, so a size-ordered scan would reorder them.
+    let bytes = make_apk(&[("classes2.dex", &b), ("classes.dex", &container), ("classes3.dex", &a)], true);
+    let f = temp_apk_from(&bytes);
+    let dir = tempfile::tempdir().unwrap();
+    for (threads, memory_bytes) in [(1, 0), (3, 0), (3, 64 << 20)] {
+        let cfg = asc_engine::CacheConfig { memory_bytes, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+        let engine = Engine::new(f.path()).with_threads(threads).with_cache(cfg);
+        // Twice: the second run is served from the caches.
+        for _ in 0..2 {
+            let got: Vec<(String, String)> = engine.list_classes(None).unwrap().into_iter().map(|c| (c.dex_name, c.descriptor)).collect();
+            let want = [
+                ("classes2.dex", "Lexample/Statics;"),
+                ("classes.dex!classes1.dex", "Lalpha/First;"),
+                ("classes.dex!classes1.dex", "Lshared/Duplicate;"),
+                ("classes.dex!classes2.dex", "Lbeta/Second;"),
+                ("classes.dex!classes2.dex", "Lshared/Duplicate;"),
+                ("classes3.dex", "Lexample/Test;"),
+            ];
+            assert_eq!(got, want.map(|(d, c)| (d.to_string(), c.to_string())));
+            engine.flush_cache_writes();
+        }
+        let shared: Vec<String> = engine.list_classes(Some("shared")).unwrap().into_iter().map(|c| c.dex_name).collect();
+        assert_eq!(shared, ["classes.dex!classes1.dex", "classes.dex!classes2.dex"]);
+    }
+}
+
+#[test]
+fn scan_classes_reports_problems_per_entry() {
+    let dex = make_dex();
+    let mut bad_def = dex.clone();
+    let off = u32::from_le_bytes(bad_def[0x64..0x68].try_into().unwrap()) as usize;
+    bad_def[off..off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let bytes = make_apk(&[("classes.dex", &dex), ("classes2.dex", b"not a dex"), ("classes3.dex", &bad_def)], false);
+    let f = temp_apk_from(&bytes);
+    let engine = Engine::new(f.path()).with_threads(2);
+    let calls = std::sync::Mutex::new(Vec::new());
+    let scanned = engine.scan_classes(None, |done, total| calls.lock().unwrap().push((done, total))).unwrap();
+    let mut calls = calls.into_inner().unwrap();
+    calls.sort_unstable();
+    assert_eq!(calls, [(1, 3), (2, 3), (3, 3)]);
+    let names: Vec<&str> = scanned.iter().map(|e| e.entry_name.as_str()).collect();
+    assert_eq!(names, ["classes.dex", "classes2.dex", "classes3.dex"]);
+    let dexes: Vec<_> = scanned.iter().map(|e| &e.result.as_ref().unwrap()[0]).collect();
+    assert_eq!(dexes[0].descriptors, ["Lexample/Test;"]);
+    assert!(dexes[1].error.is_some());
+    assert_eq!((dexes[2].descriptors.len(), dexes[2].bad_class_defs), (0, 1));
+    // The strict listing fails on the first problem, in entry order.
+    let err = engine.list_classes(None).unwrap_err().to_string();
+    assert!(err.starts_with("classes2.dex: "), "{err}");
+    assert_eq!(engine.list_classes(Some("")).unwrap_err().to_string(), "Class prefix cannot be empty");
+}

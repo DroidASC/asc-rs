@@ -6,6 +6,7 @@
 //!   parallel and streams results back as each DEX completes.
 //! * [`Engine::get_class`] rebuilds a minimal DEX containing only the target
 //!   class and renders it as smali.
+//! * [`Engine::list_classes`] lists the classes of every DEX entry in order.
 //! * [`Engine::manifest_xml`] decodes the binary `AndroidManifest.xml`.
 //!
 //! Optionally the engine keeps inflated DEX entries in an on-disk cache
@@ -15,6 +16,7 @@
 //! [`Engine::flush_cache_writes`] waits for them to land and [`Engine::close_cache_writes`]
 //! (run on drop) additionally stops queueing new ones.
 
+mod classes;
 pub mod names;
 
 use asc_apk::{Apk, Entry};
@@ -33,6 +35,7 @@ use std::time::{Instant, SystemTime};
 pub use asc_cache;
 pub use asc_findrefs::{ClassQuery, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
+pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -52,6 +55,8 @@ pub enum EngineError {
     ClassNotFound(String),
     #[error("{0}")]
     Query(String),
+    #[error("{dex}: {reason}")]
+    BadDex { dex: String, reason: String },
     #[error("worker panicked while processing {0}")]
     WorkerPanic(String),
 }
