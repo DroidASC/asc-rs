@@ -2,7 +2,7 @@
 //! line-level parsing behind the source context menu (member spans live in
 //! [`crate::members`]). Pure logic, no egui.
 
-use crate::members::{declaration_line, MemberKind};
+use crate::members::{declaration, declaration_line, MemberKind};
 
 /// Where to scroll once a class tab has its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,8 +154,9 @@ impl Tab {
         self.scroll_to = Some(self.find_matches[self.find_cursor]);
     }
 
-    /// Scroll to and highlight the declaration `jump` names. Returns false
-    /// when it is not in this class (e.g. inherited).
+    /// Scroll to and highlight the declaration `jump` names, with the caret
+    /// on its name (so `X` right after a jump finds its references). Returns
+    /// false when it is not in this class (e.g. inherited).
     pub fn jump_to(&mut self, jump: &Jump) -> bool {
         let line = match jump {
             Jump::Method(name) => method_line(self.lines(), name),
@@ -165,7 +166,7 @@ impl Tab {
             Some(i) => {
                 self.jump_line = Some(i);
                 self.scroll_to = Some(i);
-                self.caret = None;
+                self.caret = declaration(&self.lines()[i], &self.id).map(|d| (i, d.start));
                 true
             }
             None => false,
@@ -353,17 +354,22 @@ mod tests {
     }
 
     #[test]
-    fn member_jump_picks_the_overload_and_clears_the_caret() {
+    fn member_jump_picks_the_overload_and_places_the_caret() {
         let mut tab = Tab::loading("Lx;".into(), "x".into(), "Lx;".into());
-        let text = ".class Lx;\n.field f:I\n.method run()V\n.end method\n.method run(I)V\n.end method";
+        let text = ".class Lx;\n.field f:I\n.method run()V\n.end method\n.method public run(I)V\n.end method";
         tab.pending_jump = Some(Jump::Member { kind: MemberKind::Method, name: "run".into(), descriptor: "(I)V".into() });
         assert_eq!(tab.set_text(text), None);
-        assert_eq!(tab.jump_line, Some(4));
-        tab.caret = Some((1, 3));
+        assert_eq!((tab.jump_line, tab.caret), (Some(4), Some((4, ".method public ".len()))));
+        tab.caret = Some((2, 3));
         assert!(tab.jump_to(&Jump::Member { kind: MemberKind::Field, name: "f".into(), descriptor: "I".into() }));
-        assert_eq!((tab.jump_line, tab.caret), (Some(1), None));
+        assert_eq!((tab.jump_line, tab.caret), (Some(1), Some((1, ".field ".len()))));
+        // The caret lands on the declaration, so `X` finds this member.
+        let (line, col) = tab.caret.unwrap();
+        let m = crate::members::member_at(&tab.lines()[line], &tab.id, col).unwrap();
+        assert_eq!((m.kind, m.name.as_str(), m.declaration), (MemberKind::Field, "f", true));
         let missing = Jump::Member { kind: MemberKind::Field, name: "f".into(), descriptor: "J".into() };
         assert!(!tab.jump_to(&missing));
+        assert_eq!(tab.caret, Some((1, ".field ".len())));
         tab.pending_jump = Some(missing.clone());
         assert_eq!(tab.set_text(text), Some(missing));
         tab.caret = Some((0, 0));
