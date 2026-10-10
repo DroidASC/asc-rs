@@ -224,6 +224,7 @@ name = "asc-dex"
 version = "0.1.0"
 dependencies = [
  "asc-fixture",
+ "memchr",
  "thiserror 2.0.20",
 ]
 

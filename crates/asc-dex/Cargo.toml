@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "Zero-copy, lazy DEX parser primitives for Droid ASC (headers, id tables, class data, code items, encoded values, debug info, DEX041 containers)."
 
 [dependencies]
+memchr.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

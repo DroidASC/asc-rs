@@ -55,12 +55,27 @@ pub fn normalize_dex041_logical(data: &[u8], header_off: usize) -> Cow<'_, [u8]>
 
 /// Split a DEX entry into its logical DEX buffers, naming them
 /// `name!classesN.dex` when the entry is a multi-DEX container.
+///
+/// Every logical DEX after the first is a full copy of the container; prefer
+/// [`logical_dex_iter`] unless all of them are needed at once.
 pub fn logical_dex_buffers<'a>(name: &str, data: &'a [u8]) -> Vec<(String, Cow<'a, [u8]>)> {
+    logical_dex_iter(name, data).collect()
+}
+
+/// Lazy [`logical_dex_buffers`]: each logical DEX is normalised only when it
+/// is reached, so a caller that drops it before the next holds one copy of
+/// the container at a time instead of one per logical DEX.
+pub fn logical_dex_iter<'a>(name: &str, data: &'a [u8]) -> impl Iterator<Item = (String, Cow<'a, [u8]>)> + 'a {
     let offsets = dex041_logical_offsets(data);
-    if offsets.len() <= 1 {
-        return vec![(name.to_string(), Cow::Borrowed(data))];
-    }
-    offsets.into_iter().enumerate().map(|(i, off)| (format!("{name}!classes{}.dex", i + 1), normalize_dex041_logical(data, off))).collect()
+    let container = offsets.len() > 1;
+    let name = name.to_string();
+    offsets.into_iter().enumerate().map(move |(i, off)| {
+        if container {
+            (format!("{name}!classes{}.dex", i + 1), normalize_dex041_logical(data, off))
+        } else {
+            (name.to_string(), Cow::Borrowed(data))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -110,6 +125,11 @@ mod tests {
         assert_eq!(bufs[1].1[0x28], 0xAB);
         assert_eq!(&bufs[1].1[0x20..0x24], &0x90u32.to_le_bytes());
         assert_eq!(&bufs[1].1[0x80..], &data[0x80..]);
+
+        // The lazy form yields the same buffers, one at a time.
+        let lazy: Vec<_> = logical_dex_iter("classes.dex", &data).collect();
+        assert_eq!(lazy, bufs);
+        assert_eq!(logical_dex_iter("classes.dex", &data[..0x80]).collect::<Vec<_>>(), logical_dex_buffers("classes.dex", &data[..0x80]));
     }
 
     #[test]

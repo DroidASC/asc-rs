@@ -14,7 +14,7 @@ use asc_dex::encoded::{
     VALUE_SHORT,
 };
 use asc_dex::leb128::{write_sleb128, write_uleb128};
-use asc_dex::{map_type, ClassDef, Dex, HEADER_SIZE, NO_INDEX};
+use asc_dex::{map_type, mutf8, ClassDef, Dex, HEADER_SIZE, NO_INDEX};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
@@ -257,10 +257,21 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
     let mut string_offs = Vec::with_capacity(n_str);
     let first = out.pos();
     for &s in &t.strings {
-        let item = dex.string_item(s)?;
+        let bytes = dex.string_bytes(s)?;
         string_offs.push(out.pos());
-        write_uleb128(&mut out.data, item.utf16_len);
-        out.data.extend_from_slice(item.bytes);
+        // The declared length is not trusted (older tools wrote code-point
+        // or byte counts): recount it, and re-encode non-ASCII data as
+        // canonical MUTF-8 (e.g. a 4-byte UTF-8 sequence as a surrogate pair).
+        if bytes.is_ascii() {
+            write_uleb128(&mut out.data, bytes.len() as u32);
+            out.data.extend_from_slice(bytes);
+        } else {
+            let units = mutf8::to_utf16(bytes);
+            write_uleb128(&mut out.data, units.len() as u32);
+            for u in units {
+                mutf8::encode_unit(&mut out.data, u);
+            }
+        }
         out.data.push(0);
     }
     out.section(map_type::STRING_DATA, n_str, first);
