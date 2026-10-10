@@ -94,6 +94,11 @@ labels for branches, switch payloads, `fill-array-data` and try/catch blocks. Th
   byte-`re` does. An empty `string` pattern matches nothing rather than everything.
 * Member queries: with a precise class, the member name is a **substring** match; with a
   fuzzy or absent class the member name is a regex against the string table.
+* Exact descriptors (`getclass`, a precise member-query class) are MUTF-8 encoded before
+  the binary search over the type table, so class names with supplementary characters
+  (stored as surrogate pairs) are found; MUTF-8 byte order is UTF-16 code-unit order, the
+  order the DEX sorts its strings in. Python compares decoded code points and needs a
+  linear fallback for the same case.
 * Bucket resolution is fuzzy by design; every hit is verified by walking instruction
   lengths from the method start (or the previously verified offset) to the hit. That
   walk treats the leading `nop` of a switch / array payload as a one-unit instruction
