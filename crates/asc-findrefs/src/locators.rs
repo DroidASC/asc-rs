@@ -47,6 +47,11 @@ impl StringLocator {
         self.offsets.len()
     }
 
+    /// Heap bytes held by the table.
+    pub fn heap_bytes(&self) -> usize {
+        vec_bytes(&self.offsets)
+    }
+
     /// Index of the string whose data contains absolute offset `pos`.
     fn idx_at(&self, pos: usize) -> Option<u32> {
         let i = self.offsets.partition_point(|&(off, _)| (off as usize) <= pos);
@@ -112,6 +117,11 @@ impl TypeLocator {
         Ok(TypeLocator { by_string })
     }
 
+    /// Heap bytes held by the table.
+    pub fn heap_bytes(&self) -> usize {
+        vec_bytes(&self.by_string)
+    }
+
     /// Every type whose descriptor is string `string_idx`.
     pub fn types_for_string(&self, string_idx: u32) -> impl Iterator<Item = u32> + '_ {
         let start = self.by_string.partition_point(|&(s, _)| s < string_idx);
@@ -134,6 +144,11 @@ impl TypeLocator {
         }
         Ok(self.locate(buf, strings, &Regex::new(pattern)?))
     }
+}
+
+/// Heap bytes of a vector's allocation (its capacity, not its length).
+pub(crate) fn vec_bytes<T>(v: &Vec<T>) -> usize {
+    v.capacity() * std::mem::size_of::<T>()
 }
 
 /// Shared implementation for method and field id tables (both are
@@ -182,6 +197,10 @@ impl MemberLocator {
             by_class.sort_unstable();
         }
         Ok(MemberLocator { table_off: base, count, by_name, by_class: (!sorted).then_some(by_class) })
+    }
+
+    fn heap_bytes(&self) -> usize {
+        vec_bytes(&self.by_name) + self.by_class.as_ref().map_or(0, vec_bytes)
     }
 
     /// `name_idx` of member `id`.
@@ -317,6 +336,11 @@ impl MethodLocator {
         Ok(MethodLocator(MemberLocator::build(dex, dex.method_count(), dex.header().method_ids.off)?))
     }
 
+    /// Heap bytes held by the tables.
+    pub fn heap_bytes(&self) -> usize {
+        self.0.heap_bytes()
+    }
+
     /// Resolve a member query, compiling its patterns on the spot.
     pub fn locate(&self, dex: &Dex<'_>, strings: &StringLocator, types: &TypeLocator, query: &MemberQuery) -> Result<BTreeSet<u32>> {
         let compiled = CompiledQuery::new(&crate::Query::Method(query.clone()))?;
@@ -344,6 +368,11 @@ pub struct FieldLocator(MemberLocator);
 impl FieldLocator {
     pub fn build(dex: &Dex<'_>) -> Result<FieldLocator> {
         Ok(FieldLocator(MemberLocator::build(dex, dex.field_count(), dex.header().field_ids.off)?))
+    }
+
+    /// Heap bytes held by the tables.
+    pub fn heap_bytes(&self) -> usize {
+        self.0.heap_bytes()
     }
 
     /// Resolve a member query, compiling its patterns on the spot.

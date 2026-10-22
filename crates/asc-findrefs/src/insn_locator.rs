@@ -175,6 +175,12 @@ impl InsnLocator {
         self.table.len()
     }
 
+    /// Heap bytes held by the bucket, shared-method and bounds tables.
+    pub fn heap_bytes(&self) -> usize {
+        use crate::locators::vec_bytes;
+        vec_bytes(&self.table) + vec_bytes(&self.shared) + self.shared.iter().map(vec_bytes).sum::<usize>() + vec_bytes(&self.method_bounds)
+    }
+
     /// Number of non-empty buckets.
     pub fn bucket_count(&self) -> usize {
         self.table.iter().filter(|&&v| v != NONE).count()

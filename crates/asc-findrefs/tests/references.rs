@@ -203,6 +203,25 @@ fn search_state_is_reusable() {
     assert_eq!(hits, again);
 }
 
+#[test]
+fn search_state_reports_its_table_bytes() {
+    let data = make_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let state = asc_findrefs::SearchState::new();
+    assert_eq!(state.heap_bytes(), 0);
+    let fr = FindRefs::with_state(&dex, &state);
+    fr.find_ref(&Query::String("token".into())).unwrap();
+    // String table plus the instruction bucket table.
+    let strings = fr.string_locator().unwrap().heap_bytes() + fr.insn_locator().unwrap().heap_bytes();
+    assert!(strings > 0);
+    assert_eq!(state.heap_bytes(), strings);
+    // A method query adds the type and method tables on top.
+    fr.find_ref(&Query::Method(MemberQuery { class: None, name: Some("run".into()), exact_name: false })).unwrap();
+    let grown = state.heap_bytes();
+    assert_eq!(grown, strings + fr.type_locator().unwrap().heap_bytes() + fr.method_locator().unwrap().heap_bytes());
+    assert!(grown > strings);
+}
+
 /// Offset of the single code_item in `make_dex()`.
 fn code_item_off(data: &[u8]) -> usize {
     let map_off = u32_at(data, 52) as usize;
