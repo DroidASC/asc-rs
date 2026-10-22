@@ -159,8 +159,69 @@ impl CacheConfig {
         CacheConfig { memory_bytes, disk: DiskCache::open_default() }
     }
 
+    /// [`CacheConfig::resident`] sized by [`auto_memory_bytes`], so several
+    /// resident hosts on one machine do not each claim 2 GiB.
+    pub fn resident_auto() -> CacheConfig {
+        CacheConfig::resident(auto_memory_bytes())
+    }
 }
 
+/// Upper bound of [`auto_memory_bytes`].
+pub const AUTO_MEMORY_MAX: usize = 2 << 30;
+/// Lower bound of [`auto_memory_bytes`]: below this the LRU would thrash on
+/// every query (it always keeps at least one entry anyway).
+pub const AUTO_MEMORY_MIN: usize = 64 << 20;
+
+/// In-memory cache budget for this machine: a quarter of the memory
+/// currently available, clamped to [`AUTO_MEMORY_MIN`]..=[`AUTO_MEMORY_MAX`];
+/// [`AUTO_MEMORY_MAX`] when the available memory cannot be determined.
+pub fn auto_memory_bytes() -> usize {
+    auto_memory_bytes_for(available_memory())
+}
+
+/// [`auto_memory_bytes`] for a given amount of available memory.
+pub fn auto_memory_bytes_for(available: Option<u64>) -> usize {
+    match available {
+        Some(a) => usize::try_from(a / 4).unwrap_or(usize::MAX).clamp(AUTO_MEMORY_MIN, AUTO_MEMORY_MAX),
+        None => AUTO_MEMORY_MAX,
+    }
+}
+
+/// Bytes of memory available to this process: `MemAvailable`, lowered to
+/// the headroom left under a cgroup v2 `memory.max` when one applies.
+/// `None` where neither can be read (non-Linux systems).
+pub fn available_memory() -> Option<u64> {
+    let system = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| meminfo_available(&t));
+    let cgroup = cgroup_headroom();
+    match (system, cgroup) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// `MemAvailable` from `/proc/meminfo` text, in bytes.
+fn meminfo_available(meminfo: &str) -> Option<u64> {
+    let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kb.checked_mul(1024)
+}
+
+/// `memory.max - memory.current` of this process's cgroup v2, if limited.
+fn cgroup_headroom() -> Option<u64> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let rel = cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let dir = Path::new("/sys/fs/cgroup").join(rel.trim_start_matches('/'));
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
+    cgroup_headroom_from(&read("memory.max")?, &read("memory.current")?)
+}
+
+/// Headroom from the text of `memory.max` (`max` when unlimited) and
+/// `memory.current`.
+fn cgroup_headroom_from(max: &str, current: &str) -> Option<u64> {
+    let max: u64 = max.trim().parse().ok()?;
+    let current: u64 = current.trim().parse().ok()?;
+    Some(max.saturating_sub(current))
+}
 
 /// One logical DEX of a cached entry with its lazily built locator tables.
 /// The tables are shared with the entry that replaces this one once its
@@ -1167,4 +1228,34 @@ pub fn decompile_dex_class(buf: &[u8], descriptor: &str, opts: SmaliOptions) -> 
     let new_dex = Dex::parse(&rebuilt.bytes)?;
     let source = asc_smali::disassemble_class(&new_dex, descriptor, opts)?;
     Ok((rebuilt, source))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_budget_is_a_clamped_quarter_of_available_memory() {
+        assert_eq!(auto_memory_bytes_for(None), AUTO_MEMORY_MAX);
+        assert_eq!(auto_memory_bytes_for(Some(4 << 30)), 1 << 30);
+        assert_eq!(auto_memory_bytes_for(Some(8 << 30)), AUTO_MEMORY_MAX);
+        assert_eq!(auto_memory_bytes_for(Some(64 << 30)), AUTO_MEMORY_MAX);
+        assert_eq!(auto_memory_bytes_for(Some((8 << 30) - 4)), (2 << 30) - 1);
+        assert_eq!(auto_memory_bytes_for(Some(100 << 20)), AUTO_MEMORY_MIN);
+        assert_eq!(auto_memory_bytes_for(Some(0)), AUTO_MEMORY_MIN);
+        assert_eq!(auto_memory_bytes_for(Some(u64::MAX)), AUTO_MEMORY_MAX);
+        let auto = auto_memory_bytes();
+        assert!((AUTO_MEMORY_MIN..=AUTO_MEMORY_MAX).contains(&auto));
+    }
+
+    #[test]
+    fn meminfo_and_cgroup_parsing() {
+        let meminfo = "MemTotal:       12000000 kB\nMemFree:          500000 kB\nMemAvailable:    8000000 kB\n";
+        assert_eq!(meminfo_available(meminfo), Some(8_000_000 * 1024));
+        assert_eq!(meminfo_available("MemTotal: 1 kB\n"), None);
+        assert_eq!(meminfo_available("MemAvailable: lots kB\n"), None);
+        assert_eq!(cgroup_headroom_from("max\n", "123\n"), None);
+        assert_eq!(cgroup_headroom_from("1000\n", "300\n"), Some(700));
+        assert_eq!(cgroup_headroom_from("1000\n", "3000\n"), Some(0));
+    }
 }
