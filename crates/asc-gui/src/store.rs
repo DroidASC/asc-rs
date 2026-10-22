@@ -92,6 +92,35 @@ pub struct LoadedIndex {
     pub failed: Vec<String>,
 }
 
+/// Turn the result of [`Engine::scan_classes`] into the class index, keeping
+/// the classes of every DEX that could be read.
+fn index_scanned(scanned: Vec<asc_engine::EntryClasses>) -> Result<LoadedIndex, String> {
+    let total = scanned.len();
+    let mut all = Vec::new();
+    let mut failed = Vec::new();
+    for entry in scanned {
+        match entry.result {
+            // Unreadable `class_def`s are skipped silently, as before.
+            Ok(dexes) => {
+                for dex in dexes {
+                    match dex.error {
+                        Some(e) => failed.push(format!("{}: {e}", dex.dex_name)),
+                        None => all.extend(
+                            dex.descriptors.into_iter().map(|descriptor| ClassEntry { descriptor, dex_name: dex.dex_name.clone() }),
+                        ),
+                    }
+                }
+            }
+            Err(e) => failed.push(format!("{}: {e}", entry.entry_name)),
+        }
+    }
+    failed.sort();
+    if all.is_empty() && !failed.is_empty() {
+        return Err(failed.join("\n"));
+    }
+    Ok(LoadedIndex { index: ClassIndex::build(all, total), failed })
+}
+
 /// Messages from background jobs to the UI.
 pub enum Event {
     LoadProgress {
@@ -195,30 +224,7 @@ impl Store {
     fn enumerate_classes(&self) -> Result<LoadedIndex, String> {
         let scanned =
             self.engine.scan_classes(None, |done, total| self.send(Event::LoadProgress { done, total })).map_err(|e| e.to_string())?;
-        let total = scanned.len();
-        let mut all = Vec::new();
-        let mut failed = Vec::new();
-        for entry in scanned {
-            match entry.result {
-                // Unreadable `class_def`s are skipped silently, as before.
-                Ok(dexes) => {
-                    for dex in dexes {
-                        match dex.error {
-                            Some(e) => failed.push(format!("{}: {e}", dex.dex_name)),
-                            None => all.extend(
-                                dex.descriptors.into_iter().map(|descriptor| ClassEntry { descriptor, dex_name: dex.dex_name.clone() }),
-                            ),
-                        }
-                    }
-                }
-                Err(e) => failed.push(format!("{}: {e}", entry.entry_name)),
-            }
-        }
-        failed.sort();
-        if all.is_empty() && !failed.is_empty() {
-            return Err(failed.join("\n"));
-        }
-        Ok(LoadedIndex { index: ClassIndex::build(all, total), failed })
+        index_scanned(scanned)
     }
 
     /// Extract and disassemble one class; the reply carries `req` back.
@@ -341,5 +347,40 @@ mod tests {
         assert_eq!(panic_message(&*err), "boom 1");
         let err = catch_unwind(|| panic!("literal")).unwrap_err();
         assert_eq!(panic_message(&*err), "literal");
+    }
+
+    /// `RssAnon` of this process in KiB.
+    fn rss_anon_kib() -> u64 {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let line = status.lines().find_map(|l| l.strip_prefix("RssAnon:")).unwrap_or("0");
+        line.trim().trim_end_matches("kB").trim().parse().unwrap_or(0)
+    }
+
+    /// Index build time and memory on a real APK:
+    /// `ASC_BENCH_APK=app.apk cargo test --release -p asc-gui bench_index -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs ASC_BENCH_APK"]
+    fn bench_index() {
+        let apk = std::env::var("ASC_BENCH_APK").expect("set ASC_BENCH_APK to an APK path");
+        let engine = Engine::new(std::path::Path::new(&apk));
+        let started = Instant::now();
+        let scanned = engine.scan_classes(None, |_, _| {}).unwrap();
+        println!("scan_classes: {} ms", started.elapsed().as_millis());
+        let rss = rss_anon_kib();
+        let started = Instant::now();
+        let ix = index_scanned(scanned).unwrap().index;
+        let build = started.elapsed();
+        println!(
+            "index: {} classes, built in {} ms, RssAnon {:+} MiB",
+            ix.all.len(),
+            build.as_millis(),
+            (rss_anon_kib() as i64 - rss as i64) / 1024
+        );
+        for kw in ["a", "com.ss", "Activity", "zzzzqq"] {
+            let started = Instant::now();
+            let n = ix.filter(kw, usize::MAX).len();
+            println!("filter {kw:?}: {n} hits in {} ms", started.elapsed().as_millis());
+        }
+        drop(ix);
     }
 }
