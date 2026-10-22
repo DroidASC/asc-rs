@@ -1,0 +1,17 @@
+[package]
+name = "asc-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Droid ASC MCP server: a resident stdio session that keeps APKs open across getclass / findrefs / listclass / getmanifest calls."
+
+[dependencies]
+asc-engine.workspace = true
+asc-findrefs.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+asc-fixture.workspace = true
+tempfile.workspace = true

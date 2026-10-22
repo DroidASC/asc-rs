@@ -1,0 +1,162 @@
+//! MCP sessions against synthetic APKs, driven through `serve`.
+
+use asc_engine::CacheConfig;
+use asc_fixture::{make_apk, make_class_only_dex, make_dex};
+use serde_json::{json, Value};
+use std::io::Write;
+
+/// `bytes` as an `.apk` file that lives as long as the returned handle.
+fn temp_apk_from(bytes: &[u8]) -> tempfile::NamedTempFile {
+    let mut f = tempfile::Builder::new().suffix(".apk").tempfile().unwrap();
+    f.write_all(bytes).unwrap();
+    f.flush().unwrap();
+    f
+}
+
+fn temp_apk() -> tempfile::NamedTempFile {
+    let dex = make_dex();
+    temp_apk_from(&make_apk(&[("classes.dex", &dex), ("classes2.dex", &dex)], true))
+}
+
+fn opts() -> asc_mcp::Options {
+    asc_mcp::Options { threads: 2, debug: false, cache: CacheConfig { memory_bytes: 64 << 20, disk: None } }
+}
+
+/// Run one session: `messages` in, one parsed reply per request out.
+fn session(messages: &[Value]) -> Vec<Value> {
+    let input: String = messages.iter().map(|m| m.to_string() + "\n").collect();
+    let mut out = Vec::new();
+    asc_mcp::serve(input.as_bytes(), &mut out, opts()).unwrap();
+    String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
+fn call(id: u64, name: &str, args: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": args}})
+}
+
+fn text(reply: &Value) -> &str {
+    reply["result"]["content"][0]["text"].as_str().unwrap()
+}
+
+fn ok(reply: &Value) -> &Value {
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    &reply["result"]["structuredContent"]
+}
+
+#[test]
+fn full_session() {
+    let apk = temp_apk();
+    let path = apk.path().to_str().unwrap();
+    let replies = session(&[
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        call(3, "open_apk", json!({"apk": path})),
+        call(4, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token"})),
+        call(5, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token", "limit": 3, "offset": 1})),
+        call(6, "findrefs", json!({"apk_id": "apk1", "kind": "method", "name": "first", "class": "example.Test", "exact": true})),
+        call(7, "getclass", json!({"apk_id": "apk1", "class": "example.Test"})),
+        call(8, "listclass", json!({"apk_id": "apk1", "prefix": "example"})),
+        call(9, "open_apk", json!({"apk": path})),
+        call(10, "close_apk", json!({"apk_id": "apk1"})),
+        json!({"jsonrpc": "2.0", "id": 11, "method": "ping"}),
+    ]);
+    // The notification gets no reply.
+    assert_eq!(replies.len(), 11);
+    assert_eq!(replies[0]["id"], 1);
+    assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "droidasc");
+
+    let tools: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(tools, ["open_apk", "close_apk", "getclass", "findrefs", "listclass", "getmanifest"]);
+
+    let open = ok(&replies[2]);
+    assert_eq!(open["apk_id"], "apk1");
+    assert_eq!(open["dex_entries"], 2);
+    assert_eq!(open["classes"], 2);
+    assert!(open["memory_cache_bytes"].as_u64().unwrap() > 0);
+
+    // CLI line format, stable order across entries, footer with the total.
+    let all = ok(&replies[3]);
+    assert_eq!(all["total"], 4);
+    assert_eq!(all["next_offset"], Value::Null);
+    let lines: Vec<&str> = text(&replies[3]).lines().collect();
+    assert_eq!(lines.len(), 5);
+    assert!(lines[..2].iter().all(|l| l.starts_with("classes.dex | Lexample/Test;->")), "{lines:?}");
+    assert!(lines[2..4].iter().all(|l| l.starts_with("classes2.dex | ")), "{lines:?}");
+    assert!(lines.contains(&"classes.dex | Lexample/Test;->first | matched=(token)"));
+    assert_eq!(lines[4], "# 4 results");
+
+    let page = ok(&replies[4]);
+    assert_eq!((page["returned"].as_u64(), page["next_offset"].as_u64()), (Some(3), None));
+    assert_eq!(text(&replies[4]).lines().next().unwrap(), lines[1]);
+    assert_eq!(page["results"][0]["dex"], "classes.dex");
+
+    // The fixture defines `first` but never invokes it.
+    assert_eq!(ok(&replies[5])["total"], 0);
+    assert_eq!(text(&replies[5]), "# 0 results\n");
+
+    let class = ok(&replies[6]);
+    assert_eq!(class["class"], "Lexample/Test;");
+    assert!(text(&replies[6]).contains(".class public Lexample/Test;"));
+    assert!(text(&replies[6]).contains("const-string v0, \"token\""));
+
+    let classes = ok(&replies[7]);
+    assert_eq!(classes["total"], 2);
+    assert_eq!(text(&replies[7]), "Lexample/Test;\nLexample/Test;\n# 2 classes\n");
+
+    // Same path → same session.
+    assert_eq!(ok(&replies[8])["apk_id"], "apk1");
+    assert_eq!(ok(&replies[9])["closed"], true);
+    assert_eq!(replies[10]["result"], json!({}));
+}
+
+#[test]
+fn apk_path_opens_implicitly_and_apks_are_independent() {
+    let (a, b) = (temp_apk(), temp_apk_from(&make_apk(&[("classes.dex", &make_class_only_dex(&["Lother/Only;"], 0, false))], true)));
+    let replies = session(&[
+        call(1, "listclass", json!({"apk": a.path().to_str().unwrap()})),
+        call(2, "listclass", json!({"apk": b.path().to_str().unwrap()})),
+        call(3, "findrefs", json!({"apk_id": "apk1", "kind": "type", "value": "Lexample/Test;"})),
+    ]);
+    assert_eq!(ok(&replies[0])["apk_id"], "apk1");
+    assert_eq!(ok(&replies[1])["apk_id"], "apk2");
+    assert_eq!(text(&replies[1]), "Lother/Only;\n# 1 classes\n");
+    assert_eq!(ok(&replies[2])["apk_id"], "apk1");
+}
+
+#[test]
+fn errors_keep_the_session_alive() {
+    let apk = temp_apk();
+    let path = apk.path().to_str().unwrap();
+    let not_apk = temp_apk_from(b"not a zip");
+    let replies = session(&[
+        json!("just a string"),
+        call(1, "getclass", json!({"apk": path, "class": "Lnope/Missing;"})),
+        call(2, "findrefs", json!({"apk": path, "kind": "string", "value": "("})),
+        call(3, "findrefs", json!({"apk": path, "kind": "bogus"})),
+        call(4, "getclass", json!({"apk_id": "apk99", "class": "a.B"})),
+        call(5, "open_apk", json!({"apk": "/nonexistent/x.apk"})),
+        call(6, "open_apk", json!({"apk": not_apk.path().to_str().unwrap()})),
+        call(7, "listclass", json!({"apk": path, "limit": 0})),
+        call(8, "no_such_tool", json!({})),
+        json!({"jsonrpc": "2.0", "id": 9, "method": "resources/list"}),
+        call(10, "findrefs", json!({"apk": path, "kind": "string", "value": "token"})),
+    ]);
+    // Unparsable line and non-object message: JSON-RPC errors with a null id.
+    let mut lines = Vec::new();
+    asc_mcp::serve("{not json\n".as_bytes(), &mut lines, opts()).unwrap();
+    let parse: Value = serde_json::from_slice(&lines).unwrap();
+    assert_eq!(parse["error"]["code"], -32700);
+    assert_eq!(replies[0]["error"]["code"], -32600);
+
+    for (i, needle) in [(1, "not found"), (2, "pattern"), (3, "unknown kind"), (4, "apk99"), (5, "cannot open"), (6, ""), (7, "limit")] {
+        let r = &replies[i];
+        assert_eq!(r["result"]["isError"], true, "{r}");
+        let msg = text(r);
+        assert!(msg.starts_with("Error: ") && msg.contains(needle), "{msg}");
+    }
+    assert_eq!(replies[8]["error"]["code"], -32602);
+    assert_eq!(replies[9]["error"]["code"], -32601);
+    assert_eq!(ok(&replies[10])["total"], 4);
+}
