@@ -315,3 +315,35 @@ fn listclass_rejects_an_empty_prefix_and_accepts_zero_threads() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "Lexample/Test;\n");
 }
+
+#[test]
+fn mcp_serves_line_delimited_json_rpc_until_stdin_closes() {
+    use std::process::Stdio;
+    let apk = temp_apk();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_droidasc"))
+        .args(["--no-cache", "--threads", "2", "mcp", "--memory-mb", "64"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "findrefs", "arguments": {"apk": path(apk.path()), "kind": "string", "value": "token"}}}),
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for r in &requests {
+        writeln!(stdin, "{r}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let replies: Vec<serde_json::Value> = stdout(&out).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies.len(), 2, "{}", stdout(&out));
+    assert_eq!(replies[0]["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(replies[1]["result"]["structuredContent"]["total"], 4);
+    let text = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("classes.dex | Lexample/Test;->first | matched=(token)\n"), "{text}");
+}
