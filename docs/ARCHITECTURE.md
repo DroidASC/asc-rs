@@ -16,8 +16,8 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
                  │                               │                          │
                  └──────────────► asc-engine ◄───┴──────────────────────────┘
                                      │              (+ asc-axml for the manifest)
-                          ┌──────────┴──────────┐
-                       asc-cli                asc-gui
+                          ┌──────────┼──────────┐
+                       asc-cli ── asc-mcp    asc-gui
 ```
 
 ## Mapping to the Python modules
@@ -43,6 +43,7 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
 | `asc_core/utils/decompiler.py` (androguard DAD) | `asc-smali` (disassembly) — see below |
 | `asc_client/gui/*` (Tk) | `asc-gui` (egui) |
 | — (no equivalent) | `asc-cache` (disk + memory caches of inflated entries), `asc_findrefs::SearchState` (reusable locator tables) |
+| — (no equivalent) | `asc-mcp` (`droidasc mcp`: resident MCP session over stdio; one `Engine` per opened APK, all attached to one `asc_engine::SharedCache`) |
 | `tests/dex_fixture.py` | `asc-fixture` |
 
 ## Where the port deliberately differs
@@ -186,6 +187,22 @@ lazily by the queries themselves):
 
 Stored (uncompressed) entries are borrowed straight from the APK mapping and never copied
 unless an in-memory cache wants to keep their tables.
+
+`SharedCache` wraps one such cache (memory LRU, disk cache, writer thread) for several
+engines. Because the LRU is keyed by APK, engines over different APKs attached with
+`Engine::with_shared_cache` compete for one byte budget; dropping one of them leaves the
+writer running, and dropping the `SharedCache` lands the queued writes.
+
+### MCP session
+
+`asc-mcp` is the resident front end for agents. `serve` reads one JSON-RPC message per
+line and answers in order on the same thread; tools run on the engine's worker threads as
+in the CLI. Each `open_apk` (or first use of an `apk` path) creates an `Engine` attached
+to the server's `SharedCache`; `open_apk` with `warm` runs `scan_classes`, which inflates
+every entry into the LRU, so later `findrefs` / `getclass` calls only build locator tables
+once and then scan. Results are paged over a stable order (entries sorted as
+`classes.dex, classes2.dex, …`), because the engine streams entries as they finish. Tool
+failures are `isError` results, protocol errors JSON-RPC errors; neither ends the session.
 
 ### Scan strategy
 
