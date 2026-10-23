@@ -179,6 +179,9 @@
 - 性能与资源：prefix-skip；写盘队列有界，超限时延后重新解压而不是丢弃；写盘线程与预建降优先级；aarch64 硬件 SHA-256；缓存写入去掉 fsync、文件带 CRC、跨重启才校验；线程按忙碌进程分摊、磁盘自动上限 32 GiB、macOS 进程注册表。
 - 删除 GUI（asc-gui 与 egui 依赖）。
 - 上游字符串下标问题已报：MG1937/ASC#54、MG1937/rust_ASC#8。
+- 查询与 MCP：findrefs 按签名选重载（`m(I)V`、`m(I)`、`m(int, String)`、`f:I`，在定位阶段过滤）；多 APK 与规则集的零结果提示，成员列表截到 8 项；MCP 的枚举参数改为宽松字符串；工具定义补参数说明与默认值、`outputSchema`、annotations。
+- daemon：callgraph / hierarchy / getclass 可取消（MCP 同）；打开的 APK 常驻结构计入内存预算；`DROIDASC_DAEMON_WAIT_MS`、`DROIDASC_DAEMON_IDLE`。
+- 多进程：注册表 busy 标记与 100 ms 重读，多 APK 扫描中途按线程数排队，空闲后的突发扫描线程会收缩；写盘队列按内存预算封顶。多 APK 扫描接 prefix-skip 实测无收益，未合入；macOS 降优先级测不出差别，保留。
 
 ## 7. 评测结论
 
@@ -193,11 +196,9 @@
 
 ## 8. 待做
 
-- 注册表最多每秒读一次，约 1 s 的突发多进程扫描看不到彼此，自动线程不收缩（N=16 时每进程 4 线程比满线程快约 16%）。
-- macOS 下 N=16 MCP 进程合计约 21 GB 来自解压中的数据和映射页，不是内存缓存，需另查。
-- 多 APK 扫描接 prefix-skip；多 APK 查询的零结果提示。
-- findrefs 按签名过滤重载；MCP kind 的 enum 对严格受约束采样的客户端仍会拦下复数写法；字段零结果提示列出全部已引用字段时过长，应截断。
-- daemon：callgraph / hierarchy / getclass 断连后不能中途取消；引擎池的类图、resources 不计入内存预算；Windows 不支持；首次等待 300 ms、空闲 15 分钟为常量。
-- MCP 工具定义：参数说明与默认值、`outputSchema`、`readOnlyHint`；考虑去掉 open_apk / close_apk。
-- macOS 上降优先级对写盘与查询争用的实际效果未测。
+- Windows：daemon 与进程注册表不支持（优先级低）。
+- MCP 服务自己打开的 APK 尚未计入内存预算（daemon 已计入），可复用 `resident_bytes` / `set_reserved`。
+- 自动内存份额（可用内存的四分之一，按忙碌进程分）是否下调，待定。
+- 签名过滤在真实 APK 的 prefix-skip 路径上未专门测（前缀里读不到参数列表时退回完整搜索）；`outputSchema` 只描述单 APK 的形状。
+- 是否去掉 open_apk / close_apk。
 - 评测：不再做新的 agent 评测（2026-10-23）。若以后重启：S1 证据先用 40.8.0 重新标注，加「只用 CLI + skill」组，并换一个模型。

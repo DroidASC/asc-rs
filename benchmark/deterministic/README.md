@@ -16,6 +16,7 @@
 | `BENCH_TMP` | `/private/tmp/asc-bench` | 缓存和切片目录（每次冷跑前清空） |
 | `ASC_EVAL` | `~/asc-eval` | 驱动脚本（`*.sh`）使用的目录布局：`src/`（本仓库，已 release 编译）、`bin/droidasc-r1`、`bin/dexsql`、`apks/{k80,mi17}`、`rust_ASC/`、`results/` |
 | `AUTO`、`THREADS` | — | `s2.py` 的 MCP 模式：`AUTO=1` 不传 `--threads`（自动线程）；`THREADS=n` 固定每个进程的线程数；都不设时每进程 `CPU 数 / N` |
+| `IDLE`、`RULES` | — | `s2.py` 的 MCP 模式：`IDLE=S` 先让服务器空闲 S 秒再发调用（复现 agent 两次调用之间的空闲）；`RULES=i,j` 只跑这几条规则（`RULES` 列表的下标） |
 | `TRIALS`、`VERSIONS` | 各脚本不同 | 驱动脚本的重复次数，以及要跑的版本（`new old`） |
 
 ## 脚本
@@ -37,6 +38,8 @@
 | `cache/consistency.py` | 缓存一致性：40 个随机 APK × 9 条查询，冷缓存、热缓存与 `--no-cache` 逐块比较 | `consistency.py DROIDASC CORPUS_DIR CACHE_DIR` |
 | `cache/nofsync_bench.py` | no-fsync 计时：冷、热、模拟重启后 | `nofsync_bench.py BASE NEW DOUYIN CORPUS_DIR CACHE_ROOT TRIALS` |
 | `cache/nofsync_check.sh` | no-fsync 正确性：新鲜、重启前写入、L1 文件被损坏三种情况下，结果都与 `--no-cache` 相同 | `nofsync_check.sh BASE NEW APK CACHE_DIR` |
+| `cache/after_scan.py` | 冷扫后紧接着的查询延迟（写盘线程在后台重新解压时），用于测降优先级 | `after_scan.py DROIDASC CORPUS_DIR DOUYIN OUT.json [--cache-dir C]` |
+| `mem/footprint.py` | 包住一次 `s2.py`，采样各 droidasc 进程的 RSS 与 macOS `footprint`（按类别的 dirty / clean） | `AUTO=1 footprint.py OUT.mem.json 0.3 python3 s2.py mcprules DROIDASC OUT.json 16 -- --cache-dir C` |
 | `rust-asc/cmp.py` | rust_ASC 对比：findrefs 行的语义比较（rust_ASC CLI 文本 vs droidasc MCP JSON） | `cmp.py RUST_ASC DROIDASC APK [kind…]` |
 | `rust-asc/s2diff.py` | rust_ASC 对比：8 条规则在一个语料目录上的 APK 级差异（发现上游字符串索引 bug 的脚本） | `s2diff.py RUST_ASC DROIDASC CORPUS_DIR` |
 

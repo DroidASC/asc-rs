@@ -3,3 +3,4 @@
 results/
 corpus/*.tsv
 agent/s2/ref-k80.json
+__pycache__/
