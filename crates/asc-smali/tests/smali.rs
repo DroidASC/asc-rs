@@ -3,6 +3,32 @@ use asc_fixture::{make_dex, make_static_field_dex};
 use asc_smali::{disassemble_class, Options};
 
 #[test]
+fn single_method_listing_maps_pcs_to_lines() {
+    let data = asc_fixture::make_rich_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let find = |m: &str| (0..dex.method_count()).find(|&i| dex.method_display(i).unwrap() == m).unwrap();
+    let l = asc_smali::disassemble_method(&dex, find("Lexample/Rich;->compute"), Options::default()).unwrap();
+    let lines: Vec<&str> = l.text.lines().collect();
+    assert_eq!(lines[0], ".method public static compute(II)I");
+    assert_eq!(*lines.last().unwrap(), ".end method");
+    // The method alone renders exactly as it does inside its class listing.
+    let class = disassemble_class(&dex, "Lexample/Rich;", Options::default()).unwrap();
+    assert!(class.contains(&l.text), "{}", l.text);
+    // const-string at byte 0x20 (pc 0x10) and invoke-static at pc 0x12.
+    let hit = format!("    const-string v0, \"{}\"", asc_fixture::RICH_STRING);
+    assert_eq!(lines[l.line_of(0x10).unwrap() as usize], hit, "{}", l.text);
+    assert!(lines[l.line_of(0x12).unwrap() as usize].starts_with("    invoke-static {v2, v3}"), "{}", l.text);
+    assert_eq!(l.line_of(0x11), None);
+    // Debug positions: pc 8 -> 10, 13 -> 12, 16 -> 14.
+    assert_eq!((l.source_line(7), l.source_line(8), l.source_line(0x0f), l.source_line(0x12)), (None, Some(10), Some(12), Some(14)));
+    // Abstract methods have no code but still render.
+    let h = asc_smali::disassemble_method(&dex, find("Lexample/Rich;->handle"), Options::default()).unwrap();
+    assert!(h.text.starts_with(".method public abstract handle(Ljava/lang/String;I)V\n") && h.insns.is_empty(), "{}", h.text);
+    // A method the DEX only references (no definition) is an error.
+    assert!(asc_smali::disassemble_method(&dex, find("Ljava/lang/Object;-><init>"), Options::default()).is_err());
+}
+
+#[test]
 fn disassembles_fixture_class() {
     let data = make_dex();
     let dex = Dex::parse(&data).unwrap();

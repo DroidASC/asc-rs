@@ -119,6 +119,7 @@ pub(crate) fn method_body(
     debug: Option<&DebugInfo>,
     opts: Options,
     out: &mut String,
+    mut marks: Option<&mut Vec<(usize, usize)>>,
 ) -> Result<()> {
     let entries = decode_all(code);
     let mut labels = Labels::default();
@@ -204,6 +205,9 @@ pub(crate) fn method_body(
                 let _ = writeln!(out, "    .line {line}");
                 last_line = Some(line);
             }
+        }
+        if let Some(m) = marks.as_deref_mut() {
+            m.push((pc, out.len()));
         }
         match e {
             Entry::Insn(i) => {
