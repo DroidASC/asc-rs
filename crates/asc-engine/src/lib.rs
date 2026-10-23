@@ -107,6 +107,9 @@ pub type DexBytes = Arc<DexData>;
 pub struct ClassHit {
     pub dex_name: String,
     pub dex: DexBytes,
+    /// In a program, the DEX files of other archives that define the class
+    /// too (the hit is the first archive's, in program order).
+    pub also_defined_in: Vec<String>,
 }
 
 /// Result of a full `getclass`.
@@ -122,6 +125,8 @@ pub struct ClassSource {
     pub warning: Option<String>,
     /// Microseconds spent locating and inflating the DEX.
     pub scan_us: u128,
+    /// See [`ClassHit::also_defined_in`].
+    pub also_defined_in: Vec<String>,
 }
 
 /// One aggregated reference result: a method and what it references.
@@ -960,6 +965,9 @@ pub struct Engine {
     stats: Arc<Stats>,
     /// `(size, mtime, key)` of the APK the key was last computed for.
     key_cache: Mutex<Option<(u64, Option<SystemTime>, ApkKey)>>,
+    /// The APK last opened, handed out again while its files are unchanged
+    /// (a program of many jars costs a mapping and a directory parse each).
+    opened: Mutex<Option<Apk>>,
     limits: Limits,
     /// Parsed `resources.arsc` for the APK version it was read from.
     resources: Mutex<Option<resources::CachedTable>>,
@@ -1059,6 +1067,7 @@ impl Engine {
             shared_cache: false,
             stats: Arc::new(Stats::default()),
             key_cache: Mutex::new(None),
+            opened: Mutex::new(None),
             limits: Limits::default(),
             resources: Mutex::new(None),
             prebuild: prebuild::Prebuild::default(),
@@ -1214,8 +1223,17 @@ impl Engine {
         }
     }
 
+    /// Open the APK, or reuse the one opened last while [`Apk::version_of`]
+    /// finds the same files, sizes and times.
     pub fn open(&self) -> Result<Apk> {
-        Ok(Apk::open(&self.apk_path)?.with_limits(self.limits))
+        let version = Apk::version_of(&self.apk_path)?;
+        let mut opened = self.opened.lock().unwrap();
+        if let Some(apk) = opened.as_ref().filter(|a| *a.version() == version) {
+            return Ok(apk.clone().with_limits(self.limits));
+        }
+        let apk = Apk::open(&self.apk_path)?.with_limits(self.limits);
+        *opened = Some(apk.clone());
+        Ok(apk)
     }
 
     /// `apk_path` (what [`Engine::new`] takes) with relative paths resolved
@@ -1303,9 +1321,14 @@ impl Engine {
     ///
     /// DEX entries are inflated in parallel, smallest first. Entries that are
     /// not cached are first streamed only as far as their id tables and string
-    /// data to answer the probe cheaply; only a hit is inflated fully. The call
-    /// returns as soon as one worker finds the class; workers still inflating
-    /// another entry at that moment finish on their own in the background.
+    /// data to answer the probe cheaply; only a hit is inflated fully.
+    ///
+    /// A class several DEX files define resolves as a class loader would:
+    /// the first archive of a program, then `classes.dex`, `classes2.dex`,
+    /// ... ([`load_ranks`]). Once a DEX defines it, DEX files after it are no
+    /// longer read; workers still inflating one at that moment finish on
+    /// their own in the background. A program reads every archive, to name
+    /// the others that define the class too ([`ClassHit::also_defined_in`]).
     pub fn get_class_dex(&self, descriptor: &str) -> Result<Option<ClassHit>> {
         self.get_class_dex_cancellable(descriptor, &NOT_CANCELLED)
     }
@@ -1329,11 +1352,15 @@ impl Engine {
         let target: Arc<Vec<u8>> = Arc::new(asc_dex::mutf8::encode(descriptor));
         let next = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
+        // Rank of the best DEX defining the class so far: later ones need not be read.
+        let best = Arc::new(AtomicUsize::new(usize::MAX));
+        let ranks: Arc<Vec<usize>> = Arc::new(load_ranks(&entries));
+        let exhaustive = apk.archive_count() > 1;
         let workers = self.threads().min(entries.len()).max(1);
-        let (tx, rx) = mpsc::channel::<std::result::Result<Option<ClassHit>, EngineError>>();
+        let (tx, rx) = mpsc::channel::<(usize, std::result::Result<Option<ClassHit>, EngineError>)>();
         let debug = self.debug;
         for w in 0..workers {
-            let (apk, entries, key, target, next, stop, tx, logger, cache, stats) = (
+            let (apk, entries, key, target, next, stop, tx, logger, cache, stats, best, ranks) = (
                 Arc::clone(&apk),
                 Arc::clone(&entries),
                 Arc::clone(&key),
@@ -1344,11 +1371,19 @@ impl Engine {
                 Arc::clone(&self.logger),
                 self.cache.clone(),
                 Arc::clone(&self.stats),
+                Arc::clone(&best),
+                Arc::clone(&ranks),
             );
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
+                    let rank = ranks[i];
+                    // A DEX the class loader would read after the best hit cannot win.
+                    if !exhaustive && rank > best.load(Ordering::Relaxed) {
+                        let _ = tx.send((i, Ok(None)));
+                        continue;
+                    }
                     let t0 = Instant::now();
                     // Cached bytes answer directly; otherwise probe a prefix so
                     // most entries never get fully inflated.
@@ -1365,12 +1400,12 @@ impl Engine {
                                             t0.elapsed().as_micros()
                                         ));
                                     }
-                                    let _ = tx.send(Ok(None));
+                                    let _ = tx.send((i, Ok(None)));
                                     continue;
                                 }
                                 Ok(Some(true)) | Ok(None) => {}
                                 Err(e) => {
-                                    let _ = tx.send(Err(e));
+                                    let _ = tx.send((i, Err(e)));
                                     continue;
                                 }
                             }
@@ -1378,7 +1413,7 @@ impl Engine {
                                 Ok(l) => l,
                                 Err(EngineError::Apk(asc_apk::ApkError::Cancelled)) => break,
                                 Err(e) => {
-                                    let _ = tx.send(Err(e));
+                                    let _ = tx.send((i, Err(e)));
                                     continue;
                                 }
                             }
@@ -1395,7 +1430,7 @@ impl Engine {
                         }
                         match asc_dex::quick::dex_defines_class(&data, &target) {
                             Ok(true) => {
-                                found = Some(ClassHit { dex_name: name, dex: data });
+                                found = Some(ClassHit { dex_name: name, dex: data, also_defined_in: Vec::new() });
                                 break;
                             }
                             Ok(false) => {}
@@ -1415,21 +1450,22 @@ impl Engine {
                             is_hit
                         ));
                     }
-                    if is_hit {
-                        stop.store(true, Ordering::Relaxed);
-                        let _ = tx.send(Ok(found));
-                        return;
+                    if let Some(hit) = found {
+                        best.fetch_min(rank, Ordering::Relaxed);
+                        let _ = tx.send((i, Ok(Some(hit))));
+                        continue;
                     }
-                    let _ = tx.send(entry_err.map_or(Ok(None), Err));
+                    let _ = tx.send((i, entry_err.map_or(Ok(None), Err)));
                 }
             });
         }
         drop(tx);
-        let mut hit = None;
+        let mut hits: Vec<(usize, ClassHit)> = Vec::new();
         let mut last_err = None;
+        let mut answered = vec![false; entries.len()];
         let mut seen = 0usize;
         loop {
-            let msg = match rx.recv_timeout(CANCEL_POLL) {
+            let (i, msg) = match rx.recv_timeout(CANCEL_POLL) {
                 Ok(msg) => msg,
                 Err(mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::Relaxed) => {
                     stop.store(true, Ordering::Relaxed);
@@ -1438,30 +1474,34 @@ impl Engine {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
+            seen += 1;
+            answered[i] = true;
             match msg {
-                Ok(Some(h)) => {
-                    hit = Some(h);
+                Ok(Some(h)) => hits.push((ranks[i], h)),
+                Ok(None) => {}
+                Err(e) => last_err = Some(e),
+            }
+            if seen == entries.len() {
+                break;
+            }
+            // The best hit wins once every DEX the class loader reads before it has answered.
+            let best = hits.iter().map(|(rank, _)| *rank).min();
+            if let Some(best) = best.filter(|_| !exhaustive) {
+                if ranks.iter().zip(&answered).all(|(&rank, &done)| done || rank >= best) {
                     break;
-                }
-                Ok(None) => {
-                    seen += 1;
-                    if seen == entries.len() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    seen += 1;
-                    last_err = Some(e);
-                    if seen == entries.len() {
-                        break;
-                    }
                 }
             }
         }
         stop.store(true, Ordering::Relaxed);
         self.log(format!("[APK] getclass total={} us", t0.elapsed().as_micros()));
-        match (hit, last_err) {
-            (Some(h), _) => Ok(Some(h)),
+        hits.sort_by_key(|(rank, _)| *rank);
+        let mut hits = hits.into_iter().map(|(_, h)| h);
+        match (hits.next(), last_err) {
+            (Some(mut h), _) => {
+                let archive = archive_of(&h.dex_name).map(str::to_string);
+                h.also_defined_in = hits.map(|o| o.dex_name).filter(|n| archive_of(n).map(str::to_string) != archive).collect();
+                Ok(Some(h))
+            }
             (None, Some(e)) => Err(e),
             (None, None) => Ok(None),
         }
@@ -1529,7 +1569,7 @@ impl Engine {
                 ));
             }
         }
-        Ok(ClassSource { dex_name: hit.dex_name, source, rebuilt, warning, scan_us })
+        Ok(ClassSource { dex_name: hit.dex_name, source, rebuilt, warning, scan_us, also_defined_in: hit.also_defined_in })
     }
 
     /// Search every DEX entry for references. `sink` receives one batch per
@@ -1805,6 +1845,28 @@ fn entry_of(dex_name: &str) -> &str {
 }
 
 /// Memory or disk cache lookup (no inflation).
+/// Each entry's place in the order a class loader reads DEX files: archive
+/// by archive in program order, then `classes.dex`, `classes2.dex`, ... by
+/// number, other names last.
+fn load_ranks(entries: &[Entry]) -> Vec<usize> {
+    let key = |e: &Entry| {
+        let inner = e.name.rsplit('/').next().unwrap_or(&e.name);
+        let number = match inner.strip_prefix("classes").and_then(|rest| rest.strip_suffix(".dex")) {
+            Some("") => 1,
+            Some(n) if !n.starts_with('0') => n.parse().unwrap_or(u64::MAX),
+            _ => u64::MAX,
+        };
+        (e.archive, number, inner.to_string())
+    };
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_cached_key(|&i| key(&entries[i]));
+    let mut ranks = vec![0; entries.len()];
+    for (rank, i) in order.into_iter().enumerate() {
+        ranks[i] = rank;
+    }
+    ranks
+}
+
 fn lookup_cached(cache: &EngineCache, key: Option<&ApkKey>, entry: &Entry, stats: &Stats) -> Option<(Arc<CachedEntry>, Source)> {
     let key = key?;
     if let Some(mem) = &cache.memory {

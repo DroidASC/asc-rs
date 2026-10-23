@@ -64,7 +64,9 @@ droidasc callgraph framework.jar,telephony-common.jar,TeleService.apk android.te
 
 DEX names start with their archive (`services.jar/classes2.dex | ...`), callgraph rows end with
 `[services.jar]`. Archives with no `classes*.dex` (odex/vdex only) are listed as `# warning:` on
-stderr: deodex them first.
+stderr (MCP: `notes`): deodex them first, or an empty answer may just mean the code was not there.
+A class several archives define resolves like a class loader (first archive in program order,
+then `classes.dex`, `classes2.dex`, ...); getclass names the others (`also defined in`).
 
 ## Rules: composing conditions in one call
 

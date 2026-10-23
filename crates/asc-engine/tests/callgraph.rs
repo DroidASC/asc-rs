@@ -254,6 +254,88 @@ fn programs_of_several_archives_read_as_one() {
     assert!(matches!(&notes[..], [n] if n.starts_with("odexed.jar: no classes*.dex")), "{notes:?}");
 }
 
+#[test]
+fn a_class_defined_twice_resolves_in_class_loader_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, z) = (dir.path().join("a.jar"), dir.path().join("z.jar"));
+    std::fs::write(&a, make_apk(&[("classes.dex", &app_dex())], true)).unwrap();
+    std::fs::write(&z, make_apk(&[("classes.dex", &app_dex()), ("classes2.dex", &lib_dex())], false)).unwrap();
+    for (spec, from, also) in [
+        (dir.path().display().to_string(), "a.jar/classes.dex", "z.jar/classes.dex"),
+        (format!("{},{}", z.display(), a.display()), "z.jar/classes.dex", "a.jar/classes.dex"),
+    ] {
+        let engine = Engine::new(&spec).with_threads(4);
+        for _ in 0..3 {
+            let hit = engine.get_class_dex(ENTRY).unwrap().unwrap();
+            assert_eq!((hit.dex_name.as_str(), hit.also_defined_in.as_slice()), (from, [also.to_string()].as_slice()), "{spec}");
+        }
+        // Defined once: nothing else to name.
+        assert!(engine.get_class_dex(LIB).unwrap().unwrap().also_defined_in.is_empty());
+    }
+    // In one APK: classes.dex before classes2.dex, whatever the zip order.
+    let apk = dir.path().join("twice.apk");
+    std::fs::write(&apk, make_apk(&[("classes2.dex", &app_dex()), ("classes.dex", &app_dex())], true)).unwrap();
+    let engine = Engine::new(&apk).with_threads(4);
+    for _ in 0..3 {
+        let hit = engine.get_class_dex(ENTRY).unwrap().unwrap();
+        assert_eq!((hit.dex_name.as_str(), hit.also_defined_in.len()), ("classes.dex", 0));
+    }
+}
+
+#[test]
+fn archives_of_a_program_share_their_cache_with_themselves_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    // Both compressed: every read of a DEX not cached is an inflate.
+    std::fs::write(dir.path().join("app.jar"), make_apk(&[("classes.dex", &app_dex())], true)).unwrap();
+    std::fs::write(dir.path().join("lib.jar"), make_apk(&[("classes.dex", &lib_dex())], true)).unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cached = |path: &std::path::Path| {
+        let disk = asc_engine::asc_cache::DiskCache::open(cache_dir.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
+        Engine::new(path).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+    };
+    // Some string of every DEX: no DEX is skipped unread.
+    let any = Query::String("[a-z]".into());
+    let rows = |engine: &Engine| {
+        let mut n = 0;
+        engine.find_refs(&any, |b| n += b.results.len()).unwrap();
+        n
+    };
+    let program = cached(dir.path());
+    let all = rows(&program);
+    assert_eq!(program.cache_stats().inflates, 2);
+    program.flush_cache_writes();
+    // The jar alone reads what the program inflated.
+    let alone = cached(&dir.path().join("app.jar"));
+    assert!(rows(&alone) > 0);
+    assert_eq!(alone.cache_stats().inflates, 0);
+    // Rewriting one jar of the program re-inflates that jar only.
+    let lib = dir.path().join("lib.jar");
+    let bytes = std::fs::read(&lib).unwrap();
+    std::fs::remove_file(&lib).unwrap();
+    std::fs::write(&lib, &bytes[..]).unwrap();
+    let mtime = std::fs::metadata(&lib).unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&lib).unwrap().set_modified(mtime).unwrap();
+    let again = cached(dir.path());
+    assert_eq!(rows(&again), all);
+    assert_eq!(again.cache_stats().inflates, 1, "lib.jar only");
+}
+
+#[test]
+fn an_open_program_follows_its_files() {
+    let dir = temp_program();
+    let engine = Engine::new(dir.path()).with_threads(2);
+    let classes = |engine: &Engine| engine.get_class_dex(ENTRY).unwrap().map(|h| h.dex_name);
+    assert_eq!(classes(&engine).as_deref(), Some("app.jar/classes.dex"));
+    assert_eq!(engine.program_notes().len(), 1);
+    // A jar added, one removed: the next call opens the directory again.
+    std::fs::write(dir.path().join("more.jar"), make_apk(&[("classes.dex", &app_dex())], true)).unwrap();
+    std::fs::remove_file(dir.path().join("odexed.jar")).unwrap();
+    assert!(engine.program_notes().is_empty());
+    assert_eq!(engine.get_class_dex(ENTRY).unwrap().unwrap().also_defined_in, ["more.jar/classes.dex"]);
+    std::fs::remove_file(dir.path().join("app.jar")).unwrap();
+    assert_eq!(classes(&engine).as_deref(), Some("more.jar/classes.dex"));
+}
+
 /// `dex | method | matched` of every row, sorted.
 fn find_lines(engine: &Engine, q: &Query) -> Vec<String> {
     let mut rows = Vec::new();
