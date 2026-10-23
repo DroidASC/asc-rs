@@ -758,7 +758,10 @@ mod tests {
         // The file system of a real directory is known on Unix.
         assert_eq!(b.space.is_some(), cfg!(unix));
         let auto = DiskCache::open(dir.path()).with_capacity_mode(DiskCapacity::Auto);
-        assert_eq!(auto.budget().cap_bytes, auto_disk_bytes_for(disk_space(dir.path()), 0));
+        // Compare against the space the budget itself measured: other tests write to the
+        // same file system concurrently, so a second `disk_space` call may differ.
+        let ab = auto.budget();
+        assert_eq!(ab.cap_bytes, auto_disk_bytes_for(ab.space, ab.used));
         // A directory that does not exist yet is measured on its parent.
         assert_eq!(disk_space(&dir.path().join("a/b")).is_some(), cfg!(unix));
     }
