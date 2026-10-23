@@ -682,6 +682,25 @@ fn misses_print_hints_on_stderr() {
     assert!(stderr(&out).contains("did you mean Lexample/Rich;"), "{}", stderr(&out));
     let out = droidasc(&["manifest_summary", p]);
     assert!(!stderr(&out).contains("unrecognized subcommand"), "{}", stderr(&out));
+    let out = droidasc(&["findrefs", p, "rules", "literal:nope", "string:."]);
+    assert!(stderr(&out).contains("hint: r1: literal matches are case-sensitive") && !stderr(&out).contains("r2:"), "{}", stderr(&out));
+}
+
+#[test]
+fn signatures_pick_the_overload() {
+    let apk = rich_apk();
+    let p = path(apk.path());
+    for target in ["Lexample/Rich;->compute(II)I", "example.Rich.compute(int, int)", "Lexample/Rich;->compute(II)"] {
+        let out = droidasc(&["findrefs", p, "method", target]);
+        assert!(out.status.success() && stdout(&out).contains("Lexample/Rich;->compute(II)I"), "{target}: {}", stderr(&out));
+    }
+    let out = droidasc(&["findrefs", p, "method", "Lexample/Rich;->compute(I)I"]);
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    assert!(stderr(&out).contains("has no overload (I)I; it has compute(II)I"), "{}", stderr(&out));
+    let out = droidasc(&["findrefs", p, "field", "Lexample/Rich;->value:J"]);
+    assert!(stdout(&out).is_empty() && stderr(&out).contains("Lexample/Rich;->value is value:I, not :J"), "{}", stderr(&out));
+    let out = droidasc(&["findrefs", p, "method", "Lexample/Rich;->compute(%)"]);
+    assert!(stderr(&out).contains("bad signature"), "{}", stderr(&out));
 }
 
 // ---- output window (--limit / --max-bytes / --offset) and DEX order -------

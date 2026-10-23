@@ -75,6 +75,68 @@ pub struct MemberQuery {
     /// Match `name` exactly (whatever the class constraint) instead of as a
     /// regex / substring; used for "references to this member" lookups.
     pub exact_name: bool,
+    /// Only the members of this signature: one overload of a method, or a
+    /// field of one type. Checked against the id tables, before any code is
+    /// scanned.
+    pub signature: Option<MemberSignature>,
+}
+
+/// The signature constraint of a [`MemberQuery`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberSignature {
+    /// A method's parameters, and its return type when one is given.
+    Method { params: Vec<TypeMatch>, ret: Option<TypeMatch> },
+    /// A field's type.
+    Field(TypeMatch),
+}
+
+/// One type of a [`MemberSignature`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeMatch {
+    /// Exactly this descriptor: `I`, `Ljava/lang/String;`, `[B`.
+    Descriptor(String),
+    /// A class of this simple name in any package, `dims` levels of array
+    /// deep (`String[]` written without its package).
+    Simple { name: String, dims: usize },
+}
+
+impl TypeMatch {
+    /// Whether the descriptor `descriptor` is of this type.
+    pub fn matches(&self, descriptor: &str) -> bool {
+        query::CompiledType::new(self).matches(&asc_dex::mutf8::encode(descriptor))
+    }
+}
+
+impl std::fmt::Display for TypeMatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeMatch::Descriptor(d) => f.write_str(d),
+            TypeMatch::Simple { name, dims } => write!(f, "{name}{}", "[]".repeat(*dims)),
+        }
+    }
+}
+
+impl std::fmt::Display for MemberSignature {
+    /// `(I, String)V`, `(I)` or `:I`, the way the query reads.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemberSignature::Method { params, ret } => {
+                f.write_str("(")?;
+                for (i, p) in params.iter().enumerate() {
+                    // Descriptors run together, as Dalvik writes them; a simple
+                    // name needs a separator to stay readable.
+                    let simple = |t: &TypeMatch| matches!(t, TypeMatch::Simple { .. });
+                    if i > 0 && (simple(p) || simple(&params[i - 1])) {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                f.write_str(")")?;
+                ret.as_ref().map_or(Ok(()), |r| write!(f, "{r}"))
+            }
+            MemberSignature::Field(t) => write!(f, ":{t}"),
+        }
+    }
 }
 
 /// A reference search request.

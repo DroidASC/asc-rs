@@ -141,7 +141,9 @@ drops those matching another. A condition is `KIND:VALUE`: `string:REGEX`, `lite
 `type:PATTERN`, `method:TARGET`, `field:TARGET`. A TARGET is `[CLASS->]NAME`, also written
 `com.a.B.name`, `com.a.B#name` or `Lcom/a/B;->name(I)V` (CLASS exact, `~CLASS` fuzzy, a class
 without package such as `WebView` in any package; NAME a regex / substring, `=NAME` or a
-name with its signature exact). `findrefs method` / `field` take the same targets in place
+name with its signature exact). A signature also narrows to that overload: `name(I)V`,
+`name(I)` (any return type), Java style `name(int, String)` (a class without package in any
+package), `f:I` for a field's type. `findrefs method` / `field` take the same targets in place
 of the name, and the kind is forgiving (`methods:`, `Method:`). The matched column lists what each condition
 matched, in order. `findrefs APK rules RULE...` (and `--file`, one rule per line) answers several
 queries in one pass over each DEX, rows prefixed `r1 | `, `r2 | `...; a rule is a condition,

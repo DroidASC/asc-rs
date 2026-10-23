@@ -1,7 +1,7 @@
 //! Class-name normalisation shared by the CLI and MCP.
 
 use crate::{EngineError, Result};
-use asc_findrefs::{ClassQuery, MemberQuery, Query};
+use asc_findrefs::{ClassQuery, MemberQuery, MemberSignature, Query, TypeMatch};
 
 /// Turn `com.poc.Main` / `com/poc/Main` / `Lcom/poc/Main;` into a Dalvik descriptor.
 /// Array descriptors (`[Ljava/lang/Object;`, whose methods such as `clone`
@@ -160,10 +160,15 @@ fn simple_class_pattern(name: &str) -> Option<String> {
 /// rows show each overload's signature. In the class, `~` in front means
 /// fuzzy; in the name, `=` in front means exact. A class without package
 /// (`WebView`) matches that simple name in any package.
+///
+/// A signature after the name also narrows the query to it
+/// ([`parse_signature`]): `run(I)V` is that overload, `run(I)` any return
+/// type, `f:I` the field of that type.
 pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Option<&str>, exact_name: bool) -> Result<MemberQuery> {
     let mut class = class.map(str::trim).filter(|c| !c.is_empty());
     let mut name = name.map(str::trim).filter(|n| !n.is_empty());
     let mut exact_name = exact_name;
+    let mut signature = None;
     // `class: "Lc;->m"`: the whole target, read as one below.
     if let (Some(c), None) = (class, name) {
         if c.contains("->") || c.contains('#') {
@@ -180,8 +185,9 @@ pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Op
             None if class.is_none() && looks_like_class(n) => (class, name) = (Some(n), None),
             None => name = Some(t.name),
         }
-        if t.signature.is_some() {
+        if let Some(sig) = t.signature {
             exact_name = true;
+            signature = Some(parse_signature(sig, kind == "method")?);
         }
     }
     if let Some(n) = name.and_then(|n| n.strip_prefix('=')) {
@@ -203,7 +209,7 @@ pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Op
         }),
         None => None,
     };
-    Ok(MemberQuery { class, name: name.map(String::from), exact_name })
+    Ok(MemberQuery { class, name: name.map(String::from), exact_name, signature })
 }
 
 /// The findrefs kinds, as conditions spell them (`literal` is a string
@@ -299,6 +305,91 @@ fn java_type(t: &str) -> Option<String> {
     t.split('.').all(is_identifier).then(|| format!("L{};", t.replace('.', "/")))
 }
 
+/// The signature written after a member name: `(params)ret` or `(params)`
+/// of a method, `:T` of a field. Types are Dalvik descriptors run together
+/// (`(ILjava/lang/String;)V`) or Java types separated by commas
+/// (`(int, java.lang.String) void`); a Java class without package
+/// (`String`) is that simple name in any package.
+pub fn parse_signature(signature: &str, method: bool) -> Result<MemberSignature> {
+    let bad = |why: &str| {
+        EngineError::Query(format!(
+            "bad signature {signature:?}: {why}; write a method's as (params)ret, e.g. (ILjava/lang/String;)V or (int, String), \
+             a field's as :T, e.g. :I"
+        ))
+    };
+    let s = signature.trim();
+    if !method {
+        let t = s.strip_prefix(':').ok_or_else(|| bad("a field takes :T"))?;
+        return type_match(t).map(MemberSignature::Field).ok_or_else(|| bad("unknown type"));
+    }
+    let (params, ret) = s.strip_prefix('(').and_then(|r| r.split_once(')')).ok_or_else(|| bad("a method takes (params)"))?;
+    let params = params.trim();
+    let params = if params.is_empty() {
+        Vec::new()
+    } else if let Some(descriptors) = (!params.contains([',', ' '])).then(|| dalvik_types(params)).flatten() {
+        descriptors.into_iter().map(|d| TypeMatch::Descriptor(d.to_string())).collect()
+    } else {
+        params.split(',').map(type_match).collect::<Option<_>>().ok_or_else(|| bad("unknown parameter type"))?
+    };
+    let ret = match ret.trim() {
+        "" => None,
+        r => Some(type_match(r).ok_or_else(|| bad("unknown return type"))?),
+    };
+    Ok(MemberSignature::Method { params, ret })
+}
+
+/// `ILjava/lang/String;[B` → `["I", "Ljava/lang/String;", "[B"]`; `None`
+/// unless all of `s` is descriptors.
+pub(crate) fn dalvik_types(s: &str) -> Option<Vec<&str>> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        let dims = rest.len() - rest.trim_start_matches('[').len();
+        let end = match rest[dims..].chars().next()? {
+            'Z' | 'B' | 'S' | 'C' | 'I' | 'J' | 'F' | 'D' | 'V' => dims + 1,
+            'L' => dims + rest[dims..].find(';')? + 1,
+            _ => return None,
+        };
+        out.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    Some(out)
+}
+
+/// One type as written in a signature: a descriptor, a Java primitive, a
+/// dotted or slashed class (`java.lang.String`), a class without package
+/// (`String`, any package), each optionally followed by `[]`s.
+fn type_match(t: &str) -> Option<TypeMatch> {
+    let t = t.trim();
+    if let Some([d]) = dalvik_types(t).as_deref() {
+        return Some(TypeMatch::Descriptor(d.to_string()));
+    }
+    let (mut base, mut dims) = (t, 0);
+    while let Some(b) = base.strip_suffix("[]") {
+        (base, dims) = (b.trim_end(), dims + 1);
+    }
+    let arrays = "[".repeat(dims);
+    let primitive = match base {
+        "void" => "V",
+        "boolean" => "Z",
+        "byte" => "B",
+        "short" => "S",
+        "char" => "C",
+        "int" => "I",
+        "long" => "J",
+        "float" => "F",
+        "double" => "D",
+        _ => "",
+    };
+    if !primitive.is_empty() {
+        return Some(TypeMatch::Descriptor(format!("{arrays}{primitive}")));
+    }
+    if base.contains(['.', '/']) {
+        return base.split(['.', '/']).all(is_identifier).then(|| TypeMatch::Descriptor(format!("{arrays}L{};", base.replace('.', "/"))));
+    }
+    is_identifier(base).then(|| TypeMatch::Simple { name: base.to_string(), dims })
+}
+
 /// Parse a one-word findrefs condition, as the CLI's compound and rule
 /// options take them:
 ///
@@ -392,7 +483,8 @@ mod tests {
 
     #[test]
     fn member_queries_from_any_spelling_agree() {
-        let want = MemberQuery { class: precise("Landroid/webkit/WebView;"), name: Some("loadUrl".into()), exact_name: false };
+        let want =
+            MemberQuery { class: precise("Landroid/webkit/WebView;"), name: Some("loadUrl".into()), exact_name: false, signature: None };
         for spec in [
             "Landroid/webkit/WebView;->loadUrl",
             "android.webkit.WebView.loadUrl",
@@ -405,7 +497,7 @@ mod tests {
         assert_eq!(member_query("method", Some("Landroid/webkit/WebView;->loadUrl"), false, None, false).unwrap(), want);
         assert_eq!(member_query("method", Some("android.webkit.WebView"), false, Some("loadUrl"), false).unwrap(), want);
         let class_only = member_query("method", None, false, Some("android.webkit.WebView"), false).unwrap();
-        assert_eq!(class_only, MemberQuery { class: precise("Landroid/webkit/WebView;"), name: None, exact_name: false });
+        assert_eq!(class_only, MemberQuery { class: precise("Landroid/webkit/WebView;"), name: None, exact_name: false, signature: None });
         // A signature or `=` makes the name exact; an explicit class wins.
         let q = member_query("method", None, false, Some("Lc;->run(I)V"), false).unwrap();
         assert_eq!((q.name.as_deref(), q.exact_name), (Some("run"), true));
@@ -414,7 +506,12 @@ mod tests {
         let q = member_query("method", None, false, Some("~Foo->=bar"), false).unwrap();
         assert_eq!(
             q,
-            MemberQuery { class: Some(ClassQuery { pattern: "Foo".into(), precise: false }), name: Some("bar".into()), exact_name: true }
+            MemberQuery {
+                class: Some(ClassQuery { pattern: "Foo".into(), precise: false }),
+                name: Some("bar".into()),
+                exact_name: true,
+                signature: None
+            }
         );
         // Without a package: that simple name in any package.
         let q = member_query("method", None, false, Some("WebView.loadUrl"), false).unwrap();
@@ -443,6 +540,44 @@ mod tests {
             parse_condition("method:Landroid/webkit/WebView;->loadUrl").unwrap()
         );
         assert!(matches!(parse_rule("string:a & method:b").unwrap(), Query::All { all, .. } if all.len() == 2));
+    }
+
+    #[test]
+    fn signatures_in_dalvik_and_java_form() {
+        let d = |s: &str| TypeMatch::Descriptor(s.into());
+        let method = |params: Vec<TypeMatch>, ret: Option<TypeMatch>| MemberSignature::Method { params, ret };
+        let sig = |s| parse_signature(s, true).unwrap();
+        assert_eq!(sig("(I)V"), method(vec![d("I")], Some(d("V"))));
+        assert_eq!(sig("(I)"), method(vec![d("I")], None));
+        assert_eq!(sig("()"), method(vec![], None));
+        assert_eq!(sig("(ILjava/lang/String;[B)Z"), method(vec![d("I"), d("Ljava/lang/String;"), d("[B")], Some(d("Z"))));
+        assert_eq!(sig("(int)"), method(vec![d("I")], None));
+        assert_eq!(sig("(int, java.lang.String[]) void"), method(vec![d("I"), d("[Ljava/lang/String;")], Some(d("V"))));
+        assert_eq!(
+            sig("(String, Map[][])"),
+            method(vec![TypeMatch::Simple { name: "String".into(), dims: 0 }, TypeMatch::Simple { name: "Map".into(), dims: 2 }], None)
+        );
+        assert_eq!(parse_signature(":I", false).unwrap(), MemberSignature::Field(d("I")));
+        assert_eq!(parse_signature(":java.lang.String", false).unwrap(), MemberSignature::Field(d("Ljava/lang/String;")));
+        for (bad, method) in [("(I", true), ("(%)V", true), (":I", true), ("(I)V", false), (":", false)] {
+            let e = parse_signature(bad, method).unwrap_err().to_string();
+            assert!(e.contains("bad signature"), "{bad}: {e}");
+        }
+        // A signature after the name narrows the query to it.
+        for spec in ["Lc;->run(I)V", "c.run(int)void", "Lc;->run(I)V "] {
+            let q = member_query("method", None, false, Some(spec), false).unwrap();
+            assert_eq!(q.signature, Some(method(vec![d("I")], Some(d("V")))), "{spec}");
+        }
+        assert_eq!(
+            member_query("method", None, false, Some("WebView.loadUrl(String)"), false).unwrap().signature.unwrap().to_string(),
+            "(String)"
+        );
+        assert_eq!(member_query("method", None, false, Some("loadUrl"), false).unwrap().signature, None);
+        assert!(member_query("field", None, false, Some("Lc;->f(I)V"), false).is_err());
+        assert_eq!(
+            parse_condition("method:Lc;->m(I)").unwrap(),
+            Query::Method(member_query("method", None, false, Some("Lc;->m(I)"), false).unwrap())
+        );
     }
 
     #[test]

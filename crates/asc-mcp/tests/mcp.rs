@@ -3,6 +3,7 @@
 use asc_engine::CacheConfig;
 use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_rich_dex};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 /// `bytes` as an `.apk` file that lives as long as the returned handle.
@@ -227,7 +228,7 @@ fn findrefs_context_and_callgraph() {
         call(3, "findrefs", json!({"apk": path, "kind": "string", "value": "llo", "context": "lots"})),
         call(4, "callgraph", json!({"apk": path, "class": "example.Rich", "method": "compute"})),
         call(5, "callgraph", json!({"apk": path, "class": "Lexample/Rich;", "method": "<init>()V", "direction": "callees"})),
-        call(6, "callgraph", json!({"apk": path, "class": "example.Rich", "method": "compute", "direction": "up"})),
+        call(6, "callgraph", json!({"apk": path, "class": "example.Rich", "method": "compute", "direction": "sideways"})),
         call(7, "callgraph", json!({"apk": path, "class": "example.Rich", "method": "missing"})),
     ]);
     let r = ok(&replies[0]);
@@ -249,6 +250,7 @@ fn findrefs_context_and_callgraph() {
     assert_eq!((r["methods"].as_u64(), r["rows"][1]["parent"].as_u64()), (Some(1), Some(0)));
     assert_eq!(text(&replies[4]).lines().nth(1), Some("  1 -> Ljava/lang/Object;-><init>()V [no body]"));
     assert_eq!(replies[5]["result"]["isError"], true);
+    assert!(text(&replies[5]).contains("use callers, callees"), "{}", text(&replies[5]));
     assert!(text(&replies[6]).contains("no method Lexample/Rich;->missing"), "{}", text(&replies[6]));
 }
 
@@ -345,6 +347,26 @@ fn findrefs_over_a_directory_reports_per_apk() {
     assert!(folded.contains("apk1 | 0 hits (+4 in SDKs) | ") && folded.contains("apk1 | sdk | Lexample/ 4"), "{folded}");
 
     assert_eq!(ok(&replies[4])["apks_total"], 1);
+}
+
+#[test]
+fn zero_results_over_many_apks_say_what_was_searched() {
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "Absent"})),
+        call(2, "findrefs", json!({"dir": d, "rules": [{"kind": "string", "value": "token"}, {"kind": "literal", "value": "nope"}]})),
+        call(3, "findrefs", json!({"dir": d, "kind": "string", "value": "token"})),
+    ]);
+    let body = text(&replies[0]);
+    // a.apk (2 DEX), b, bomb and sub/c (1 each); broken.apk does not open.
+    assert!(body.contains("\n# hint: searched 5 APKs (5 DEX entries)\n# hint: string patterns are case-sensitive"), "{body}");
+    assert_eq!(ok(&replies[0])["hints"].as_array().unwrap().len(), 2);
+    let rules = text(&replies[1]);
+    assert!(rules.contains("\n# hint: searched 5 APKs"), "{rules}");
+    assert!(rules.contains("\n# r2 hint: literal matches are case-sensitive") && !rules.contains("# r1 hint"), "{rules}");
+    assert!(ok(&replies[1])["rules"][1]["hint"].is_string() && ok(&replies[1])["rules"][0]["hint"].is_null());
+    assert!(!text(&replies[2]).contains("# hint"));
 }
 
 #[test]
@@ -739,9 +761,10 @@ fn findrefs_rules_answer_every_rule_in_one_call() {
     let s = ok(&reply);
     let totals: Vec<u64> = s["rules"].as_array().unwrap().iter().map(|r| r["total"].as_u64().unwrap()).collect();
     assert_eq!(totals, [4, 0, 2, 4]);
+    assert!(s["rules"][1]["hint"].as_str().unwrap().contains("(?i)") && s["rules"][0]["hint"].is_null());
     let body = text(&reply);
     assert!(body.starts_with("# r1 string \"token\": 4 results\nr1 | classes.dex | Lexample/Test;->first()V | \"token\"\n"), "{body}");
-    assert!(body.contains("# r2 string \"absent\": 0 results\n# r3 extends \"java.lang.Object\": 2 results\nr3 | classes.dex | Lexample/Test; | extends Ljava/lang/Object;\n"), "{body}");
+    assert!(body.contains("# r2 string \"absent\": 0 results\n# r2 hint: string patterns are case-sensitive regexes: prefix (?i) to ignore case\n# r3 extends \"java.lang.Object\": 2 results\nr3 | classes.dex | Lexample/Test; | extends Ljava/lang/Object;\n"), "{body}");
     assert!(body.contains("# r4 all(string \"tok\"): 4 results\n"), "{body}");
     // The `more` hint is a complete single-rule call.
     let line = body.lines().find(|l| l.starts_with("r1 | more | 3 more: findrefs ")).expect(body);
@@ -1012,11 +1035,80 @@ fn compact_structured_content_leaves_the_bulk_to_the_text() {
 fn tool_definitions_stay_small_and_take_the_output_options() {
     let replies = session(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
     let tools = &replies[0]["result"]["tools"];
-    // What an agent reads before its first call; it was 16 KB.
-    assert!(tools.to_string().len() <= 10 << 10, "{} bytes", tools.to_string().len());
+    // What an agent reads before its first call; it was 16 KB before the
+    // output budget, 9 KB before parameter defaults and output schemas.
+    assert!(tools.to_string().len() <= 14 << 10, "{} bytes", tools.to_string().len());
     for t in tools.as_array().unwrap() {
         let p = &t["inputSchema"]["properties"];
         assert!(p["max_bytes"].is_object() && p["spill"].is_object() && p["page"].is_object(), "{}", t["name"]);
+        // Strictly sampling clients would refuse lenient spellings before the call.
+        assert!(p.as_object().unwrap().values().all(|v| v.get("enum").is_none()), "{}", t["name"]);
+        assert_eq!(t["outputSchema"]["type"], "object", "{}", t["name"]);
+        assert_eq!(t["annotations"]["openWorldHint"], false, "{}", t["name"]);
+        let read_only = t["name"] != "close_apk";
+        assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
+    }
+    assert!(tools[3]["inputSchema"]["properties"]["kind"]["description"].as_str().unwrap().contains("implements"));
+}
+
+/// Whether `v` is of JSON Schema type `ty` (a name or a list of names).
+fn of_type(v: &Value, ty: &Value) -> bool {
+    match ty {
+        Value::Array(list) => list.iter().any(|t| of_type(v, t)),
+        Value::String(t) => match t.as_str() {
+            "string" => v.is_string(),
+            "integer" => v.is_u64() || v.is_i64(),
+            "number" => v.is_number(),
+            "boolean" => v.is_boolean(),
+            "array" => v.is_array(),
+            "object" => v.is_object(),
+            "null" => v.is_null(),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[test]
+fn output_schemas_describe_the_structured_content() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
+    let a = apk.path().to_str().unwrap();
+    let audit = temp_apk_from(&audit_apk_bytes(33));
+    let m = audit.path().to_str().unwrap();
+    let calls: &[(&str, Value)] = &[
+        ("findrefs", json!({"apk": a, "kind": "string", "value": "llo"})),
+        ("findrefs", json!({"apk": a, "kind": "string", "value": "absent"})),
+        ("findrefs", json!({"apk": a, "rules": [{"kind": "string", "value": "llo"}]})),
+        ("getclass", json!({"apk": a, "class": "Lexample/Rich;"})),
+        ("manifest_summary", json!({"apk": m})),
+        ("resources", json!({"apk": m, "search": "app"})),
+        ("resources", json!({"apk": m, "xml": "res/xml/file_paths.xml"})),
+        ("callgraph", json!({"apk": a, "class": "example.Rich", "method": "compute"})),
+        ("hierarchy", json!({"apk": a, "class": "java.lang.Object"})),
+        ("listclass", json!({"apk": a})),
+        ("getmanifest", json!({"apk": m})),
+        ("open_apk", json!({"apk": a})),
+    ];
+    let mut msgs = vec![json!({"jsonrpc": "2.0", "id": 0, "method": "tools/list"})];
+    msgs.extend(calls.iter().enumerate().map(|(i, (tool, args))| call(i as u64 + 1, tool, args.clone())));
+    let replies = session(&msgs);
+    let tools = replies[0]["result"]["tools"].as_array().unwrap();
+    let schema = |tool: &str| tools.iter().find(|t| t["name"] == tool).unwrap()["outputSchema"]["properties"].as_object().unwrap().clone();
+    let mut seen: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for ((tool, _), reply) in calls.iter().zip(&replies[1..]) {
+        let content = ok(reply);
+        for (field, spec) in schema(tool) {
+            if let Some(v) = content.get(&field) {
+                assert!(of_type(v, &spec["type"]), "{tool}.{field}: {v} is not {}", spec["type"]);
+                seen.entry(tool).or_default().insert(field);
+            }
+        }
+    }
+    // Every field the schemas of these tools promise shows up in some reply.
+    for tool in ["findrefs", "getclass", "manifest_summary", "resources", "callgraph", "hierarchy", "listclass", "getmanifest", "open_apk"]
+    {
+        let missing: Vec<String> = schema(tool).keys().filter(|k| !seen[tool].contains(*k)).cloned().collect();
+        assert!(missing.is_empty(), "{tool}: {missing:?}");
     }
 }
 
@@ -1055,6 +1147,26 @@ fn lenient_spellings_answer_like_the_documented_ones() {
     assert_eq!(rows(&replies[10]), rows(&replies[9]));
     assert_eq!(replies[8]["result"]["isError"], true);
     assert!(text(&replies[8]).contains("closest: method"), "{}", text(&replies[8]));
+}
+
+#[test]
+fn enumerated_arguments_take_other_spellings() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
+    let a = apk.path().to_str().unwrap();
+    let cg = |id, d: &str| call(id, "callgraph", json!({"apk": a, "class": "example.Rich", "method": "compute", "direction": d}));
+    let hi = |id, d: &str| call(id, "hierarchy", json!({"apk": a, "class": "java.lang.Object", "direction": d}));
+    let replies = session(&[
+        cg(1, "callers"),
+        cg(2, "Callers"),
+        cg(3, "up"),
+        hi(4, "supers"),
+        hi(5, "Parents"),
+        call(6, "findrefs", json!({"apk": a, "kind": "string", "value": "llo", "spill": "No"})),
+    ]);
+    assert_eq!(text(&replies[1]), text(&replies[0]));
+    assert_eq!(text(&replies[2]), text(&replies[0]));
+    assert_eq!(text(&replies[4]), text(&replies[3]));
+    assert!(ok(&replies[5])["total"].as_u64().unwrap() > 0, "{}", replies[5]);
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //! its resource table, for one APK or (`apks` / `dir`) many.
 
 use crate::multi::{self, Report, Section};
-use crate::{bool_arg, max_bytes, str_arg, usize_arg, Call, OpenApk, Server, ToolError, ToolResult};
+use crate::{bool_arg, choice_arg, max_bytes, str_arg, usize_arg, Call, OpenApk, Server, ToolError, ToolResult};
 use asc_engine::{ManifestSummary, ResourceField, ResourceRow};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -24,12 +24,14 @@ enum Filter {
 }
 
 fn filter_arg(args: &Value, default: Filter) -> Result<Filter, ToolError> {
-    match str_arg(args, "filter")? {
-        None => Ok(default),
-        Some("all") => Ok(Filter::All),
-        Some("exported") => Ok(Filter::Exported),
-        Some(f) => Err(ToolError(format!("unknown filter {f:?}: use all or exported"))),
+    if str_arg(args, "filter")?.is_none() {
+        return Ok(default);
     }
+    const CHOICES: &[(&str, &[&str])] = &[("all", &["any", "none", "everything"]), ("exported", &["export", "public", "reachable"])];
+    Ok(match choice_arg(args, "filter", "exported", CHOICES)? {
+        "all" => Filter::All,
+        _ => Filter::Exported,
+    })
 }
 
 /// `kind`: record kinds (the first word of a record: `provider`,
@@ -122,12 +124,12 @@ fn rows_json(rows: &[ResourceRow]) -> Value {
 }
 
 fn field_arg(args: &Value) -> Result<ResourceField, ToolError> {
-    match str_arg(args, "in")?.unwrap_or("any") {
-        "name" => Ok(ResourceField::Name),
-        "value" => Ok(ResourceField::Value),
-        "any" => Ok(ResourceField::Any),
-        f => Err(ToolError(format!("unknown `in` {f:?}: use name, value or any"))),
-    }
+    const CHOICES: &[(&str, &[&str])] = &[("name", &["key"]), ("value", &[]), ("any", &["both", "all"])];
+    Ok(match choice_arg(args, "in", "any", CHOICES)? {
+        "name" => ResourceField::Name,
+        "value" => ResourceField::Value,
+        _ => ResourceField::Any,
+    })
 }
 
 /// What one APK's `resources` call answers: matching rows and their total.
@@ -371,7 +373,7 @@ impl Server {
 
 /// `tools/list` entries of this module's tools.
 pub mod defs {
-    use crate::defs::{apk_props, many, merge};
+    use crate::defs::{apk_props, many, merge, shape};
     use serde_json::{json, Value};
 
     pub fn manifest_summary() -> Value {
@@ -381,12 +383,16 @@ pub mod defs {
                 intent-filter, deeplink, provider-path, nsc. Default filter=exported unless kind / name narrow it. \
                 With apks / dir: a head line and exported records per APK.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "filter": {"type": "string", "enum": ["all", "exported"]},
+                "filter": {"type": "string", "description": "exported or all."},
                 "kind": {"type": ["string", "array"], "description": "Record kinds: provider, activity, service, receiver, \
                     permission, deeplink, ..."},
                 "name": {"type": "string", "description": "Regex over the record (case-insensitive)."},
                 "offset": {"type": "integer"},
             }), many()])},
+            "outputSchema": shape(&[
+                ("apk_id", "string"), ("package", "string?"), ("application", "object"), ("uses_permissions", "array"),
+                ("components", "array"), ("warnings", "array"), ("records_total", "integer"),
+            ]),
         })
     }
 
@@ -400,10 +406,11 @@ pub mod defs {
                 "resolve": {"type": "boolean"},
                 "search": {"type": "string", "description": "Regex (literal=true: text)."},
                 "literal": {"type": "boolean"},
-                "in": {"type": "string", "enum": ["name", "value", "any"]},
-                "limit": {"type": "integer"},
+                "in": {"type": "string", "description": "search in name, value or any (default)."},
+                "limit": {"type": "integer", "description": format!("Default {}.", super::RESOURCES_LIMIT)},
                 "xml": {"type": "string", "description": "Path inside the APK, e.g. res/xml/file_paths.xml"},
             }), many()])},
+            "outputSchema": shape(&[("apk_id", "string"), ("total", "integer"), ("rows", "array"), ("chain", "array"), ("xml", "string")]),
         })
     }
 }

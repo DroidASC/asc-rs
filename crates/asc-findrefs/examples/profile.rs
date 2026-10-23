@@ -16,8 +16,8 @@ fn main() {
     let query = match args[2].as_str() {
         "string" => Query::String(args[3].clone()),
         "type" => Query::Type(args[3].clone()),
-        "method" => Query::Method(MemberQuery { class: None, name: Some(args[3].clone()), exact_name: false }),
-        _ => Query::Field(MemberQuery { class: None, name: Some(args[3].clone()), exact_name: false }),
+        "method" => Query::Method(MemberQuery { class: None, name: Some(args[3].clone()), exact_name: false, signature: None }),
+        _ => Query::Field(MemberQuery { class: None, name: Some(args[3].clone()), exact_name: false, signature: None }),
     };
     let t = Instant::now();
     let compiled = CompiledQuery::new(&query).expect("compile query");

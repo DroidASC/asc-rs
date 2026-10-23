@@ -34,7 +34,7 @@ mod res;
 mod rules;
 
 use asc_engine::{
-    names, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch, RefContext,
+    hints, names, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch, RefContext,
     RefResult, SharedCache, SmaliOptions, Threads,
 };
 use asc_findrefs::Query;
@@ -362,7 +362,7 @@ impl Server {
                         reply has a section per APK (per_apk rows each) and a cursor for its next page. Replies stay \
                         within max_bytes (16 KB): beyond it the full output is written to a file whose path the reply \
                         gives (read the lines you need), or with spill=\"never\" paged (page=N). A `more` / `next` hint \
-                        is the complete arguments of the next call.",
+                        is the complete arguments of the next call. Booleans default to false unless described otherwise.",
                 }))
             }
             "ping" => Ok(json!({})),
@@ -775,10 +775,9 @@ impl Server {
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("callgraph needs `class`".into()))?;
         let method = str_arg(args, "method")?.ok_or_else(|| ToolError("callgraph needs `method`".into()))?;
-        let direction = match str_arg(args, "direction")?.unwrap_or("callers") {
+        let direction = match choice_arg(args, "direction", "callers", CALL_DIRECTIONS)? {
             "callers" => Direction::Callers,
-            "callees" => Direction::Callees,
-            d => return Err(ToolError(format!("unknown direction {d:?}: use callers or callees"))),
+            _ => Direction::Callees,
         };
         let q = CallQuery {
             class: names::format_class_name(class)?,
@@ -824,10 +823,9 @@ impl Server {
         let sdks = self.sdk_filter(args, true)?;
         let view = View {
             per_apk: usize_arg(args, "per_apk")?.unwrap_or(PER_APK),
-            group: match str_arg(args, "group")?.unwrap_or("none") {
-                "none" => None,
+            group: match choice_arg(args, "group", "none", GROUPS)? {
                 "package" => Some(usize_arg(args, "package_depth")?.unwrap_or(PACKAGE_DEPTH).max(1)),
-                g => return Err(ToolError(format!("unknown group {g:?}: use none or package"))),
+                _ => None,
             },
             collapsed: sdks.is_some(),
             query: query_args(args, FINDREFS_QUERY_KEYS),
@@ -836,12 +834,14 @@ impl Server {
         // Identical DEX in several APKs is searched once.
         let dedup = DexDedup::new();
         let cached = AtomicUsize::new(0);
+        let dex_entries = AtomicUsize::new(0);
         let (sections, empty, stats) = self.sweep(
             paths,
             call,
             release,
             |apk| {
                 let target = apk.engine.search_target().map_err(|e| e.to_string())?;
+                dex_entries.fetch_add(target.entries.len(), Ordering::Relaxed);
                 // L3: this query already ran on this APK version.
                 if let Some(batches) = apk.engine.cached_refs(&target, query, true) {
                     cached.fetch_add(1, Ordering::Relaxed);
@@ -872,7 +872,7 @@ impl Server {
         );
         call.check()?;
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        let header = format!(
+        let mut header = format!(
             "# findrefs {} over {} APKs: {} with hits, {} hits, {} errors, {ms:.0} ms",
             rules::describe(args),
             paths.len(),
@@ -880,7 +880,18 @@ impl Server {
             stats.hits,
             stats.errors
         );
+        let hints: Vec<String> = if stats.hits == 0 {
+            std::iter::once(hints::searched_hint(paths.len(), dex_entries.load(Ordering::Relaxed)))
+                .chain(hints::query_hint(query))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for h in &hints {
+            header.push_str(&format!("\n# hint: {h}"));
+        }
         let summary = json!({
+            "hints": hints,
             "apks_total": paths.len(),
             "apks_with_hits": stats.with_hits,
             "total": stats.hits,
@@ -1243,6 +1254,12 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
     })
 }
 
+/// `direction` of callgraph, with the spellings models also use.
+const CALL_DIRECTIONS: &[(&str, &[&str])] =
+    &[("callers", &["caller", "up", "incoming", "in"]), ("callees", &["callee", "down", "outgoing", "out"])];
+/// `group` of a multi-APK findrefs.
+const GROUPS: &[(&str, &[&str])] = &[("none", &["no", "off", "false"]), ("package", &["pkg", "packages"])];
+
 /// The findrefs arguments that define the query (not the APKs, paging or view).
 const FINDREFS_QUERY_KEYS: &[&str] = &["kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "all", "none", "sdk_prefixes"];
 
@@ -1306,6 +1323,19 @@ pub fn bool_arg(args: &Value, key: &str) -> Result<Option<bool>, ToolError> {
         Some(Value::String(s)) if s == "false" => Ok(Some(false)),
         Some(_) => Err(ToolError(format!("`{key}` must be a boolean"))),
     }
+}
+
+/// An enumerated string argument, `default` when absent. `choices` pairs
+/// each value with the other spellings models use for it; case and a
+/// trailing `s` do not matter. Unknown values fail with the valid ones.
+pub fn choice_arg(args: &Value, key: &str, default: &'static str, choices: &[(&'static str, &[&str])]) -> Result<&'static str, ToolError> {
+    let Some(v) = str_arg(args, key)? else { return Ok(default) };
+    let v = v.trim().to_ascii_lowercase();
+    let find = |v: &str| choices.iter().find(|(c, aliases)| *c == v || aliases.contains(&v)).map(|(c, _)| *c);
+    find(&v).or_else(|| v.strip_suffix('s').and_then(find)).ok_or_else(|| {
+        let valid: Vec<&str> = choices.iter().map(|(c, _)| *c).collect();
+        ToolError(format!("unknown {key} {v:?}: use {}", valid.join(", ")))
+    })
 }
 
 /// A non-negative integer argument, also given as a string of digits.
@@ -1392,6 +1422,9 @@ fn tool_definitions() -> Value {
                 if let Some(p) = d["inputSchema"]["properties"].as_object_mut() {
                     p.extend(defs::output_props().as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())));
                 }
+                if d.get("annotations").is_none() {
+                    d["annotations"] = defs::read_only();
+                }
                 d
             })
             .collect(),
@@ -1399,9 +1432,36 @@ fn tool_definitions() -> Value {
 }
 
 /// `tools/list` entries. Tools that sweep many APKs add [`defs::many`] to
-/// their properties.
+/// their properties; their `outputSchema` describes the one-APK reply (a
+/// multi-APK reply is a summary with `apks` sections, as the server
+/// instructions say). Parameters say what they are and their default in a
+/// few words, those every tool shares only where the instructions do not:
+/// the list is what an agent reads before its first call.
 pub mod defs {
-    use serde_json::{json, Value};
+    use serde_json::{json, Map, Value};
+
+    /// What every tool but close_apk is: it reads the APK and answers;
+    /// caches are not part of what the tool changes.
+    pub fn read_only() -> Value {
+        json!({"readOnlyHint": true, "openWorldHint": false})
+    }
+
+    /// `structuredContent` of the main path, as `(field, type)`; `?` after
+    /// the type admits null. Spill and page fields (`file`, `page`, ...) come
+    /// on top when the reply is over its budget, so no field is required.
+    pub fn shape(fields: &[(&str, &str)]) -> Value {
+        let props: Map<String, Value> = fields
+            .iter()
+            .map(|(name, ty)| {
+                let ty = match ty.strip_suffix('?') {
+                    Some(t) => json!([t, "null"]),
+                    None => json!(ty),
+                };
+                (name.to_string(), json!({"type": ty}))
+            })
+            .collect();
+        json!({"type": "object", "properties": props})
+    }
 
     pub fn apk_props() -> Value {
         json!({
@@ -1410,12 +1470,12 @@ pub mod defs {
         })
     }
 
-    /// Budget and spill properties every tool takes (explained once, in the
-    /// server instructions).
+    /// Budget and spill properties every tool takes (explained in the server
+    /// instructions too).
     pub fn output_props() -> Value {
         json!({
             "max_bytes": {"type": "integer"},
-            "spill": {"type": "string", "enum": ["auto", "always", "never"]},
+            "spill": {"type": "string", "description": "auto, always or never."},
             "page": {"type": "integer"},
         })
     }
@@ -1425,16 +1485,19 @@ pub mod defs {
         json!({
             "apks": {"type": "array", "items": {"type": "string"}},
             "dir": {"type": "string"},
-            "glob": {"type": "string"},
-            "recursive": {"type": "boolean"},
-            "per_apk": {"type": "integer"},
+            "glob": {"type": "string", "description": "Default *.apk."},
+            "recursive": {"type": "boolean", "description": "Default true."},
+            "per_apk": {"type": "integer", "description": "Default 10."},
             "cursor": {"type": "string"},
-            "release": {"type": "boolean"},
+            "release": {"type": "boolean", "description": "Free each APK when done; default: if they overflow the cache."},
         })
     }
 
-    pub fn page_props() -> Value {
-        json!({"offset": {"type": "integer"}, "limit": {"type": "integer"}})
+    pub fn page_props(limit: usize) -> Value {
+        json!({
+            "offset": {"type": "integer"},
+            "limit": {"type": "integer", "description": format!("Default {limit}.")},
+        })
     }
 
     /// `base` plus every property of `extra`.
@@ -1453,14 +1516,20 @@ pub mod defs {
                 register each (apk_id, DEX size, path).",
             "inputSchema": {"type": "object", "properties": merge(json!({
                 "apk": {"type": "string"},
-                "warm": {"type": "boolean"},
-                "prebuild": {"type": "boolean", "description": "Build search tables in the background (default true)."},
+                "warm": {"type": "boolean", "description": "Default true (false with apks / dir)."},
+                "prebuild": {"type": "boolean", "description": "Build search tables in the background, default true."},
             }), &[many()])},
+            "outputSchema": shape(&[("apk_id", "string"), ("path", "string"), ("dex_entries", "integer"), ("classes", "integer?")]),
         })
     }
 
     pub fn close_apk() -> Value {
-        json!({"description": "Forget an opened APK.", "inputSchema": {"type": "object", "properties": apk_props()}})
+        json!({
+            "description": "Forget an opened APK.",
+            "inputSchema": {"type": "object", "properties": apk_props()},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            "outputSchema": shape(&[("apk_id", "string"), ("closed", "boolean"), ("released_bytes", "integer")]),
+        })
     }
 
     pub fn getclass() -> Value {
@@ -1470,10 +1539,14 @@ pub mod defs {
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string", "description": "Lcom/a/B; or com.a.B"},
                 "method": {"type": "string", "description": "Only these methods: a name (every overload) or name(params)ret."},
-                "full": {"type": "boolean"},
-                "debug_info": {"type": "boolean", "description": ".line / .param (default false)."},
-                "resource_names": {"type": "boolean", "description": "`# @type/name` after resource ids (default true)."},
+                "full": {"type": "boolean", "description": "Whole class even over budget, default false."},
+                "debug_info": {"type": "boolean", "description": ".line / .param, default false."},
+                "resource_names": {"type": "boolean", "description": "`# @type/name` after resource ids, default true."},
             })]), "required": ["class"]},
+            "outputSchema": shape(&[
+                ("apk_id", "string"), ("class", "string"), ("dex_name", "string"), ("source", "string"), ("warning", "string?"),
+                ("rebuilt", "boolean"),
+            ]),
         })
     }
 
@@ -1484,19 +1557,24 @@ pub mod defs {
                 `all` / `none`: several conditions in one method; `rules`: several queries in one pass. With apks / dir: \
                 a section per APK, SDK hits folded.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "kind": {"type": "string", "enum": ["string", "type", "method", "field", "extends", "impl"]},
-                "value": {"type": "string", "description": "string: regex (literal=true: text); type, extends, impl: a type; method / field: a whole target also works, e.g. Landroid/webkit/WebView;->loadUrl or android.webkit.WebView.loadUrl."},
+                "kind": {"type": "string", "description": "string, literal, type, method, field, extends or impl (also \
+                    plurals and synonyms: implements, class, call...)."},
+                "value": {"type": "string", "description": "string: regex (literal=true: text); type, extends, impl: a type; method / field: a whole target also works, e.g. Landroid/webkit/WebView;->loadUrl, android.webkit.WebView.loadUrl(String)."},
                 "literal": {"type": "boolean"},
-                "name": {"type": "string", "description": "method / field name, regex (exact=true: equal)."},
-                "class": {"type": "string", "description": "method / field: declaring class."},
-                "fuzzy_class": {"type": "boolean"},
+                "name": {"type": "string", "description": "Member name, regex (exact=true: equal); name(params)ret or name:T: that overload / type."},
+                "class": {"type": "string", "description": "Declaring class; without package: any package."},
+                "fuzzy_class": {"type": "boolean", "description": "class is a regex, default false."},
                 "exact": {"type": "boolean"},
                 "context": {"type": ["integer", "string", "boolean"], "description": "Lines of smali around each hit, or \"method\"."},
-                "collapse_sdks": {"type": "boolean", "description": "Fold androidx, kotlin, gms... hits into counts."},
-                "sdk_prefixes": {"type": "array", "items": {"type": "string"}},
-                "group": {"type": "string", "enum": ["none", "package"]},
-                "package_depth": {"type": "integer"},
-            }), crate::rules::defs::findrefs_props(), page_props(), many()])},
+                "collapse_sdks": {"type": "boolean", "description": "Fold androidx, kotlin, gms... hits into counts; default true with apks / dir."},
+                "sdk_prefixes": {"type": "array", "items": {"type": "string"}, "description": "Instead of the built-in SDK list."},
+                "group": {"type": "string", "description": "none (default) or package: rows per package."},
+                "package_depth": {"type": "integer", "description": "Default 3."},
+            }), crate::rules::defs::findrefs_props(), page_props(super::FINDREFS_LIMIT), many()])},
+            "outputSchema": shape(&[
+                ("apk_id", "string"), ("total", "integer"), ("returned", "integer"), ("next_offset", "integer?"),
+                ("results", "array"), ("hints", "array"), ("rules", "array"),
+            ]),
         })
     }
 
@@ -1507,11 +1585,15 @@ pub mod defs {
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string"},
                 "method": {"type": "string", "description": "A name (every overload) or name(params)ret."},
-                "direction": {"type": "string", "enum": ["callers", "callees"]},
-                "depth": {"type": "integer", "description": "Default 2."},
-                "max_nodes": {"type": "integer"},
-                "virtual": {"type": "boolean"},
+                "direction": {"type": "string", "description": "callers (default) or callees."},
+                "depth": {"type": "integer", "description": format!("Default {}.", super::CALLGRAPH_DEPTH)},
+                "max_nodes": {"type": "integer", "description": format!("Default {}.", super::CALLGRAPH_MAX_NODES)},
+                "virtual": {"type": "boolean", "description": "Also virtual / interface calls, default false."},
             })]), "required": ["class", "method"]},
+            "outputSchema": shape(&[
+                ("apk_id", "string"), ("direction", "string"), ("depth", "integer"), ("methods", "integer"), ("truncated", "boolean"),
+                ("rows", "array"),
+            ]),
         })
     }
 
@@ -1520,7 +1602,8 @@ pub mod defs {
             "description": "Classes the APK defines, optionally under a prefix. With apks / dir: count and first classes per APK.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "prefix": {"type": "string", "description": "com.a or Lcom/a"},
-            }), page_props(), many()])},
+            }), page_props(super::LISTCLASS_LIMIT), many()])},
+            "outputSchema": shape(&[("apk_id", "string"), ("total", "integer"), ("next_offset", "integer?"), ("classes", "array")]),
         })
     }
 
@@ -1528,8 +1611,9 @@ pub mod defs {
         json!({
             "description": "AndroidManifest.xml as XML (records: manifest_summary).",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "resolve": {"type": "boolean", "description": "Resource references by name."},
+                "resolve": {"type": "boolean", "description": "Resource references by name, default false."},
             })])},
+            "outputSchema": shape(&[("apk_id", "string"), ("xml", "string")]),
         })
     }
 }

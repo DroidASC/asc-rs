@@ -4,12 +4,12 @@
 
 use crate::{names, Engine, Result};
 use asc_dex::Dex;
-use asc_findrefs::{MemberQuery, Query};
+use asc_findrefs::{MemberQuery, MemberSignature, Query};
 
 /// Suggestions per hint.
 const MAX_SUGGESTIONS: usize = 5;
-/// Members listed when none is close to the name asked for.
-const MAX_MEMBERS: usize = 12;
+/// Members listed in one hint.
+const MAX_MEMBERS: usize = 8;
 /// Packages an APK uses but does not define (the framework and the JDK).
 const FRAMEWORK: &[&str] = &["Landroid/", "Ljava/", "Ljavax/", "Lkotlin/", "Ldalvik/", "Lorg/json/", "Lorg/xml/", "Lorg/w3c/", "Lsun/"];
 
@@ -65,8 +65,32 @@ fn class_members(dex: &Dex<'_>, class: &str, methods: bool) -> Result<Vec<String
     Ok(out)
 }
 
+/// `a, b, c` for at most [`MAX_MEMBERS`] items, then how many were left out.
+fn list_some<S: AsRef<str>>(items: &[S]) -> String {
+    let mut out = items.iter().take(MAX_MEMBERS).map(AsRef::as_ref).collect::<Vec<_>>().join(", ");
+    if items.len() > MAX_MEMBERS {
+        out.push_str(&format!(" … ({} in all)", items.len()));
+    }
+    out
+}
+
+/// Whether the member `m` as [`class_members`] writes it (`name(params)ret`
+/// or `name:T`) has `signature`.
+fn has_signature(m: &str, signature: &MemberSignature) -> bool {
+    match signature {
+        MemberSignature::Method { params, ret } => {
+            let Some((have, have_ret)) = m.split_once('(').and_then(|(_, r)| r.split_once(')')) else { return false };
+            let Some(have) = names::dalvik_types(have) else { return false };
+            have.len() == params.len()
+                && have.iter().zip(params).all(|(h, p)| p.matches(h))
+                && ret.as_ref().is_none_or(|r| r.matches(have_ret))
+        }
+        MemberSignature::Field(t) => m.split_once(':').is_some_and(|(_, have)| t.matches(have)),
+    }
+}
+
 /// The members of `members` worth showing for `name`: the same name (any
-/// case), then names within a small edit distance, else the first few.
+/// case), then names within a small edit distance, else all of them.
 fn closest_members(members: &[String], name: Option<&str>) -> Vec<String> {
     let member_name = |m: &str| m.split(['(', ':']).next().unwrap_or(m).to_string();
     let mut picked: Vec<String> = match name {
@@ -92,7 +116,6 @@ fn closest_members(members: &[String], name: Option<&str>) -> Vec<String> {
         picked = members.to_vec();
     }
     picked.dedup();
-    picked.truncate(MAX_MEMBERS);
     picked
 }
 
@@ -222,7 +245,7 @@ impl Engine {
         if members.is_empty() {
             return format!("; no DEX references {class}{}", self.class_not_found_hint(class));
         }
-        format!("; {class} has {}", closest_members(&members, name).join(", "))
+        format!("; {class} has {}", list_some(&closest_members(&members, name)))
     }
 
     /// Every member of `class` any DEX references or defines, sorted.
@@ -245,16 +268,10 @@ impl Engine {
     pub fn no_results_hints(&self, query: &Query, entries: usize) -> Vec<String> {
         let mut out = vec![format!("searched {entries} DEX entr{}", if entries == 1 { "y" } else { "ies" })];
         match query {
-            Query::String(p) if p.chars().any(char::is_alphabetic) && !p.starts_with("(?i") => {
-                out.push("string patterns are case-sensitive regexes: prefix (?i) to ignore case".into());
+            Query::Method(m) | Query::Field(m) => {
+                out.extend(self.member_query_hint(m, matches!(query, Query::Method(_))).or_else(|| query_hint(query)));
             }
-            Query::StringLiteral(_) => out.push("literal matches are case-sensitive; a string regex with (?i) ignores case".into()),
-            Query::Method(m) | Query::Field(m) => out.extend(self.member_query_hint(m, matches!(query, Query::Method(_)))),
-            Query::Extends(_) | Query::Implements(_) => {
-                out.push("only direct subclasses / implementers are listed: hierarchy walks the whole tree".into());
-            }
-            Query::All { .. } => out.push("every `all` condition must match inside the same method".into()),
-            Query::String(_) | Query::Type(_) => {}
+            _ => out.extend(query_hint(query)),
         }
         out
     }
@@ -273,16 +290,50 @@ impl Engine {
         };
         let member_name = |s: &str| s.split(['(', ':']).next().unwrap_or(s).to_string();
         let defined: Vec<&String> = members.iter().filter(|s| member_name(s) == *name).collect();
-        Some(if defined.is_empty() {
-            format!("{class} has no {kind} {name:?}; it has {}", closest_members(&members, Some(name)).join(", "))
-        } else {
-            let access = if methods { "calls it" } else { "reads or writes it" };
-            format!(
+        let access = if methods { "calls it" } else { "reads or writes it" };
+        Some(match &m.signature {
+            _ if defined.is_empty() => {
+                format!("{class} has no {kind} {name:?}; it has {}", list_some(&closest_members(&members, Some(name))))
+            }
+            Some(sig) if !defined.iter().any(|d| has_signature(d, sig)) => match sig {
+                MemberSignature::Method { .. } => {
+                    format!("{class}->{name} has no overload {sig}; it has {}: drop the signature for every overload", list_some(&defined))
+                }
+                MemberSignature::Field(_) => format!("{class}->{name} is {}, not {sig}: drop the type to match it", list_some(&defined)),
+            },
+            _ => format!(
                 "{class}->{name} exists ({}), but no code {access}: findrefs lists references, not definitions",
-                defined.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-            )
+                list_some(&defined)
+            ),
         })
     }
+}
+
+/// What a zero-result `query` itself suggests, without looking at an APK
+/// (so also for searches over many APKs).
+pub fn query_hint(query: &Query) -> Option<String> {
+    Some(match query {
+        Query::String(p) if p.chars().any(char::is_alphabetic) && !p.starts_with("(?i") => {
+            "string patterns are case-sensitive regexes: prefix (?i) to ignore case".into()
+        }
+        Query::StringLiteral(_) => "literal matches are case-sensitive; a string regex with (?i) ignores case".into(),
+        Query::Method(MemberQuery { signature: Some(sig), .. }) | Query::Field(MemberQuery { signature: Some(sig), .. }) => {
+            format!("only members of signature {sig} match: drop it for every overload")
+        }
+        Query::Method(MemberQuery { exact_name: true, .. }) | Query::Field(MemberQuery { exact_name: true, .. }) => {
+            "findrefs lists references, not definitions; the name is matched exactly (without = or a signature it is a pattern)".into()
+        }
+        Query::Extends(_) | Query::Implements(_) => {
+            "only direct subclasses / implementers are listed: hierarchy walks the whole tree".into()
+        }
+        Query::All { .. } => "every `all` condition must match inside the same method".into(),
+        Query::String(_) | Query::Type(_) | Query::Method(_) | Query::Field(_) => return None,
+    })
+}
+
+/// The first hint line of a search over many APKs that found nothing.
+pub fn searched_hint(apks: usize, entries: usize) -> String {
+    format!("searched {apks} APK{} ({entries} DEX entr{})", if apks == 1 { "" } else { "s" }, if entries == 1 { "y" } else { "ies" })
 }
 
 #[cfg(test)]
@@ -303,6 +354,12 @@ mod tests {
         assert_eq!(closest_members(&members, Some("loadurl")), ["loadUrl(Ljava/lang/String;)V"]);
         assert_eq!(closest_members(&members, Some("loadDta"))[0], "loadData()V");
         assert_eq!(closest_members(&members, Some("nothing")), members);
+        let many: Vec<String> = (0..20).map(|i| format!("f{i}:I")).collect();
+        assert_eq!(list_some(&many), "f0:I, f1:I, f2:I, f3:I, f4:I, f5:I, f6:I, f7:I … (20 in all)");
+        assert_eq!(list_some(&members[..2]), "a()V, loadUrl(Ljava/lang/String;)V");
+        let sig = names::parse_signature("(String)", true).unwrap();
+        assert!(has_signature("loadUrl(Ljava/lang/String;)V", &sig) && !has_signature("a()V", &sig));
+        assert!(has_signature("f:I", &names::parse_signature(":int", false).unwrap()));
         assert!(is_framework_class("Landroid/app/Activity;") && !is_framework_class("Landroidx/core/A;"));
         assert_eq!(resource_name_of("res/xml-v21/file_paths.xml").as_deref(), Some("xml/file_paths"));
         assert_eq!(resource_name_of("AndroidManifest.xml"), None);

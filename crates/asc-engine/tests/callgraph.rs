@@ -198,7 +198,7 @@ fn findrefs_context_marks_the_referencing_instructions() {
 
     // Two call sites of helper in two methods; context added after the fact
     // (a page of rows) matches the one computed during the search.
-    let q = Query::Method(asc_engine::MemberQuery { class: None, name: Some("helper".into()), exact_name: true });
+    let q = Query::Method(asc_engine::MemberQuery { class: None, name: Some("helper".into()), exact_name: true, signature: None });
     let inline = run(&q, RefContext::Lines(0));
     let mut later = run(&q, RefContext::None);
     assert_eq!(later.len(), 2);
