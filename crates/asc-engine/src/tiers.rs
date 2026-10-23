@@ -36,8 +36,11 @@ use std::time::{Duration, Instant};
 pub(crate) const LOCATORS_KIND: &str = "locators";
 /// `find_refs` results larger than this (encoded) are not kept in L3.
 pub(crate) const L3_MAX_RESULT: usize = 4 << 20;
+/// Text-only result blocks contain no repeated public-row metadata. Permit a
+/// broad query to use the normal rendered cache without allowing unbounded L3.
+const L3_MAX_COMPACT_RESULT: usize = 128 << 20;
 /// Layout version of the encoded `find_refs` results.
-const RESULT_FORMAT: u32 = 4;
+const RESULT_FORMAT: u32 = 5;
 /// Ends the encoded batches (where an entry name's length would be), so a
 /// truncated file is told from a complete one; the run's notes follow it.
 const RESULT_END: u32 = u32::MAX;
@@ -211,11 +214,16 @@ impl ResultRecorder {
             put_str(&mut self.out, &r.dex_name);
             put_u32(&mut self.out, r.method_idx);
             put_str(&mut self.out, &r.method);
-            put_str(&mut self.out, &r.signature);
+            put_str(&mut self.out, r.rendered_text());
+            self.out.push(u8::from(r.rendered));
+            put_u32(&mut self.out, r.rendered_ends.len() as u32);
+            for &end in &r.rendered_ends {
+                put_u32(&mut self.out, end);
+            }
             put_u32(&mut self.out, r.matched.len() as u32);
             for m in &r.matched {
                 self.out.push(match m {
-                    Matched::String(_) => 0,
+                    Matched::String(_) | Matched::TextString { .. } => 0,
                     Matched::Symbol(_) => 1,
                 });
                 put_str(&mut self.out, m.as_str());
@@ -240,7 +248,9 @@ impl ResultRecorder {
                 }
             }
         }
-        if self.out.len() > L3_MAX_RESULT {
+        let compact = b.results.iter().any(|r| r.rendered && !r.rendered_ends.is_empty());
+        let limit = if compact { L3_MAX_COMPACT_RESULT } else { L3_MAX_RESULT };
+        if self.out.len() > limit {
             self.keep = false;
             self.out = Vec::new();
         }
@@ -283,7 +293,19 @@ pub(crate) struct Recorded {
 }
 
 /// The run recorded by [`ResultRecorder`]; `None` for anything malformed.
-pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Recorded> {
+#[cfg(test)]
+fn decode_batches(bytes: &[u8]) -> Option<Recorded> {
+    decode_batches_backing(Arc::new(bytes.to_vec()))
+}
+
+/// [`decode_batches`] over a mapped L3 file: rows share it instead of
+/// copying the rendered text.
+pub(crate) fn decode_batches_view(bytes: asc_cache::Rendered) -> Option<Recorded> {
+    decode_batches_backing(Arc::new(bytes))
+}
+
+fn decode_batches_backing(backing: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Option<Recorded> {
+    let bytes = backing.as_ref().as_ref();
     let mut r = Cursor { bytes, at: 0 };
     if r.u32()? != RESULT_FORMAT {
         return None;
@@ -297,16 +319,38 @@ pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Recorded> {
         }
         let entry_name = String::from_utf8(r.take(len as usize)?.to_vec()).ok()?;
         let n = r.u32()? as usize;
-        let mut results = Vec::with_capacity(n.min(bytes.len()));
+        let mut results = Vec::with_capacity(n.min(backing.as_ref().as_ref().len()));
         for _ in 0..n {
-            let dex_name = r.str()?;
+            let dex_name = r.str()?.into();
             let method_idx = r.u32()?;
             let method = r.str()?;
-            let signature = r.str()?;
+            let signature_start = r.str_range()?;
+            let rendered = match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => return None,
+            };
+            let rendered_ends = (0..r.u32()?).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
+            let signature_len = signature_start.end - signature_start.start;
+            let signature = &backing.as_ref().as_ref()[signature_start.clone()];
+            let valid_ends = rendered_ends.windows(2).all(|w| w[0] < w[1])
+                && rendered_ends.iter().all(|&end| signature.get(end as usize) == Some(&b'\n'))
+                && rendered_ends.last().is_none_or(|&end| end as usize + 1 == signature_len);
+            if !valid_ends {
+                return None;
+            }
+            let (signature, rendered_backing) = if rendered {
+                (
+                    String::new(),
+                    Some(crate::RenderedBacking { bytes: Arc::clone(&backing), start: signature_start.start, end: signature_start.end }),
+                )
+            } else {
+                (std::str::from_utf8(&backing.as_ref().as_ref()[signature_start.clone()]).ok()?.to_owned(), None)
+            };
             let m = r.u32()? as usize;
             let matched = (0..m)
                 .map(|_| match r.u8()? {
-                    0 => Some(Matched::String(r.str()?)),
+                    0 => Some(Matched::String(r.str()?.into())),
                     1 => Some(Matched::Symbol(r.str()?)),
                     _ => None,
                 })
@@ -325,7 +369,19 @@ pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Recorded> {
                 1 => Some(r.str()?),
                 _ => return None,
             };
-            results.push(RefResult { dex_name, method_idx, method, signature, matched, relation, sites, context });
+            results.push(RefResult {
+                dex_name,
+                method_idx,
+                method,
+                signature,
+                matched: matched.into(),
+                relation,
+                sites,
+                context,
+                rendered,
+                rendered_ends,
+                rendered_backing,
+            });
         }
         out.push(RefBatch { entry_name, results, inflate_us: 0, search_us: 0, source: "result", error: None });
     }
@@ -341,6 +397,14 @@ impl Cursor<'_> {
         let s = self.bytes.get(self.at..self.at.checked_add(n)?)?;
         self.at += n;
         Some(s)
+    }
+
+    fn str_range(&mut self) -> Option<std::ops::Range<usize>> {
+        let len = self.u32()? as usize;
+        let start = self.at;
+        let bytes = self.take(len)?;
+        std::str::from_utf8(bytes).ok()?;
+        Some(start..start + len)
     }
 
     fn u8(&mut self) -> Option<u8> {
@@ -570,10 +634,13 @@ mod tests {
             method_idx: 7,
             method: "La;->b".into(),
             signature: "La;->b()V".into(),
-            matched: vec![Matched::String("x\ny".into()), Matched::Symbol("La;->c:I".into())],
+            matched: vec![Matched::String("x\ny".into()), Matched::Symbol("La;->c:I".into())].into(),
             relation: rel,
             sites: vec![RefSite { offset: 9, matched: 1, pc: Some(3), line: None }],
             context: rel.map(|_| "    const-string v0, \"x\"".to_string()),
+            rendered: false,
+            rendered_ends: Vec::new(),
+            rendered_backing: None,
         };
         let batch = |name: &str, results, error: Option<String>| RefBatch {
             entry_name: name.into(),

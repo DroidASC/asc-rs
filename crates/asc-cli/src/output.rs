@@ -282,6 +282,25 @@ impl<W: Write> LineSink<W> {
         self.write(line, show);
     }
 
+    /// Write a newline-terminated compact block directly when no window,
+    /// spill copy, or `-o` file requires record-by-record bookkeeping.
+    pub(crate) fn rendered_block(&mut self, text: &str, records: usize) -> bool {
+        if !self.window.is_everything() || self.file.is_some() || self.full.is_some() {
+            return false;
+        }
+        self.records += records;
+        self.shown += records;
+        self.shown_bytes += text.len();
+        let Some(out) = self.stdout.as_mut() else { return true };
+        if let Err(e) = out.write_all(text.as_bytes()) {
+            self.stdout = None;
+            if e.kind() != ErrorKind::BrokenPipe {
+                self.fail(format!("cannot write to stdout: {e}"));
+            }
+        }
+        true
+    }
+
     /// A `# ...` line that is always shown and is not a record.
     pub(crate) fn comment(&mut self, line: &str) {
         self.write(line, true);

@@ -634,7 +634,11 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         // indexes (`u32::MAX` would otherwise allocate 512 MiB).
         let max_idx = (buf.len() / 4) as u32;
         let set = IdxSet::from_iter(idxs.iter().copied().filter(|&i| i < max_idx));
-        let matches = scanner.scan(buf, kind, &set);
+        // CodeScanner's public raw API retains unverified byte-pattern
+        // candidates. FindRefs asks its internal instruction-aware variant to
+        // omit odd offsets before allocating candidate storage; no DEX opcode
+        // can start there.
+        let matches = scanner.scan_instruction_candidates(buf, kind, &set);
         let offsets: Vec<u32> = matches.iter().map(|m| m.0).collect();
         let methods = insn.locate(buf, &offsets);
         Ok(matches

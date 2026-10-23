@@ -126,7 +126,7 @@ impl Engine {
     pub fn cached_refs(&self, target: &SearchTarget, query: &Query, aggregate: bool) -> Option<Vec<RefBatch>> {
         let (disk, key) = self.rendered_tier(target)?;
         // A sweep takes no condition resolved over the program, so no notes.
-        tiers::decode_batches(&disk.get_rendered(key, &tiers::findrefs_key(query, sweep_opts(aggregate)))?).map(|r| r.batches)
+        tiers::decode_batches_view(disk.get_rendered_view(key, &tiers::findrefs_key(query, sweep_opts(aggregate)))?).map(|r| r.batches)
     }
 
     /// Keep the batches of a complete search of `query` on this APK in L3
@@ -224,7 +224,7 @@ impl Engine {
 }
 
 fn sweep_opts(aggregate: bool) -> FindOptions {
-    FindOptions { aggregate, context: RefContext::None }
+    FindOptions { aggregate, context: RefContext::None, ..Default::default() }
 }
 
 /// The leader's result, once it is published.
@@ -272,7 +272,7 @@ fn renamed(mut batch: RefBatch, name: &str) -> RefBatch {
     if from != name {
         for r in &mut batch.results {
             if let Some(rest) = r.dex_name.strip_prefix(&from) {
-                r.dex_name = format!("{name}{rest}");
+                r.dex_name = format!("{name}{rest}").into();
             }
         }
         if let Some(e) = &mut batch.error {
@@ -295,10 +295,13 @@ mod tests {
             method_idx: 0,
             method: "La;->m".into(),
             signature: "La;->m()V".into(),
-            matched: vec![],
+            matched: Default::default(),
             relation: None,
             sites: vec![],
             context: None,
+            rendered: false,
+            rendered_ends: Vec::new(),
+            rendered_backing: None,
         };
         let batch = RefBatch {
             entry_name: "classes2.dex".into(),
@@ -310,7 +313,7 @@ mod tests {
         };
         let b = renamed(batch, "classes5.dex");
         assert_eq!(b.entry_name, "classes5.dex");
-        assert_eq!(b.results.iter().map(|r| r.dex_name.as_str()).collect::<Vec<_>>(), ["classes5.dex", "classes5.dex!classes1.dex"]);
+        assert_eq!(b.results.iter().map(|r| r.dex_name.as_ref()).collect::<Vec<_>>(), ["classes5.dex", "classes5.dex!classes1.dex"]);
         assert_eq!(b.error.as_deref(), Some("classes5.dex!classes2.dex: bad"));
         assert_eq!(b.source, "shared");
     }

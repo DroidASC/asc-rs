@@ -187,7 +187,7 @@ impl Engine {
         let mut missing = Vec::new();
         for (i, rule) in rules.iter().enumerate() {
             let replay =
-                rendered.and_then(|(d, k)| d.get_rendered(k, &tiers::findrefs_key(rule, opts))).and_then(|b| tiers::decode_batches(&b));
+                rendered.and_then(|(d, k)| d.get_rendered_view(k, &tiers::findrefs_key(rule, opts))).and_then(tiers::decode_batches_view);
             match replay {
                 Some(recorded) => {
                     for batch in recorded.batches {
@@ -281,7 +281,7 @@ impl Engine {
         aggregate: bool,
         cancel: &AtomicBool,
     ) -> Vec<RefBatch> {
-        let opts = FindOptions { aggregate, context: RefContext::None };
+        let opts = FindOptions { aggregate, context: RefContext::None, ..Default::default() };
         let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, rules, opts);
         search_entry_with(&target.apk, target.key.as_ref(), entry, rules.len(), &run, None, cancel, self.cache.as_deref(), &self.stats)
     }

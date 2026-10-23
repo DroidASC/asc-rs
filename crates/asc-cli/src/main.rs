@@ -724,7 +724,7 @@ fn findrefs_rules(
     }
     let mut errors = Vec::new();
     let mut totals = vec![0usize; rules.len()];
-    let opts = FindOptions { aggregate: true, context };
+    let opts = FindOptions { aggregate: true, context, ..Default::default() };
     let mut print = |(i, batch): (usize, asc_engine::RefBatch), sink: &mut output::LineSink<_>| {
         if let Some(e) = batch.error {
             errors.push(format!("{}: {e}", batch.entry_name));
@@ -1075,13 +1075,24 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let mut order = DexOrder::new(&engine, 1)?;
             let mut sink = io.sink(output.as_ref(), true)?;
             let mut errors = Vec::new();
-            let opts = FindOptions { aggregate: true, context };
+            let opts = FindOptions { aggregate: true, context, method_display: false, compact_text: context == RefContext::None };
             let mut print = |batch: asc_engine::RefBatch, sink: &mut output::LineSink<_>| {
                 if let Some(e) = batch.error {
                     errors.push(format!("{}: {e}", batch.entry_name));
                 }
                 for r in &batch.results {
-                    sink.line(&r.text());
+                    if let Some((block, count)) = r.rendered_block() {
+                        if sink.rendered_block(block, count) {
+                            continue;
+                        }
+                    }
+                    if let Some(lines) = r.rendered_lines() {
+                        for line in lines {
+                            sink.line(line);
+                        }
+                    } else {
+                        sink.line(&r.text());
+                    }
                 }
             };
             let summary = engine
