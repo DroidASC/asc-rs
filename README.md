@@ -29,7 +29,7 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
   mcp          Serve MCP tools over stdio, keeping opened APKs resident.
   cache        Inspect or clear the on-disk cache (path | stats | clear).
 
-  --threads N      worker threads (default: number of logical CPUs); --thread N also works
+  --threads N      worker threads (default: logical CPUs split with your other busy mcp/gui processes); --thread N also works
   --no-cache       bypass the on-disk cache of inflated DEX files
   --cache-dir DIR  use DIR instead of the default cache directory
   --cache-max-mb MIB  on-disk cache budget (default: automatic, see "Caching")
@@ -297,8 +297,9 @@ asc-rs 找到的行与 Python 参考实现相同（采用自己的行格式）�
 
 | | 自动预算 | 显式指定 |
 |---|---|---|
-| 磁盘 | cache 可容纳量（自身字节数 + 文件系统剩余空间）的 20 %，最多 4 GiB，且绝不会使剩余空间少于 max(1 GiB, 文件系统的 5 %)；无法读取剩余空间时（Windows）为 4 GiB | `--cache-max-mb MIB`，否则 `$DROIDASC_CACHE_MAX_MB` |
+| 磁盘 | cache 可容纳量（自身字节数 + 文件系统剩余空间）的 20 %，最多 32 GiB，且绝不会使剩余空间少于 max(1 GiB, 文件系统的 5 %)；无法读取剩余空间时（Windows）为 4 GiB | `--cache-max-mb MIB`，否则 `$DROIDASC_CACHE_MAX_MB` |
 | 内存（gui、mcp） | 用户所有正在运行的 `gui` / `mcp` 进程共用一个预算，平均分配：(可用内存 + 它们的 cache 所占) 的四分之一，除以进程数，每个 64 MiB–2 GiB；无法读取时为 2 GiB。每个进程在 `$XDG_RUNTIME_DIR/droidasc` 中登记，并最多每秒重读一次登记表 | `--memory-mb MIB`（固定值；仍会登记，以便其他进程将其计入） |
+| 线程 | 逻辑 CPU 在本进程与该用户其他已登记、且最近 5 秒内加载过条目的 `gui` / `mcp` 进程之间平均分配（agent 两次调用之间空闲的服务器不计入），总数最多每个 CPU 4 个 worker：忙碌进程不超过 4 个时每个进程都用满全部 CPU，最少 2 个；每次搜索都会重新读取，注册表最多每秒读一次。一次性命令会计入常驻进程，但自己不登记 | `--threads N` |
 
 磁盘预算在每次淘汰时重新计算（每一批写入一次，与之前同样的目录遍历），每次按自动预算写入前先用一次
 `statvfs` 检查剩余空间：会侵占保留空间的条目不会写入；当其他程序把磁盘写满时，下一次淘汰会把 cache

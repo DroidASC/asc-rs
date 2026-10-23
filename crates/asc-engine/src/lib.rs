@@ -60,7 +60,7 @@ pub use prebuild::PrebuildReport;
 pub use resources::{parse_id, ResourceField, ResourceRow};
 pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
-pub use tiers::auto_memory_share;
+pub use tiers::{auto_memory_share, auto_threads, auto_threads_for};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -864,7 +864,7 @@ impl<'a> Loaded<'a> {
 /// Engine over one APK.
 pub struct Engine {
     apk_path: PathBuf,
-    threads: usize,
+    threads: Threads,
     debug: bool,
     logger: Logger,
     cache: Option<Arc<EngineCache>>,
@@ -901,16 +901,43 @@ struct Stats {
     skipped: AtomicUsize,
 }
 
-/// Worker threads to use when the caller does not say.
-pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
+/// Worker threads of a search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Threads {
+    /// [`auto_threads`], read again by every search.
+    #[default]
+    Auto,
+    Fixed(usize),
+}
+
+impl Threads {
+    /// The thread count for a search starting now (at least 1).
+    pub fn count(self) -> usize {
+        match self {
+            Threads::Auto => auto_threads(),
+            Threads::Fixed(n) => n.max(1),
+        }
+    }
+}
+
+impl From<usize> for Threads {
+    fn from(n: usize) -> Threads {
+        Threads::Fixed(n)
+    }
+}
+
+/// `None` (no `--threads`) is [`Threads::Auto`].
+impl From<Option<usize>> for Threads {
+    fn from(n: Option<usize>) -> Threads {
+        n.map_or(Threads::Auto, Threads::Fixed)
+    }
 }
 
 impl Engine {
     pub fn new(apk_path: impl AsRef<Path>) -> Engine {
         Engine {
             apk_path: apk_path.as_ref().to_path_buf(),
-            threads: default_threads(),
+            threads: Threads::Auto,
             debug: false,
             logger: Arc::new(|m| println!("{m}")),
             cache: None,
@@ -930,8 +957,8 @@ impl Engine {
         self
     }
 
-    pub fn with_threads(mut self, threads: usize) -> Engine {
-        self.threads = threads.max(1);
+    pub fn with_threads(mut self, threads: impl Into<Threads>) -> Engine {
+        self.threads = threads.into();
         self
     }
 
@@ -989,8 +1016,9 @@ impl Engine {
         &self.apk_path
     }
 
+    /// The thread count for a search starting now.
     pub fn threads(&self) -> usize {
-        self.threads
+        self.threads.count()
     }
 
     pub fn cache_stats(&self) -> CacheStats {
@@ -1146,7 +1174,7 @@ impl Engine {
         let target: Arc<Vec<u8>> = Arc::new(asc_dex::mutf8::encode(descriptor));
         let next = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let workers = self.threads.min(entries.len()).max(1);
+        let workers = self.threads().min(entries.len()).max(1);
         let (tx, rx) = mpsc::channel::<std::result::Result<Option<ClassHit>, EngineError>>();
         let debug = self.debug;
         for w in 0..workers {
@@ -1382,7 +1410,7 @@ impl Engine {
         let mut recorder = rendered.as_ref().map(|_| tiers::ResultRecorder::new());
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<RefBatch>();
-        let workers = self.threads.min(entries.len()).max(1);
+        let workers = self.threads().min(entries.len()).max(1);
         let cache = self.cache.as_deref();
         let stats = &self.stats;
         let probe = skip::Probe::new(vec![&compiled]);
@@ -1470,7 +1498,7 @@ impl Engine {
         }
         let key = self.apk_key(&apk);
         let next = AtomicUsize::new(0);
-        let workers = self.threads.min(entries.len()).max(1);
+        let workers = self.threads().min(entries.len()).max(1);
         let cache = self.cache.as_deref();
         let l2 = cache.and_then(|c| c.disk.as_deref()).filter(|d| d.uses(Tier::Derived)).zip(key.as_ref());
         let mut slots: Vec<Option<std::result::Result<Vec<DexView>, String>>> = (0..entries.len()).map(|_| None).collect();

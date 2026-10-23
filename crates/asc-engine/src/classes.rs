@@ -149,7 +149,7 @@ impl Engine {
         let slots: Vec<Mutex<Option<EntryClasses>>> = (0..total).map(|_| Mutex::new(None)).collect();
         let next = AtomicUsize::new(0);
         let done = AtomicUsize::new(0);
-        let workers = self.threads.min(total).max(1);
+        let workers = self.threads().min(total).max(1);
         std::thread::scope(|s| {
             for _ in 0..workers {
                 let (apk, entries, order, slots, key, prefix) = (&apk, &entries, &order, &slots, key.as_ref(), prefix.as_ref());

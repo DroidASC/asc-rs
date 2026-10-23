@@ -35,7 +35,7 @@ mod rules;
 
 use asc_engine::{
     names, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch, RefContext,
-    RefResult, SharedCache, SmaliOptions,
+    RefResult, SharedCache, SmaliOptions, Threads,
 };
 use asc_findrefs::Query;
 use class_text::ClassText;
@@ -65,7 +65,7 @@ const PACKAGE_DEPTH: usize = 3;
 
 /// Server settings.
 pub struct Options {
-    pub threads: usize,
+    pub threads: Threads,
     pub debug: bool,
     /// Shared by every opened APK.
     pub cache: CacheConfig,
@@ -84,10 +84,10 @@ impl Options {
     /// Guarded inflate limits, the built-in SDK prefixes, replies spilled
     /// under the cache directory (see [`SpillDir::default_dir`]) and the
     /// full structured results.
-    pub fn new(threads: usize, debug: bool, cache: CacheConfig) -> Options {
+    pub fn new(threads: impl Into<Threads>, debug: bool, cache: CacheConfig) -> Options {
         let spill_dir = SpillDir::default_dir(cache.disk.as_ref().map(|d| d.dir()));
         Options {
-            threads,
+            threads: threads.into(),
             debug,
             cache,
             limits: InflateLimits::guarded(),
@@ -251,7 +251,7 @@ struct Sessions {
 /// Session state: the opened APKs and the cache they share. Tool calls take
 /// `&self` and may run concurrently.
 pub struct Server {
-    threads: usize,
+    threads: Threads,
     debug: bool,
     limits: InflateLimits,
     /// Descriptor prefixes (`Lcom/foo/`) of `collapse_sdks`.
@@ -593,7 +593,7 @@ impl Server {
                 apk.engine.release_memory_cache();
             }
         };
-        let mut outcomes = multi::fan_out(self.threads, &apks, &call.cancel, &plan, &run, done).into_iter();
+        let mut outcomes = multi::fan_out(self.threads.count(), &apks, &call.cancel, &plan, &run, done).into_iter();
         let mut stats = SweepStats { released: release, ..SweepStats::default() };
         let (mut sections, mut empty) = (Vec::new(), Vec::new());
         for (path, o) in paths.iter().zip(&opened) {

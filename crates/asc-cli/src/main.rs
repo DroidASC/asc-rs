@@ -5,7 +5,7 @@ mod daemon;
 mod output;
 
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
-use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
+use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext, Threads};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use output::{Io, LocalEngines};
@@ -89,10 +89,6 @@ const SUBCOMMANDS: [&str; 16] = [
     "daemon",
 ];
 
-fn default_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
-}
-
 #[derive(Parser)]
 #[command(name = "droidasc", about = "ASC tooling entry.", after_help = EXAMPLES, version, disable_version_flag = true)]
 struct Cli {
@@ -110,9 +106,12 @@ struct Common {
     /// Enable debug profiling output (written to stderr).
     #[arg(long, global = true)]
     debug: bool,
-    /// Worker thread count (default: number of logical CPUs).
-    #[arg(long, alias = "thread", global = true, value_name = "N", default_value_t = default_threads())]
-    threads: usize,
+    /// Worker thread count (default: the logical CPUs; once more than 4 of
+    /// this user's processes are busy, 4 per CPU split between them and the
+    /// other busy `mcp` / `gui` processes, at least 2. Resident hosts follow
+    /// them as they start and stop).
+    #[arg(long, alias = "thread", global = true, value_name = "N")]
+    threads: Option<usize>,
     /// Do not read or write the on-disk cache of inflated DEX files.
     #[arg(long, global = true)]
     no_cache: bool,
@@ -120,7 +119,7 @@ struct Common {
     #[arg(long, global = true, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
     /// On-disk cache budget, in MiB (default: $DROIDASC_CACHE_MAX_MB, else
-    /// automatic: 20% of the cache's file system room, at most 4096, never
+    /// automatic: 20% of the cache's file system room, at most 32768, never
     /// below a 1 GiB / 5% free-space reserve).
     #[arg(long, global = true, value_name = "MIB")]
     cache_max_mb: Option<u64>,
@@ -927,7 +926,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
     let common = cli.common;
     match cli.command {
         Command::Gui { apk_path } => {
-            launch_gui(apk_path, common.threads, common.debug, common.resident_cache())?;
+            launch_gui(apk_path, common.threads.into(), common.debug, common.resident_cache())?;
         }
         Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes, structured, spill_mb } => {
             let mut opts = asc_mcp::Options::new(common.threads, common.debug, common.resident_cache());
@@ -996,7 +995,7 @@ fn daemon_command(_common: &Common, _action: DaemonAction) -> Result<u8, String>
 }
 
 #[cfg(feature = "gui")]
-fn launch_gui(apk_path: PathBuf, threads: usize, debug: bool, cache: CacheConfig) -> Result<(), String> {
+fn launch_gui(apk_path: PathBuf, threads: Threads, debug: bool, cache: CacheConfig) -> Result<(), String> {
     asc_gui::launch(apk_path, threads, debug, cache).map_err(|e| e.to_string())
 }
 
@@ -1005,7 +1004,7 @@ fn mib(bytes: u64) -> String {
 }
 
 #[cfg(not(feature = "gui"))]
-fn launch_gui(_apk_path: PathBuf, _threads: usize, _debug: bool, _cache: CacheConfig) -> Result<(), String> {
+fn launch_gui(_apk_path: PathBuf, _threads: Threads, _debug: bool, _cache: CacheConfig) -> Result<(), String> {
     Err("this build was compiled without the `gui` feature".into())
 }
 

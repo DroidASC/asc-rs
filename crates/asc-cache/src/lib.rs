@@ -300,8 +300,11 @@ pub enum DiskCapacity {
     Fixed(u64),
 }
 
-/// Upper bound of the automatic disk budget.
-pub const AUTO_DISK_MAX: u64 = 4 << 30;
+/// Upper bound of the automatic disk budget. Large enough for the inflated
+/// DEX of a phone's worth of APKs (416 system and store APKs: 8.6 GB).
+pub const AUTO_DISK_MAX: u64 = 32 << 30;
+/// The automatic disk budget where the free space cannot be read.
+pub const AUTO_DISK_UNKNOWN: u64 = 4 << 30;
 /// Smallest free space the automatic budget leaves on the file system; the
 /// reserve is the larger of this and [`AUTO_DISK_RESERVE_PERCENT`] of it.
 pub const AUTO_DISK_RESERVE_MIN: u64 = 1 << 30;
@@ -317,7 +320,7 @@ pub fn auto_disk_reserve(total: u64) -> u64 {
 
 /// The automatic disk budget for a cache holding `used` bytes on a file
 /// system with `(free, total)` bytes (`None`: unknown, e.g. on Windows,
-/// giving [`AUTO_DISK_MAX`]).
+/// giving [`AUTO_DISK_UNKNOWN`]).
 ///
 /// [`AUTO_DISK_PERCENT`] of what the cache could occupy (its own bytes plus
 /// the free space), at most [`AUTO_DISK_MAX`], and never more than leaves
@@ -326,7 +329,7 @@ pub fn auto_disk_reserve(total: u64) -> u64 {
 /// (No separate floor: with a reserve of at least 1 GiB, the reserve is
 /// always the tighter bound on a disk too small for 20 % to reach 256 MiB.)
 pub fn auto_disk_bytes_for(space: Option<(u64, u64)>, used: u64) -> u64 {
-    let Some((free, total)) = space else { return AUTO_DISK_MAX };
+    let Some((free, total)) = space else { return AUTO_DISK_UNKNOWN };
     let room = used.saturating_add(free);
     let budget = (room / 100 * AUTO_DISK_PERCENT).min(AUTO_DISK_MAX);
     budget.min(room.saturating_sub(auto_disk_reserve(total)))
@@ -427,7 +430,7 @@ fn is_cache_dir_name(name: &str) -> bool {
 
 impl DiskCache {
     /// Capacity of [`DiskCapacity::Auto`] when the free space is unknown.
-    pub const DEFAULT_CAP: u64 = AUTO_DISK_MAX;
+    pub const DEFAULT_CAP: u64 = AUTO_DISK_UNKNOWN;
 
     /// The default cache directory: `$DROIDASC_CACHE_DIR`, else
     /// `$XDG_CACHE_HOME/droidasc`, else `~/.cache/droidasc`.
@@ -1414,9 +1417,11 @@ mod tests {
     #[test]
     fn auto_disk_budget_follows_free_space() {
         // Unknown file system (Windows): the old fixed cap.
-        assert_eq!(auto_disk_bytes_for(None, 0), AUTO_DISK_MAX);
-        // Large disk: capped at 4 GiB.
+        assert_eq!(auto_disk_bytes_for(None, 0), AUTO_DISK_UNKNOWN);
+        // Large disk: capped at 32 GiB.
         assert_eq!(auto_disk_bytes_for(Some((500 * GIB, 1000 * GIB)), 0), AUTO_DISK_MAX);
+        // 100 GiB free: 20 GiB, past the old 4 GiB cap.
+        assert_eq!(auto_disk_bytes_for(Some((100 * GIB, 500 * GIB)), 0), 100 * GIB / 100 * 20);
         // Small disk: 20 % of free + own bytes.
         assert_eq!(auto_disk_bytes_for(Some((10 * GIB, 20 * GIB)), 0), 10 * GIB / 100 * 20);
         assert_eq!(auto_disk_bytes_for(Some((9 * GIB, 20 * GIB)), GIB), 10 * GIB / 100 * 20);

@@ -280,7 +280,7 @@ lazily by the queries themselves):
   `$DROIDASC_CACHE_TIERS`) turns tiers off: their reads miss and writes are skipped. The cap is a
   `DiskCapacity`: `Fixed(bytes)` (`--cache-max-mb`, `$DROIDASC_CACHE_MAX_MB`) or `Auto`
   (default), which `capacity_for(used)` turns into `auto_disk_bytes_for(disk_space(dir),
-  used)` = min(20 % of used + free, 4 GiB, used + free - `auto_disk_reserve(total)`),
+  used)` = min(20 % of used + free, 32 GiB, used + free - `auto_disk_reserve(total)`),
   the reserve being max(1 GiB, 5 % of the file system). `evict` recomputes it on every
   pass, so a disk filled by someone else shrinks the cache below its current size;
   `put` refuses (`CacheError::LowDiskSpace`) an entry that would leave less than the
@@ -316,7 +316,17 @@ lazily by the queries themselves):
   stale pids are recognised by the start time and removed by readers) and, at most once a
   second after charging bytes, resizes itself (`MemoryCache::set_capacity`) to
   `auto_memory_share` = (available + held by every registered process) / 4 / processes.
-  A fixed `--memory-mb` cache registers too but keeps its size.
+  A fixed `--memory-mb` cache registers too but keeps its size. The registry needs a
+  process start time to tell a reused pid apart: `/proc/<pid>/stat` on Linux,
+  `proc_pidinfo(PROC_PIDTBSDINFO)` on macOS; elsewhere processes do not register.
+* Threads: `Threads::Auto` (no `--threads`) is resolved by every search through
+  `auto_threads` = clamp(4 x CPUs / (1 + other registered processes whose entry is under
+  5 s old), 2, CPUs). An entry is rewritten only by `maybe_rebalance`, i.e. while its process
+  charges loaded entries, so its age separates processes scanning now from servers
+  waiting for their next call. N servers scanning together then share the CPUs instead
+  of each starting one worker per CPU. The factor 4 is measured: an exact split leaves
+  CPUs idle while the processes holding the largest APKs finish alone (8 servers over
+  312 APKs on 16 CPUs: 223 ms with 2 workers each, 180 ms with 8, 176 ms with 16).
 * Remapping: a freshly inflated entry that goes into the memory cache is queued for the
   disk writer together with a `Weak` handle to it. Once the file is renamed into place
   the writer maps it, compares it with the heap bytes, and swaps the LRU slot for a

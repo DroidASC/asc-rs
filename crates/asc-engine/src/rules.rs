@@ -149,7 +149,7 @@ impl Engine {
         let mut recorders: Vec<_> = missing.iter().map(|_| rendered.map(|_| tiers::ResultRecorder::new())).collect();
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<Vec<RefBatch>>();
-        let workers = self.threads.min(entries.len()).max(1);
+        let workers = self.threads().min(entries.len()).max(1);
         let searched: Vec<&CompiledQuery> = missing.iter().map(|&i| &compiled[i]).collect();
         let (cache, stats, searched) = (self.cache.as_deref(), &self.stats, &searched);
         let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, searched, opts);
