@@ -59,9 +59,9 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
     }
     // Keep only methods every definition `all` part also names (`def_all[0]`
     // already seeded the set when there is no code part).
+    // Both are checked candidate by candidate, reading only their classes.
     for d in def_all.iter().skip(usize::from(n == 0)) {
-        let keep = defined_method_set(dex, d)?;
-        methods.retain(|m, _| keep.contains(m));
+        retain_defined(dex, &mut methods, d, true)?;
     }
     // Drop methods a `none` part matches, code or definition.
     for h in hits[n..].iter().flatten() {
@@ -70,8 +70,7 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
         }
     }
     for d in &def_none {
-        let drop = defined_method_set(dex, d)?;
-        methods.retain(|m, _| !drop.contains(m));
+        retain_defined(dex, &mut methods, d, false)?;
     }
     let def_labels: Vec<String> = def_all.iter().map(|d| d.label()).collect();
     let mut rows = Vec::with_capacity(methods.len());
@@ -100,6 +99,22 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
         attach_context(fr, &mut rows, opts.context)?;
     }
     Ok(rows)
+}
+
+/// Keep the methods of `methods` whose definition matches `d` (`keep`) or
+/// does not (`!keep`).
+fn retain_defined<V>(dex: &asc_dex::Dex<'_>, methods: &mut BTreeMap<u32, V>, d: &Defined, keep: bool) -> Result<()> {
+    let mut filter = crate::defs::DefinedFilter::new(dex, d)?;
+    let mut out = Vec::new();
+    for &m in methods.keys() {
+        if filter.matches(m)? != keep {
+            out.push(m);
+        }
+    }
+    for m in out {
+        methods.remove(&m);
+    }
+    Ok(())
 }
 
 /// The method ids a resolved definition predicate names in this DEX, as a set.

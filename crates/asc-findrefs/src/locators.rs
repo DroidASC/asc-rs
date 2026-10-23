@@ -53,16 +53,6 @@ impl StringLocator {
         self.offsets.heap_bytes()
     }
 
-    /// Index of the string whose data contains absolute offset `pos`.
-    fn idx_at(&self, pos: usize) -> Option<u32> {
-        let i = self.offsets.partition_point(|&[off, _]| (off as usize) <= pos);
-        if i == 0 {
-            None
-        } else {
-            Some(self.offsets[i - 1][1])
-        }
-    }
-
     /// The string-data region of `buf` (empty when `buf` is not the buffer the
     /// locator was built from and the offsets do not fit).
     fn region<'b>(&self, buf: &'b [u8]) -> &'b [u8] {
@@ -71,42 +61,78 @@ impl StringLocator {
         &buf[start..end]
     }
 
-    /// All string indexes whose data matches `re`.
+    /// All string indexes whose data matches `re`, each string matched on
+    /// its own: a match never runs from one string into the next.
     ///
-    /// One pass over the whole string-data region, except for a pattern with
-    /// anchors (`^`, `$`, `\A`, `\z`): those match each string on its own, so
-    /// `^abc$` means a string that is exactly `abc` rather than the start and
-    /// end of the region.
+    /// One pass over the whole string-data region; a match that does not lie
+    /// inside one string (it crossed a terminator or a length prefix) is
+    /// discarded, and every string it touched is matched again on its own,
+    /// so a real match it overlapped is not lost. A pattern with look-around
+    /// (`^`, `$`, `\b`, ...) is matched string by string from the start, so
+    /// `^abc$` means a string that is exactly `abc`.
     pub fn locate(&self, buf: &[u8], re: &Regex) -> BTreeSet<u32> {
         let mut out = BTreeSet::new();
         if self.offsets.is_empty() {
             return out;
         }
-        if has_anchors(re) {
-            return self.locate_each(buf, re);
+        let shape = PatternShape::of(re);
+        if shape.looks {
+            return self.locate_each(buf, re, shape.extent);
         }
         let region = self.region(buf);
-        for m in re.find_iter(region) {
-            if let Some(idx) = self.idx_at(self.strdata_start + m.start()) {
-                out.insert(idx);
+        // Region offset of the string at sorted position `p` (the region end
+        // past the last one).
+        let start_of = |p: usize| self.offsets.get(p).map_or(region.len(), |&[off, _]| (off as usize).saturating_sub(self.strdata_start));
+        let mut at = 0;
+        while at <= region.len() {
+            let Some(m) = re.find_at(region, at) else { break };
+            let abs = self.strdata_start + m.start();
+            // Sorted positions of the strings starting at or before the match.
+            let p = self.offsets.partition_point(|&[off, _]| (off as usize) <= abs);
+            if let Some((from, to)) = p.checked_sub(1).and_then(|q| self.extent(buf, q, shape.extent)) {
+                if from <= abs && abs + m.len() <= to {
+                    out.insert(self.offsets[p - 1][1]);
+                    // The string matched: its rest cannot add anything.
+                    at = start_of(p).max(m.end()).max(m.start() + 1);
+                    continue;
+                }
             }
+            // A match across strings: match each string it touched alone.
+            let last = abs + m.len().max(1) - 1;
+            let q = self.offsets.partition_point(|&[off, _]| (off as usize) <= last);
+            for i in p.saturating_sub(1)..q {
+                if self.matches_alone(buf, i, re, shape.extent) {
+                    out.insert(self.offsets[i][1]);
+                }
+            }
+            at = start_of(q).max(m.end()).max(m.start() + 1);
         }
         out
     }
 
-    /// [`StringLocator::locate`] string by string: the data of each, without
-    /// its length prefix and terminator. An unreadable string never matches.
-    fn locate_each(&self, buf: &[u8], re: &Regex) -> BTreeSet<u32> {
-        let mut out = BTreeSet::new();
-        for &[off, idx] in self.offsets.iter() {
-            let off = off as usize;
-            let Some(data) = asc_dex::leb128::uleb128_len(buf, off).ok().and_then(|n| buf.get(off + n..)) else { continue };
-            let data = &data[..memchr::memchr(0, data).unwrap_or(data.len())];
-            if re.is_match(data) {
-                out.insert(idx);
-            }
-        }
-        out
+    /// [`StringLocator::locate`] string by string, each string being its
+    /// `extent`. An unreadable string never matches.
+    fn locate_each(&self, buf: &[u8], re: &Regex, extent: Extent) -> BTreeSet<u32> {
+        (0..self.offsets.len()).filter(|&i| self.matches_alone(buf, i, re, extent)).map(|i| self.offsets[i][1]).collect()
+    }
+
+    /// Whether `re` matches the string at sorted position `i` on its own.
+    fn matches_alone(&self, buf: &[u8], i: usize, re: &Regex, extent: Extent) -> bool {
+        self.extent(buf, i, extent).is_some_and(|(from, to)| re.is_match(&buf[from..to]))
+    }
+
+    /// Absolute `[from, to)` of the string at sorted position `i`: its data
+    /// after the length prefix, plus the terminator for
+    /// [`Extent::WithTerminator`]. `None` when the prefix is unreadable.
+    fn extent(&self, buf: &[u8], i: usize, extent: Extent) -> Option<(usize, usize)> {
+        let off = self.offsets[i][0] as usize;
+        let from = off + asc_dex::leb128::uleb128_len(buf, off).ok()?;
+        let data = buf.get(from..)?;
+        let to = match memchr::memchr(0, data) {
+            Some(n) => from + n + usize::from(extent == Extent::WithTerminator),
+            None => buf.len(),
+        };
+        Some((from, to))
     }
 
     /// All string indexes whose data contains the literal bytes `finder`
@@ -153,10 +179,63 @@ impl StringLocator {
     }
 }
 
-/// Whether `re` has a start / end anchor (of the haystack or of a line).
-/// A pattern the parser rejects is searched over the whole region, as before.
-fn has_anchors(re: &Regex) -> bool {
-    regex_syntax::ParserBuilder::new().utf8(false).build().parse(re.as_str()).is_ok_and(|hir| hir.properties().look_set().contains_anchor())
+/// What a string is to a pattern.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Extent {
+    /// Its data.
+    Data,
+    /// Its data and its terminating NUL, for a pattern that spells a NUL:
+    /// class patterns end a descriptor with `;\x00`.
+    WithTerminator,
+}
+
+/// The properties of a pattern that decide how strings are matched.
+struct PatternShape {
+    /// Look-around (anchors, word boundaries) sees the string's edges.
+    looks: bool,
+    extent: Extent,
+}
+
+impl PatternShape {
+    /// A pattern the parser rejects is searched over the whole region as
+    /// data, as before.
+    fn of(re: &Regex) -> PatternShape {
+        let pattern = re.as_str();
+        let looks =
+            regex_syntax::ParserBuilder::new().utf8(false).build().parse(pattern).is_ok_and(|hir| !hir.properties().look_set().is_empty());
+        let spells_nul =
+            regex_syntax::ast::parse::Parser::new().parse(pattern).is_ok_and(|ast| regex_syntax::ast::visit(&ast, NulFinder).is_err());
+        PatternShape { looks, extent: if spells_nul { Extent::WithTerminator } else { Extent::Data } }
+    }
+}
+
+/// Fails the walk at a literal NUL (`\x00`, `\0`, in a class or a range
+/// from it). A NUL only reached through `.` or a negated class does not
+/// count: those keep to the string's data.
+struct NulFinder;
+
+impl regex_syntax::ast::Visitor for NulFinder {
+    type Output = ();
+    type Err = ();
+
+    fn finish(self) -> std::result::Result<(), ()> {
+        Ok(())
+    }
+
+    fn visit_pre(&mut self, ast: &regex_syntax::ast::Ast) -> std::result::Result<(), ()> {
+        match ast {
+            regex_syntax::ast::Ast::Literal(l) if l.c == '\0' => Err(()),
+            _ => Ok(()),
+        }
+    }
+
+    fn visit_class_set_item_pre(&mut self, item: &regex_syntax::ast::ClassSetItem) -> std::result::Result<(), ()> {
+        match item {
+            regex_syntax::ast::ClassSetItem::Literal(l) if l.c == '\0' => Err(()),
+            regex_syntax::ast::ClassSetItem::Range(r) if r.start.c == '\0' => Err(()),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Locates type indexes through their descriptor strings.

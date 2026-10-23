@@ -11,6 +11,9 @@
 //!   query, replayed by a later run of the same query on the same APK with
 //!   the same build of the tool.
 //!
+//! * L2 also keeps the class graph (`hierarchy::GRAPH_KIND`, one per APK),
+//!   used in place where it is mapped.
+//!
 //! Other derived indexes (call graph edges, resource tables, manifest
 //! summaries) go to L2 the same way: serialise them into bytes that can be
 //! viewed in place, store them with `DiskCache::put_derived(key, name, kind,

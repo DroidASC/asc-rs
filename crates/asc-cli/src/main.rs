@@ -166,6 +166,14 @@ impl Common {
     /// Read the settings: the flags above, then the environment and the
     /// config file. Every command needs them; `main` calls this first.
     fn resolve(&mut self) -> Result<(), String> {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        self.resolve_in(&cwd)
+    }
+
+    /// [`Common::resolve`] with a relative cache directory given as a flag
+    /// (`--cache-dir`, `--set cache.dir=`) taken from `cwd`: the client's,
+    /// when the daemon (running in `/`) reads the flags.
+    fn resolve_in(&mut self, cwd: &Path) -> Result<(), String> {
         let mut flags: Vec<(String, String)> = Vec::new();
         let mut flag = |key: &str, value: String| flags.push((key.into(), value));
         if let Some(n) = self.threads {
@@ -176,8 +184,7 @@ impl Common {
         }
         if let Some(d) = &self.cache_dir {
             // Absolute, so a daemon started from here (in `/`) uses the same one.
-            let d = std::env::current_dir().map(|cwd| cwd.join(d)).unwrap_or_else(|_| d.clone());
-            flag("cache.dir", d.display().to_string());
+            flag("cache.dir", cwd.join(d).display().to_string());
         }
         if let Some(mb) = self.cache_max_mb {
             flag("cache.max", mb.to_string());
@@ -192,7 +199,13 @@ impl Common {
             let Some((key, value)) = pair.split_once('=') else {
                 return Err(format!("--set {pair:?}: expected KEY=VALUE, e.g. --set memory.max=4G (keys: droidasc config)"));
             };
-            flag(key.trim(), value.trim().to_string());
+            let (key, value) = (key.trim(), value.trim());
+            match key {
+                "cache.dir" if !matches!(value, "" | "default") && !value.starts_with('~') => {
+                    flag(key, cwd.join(value).display().to_string());
+                }
+                _ => flag(key, value.to_string()),
+            }
         }
         self.config = Some(Config::load(&flags).map_err(|e| format!("{e} (droidasc config lists the settings)"))?);
         Ok(())
@@ -877,6 +890,9 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant)
     }
     if let Some(w) = &src.warning {
         io.note(format_args!("Warning: {w}"));
+    }
+    if !src.also_defined_in.is_empty() {
+        io.note(format_args!("# {descriptor} from {}; also defined in {}", src.dex_name, src.also_defined_in.join(", ")));
     }
     if let Some(p) = &args.dump_dex {
         let rebuilt = src.rebuilt.as_ref().ok_or_else(|| format!("cannot write {}: the class was not rebuilt", p.display()))?;

@@ -5,6 +5,7 @@ use crate::{ApkError, Result};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// File extensions a directory contributes.
 const EXTENSIONS: [&str; 4] = ["apk", "jar", "zip", "dex"];
@@ -15,6 +16,21 @@ const MAX_DEPTH: usize = 8;
 pub(crate) struct Source {
     pub path: PathBuf,
     pub label: String,
+}
+
+/// Which files an [`Apk`](crate::Apk) was opened from, with their sizes
+/// and modification times ([`Apk::version_of`](crate::Apk::version_of)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version(Vec<(PathBuf, u64, Option<SystemTime>)>);
+
+impl Version {
+    pub(crate) fn of_sources(sources: &[Source]) -> Result<Version> {
+        let stat = |s: &Source| {
+            let meta = fs::metadata(&s.path).map_err(|source| ApkError::Io { path: s.path.clone(), source })?;
+            Ok((s.path.clone(), meta.len(), meta.modified().ok()))
+        };
+        Ok(Version(sources.iter().map(stat).collect::<Result<_>>()?))
+    }
 }
 
 /// The paths `spec` joins with `,`, or `spec` itself when a file of that

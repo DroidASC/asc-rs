@@ -178,6 +178,33 @@ fn output_files_land_relative_to_the_client() {
 }
 
 #[test]
+fn a_relative_cache_dir_is_the_clients() {
+    let env = Env::new();
+    let run = |daemon: bool, cache: &str| {
+        let mut cmd = Command::new(&env.exe);
+        cmd.current_dir(env.work.path())
+            .env("DROIDASC_CONFIG", "")
+            .env("DROIDASC_RUNTIME_DIR", env.runtime.path())
+            .env_remove("DROIDASC_DAEMON")
+            .args(["findrefs", "app.apk", "string", "token", "--threads", "1", "--limit", "1"])
+            .args(["--set", &format!("cache.dir={cache}")]);
+        if !daemon {
+            cmd.env("DROIDASC_DAEMON", "off");
+        }
+        cmd.output().expect("run droidasc")
+    };
+    for (daemon, cache) in [(false, "local-cache"), (true, "remote-cache")] {
+        let out = run(daemon, cache);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{out:?}");
+        // The cut output goes to the cache's out/, below the client's directory.
+        let spilled = env.work.path().join(cache).join("out");
+        assert!(stdout.contains(&spilled.display().to_string()), "{stdout}");
+        assert!(std::fs::read_dir(&spilled).unwrap().next().is_some());
+    }
+}
+
+#[test]
 fn first_command_starts_the_daemon_and_off_bypasses_it() {
     let env = Env::new();
     let off = env.run(false, &["listclass", "app.apk"]);

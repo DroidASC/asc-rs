@@ -101,6 +101,27 @@ fn anchors_apply_to_each_string() {
 }
 
 #[test]
+fn matches_never_run_from_one_string_into_the_next() {
+    let data = make_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let loc = StringLocator::build(&dex).unwrap();
+    let find = |p: &str| loc.locate_pattern(dex.buf(), p).unwrap().into_iter().collect::<Vec<_>>();
+    // Strings: Lexample/Test; Ljava/lang/Object; V first second token
+    // Over the whole region `st.{2}se` would join "first" to "second".
+    assert!(find("st.{2}se").is_empty() && find("st[^x]+se").is_empty());
+    // A greedy match from the first string across all of them must not hide
+    // the strings that match alone.
+    assert_eq!(find("e.*n"), [4, 5]);
+    assert_eq!(find("irst[^z]*"), [3]);
+    // A spelled NUL is the terminator: class patterns end descriptors so.
+    assert_eq!(find(r";\x00"), [0, 1]);
+    assert_eq!(find(r"[/L]Test;\x00"), [0]);
+    assert!(find(r"t\x00s").is_empty());
+    // Word boundaries see each string's edges, not the length prefix.
+    assert_eq!(find(r"\btoken"), [5]);
+}
+
+#[test]
 fn method_sets_are_the_union_of_their_members() {
     let data = make_dex();
     let dex = Dex::parse(&data).unwrap();

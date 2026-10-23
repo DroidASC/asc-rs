@@ -2,22 +2,37 @@
 //! implementers, supertypes, and which of them define (override) a method.
 //!
 //! The graph is built from the `class_def_item`s of every DEX (superclass and
-//! interface list per class, interned descriptors, edges sorted both ways)
-//! and kept on the engine for later queries until the APK changes or
-//! [`Engine::release_memory_cache`] drops it. A type the APK only references
+//! interface list per class, interned descriptors, edges sorted both ways,
+//! the class annotations of each class) and kept on the engine for later
+//! queries until the APK changes or [`Engine::release_memory_cache`] drops
+//! it. With a disk cache it is also persisted to L2 ([`GRAPH_KIND`]), so a
+//! later process maps it back instead of reading every class definition. A type the APK only references
 //! (a framework class) is a node without a definition: its own supertypes are
 //! unknown.
 
 use crate::resources::{file_ident, FileIdent};
-use crate::{cancelled, DexView, Engine, EngineError, Result, NOT_CANCELLED};
+use crate::{cancelled, DexView, Engine, EngineError, Job, Result, WriteJob, NOT_CANCELLED};
+use asc_cache::Tier;
 use asc_dex::Dex;
 use asc_findrefs::ClassRelation;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+mod packed;
+
+use packed::{Builder, Packed};
 
 /// No `superclass_idx` (`java.lang.Object` itself).
 const NO_INDEX: u32 = u32::MAX;
+
+/// L2 kind of the persisted class graph, stored under [`GRAPH_NAME`].
+pub(crate) const GRAPH_KIND: &str = "classgraph";
+/// The graph spans the whole APK (or program): one per APK key.
+pub(crate) const GRAPH_NAME: &str = "apk";
+/// Layout version of [`ClassGraph::bytes`]; bump on any change.
+pub(crate) const GRAPH_FORMAT: u32 = 1;
 
 /// Which way to walk the hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,23 +171,9 @@ impl HierarchyTree {
     }
 }
 
-/// `(child, parent, relation)` between class ids.
-type Edge = (u32, u32, ClassRelation);
-
 /// Every class the APK defines or references through a class definition,
-/// with the edges between them.
-pub(crate) struct ClassGraph {
-    names: Vec<Arc<str>>,
-    ids: HashMap<Arc<str>, u32>,
-    /// Per class: `(view + 1, class_def index)` of its first definition, `(0, 0)` if none.
-    defined: Vec<(u32, u32)>,
-    /// `(child, parent, relation)` sorted by child.
-    up: Vec<Edge>,
-    /// The same edges sorted by parent.
-    down: Vec<Edge>,
-    /// DEX names, by view index.
-    dex_names: Vec<String>,
-}
+/// with the edges between them and the class annotations of each.
+pub(crate) struct ClassGraph(Packed);
 
 /// One class definition of a DEX, by descriptor.
 struct DefinedClass {
@@ -181,6 +182,8 @@ struct DefinedClass {
     interfaces: Vec<String>,
     /// Its index in the DEX's `class_defs`.
     def_idx: u32,
+    /// Descriptors of its class annotations (any visibility).
+    annotations: Vec<String>,
 }
 
 fn dex_classes(v: &DexView) -> Result<Vec<DefinedClass>> {
@@ -194,25 +197,39 @@ fn dex_classes(v: &DexView) -> Result<Vec<DefinedClass>> {
         } else {
             dex.type_list(def.interfaces_off)?.into_iter().map(|t| dex.type_descriptor(t as u32)).collect::<std::result::Result<_, _>>()?
         };
-        out.push(DefinedClass { class: dex.type_descriptor(def.class_idx)?, superclass: sup, interfaces: ifaces, def_idx: i });
+        let annotations = class_annotations(&dex, def.annotations_off)?;
+        out.push(DefinedClass { class: dex.type_descriptor(def.class_idx)?, superclass: sup, interfaces: ifaces, def_idx: i, annotations });
+    }
+    Ok(out)
+}
+
+/// Descriptors of the class annotations of the `annotations_directory_item`
+/// at `off` (0: none). Only the directory's first word is read: the member
+/// annotations it lists are left alone.
+fn class_annotations(dex: &Dex<'_>, off: u32) -> Result<Vec<String>> {
+    if off == 0 {
+        return Ok(Vec::new());
+    }
+    let buf = dex.buf();
+    let set_off = buf
+        .get(off as usize..off as usize + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+        .ok_or(asc_dex::DexError::BadRange { what: "annotations_directory_item", offset: off as usize })?;
+    if set_off == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for item_off in asc_dex::annotations::parse_annotation_set(buf, set_off as usize)? {
+        let (item, _) = asc_dex::encoded::parse_annotation_item(buf, item_off as usize)?;
+        out.push(dex.type_descriptor(item.annotation.type_idx)?);
     }
     Ok(out)
 }
 
 impl ClassGraph {
-    /// Heap held by the graph, roughly.
+    /// Heap held by the graph, roughly: none once mapped from L2.
     pub(crate) fn heap_bytes(&self) -> usize {
-        use std::mem::size_of;
-        // Each name is an `Arc<str>` (two counters ahead of the bytes), held
-        // by `names` and as a key of `ids` (one more word of id and padding,
-        // plus a control byte, per hash slot).
-        let names: usize = self.names.iter().map(|n| n.len() + 2 * size_of::<usize>()).sum();
-        names
-            + self.names.capacity() * size_of::<Arc<str>>()
-            + self.ids.capacity() * (size_of::<(Arc<str>, u32)>() + 1)
-            + self.defined.capacity() * size_of::<(u32, u32)>()
-            + (self.up.capacity() + self.down.capacity()) * size_of::<Edge>()
-            + self.dex_names.iter().map(|n| n.capacity() + size_of::<String>()).sum::<usize>()
+        self.0.heap_bytes()
     }
 
     /// `None` once `cancel` is raised.
@@ -242,66 +259,49 @@ impl ClassGraph {
         let mut parsed = parsed.into_inner().unwrap();
         // Views in entry order, so "first definition" means the first DEX.
         parsed.sort_by_key(|(i, _)| *i);
-        let mut g = ClassGraph {
-            names: Vec::new(),
-            ids: HashMap::new(),
-            defined: Vec::new(),
-            up: Vec::new(),
-            down: Vec::new(),
-            dex_names: views.iter().map(|v| v.name.clone()).collect(),
-        };
-        let mut seen_edges = HashSet::new();
+        let mut b = Builder::default();
         for (view, classes) in parsed {
-            for DefinedClass { class, superclass, interfaces, def_idx } in classes {
-                let c = g.intern(&class);
-                if g.defined[c as usize].0 != 0 {
+            for DefinedClass { class, superclass, interfaces, def_idx, annotations } in classes {
+                let c = b.intern(&class);
+                if !b.define(c, view as u32, def_idx) {
                     continue; // a duplicate definition: the first one wins
                 }
-                g.defined[c as usize] = (view as u32 + 1, def_idx);
+                for a in annotations {
+                    b.annotate(c, a);
+                }
                 let parents =
                     superclass.iter().map(|s| (s, ClassRelation::Extends)).chain(interfaces.iter().map(|i| (i, ClassRelation::Implements)));
                 for (p, rel) in parents {
-                    let p = g.intern(p);
-                    if seen_edges.insert((c, p, rel)) {
-                        g.up.push((c, p, rel));
-                    }
+                    let p = b.intern(p);
+                    b.edge(c, p, rel);
                 }
             }
         }
-        g.up.sort_unstable_by_key(|&(c, p, _)| (c, p));
-        g.down = g.up.clone();
-        g.down.sort_unstable_by_key(|&(c, p, _)| (p, c));
-        Some(g)
+        Some(ClassGraph(b.finish(views.iter().map(|v| v.name.as_str()))))
     }
 
-    fn intern(&mut self, name: &str) -> u32 {
-        if let Some(&id) = self.ids.get(name) {
-            return id;
-        }
-        let id = self.names.len() as u32;
-        let name: Arc<str> = Arc::from(name);
-        self.names.push(name.clone());
-        self.ids.insert(name, id);
-        self.defined.push((0, 0));
-        id
+    /// The graph as persisted in L2 (read back by [`ClassGraph::from_mapped`]).
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+
+    /// A graph [`ClassGraph::bytes`] stored, used in place; `None` for bytes
+    /// that are not one.
+    fn from_mapped(d: asc_cache::Derived) -> Option<ClassGraph> {
+        Packed::from_mapped(d).map(ClassGraph)
     }
 
     fn id(&self, name: &str) -> Option<u32> {
-        self.ids.get(name).copied()
+        self.0.id(name)
     }
 
     fn name(&self, id: u32) -> &str {
-        &self.names[id as usize]
+        self.0.name(id)
     }
 
     /// Neighbours of `id` one level up or down.
     fn neighbours(&self, id: u32, dir: Lineage) -> impl Iterator<Item = (u32, ClassRelation)> + '_ {
-        let (edges, key): (&[Edge], fn(&Edge) -> u32) = match dir {
-            Lineage::Supers => (&self.up, |e| e.0),
-            Lineage::Subclasses => (&self.down, |e| e.1),
-        };
-        let start = edges.partition_point(|e| key(e) < id);
-        edges[start..].iter().take_while(move |e| key(e) == id).map(move |&(c, p, rel)| match dir {
+        self.0.edges_of(id, dir == Lineage::Subclasses).map(move |(c, p, rel)| match dir {
             Lineage::Supers => (p, rel),
             Lineage::Subclasses => (c, rel),
         })
@@ -329,26 +329,34 @@ impl ClassGraph {
     }
 
     fn dex_of(&self, id: u32) -> Option<&str> {
-        let (view, _) = self.defined[id as usize];
-        (view != 0).then(|| self.dex_names[view as usize - 1].as_str())
+        let (view, _) = self.0.defined(id);
+        (view != 0).then(|| self.0.dex_name(view as usize - 1))
     }
 
     /// Descriptors of the classes this APK defines whose descriptor matches
     /// `re` (for `in:{type:...}`).
     pub(crate) fn defined_classes_matching(&self, re: &regex::bytes::Regex) -> Vec<String> {
-        self.names
-            .iter()
-            .enumerate()
-            .filter(|&(id, name)| self.defined[id].0 != 0 && re.is_match(name.as_bytes()))
-            .map(|(_, name)| name.to_string())
+        (0..self.0.classes() as u32)
+            .filter(|&id| self.0.defined(id).0 != 0)
+            .map(|id| self.name(id))
+            .filter(|name| re.is_match(name.as_bytes()))
+            .map(String::from)
             .collect()
+    }
+
+    /// Descriptors of the classes carrying the class annotation `annotation`
+    /// (for `in:{annotation:...}`), sorted.
+    pub(crate) fn classes_annotated(&self, annotation: &str) -> Vec<String> {
+        let mut out: Vec<String> = self.0.annotated(annotation).map(|id| self.name(id).to_string()).collect();
+        out.sort_unstable();
+        out
     }
 
     /// `name(params)ret` of the methods `class` defines whose name is `name`
     /// (and proto `proto` when given).
     pub(crate) fn defines(&self, views: &[DexView], class: &str, name: &str, proto: Option<&str>) -> Result<Vec<String>> {
         let Some(id) = self.id(class) else { return Ok(Vec::new()) };
-        let (view, def_idx) = self.defined[id as usize];
+        let (view, def_idx) = self.0.defined(id);
         if view == 0 {
             return Ok(Vec::new());
         }
@@ -373,7 +381,7 @@ impl ClassGraph {
     /// Where the program first defines `class`: `(view index, class_def
     /// index)`; `None` when it does not.
     pub(crate) fn definition(&self, class: &str) -> Option<(usize, u32)> {
-        let (view, def_idx) = self.defined[self.id(class)? as usize];
+        let (view, def_idx) = self.0.defined(self.id(class)?);
         (view != 0).then(|| (view as usize - 1, def_idx))
     }
 
@@ -448,16 +456,41 @@ pub(crate) fn split_method(method: &str) -> Result<(String, Option<String>)> {
 
 impl Engine {
     /// The class graph of the APK, built over `views` unless one built from
-    /// the same APK file is kept. A cancelled build is not kept.
+    /// the same APK file is kept, in memory or in L2. A cancelled build is
+    /// not kept; one that met unreadable DEX files is not persisted (a later
+    /// process should report them too).
     pub(crate) fn class_graph(&self, views: &[DexView], errors: &mut Vec<String>, cancel: &AtomicBool) -> Result<Arc<ClassGraph>> {
-        let ident = file_ident(&self.open()?);
+        let apk = self.open()?;
+        let ident = file_ident(&apk);
         let mut slot = self.class_graph.lock().unwrap();
         if let Some((id, g)) = slot.as_ref() {
             if ident.is_some() && *id == ident {
                 return Ok(g.clone());
             }
         }
+        let disk = self.cache.as_ref().and_then(|c| c.disk.as_deref()).filter(|d| d.uses(Tier::Derived));
+        let key = disk.and_then(|_| self.apk_key(&apk));
+        if let (Some(disk), Some(key)) = (disk, &key) {
+            let stored = disk.get_derived(key, GRAPH_NAME, GRAPH_KIND, GRAPH_FORMAT).and_then(ClassGraph::from_mapped);
+            // The key covers the archives; the DEX names pin the view order
+            // the definitions index.
+            if let Some(g) = stored.filter(|g| g.0.dex_names().eq(views.iter().map(|v| v.name.as_str()))) {
+                self.stats.derived_hits.fetch_add(1, Ordering::Relaxed);
+                let g = Arc::new(g);
+                *slot = Some((ident, g.clone()));
+                return Ok(g);
+            }
+        }
+        let t0 = Instant::now();
+        let errors_before = errors.len();
         let g = Arc::new(ClassGraph::build(views, self.threads(), errors, cancel).ok_or_else(cancelled)?);
+        let cost = t0.elapsed();
+        if let (Some(disk), Some(key)) = (disk, key) {
+            if errors.len() == errors_before && disk.admits_derived(cost) {
+                let job = WriteJob { key, apk: Arc::from(apk.path()), kind: Job::Graph { graph: g.clone(), cost } };
+                self.cache.as_ref().expect("a disk implies a cache").put_async(job);
+            }
+        }
         *slot = Some((ident, g.clone()));
         Ok(g)
     }
@@ -561,5 +594,116 @@ impl Engine {
             method: q.method.clone(),
             errors,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// `B extends A implements I`, `C extends B` (in the second DEX), `D`
+    /// with a non-ASCII name; `B` and `C` carry `@M`; `I` is only referenced.
+    fn sample() -> ClassGraph {
+        let mut b = Builder::default();
+        let [a, bb, c, i, d] = ["LA;", "LB;", "LC;", "LI;", "Lé;"].map(|n| b.intern(n));
+        assert!(b.define(a, 0, 0) && b.define(bb, 0, 1) && b.define(c, 1, 0) && b.define(d, 0, 2));
+        assert!(!b.define(c, 0, 9), "the first definition wins");
+        b.edge(bb, a, ClassRelation::Extends);
+        b.edge(bb, i, ClassRelation::Implements);
+        b.edge(c, bb, ClassRelation::Extends);
+        b.edge(c, bb, ClassRelation::Extends);
+        b.annotate(c, "LM;".into());
+        b.annotate(bb, "LM;".into());
+        b.annotate(bb, "LN;".into());
+        ClassGraph(b.finish(["classes.dex", "lib.jar/classes.dex"].into_iter()))
+    }
+
+    fn check(g: &ClassGraph) {
+        assert_eq!(g.reachable("LA;", Lineage::Subclasses, 10), ["LB;", "LC;"]);
+        assert_eq!(g.reachable("LC;", Lineage::Supers, 10), ["LB;", "LA;", "LI;"]);
+        assert_eq!(g.reachable("LC;", Lineage::Supers, 2), ["LB;", "LA;"]);
+        assert!(g.reachable("LZ;", Lineage::Supers, 10).is_empty());
+        assert_eq!(g.classes_annotated("LM;"), ["LB;", "LC;"]);
+        assert_eq!(g.classes_annotated("LN;"), ["LB;"]);
+        assert!(g.classes_annotated("LL;").is_empty() && g.classes_annotated("LZ;").is_empty());
+        assert_eq!(g.dex_of(g.id("LC;").unwrap()), Some("lib.jar/classes.dex"));
+        assert_eq!(g.dex_of(g.id("LI;").unwrap()), None);
+        assert_eq!(g.name(g.id("Lé;").unwrap()), "Lé;");
+        let re = regex::bytes::Regex::new("^L[A-C];$").unwrap();
+        assert_eq!(
+            g.defined_classes_matching(&re).into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["LA;".into(), "LB;".into(), "LC;".into()])
+        );
+        assert_eq!(g.0.dex_names().collect::<Vec<_>>(), ["classes.dex", "lib.jar/classes.dex"]);
+    }
+
+    /// An L2 directory to hand bytes back as the disk cache would.
+    struct Store {
+        _dir: tempfile::TempDir,
+        disk: asc_cache::DiskCache,
+        key: asc_cache::ApkKey,
+    }
+
+    impl Store {
+        fn new() -> Store {
+            let dir = tempfile::tempdir().unwrap();
+            let disk = asc_cache::DiskCache::open(dir.path().join("cache")).with_capacity(1 << 30);
+            let apk = dir.path().join("a.apk");
+            std::fs::write(&apk, asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true)).unwrap();
+            let key = asc_cache::ApkKey::for_apk(&asc_apk::Apk::open(&apk).unwrap()).unwrap();
+            Store { _dir: dir, disk, key }
+        }
+
+        fn mapped(&self, bytes: &[u8]) -> Option<ClassGraph> {
+            self.disk.put_derived(&self.key, GRAPH_NAME, GRAPH_KIND, GRAPH_FORMAT, std::time::Duration::ZERO, bytes).unwrap();
+            ClassGraph::from_mapped(self.disk.get_derived(&self.key, GRAPH_NAME, GRAPH_KIND, GRAPH_FORMAT).unwrap())
+        }
+    }
+
+    #[test]
+    fn graphs_answer_alike_built_and_mapped() {
+        let store = Store::new();
+        let g = sample();
+        check(&g);
+        let back = store.mapped(g.bytes()).unwrap();
+        check(&back);
+        assert_eq!(back.heap_bytes(), 0);
+        assert!(g.heap_bytes() >= g.bytes().len());
+        // No classes at all.
+        let empty = ClassGraph(Builder::default().finish(std::iter::empty()));
+        assert!(store.mapped(empty.bytes()).unwrap().reachable("LA;", Lineage::Supers, 1).is_empty());
+        // Enough classes to grow the table, all still found.
+        let mut b = Builder::default();
+        let names: Vec<String> = (0..5000).map(|i| format!("Lc{i};")).collect();
+        let ids: Vec<u32> = names.iter().map(|n| b.intern(n)).collect();
+        assert_eq!(names.iter().map(|n| b.intern(n)).collect::<Vec<_>>(), ids);
+        let g = store.mapped(ClassGraph(b.finish(std::iter::empty())).bytes()).unwrap();
+        assert!(names.iter().zip(&ids).all(|(n, &id)| g.id(n) == Some(id) && g.name(id) == n));
+    }
+
+    #[test]
+    fn damaged_bytes_never_index_out_of_bounds() {
+        let store = Store::new();
+        let bytes = sample().bytes().to_vec();
+        for n in 0..bytes.len() {
+            assert!(store.mapped(&bytes[..n]).is_none(), "truncated to {n}");
+        }
+        // Any single-byte change is rejected or still answers without
+        // panicking.
+        let any = regex::bytes::Regex::new(".").unwrap();
+        for at in 0..bytes.len() {
+            let mut b = bytes.clone();
+            b[at] ^= 0xa5;
+            if let Some(g) = store.mapped(&b) {
+                for name in ["LA;", "LB;", "LC;", "LI;", "Lé;"] {
+                    g.reachable(name, Lineage::Subclasses, 10);
+                    g.reachable(name, Lineage::Supers, 10);
+                    g.id(name).map(|id| g.dex_of(id));
+                }
+                g.classes_annotated("LM;");
+                g.defined_classes_matching(&any);
+            }
+        }
     }
 }

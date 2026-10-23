@@ -55,8 +55,42 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Identity of an APK for cache purposes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ApkKey(String);
+///
+/// A program of several archives has a key of its own (rendered results,
+/// L3, and [`MemoryCache`] go by it), and each archive its own key too: L1
+/// and L2 files of an entry live under its archive's key, by its name inside
+/// the archive ([`ApkKey::locate`]). Rewriting one jar of a program then
+/// costs that jar's entries only, and a jar read alone shares them with the
+/// same jar read as part of a program.
+#[derive(Debug, Clone)]
+pub struct ApkKey {
+    id: String,
+    /// Each archive of a program; empty for a lone archive.
+    archives: Arc<[ArchiveKey]>,
+}
+
+/// One archive of a program's [`ApkKey`].
+#[derive(Debug)]
+struct ArchiveKey {
+    /// What the program's names of its entries start with, before a `/`.
+    label: String,
+    path: PathBuf,
+    key: ApkKey,
+}
+
+impl PartialEq for ApkKey {
+    fn eq(&self, other: &ApkKey) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ApkKey {}
+
+impl std::hash::Hash for ApkKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
 
 /// Characters a key stem (and a cached entry file name) may contain.
 fn is_key_char(c: char) -> bool {
@@ -73,22 +107,51 @@ impl ApkKey {
     /// with the old one); for a program of several archives, from those of
     /// each and its path, in order.
     pub fn for_apk(apk: &asc_apk::Apk) -> asc_apk::Result<ApkKey> {
+        let ids = apk.directories()?;
         let mut key = 0u64;
-        for (i, (path, directory)) in apk.directories()?.into_iter().enumerate() {
-            let meta = fs::metadata(path).map_err(|source| asc_apk::ApkError::Io { path: path.to_path_buf(), source })?;
+        let mut archives = Vec::with_capacity(if ids.len() > 1 { ids.len() } else { 0 });
+        for (i, id) in ids.iter().enumerate() {
+            let meta = fs::metadata(id.path).map_err(|source| asc_apk::ApkError::Io { path: id.path.to_path_buf(), source })?;
             let mtime = meta.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
-            let mut h = fnv64(directory);
+            let mut h = fnv64(id.directory);
             h ^= meta.len().wrapping_mul(0x9E37_79B9_7F4A_7C15);
             h ^= (mtime as u64).rotate_left(17);
+            if ids.len() > 1 {
+                // The key the archive has when read alone.
+                let stem = id.path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+                let key = ApkKey::lone(&stem, h);
+                archives.push(ArchiveKey { label: id.label.to_string(), path: id.path.to_path_buf(), key });
+            }
             // A lone archive keeps the key it always had.
-            key = if i == 0 { h } else { key.rotate_left(11) ^ h ^ fnv64(path.as_os_str().as_encoded_bytes()).rotate_left(29) };
+            key = if i == 0 { h } else { key.rotate_left(11) ^ h ^ fnv64(id.path.as_os_str().as_encoded_bytes()).rotate_left(29) };
         }
-        let stem: String = apk.stem().chars().filter(|c| is_key_char(*c)).take(STEM_MAX).collect();
-        Ok(ApkKey(format!("{stem}-{key:0width$x}", width = HASH_HEX_LEN)))
+        Ok(ApkKey { archives: archives.into(), ..ApkKey::lone(&apk.stem(), key) })
+    }
+
+    /// The key of one archive: `stem` (sanitised) and its hash.
+    fn lone(stem: &str, hash: u64) -> ApkKey {
+        let stem: String = stem.chars().filter(|c| is_key_char(*c)).take(STEM_MAX).collect();
+        ApkKey::from_id(format!("{stem}-{hash:0width$x}", width = HASH_HEX_LEN))
+    }
+
+    fn from_id(id: String) -> ApkKey {
+        ApkKey { id, archives: Arc::new([]) }
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.id
+    }
+
+    /// The key and name the L1 / L2 files of the entry (or logical DEX) a
+    /// program calls `name` are stored under: its archive's, by its name
+    /// inside that archive. Other names (and a lone archive's) stay as
+    /// they are.
+    pub fn locate<'n>(&self, name: &'n str) -> (&ApkKey, &'n str) {
+        let found = asc_apk::archive_of(name).and_then(|label| {
+            let a = self.archives.iter().find(|a| a.label == label)?;
+            Some((&a.key, &name[label.len() + 1..]))
+        });
+        found.unwrap_or((self, name))
     }
 }
 
@@ -553,10 +616,12 @@ impl DiskCache {
     }
 
     fn entry_path(&self, key: &ApkKey, entry_name: &str) -> PathBuf {
+        let (key, entry_name) = key.locate(entry_name);
         self.dir.join(key.as_str()).join(safe_name(entry_name))
     }
 
     fn derived_path(&self, key: &ApkKey, name: &str, kind: &str, version: u32) -> PathBuf {
+        let (key, name) = key.locate(name);
         let file = format!("{}~{}.v{DERIVED_FORMAT}.{version}", safe_name(name), safe_name(kind));
         self.dir.join(DERIVED_DIR).join(key.as_str()).join(file)
     }
@@ -709,8 +774,12 @@ impl DiskCache {
 
     /// Record where the APK of `key` lives, so eviction can tell the entries
     /// of an APK deleted or replaced since (evicted first) from live ones.
-    /// Cheap to repeat; hosts call it once per APK.
+    /// Cheap to repeat; hosts call it once per APK. A program's archives are
+    /// recorded one by one, each under its own key.
     pub fn note_source(&self, key: &ApkKey, apk_path: &Path) -> Result<(), CacheError> {
+        if !key.archives.is_empty() {
+            return key.archives.iter().try_for_each(|a| self.note_source(&a.key, &a.path));
+        }
         let path = self.dir.join(SOURCES_DIR).join(key.as_str());
         let Some(stamp) = source_stamp(apk_path) else { return Ok(()) };
         if fs::read_to_string(&path).is_ok_and(|s| s == stamp) {
@@ -1371,7 +1440,7 @@ mod tests {
 
     #[test]
     fn memory_remove_apk_releases_only_that_apk() {
-        let (a, b) = (ApkKey("a-0123456789abcdef".into()), ApkKey("b-0123456789abcdef".into()));
+        let (a, b) = (ApkKey::from_id("a-0123456789abcdef".into()), ApkKey::from_id("b-0123456789abcdef".into()));
         let mut mem = MemoryCache::new(1 << 20);
         mem.insert(&a, "classes.dex", Arc::new(1), 100);
         mem.insert(&a, "classes2.dex", Arc::new(2), 50);
@@ -1386,7 +1455,7 @@ mod tests {
     fn disk_roundtrip_and_clear() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         assert!(cache.get(&key, "classes.dex", 3).is_none());
         cache.put(&key, "classes.dex", b"abc").unwrap();
         assert_eq!(&*cache.get(&key, "classes.dex", 3).unwrap(), b"abc");
@@ -1401,8 +1470,8 @@ mod tests {
     fn disk_evicts_least_recently_used_apk() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(20);
-        let old = ApkKey("old-0000000000000001".into());
-        let new = ApkKey("new-0000000000000002".into());
+        let old = ApkKey::from_id("old-0000000000000001".into());
+        let new = ApkKey::from_id("new-0000000000000002".into());
         cache.put(&old, "classes.dex", &[0; 6]).unwrap();
         // Make sure the second directory is strictly newer.
         let later = SystemTime::now() + Duration::from_secs(5);
@@ -1475,7 +1544,7 @@ mod tests {
     #[test]
     fn eviction_follows_a_lowered_capacity() {
         let dir = tempfile::tempdir().unwrap();
-        let keys: Vec<ApkKey> = (0..3).map(|i| ApkKey(format!("app-000000000000000{i}"))).collect();
+        let keys: Vec<ApkKey> = (0..3).map(|i| ApkKey::from_id(format!("app-000000000000000{i}"))).collect();
         let cache = DiskCache::open(dir.path()).with_capacity(100);
         for (i, k) in keys.iter().enumerate() {
             cache.put(k, "classes.dex", &[0; 10]).unwrap();
@@ -1508,7 +1577,7 @@ mod tests {
     fn unrelated_directories_survive_evict_and_clear() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(4);
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         // The first write tags the (empty) directory ...
         cache.put(&key, "classes.dex", &[0; 8]).unwrap();
         assert!(dir.path().join(CACHEDIR_TAG).is_file());
@@ -1546,7 +1615,7 @@ mod tests {
         assert!(lookalike.join("classes.dex").is_file());
         // Writing refuses too, so no tag is planted that would make backup
         // tools skip the user's directory.
-        let key = ApkKey("other-fedcba9876543210".into());
+        let key = ApkKey::from_id("other-fedcba9876543210".into());
         assert!(matches!(cache.put(&key, "classes.dex", &[0; 4]), Err(CacheError::NotACacheDir { .. })));
         assert!(!dir.path().join(CACHEDIR_TAG).exists());
         assert!(!dir.path().join("other-fedcba9876543210").exists());
@@ -1564,7 +1633,7 @@ mod tests {
         fs::write(dir.path().join(SPILL_DIR).join("ab.txt"), b"reply").unwrap();
         let cache = DiskCache::open(dir.path());
         assert!(cache.check_usable().is_ok());
-        cache.put(&ApkKey("app-0123456789abcdef".into()), "classes.dex", &[0; 4]).unwrap();
+        cache.put(&ApkKey::from_id("app-0123456789abcdef".into()), "classes.dex", &[0; 4]).unwrap();
         cache.clear().unwrap();
         assert!(!dir.path().join(SPILL_DIR).exists(), "clear removes spilled replies too");
     }
@@ -1584,7 +1653,7 @@ mod tests {
         fs::write(legacy.join("classes.dex"), [0; 16]).unwrap();
         assert_eq!(cache.clear().unwrap(), 16);
         // A put adopts it for good.
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         cache.put(&key, "classes.dex", &[0; 4]).unwrap();
         assert!(dir.path().join(CACHEDIR_TAG).is_file());
     }
@@ -1595,7 +1664,7 @@ mod tests {
         let cache = DiskCache::open(dir.path()).with_capacity(1);
         fs::create_dir(dir.path().join(CACHEDIR_TAG)).unwrap();
         fs::write(dir.path().join("notes.txt"), b"keep").unwrap();
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         assert!(matches!(cache.put(&key, "classes.dex", &[0; 4]), Err(CacheError::NotACacheDir { .. })));
         assert!(matches!(cache.clear(), Err(CacheError::NotACacheDir { .. })));
     }
@@ -1607,7 +1676,7 @@ mod tests {
         let cache = DiskCache::open(dir.path());
         fs::write(dir.path().join(".gitignore"), b"*\n").unwrap();
         assert!(matches!(cache.check_usable(), Err(CacheError::NotACacheDir { .. })));
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         assert!(matches!(cache.put(&key, "classes.dex", &[0; 4]), Err(CacheError::NotACacheDir { .. })));
         assert!(!dir.path().join(CACHEDIR_TAG).exists());
         // Finder metadata next to a legacy cache does not.
@@ -1620,7 +1689,7 @@ mod tests {
     #[test]
     fn memory_lru_evicts_by_bytes() {
         let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
-        let k = ApkKey("k".into());
+        let k = ApkKey::from_id("k".into());
         m.insert(&k, "a", Arc::new(vec![0; 4]), 4);
         m.insert(&k, "b", Arc::new(vec![0; 4]), 4);
         assert!(m.get(&k, "a").is_some()); // a is now most recent
@@ -1639,7 +1708,7 @@ mod tests {
     #[test]
     fn memory_lru_resize_charges_and_evicts() {
         let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
-        let k = ApkKey("k".into());
+        let k = ApkKey::from_id("k".into());
         let a = Arc::new(vec![0; 4]);
         m.insert(&k, "a", Arc::clone(&a), 4);
         let b = Arc::new(vec![0; 4]);
@@ -1662,7 +1731,7 @@ mod tests {
     #[test]
     fn memory_lru_capacity_can_shrink_and_peek_keeps_recency() {
         let mut m: MemoryCache<u8> = MemoryCache::new(10);
-        let k = ApkKey("k".into());
+        let k = ApkKey::from_id("k".into());
         m.insert(&k, "a", Arc::new(1), 4);
         m.insert(&k, "b", Arc::new(2), 4);
         assert_eq!(*m.peek(&k, "a").unwrap(), 1); // a stays least recently used
@@ -1675,7 +1744,7 @@ mod tests {
     #[test]
     fn memory_lru_reserved_bytes_make_room_under_the_cap() {
         let mut m: MemoryCache<u8> = MemoryCache::new(10);
-        let k = ApkKey("k".into());
+        let k = ApkKey::from_id("k".into());
         m.insert(&k, "a", Arc::new(1), 4);
         m.insert(&k, "b", Arc::new(2), 4);
         m.set_reserved(3);
@@ -1691,7 +1760,7 @@ mod tests {
     #[test]
     fn memory_lru_replace_keeps_size_and_recency() {
         let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
-        let k = ApkKey("k".into());
+        let k = ApkKey::from_id("k".into());
         let a = Arc::new(vec![0; 4]);
         m.insert(&k, "a", Arc::clone(&a), 4);
         m.insert(&k, "b", Arc::new(vec![0; 4]), 4);
@@ -1771,7 +1840,7 @@ mod tests {
     fn l1_files_from_an_earlier_boot_are_checked() {
         let dir = tempfile::tempdir().unwrap();
         let cache = booted_cache(dir.path());
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         let data: Vec<u8> = (0..4096u32).map(|i| i as u8).collect();
         let path = cache.entry_path(&key, "classes.dex");
         let n = data.len() as u64;
@@ -1811,7 +1880,7 @@ mod tests {
     fn l2_and_l3_files_carry_checksums() {
         let dir = tempfile::tempdir().unwrap();
         let cache = booted_cache(dir.path());
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         let path = cache.derived_path(&key, "classes.dex", "locators", 1);
         let flip = DERIVED_HEADER as u64 + 3;
         cache.put_derived(&key, "classes.dex", "locators", 1, Duration::from_millis(7), b"tables").unwrap();
@@ -1837,7 +1906,7 @@ mod tests {
     fn derived_roundtrip_is_versioned_and_aligned() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         assert!(cache.get_derived(&key, "classes.dex", "locators", 1).is_none());
         cache.put_derived(&key, "classes.dex", "locators", 1, Duration::from_millis(7), b"tables").unwrap();
         let d = cache.get_derived(&key, "classes.dex", "locators", 1).unwrap();
@@ -1863,7 +1932,7 @@ mod tests {
     fn rendered_results_are_keyed_by_the_full_query() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         let q = rendered_key("findrefs", "1.0", "string\0token");
         assert!(cache.get_rendered(&key, &q).is_none());
         cache.put_rendered(&key, &q, b"rows").unwrap();
@@ -1879,7 +1948,7 @@ mod tests {
     fn stats_and_clear_cover_every_tier() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
-        let (a, b) = (ApkKey("a-0123456789abcdef".into()), ApkKey("b-0123456789abcdef".into()));
+        let (a, b) = (ApkKey::from_id("a-0123456789abcdef".into()), ApkKey::from_id("b-0123456789abcdef".into()));
         cache.put(&a, "classes.dex", &[0; 10]).unwrap();
         cache.put_derived(&a, "classes.dex", "locators", 1, Duration::ZERO, &[0; 6]).unwrap();
         cache.put_rendered(&b, "q", &[0; 3]).unwrap();
@@ -1900,7 +1969,7 @@ mod tests {
     fn disabled_tiers_miss_and_skip_writes() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1 << 20).with_tiers(&[Tier::Derived]);
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         cache.put(&key, "classes.dex", b"abc").unwrap();
         cache.put_rendered(&key, "q", b"rows").unwrap();
         cache.put_derived(&key, "classes.dex", "k", 1, Duration::ZERO, b"t").unwrap();
@@ -1915,7 +1984,7 @@ mod tests {
     fn lazy_eviction_skips_a_walk_right_after_another() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1 << 30);
-        let key = ApkKey("app-0123456789abcdef".into());
+        let key = ApkKey::from_id("app-0123456789abcdef".into());
         cache.put(&key, "classes.dex", &[0; 100]).unwrap();
         cache.evict();
         assert!(dir.path().join(EVICT_MARKER).is_file());
@@ -1946,7 +2015,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Budget 1000: L2 may hold 500, L3 125.
         let cache = DiskCache::open(dir.path()).with_capacity(1000);
-        let k = |i: u32| ApkKey(format!("app-{i:016x}"));
+        let k = |i: u32| ApkKey::from_id(format!("app-{i:016x}"));
         // L3: four 64-byte results (+ header), the oldest beyond L3's own budget.
         for i in 0..4 {
             let q = format!("q{i}");
@@ -1980,7 +2049,7 @@ mod tests {
     fn l1_eviction_weighs_size_with_age() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(600);
-        let (big, small) = (ApkKey("big-0000000000000001".into()), ApkKey("small-0000000000000002".into()));
+        let (big, small) = (ApkKey::from_id("big-0000000000000001".into()), ApkKey::from_id("small-0000000000000002".into()));
         // The big entry is newer but costs far more space per second of age.
         cache.put(&small, "classes.dex", &[0; 100]).unwrap();
         cache.put(&big, "classes.dex", &[0; 550]).unwrap();
@@ -1995,7 +2064,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let apks = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1000);
-        let (live, dead) = (ApkKey("live-0000000000000001".into()), ApkKey("dead-0000000000000002".into()));
+        let (live, dead) = (ApkKey::from_id("live-0000000000000001".into()), ApkKey::from_id("dead-0000000000000002".into()));
         let (live_apk, dead_apk) = (apks.path().join("live.apk"), apks.path().join("dead.apk"));
         fs::write(&live_apk, b"PK").unwrap();
         fs::write(&dead_apk, b"PK").unwrap();

@@ -313,6 +313,26 @@ pub struct Analyzer {
     targets: Vec<usize>,
     visited: Vec<bool>,
     stack: Vec<u32>,
+    /// Per block, the registers live at its entry (read before written on
+    /// some path from there), `live_words` words each; empty until a
+    /// [`MethodValues::result_use`] needs them.
+    live: Vec<u64>,
+    live_words: usize,
+    /// The wide registers whose pair liveness is solved, and per wide
+    /// register and block whether the pair is live at the block's entry
+    /// (a pair dies when either half is written, so it is not the
+    /// liveness of its two registers).
+    wide_keys: Vec<i64>,
+    wide_live: Vec<bool>,
+    /// Per block, the registers it reads before writing them and those it
+    /// writes, `live_words` words each.
+    gen: Vec<u64>,
+    kill: Vec<u64>,
+    /// Successor blocks (not handlers) of block `b`:
+    /// `succ[succ_start[b]..succ_start[b + 1]]`; empty until needed.
+    succ: Vec<u32>,
+    succ_start: Vec<u32>,
+    scratch_live: Vec<u64>,
 }
 
 /// One analyzed method, answering queries about its call sites.
@@ -336,6 +356,10 @@ impl Analyzer {
             return None;
         }
         self.solve(&code);
+        self.live.clear();
+        self.wide_keys.clear();
+        self.wide_live.clear();
+        self.succ_start.clear();
         Some(MethodValues { an: self, code })
     }
 
@@ -525,6 +549,230 @@ impl Analyzer {
     }
 }
 
+impl Analyzer {
+    /// Solve the registers live at each block's entry, backward to a
+    /// fixpoint; once per method.
+    ///
+    /// A block's handlers see the registers before each of its instructions,
+    /// writes included (a throwing instruction writes nothing), so what they
+    /// need is live at the block's entry.
+    fn solve_liveness(&mut self, code: &[u8], regs: usize) {
+        if !self.live.is_empty() || self.blocks.is_empty() {
+            return;
+        }
+        self.edges(code);
+        let (nblocks, words) = (self.blocks.len(), regs.div_ceil(64).max(1));
+        self.live_words = words;
+        self.live.resize(nblocks * words, 0);
+        for v in [&mut self.gen, &mut self.kill] {
+            v.clear();
+            v.resize(nblocks * words, 0);
+        }
+        // Each block's reads-before-writes and writes, in one backward pass.
+        for b in 0..nblocks {
+            let insns = self.blocks[b] as usize..self.block_end(b);
+            let (gen, kill) = (&mut self.gen[b * words..(b + 1) * words], &mut self.kill[b * words..(b + 1) * words]);
+            for i in insns.rev() {
+                let pc = self.pcs[i] as usize;
+                let op = opcode(code[pc]).expect("walked instruction has a defined opcode");
+                if let Some((lo, hi)) = written(code, pc, op) {
+                    for r in lo.max(0)..=hi.min(regs as i64 - 1) {
+                        let (w, bit) = (r as usize / 64, 1u64 << (r % 64));
+                        gen[w] &= !bit;
+                        kill[w] |= bit;
+                    }
+                }
+                for_each_read(code, pc, op, |r| {
+                    if let Some(r) = usize::try_from(r).ok().filter(|&r| r < regs) {
+                        gen[r / 64] |= 1 << (r % 64);
+                    }
+                });
+            }
+        }
+        let mut live = std::mem::take(&mut self.scratch_live);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for b in (0..nblocks).rev() {
+                live.clear();
+                live.resize(words, 0);
+                for &s in &self.succ[self.succ_start[b] as usize..self.succ_start[b + 1] as usize] {
+                    let s = s as usize;
+                    live.iter_mut().zip(&self.live[s * words..(s + 1) * words]).for_each(|(l, x)| *l |= x);
+                }
+                for (l, (g, k)) in live.iter_mut().zip(self.gen[b * words..].iter().zip(&self.kill[b * words..(b + 1) * words])) {
+                    *l = g | (*l & !k);
+                }
+                for k in self.block_handlers(b) {
+                    let h = self.handlers[k].1 as usize;
+                    live.iter_mut().zip(&self.live[h * words..(h + 1) * words]).for_each(|(l, x)| *l |= x);
+                }
+                for (e, l) in self.live[b * words..(b + 1) * words].iter_mut().zip(&live) {
+                    if *e | l != *e {
+                        *e |= l;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        self.scratch_live = live;
+    }
+
+    /// Solve, once per method and wide register `r`, whether the pair
+    /// `r`, `r + 1` is live at each block's entry; returns the key's index.
+    fn solve_wide(&mut self, code: &[u8], r: i64) -> usize {
+        if let Some(k) = self.wide_keys.iter().position(|&x| x == r) {
+            return k;
+        }
+        self.edges(code);
+        let n = self.blocks.len();
+        let key = self.wide_keys.len();
+        self.wide_keys.push(r);
+        self.wide_live.resize((key + 1) * n, false);
+        // Per block: read before written, and written.
+        let gen_kill: Vec<(bool, bool)> = (0..n)
+            .map(|b| {
+                (self.blocks[b] as usize..self.block_end(b)).rev().fold((false, false), |(gen, kill), i| {
+                    let pc = self.pcs[i] as usize;
+                    let op = opcode(code[pc]).expect("walked instruction has a defined opcode");
+                    let write = kills(code, pc, op, r, true);
+                    (reads(code, pc, op, r) || reads(code, pc, op, r + 1) || (gen && !write), kill || write)
+                })
+            })
+            .collect();
+        let mut all = std::mem::take(&mut self.wide_live);
+        let live = &mut all[key * n..(key + 1) * n];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for b in (0..n).rev() {
+                let out = self.succ[self.succ_start[b] as usize..self.succ_start[b + 1] as usize].iter().any(|&s| live[s as usize]);
+                let (gen, kill) = gen_kill[b];
+                let caught = self.handlers[self.block_handlers(b)].iter().any(|&(_, h)| live[h as usize]);
+                if (gen || (out && !kill) || caught) && !live[b] {
+                    live[b] = true;
+                    changed = true;
+                }
+            }
+        }
+        self.wide_live = all;
+        key
+    }
+
+    /// Build [`Analyzer::succ`]: the blocks control reaches from the end of
+    /// each block (not its handlers).
+    fn edges(&mut self, code: &[u8]) {
+        if !self.succ_start.is_empty() {
+            return;
+        }
+        self.succ.clear();
+        let mut targets = std::mem::take(&mut self.targets);
+        for b in 0..self.blocks.len() {
+            self.succ_start.push(self.succ.len() as u32);
+            let end = self.block_end(b);
+            let last = self.pcs[end - 1] as usize;
+            let op = opcode(code[last]).expect("walked instruction has a defined opcode");
+            if Flow::of(op.value).falls_through() && end < self.pcs.len() {
+                self.succ.push(b as u32 + 1);
+            }
+            // Targets were validated while building the blocks.
+            if branch_targets(code, last, op, &mut targets).is_some() {
+                for &t in &targets {
+                    if let Some(t) = self.insn_at(t) {
+                        self.succ.push(self.block_of(t) as u32);
+                    }
+                }
+            }
+        }
+        self.succ_start.push(self.succ.len() as u32);
+        self.targets = targets;
+    }
+
+    /// Search forward from instruction `first` for a read of `r` (the pair
+    /// when `wide`) before it is written over; `None` when the search visits
+    /// more than [`WALK_BUDGET`] instructions undecided.
+    fn walk_to_use(&mut self, code: &[u8], first: usize, r: i64, wide: bool) -> Option<ResultUse> {
+        let n = self.pcs.len();
+        self.visited.clear();
+        self.visited.resize(n, false);
+        self.stack.clear();
+        self.stack.push(first as u32);
+        let mut targets = std::mem::take(&mut self.targets);
+        let mut budget = WALK_BUDGET;
+        let mut answer = Some(ResultUse::Unused);
+        while let Some(k) = self.stack.pop() {
+            let k = k as usize;
+            if std::mem::replace(&mut self.visited[k], true) {
+                continue;
+            }
+            if budget == 0 {
+                answer = None;
+                break;
+            }
+            budget -= 1;
+            let pc = self.pcs[k] as usize;
+            let op = opcode(code[pc]).expect("walked instruction has a defined opcode");
+            if reads(code, pc, op, r) || (wide && reads(code, pc, op, r + 1)) {
+                answer = Some(ResultUse::Used);
+                break;
+            }
+            // A throwing instruction writes nothing: its handlers see `r` first.
+            for h in self.block_handlers(self.block_of(k)) {
+                self.stack.push(self.blocks[self.handlers[h].1 as usize]);
+            }
+            if kills(code, pc, op, r, wide) {
+                continue;
+            }
+            if Flow::of(op.value).falls_through() && k + 1 < n {
+                self.stack.push((k + 1) as u32);
+            }
+            if branch_targets(code, pc, op, &mut targets).is_some() {
+                for &t in &targets {
+                    if let Some(t) = self.insn_at(t) {
+                        self.stack.push(t as u32);
+                    }
+                }
+            }
+        }
+        self.targets = targets;
+        answer
+    }
+}
+
+/// Instructions [`Analyzer::walk_to_use`] visits before it leaves a result
+/// to the method's liveness.
+const WALK_BUDGET: usize = 256;
+
+/// The registers `[lo, hi]` the instruction at `pc` writes.
+fn written(code: &[u8], pc: usize, op: &Opcode) -> Option<(i64, i64)> {
+    let w = dest(op.value)?;
+    let a = vreg_a(code, pc, op).unwrap_or(-1);
+    Some((a, if w == Width::Wide { a + 1 } else { a }))
+}
+
+/// Call `f` with each register the instruction at `pc` reads, as [`reads`]
+/// answers it.
+fn for_each_read(code: &[u8], pc: usize, op: &Opcode, mut f: impl FnMut(i64)) {
+    if matches!(op.format, Format::K35c | Format::K45cc | Format::K3rc | Format::K4rcc) {
+        if let Some(i) = Instruction::decode(code, pc) {
+            i.regs.iter().for_each(|&r| f(i64::from(r)));
+        }
+        return;
+    }
+    for r in [vreg_a(code, pc, op), vreg_b(code, pc, op), vreg_c(code, pc, op)].into_iter().flatten() {
+        if reads(code, pc, op, r) {
+            f(r);
+        }
+    }
+}
+
+/// Whether the instruction at `pc` writes over register `r` (or the pair
+/// `r`, `r + 1` when `wide`), in part or whole.
+fn kills(code: &[u8], pc: usize, op: &Opcode, r: i64, wide: bool) -> bool {
+    let rhi = if wide { r + 1 } else { r };
+    written(code, pc, op).is_some_and(|(a, hi)| a <= rhi && r <= hi)
+}
+
 impl MethodValues<'_> {
     /// The values of each argument register of the invoke at `pc`, in the
     /// instruction's register order (`{v0, v1}` or `{v4 .. v7}`; a wide
@@ -570,56 +818,67 @@ impl MethodValues<'_> {
         }
         let Some(r) = vreg_a(code, next, mr) else { return ResultUse::Unknown };
         let wide = mr.value == 0x0b;
-        let n = an.pcs.len();
-        an.visited.clear();
-        an.visited.resize(n, false);
-        an.stack.clear();
         // Start after the move-result (which cannot throw).
-        if i + 2 < n {
-            an.stack.push((i + 2) as u32);
+        let first = i + 2;
+        if first >= an.pcs.len() {
+            return ResultUse::Unused;
         }
-        let mut targets = std::mem::take(&mut an.targets);
-        let mut used = ResultUse::Unused;
-        while let Some(k) = an.stack.pop() {
-            let k = k as usize;
-            if std::mem::replace(&mut an.visited[k], true) {
-                continue;
-            }
+        // Most results are read or dropped within a few instructions: walk
+        // forward first, and only solve the method's liveness for a result
+        // that walk cannot settle cheaply.
+        if let Some(answer) = an.walk_to_use(code, first, r, wide) {
+            return answer;
+        }
+        // Liveness at the block boundaries, then a walk to the first read or
+        // write of `r` inside the block.
+        let regs = usize::from(self.code.registers);
+        let live = if wide {
+            Live::Pair(an.solve_wide(code, r))
+        } else {
+            an.solve_liveness(code, regs);
+            usize::try_from(r).ok().filter(|&r| r < regs).map_or(Live::Never, Live::Register)
+        };
+        let b = an.block_of(first);
+        if an.handlers[an.block_handlers(b)].iter().any(|&(_, h)| live.at(an, h as usize)) {
+            return ResultUse::Used;
+        }
+        for k in first..an.block_end(b) {
             let pc = an.pcs[k] as usize;
             let op = opcode(code[pc]).expect("walked instruction has a defined opcode");
             if reads(code, pc, op, r) || (wide && reads(code, pc, op, r + 1)) {
-                used = ResultUse::Used;
-                break;
+                return ResultUse::Used;
             }
-            // A throwing instruction writes nothing: its handlers see `r` first.
-            let b = an.block_of(k);
-            for k in an.block_handlers(b) {
-                let h = an.handlers[k].1 as usize;
-                an.stack.push(an.blocks[h]);
-            }
-            let killed = dest(op.value).is_some_and(|w| {
-                let a = vreg_a(code, pc, op).unwrap_or(-1);
-                let hi = if w == Width::Wide { a + 1 } else { a };
-                let rhi = if wide { r + 1 } else { r };
-                a <= rhi && r <= hi
-            });
-            if killed {
-                continue;
-            }
-            let flow = Flow::of(op.value);
-            if flow.falls_through() && k + 1 < n {
-                an.stack.push((k + 1) as u32);
-            }
-            if branch_targets(code, pc, op, &mut targets).is_some() {
-                for &t in &targets {
-                    if let Some(t) = an.insn_at(t) {
-                        an.stack.push(t as u32);
-                    }
-                }
+            if kills(code, pc, op, r, wide) {
+                return ResultUse::Unused;
             }
         }
-        an.targets = targets;
-        used
+        if an.succ[an.succ_start[b] as usize..an.succ_start[b + 1] as usize].iter().any(|&s| live.at(an, s as usize)) {
+            ResultUse::Used
+        } else {
+            ResultUse::Unused
+        }
+    }
+}
+
+/// Where [`MethodValues::result_use`] reads a result's liveness at a block
+/// entry.
+#[derive(Clone, Copy)]
+enum Live {
+    /// A narrow register, from [`Analyzer::solve_liveness`].
+    Register(usize),
+    /// A wide pair, the key [`Analyzer::solve_wide`] returned.
+    Pair(usize),
+    /// A register out of the method's frame.
+    Never,
+}
+
+impl Live {
+    fn at(self, an: &Analyzer, b: usize) -> bool {
+        match self {
+            Live::Register(r) => an.live[b * an.live_words + r / 64] & (1 << (r % 64)) != 0,
+            Live::Pair(key) => an.wide_live[key * an.blocks.len() + b],
+            Live::Never => false,
+        }
     }
 }
 
@@ -962,6 +1221,66 @@ mod tests {
         assert_eq!(m.result_use(read), ResultUse::Used);
         // `wide` sits after a return: unreachable.
         assert_eq!(m.result_use(wide), ResultUse::Unknown);
+    }
+
+    /// `n` instructions that touch none of v0..v3.
+    fn filler(a: &mut Asm, n: usize) {
+        for _ in 0..n {
+            a.const4(4, 0);
+        }
+    }
+
+    #[test]
+    fn result_use_past_the_walk_budget() {
+        // Every result is settled only after more instructions than the
+        // forward walk visits, so the block liveness answers.
+        let far = WALK_BUDGET + 8;
+        let mut a = Asm::default();
+        // Read after a loop of fillers.
+        let looped = a.invoke_static(1, &[]);
+        a.move_result(0);
+        let top = a.here();
+        filler(&mut a, far);
+        let back = a.if_eqz(1, 0);
+        a.patch_if(back, top);
+        // Written over after the fillers, then read: unused.
+        let clobbered = a.invoke_static(2, &[]);
+        a.move_result(2);
+        filler(&mut a, far);
+        a.const4(2, 0);
+        // A wide result whose high half is written, then its low half read.
+        let wide = a.invoke_static(3, &[]);
+        a.move_result_wide(1);
+        filler(&mut a, far);
+        let skip = a.if_eqz(3, 0);
+        a.const4(2, 0);
+        let join = a.here();
+        a.patch_if(skip, join);
+        a.add_lit8(3, 1, 1);
+        a.ret(0);
+        let mut an = Analyzer::new();
+        let mut m = an.analyze(code(&a, 5, 0, &[])).unwrap();
+        assert_eq!(m.result_use(looped), ResultUse::Used);
+        assert_eq!(m.result_use(clobbered), ResultUse::Unused);
+        // One path keeps the pair whole up to the read.
+        assert_eq!(m.result_use(wide), ResultUse::Used);
+
+        // The value is overwritten on the only path, but a handler of the
+        // try range reads it first.
+        let mut a = Asm::default();
+        let call = a.invoke_static(1, &[]);
+        a.move_result(0);
+        let start = a.here();
+        filler(&mut a, far);
+        a.const4(0, 0);
+        let end = a.return_void();
+        let handler = a.ret(0);
+        let mut an = Analyzer::new();
+        let catches = [Catch { start, end, handler }];
+        let mut m = an.analyze(code(&a, 5, 0, &catches)).unwrap();
+        assert_eq!(m.result_use(call), ResultUse::Used);
+        let mut m = an.analyze(code(&a, 5, 0, &[])).unwrap();
+        assert_eq!(m.result_use(call), ResultUse::Unused);
     }
 
     #[test]
