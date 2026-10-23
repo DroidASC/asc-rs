@@ -204,7 +204,18 @@ enum Command {
     /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
     /// opened APKs resident across calls.
     /// Every opened APK shares one `--memory-mb` budget.
-    Mcp,
+    Mcp {
+        /// Refuse a single entry that inflates past this many MiB (zip bombs).
+        #[arg(long, default_value_t = 1024)]
+        max_entry_mb: u64,
+        /// Refuse an entry that expands more than this over its compressed size.
+        #[arg(long, default_value_t = 100)]
+        max_ratio: u64,
+        /// Package prefixes `collapse_sdks` folds, comma separated (com.foo or
+        /// Lcom/foo/), replacing the built-in list.
+        #[arg(long, value_delimiter = ',')]
+        sdk_prefixes: Option<Vec<String>>,
+    },
     /// Inspect or clear the on-disk cache of inflated DEX files.
     Cache {
         #[command(subcommand)]
@@ -527,8 +538,13 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
         Command::Gui { apk_path } => {
             launch_gui(apk_path, common.threads, common.debug, common.resident_cache())?;
         }
-        Command::Mcp => {
-            let opts = asc_mcp::Options { threads: common.threads, debug: common.debug, cache: common.resident_cache() };
+        Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes } => {
+            let mut opts = asc_mcp::Options::new(common.threads, common.debug, common.resident_cache());
+            opts.limits.max_entry_bytes = max_entry_mb.saturating_mul(1 << 20);
+            opts.limits.max_ratio = max_ratio;
+            if let Some(p) = sdk_prefixes {
+                opts.sdk_prefixes = p;
+            }
             asc_mcp::serve(std::io::stdin().lock(), std::io::stdout(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {
