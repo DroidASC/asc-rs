@@ -1,0 +1,12 @@
+[package]
+name = "asc-arsc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Lazy, bounds-checked resources.arsc reader used by Droid ASC: names, per-config values, reference resolution."
+
+[dependencies]
+asc-axml.workspace = true
+thiserror.workspace = true

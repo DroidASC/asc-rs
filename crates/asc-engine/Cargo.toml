@@ -15,6 +15,9 @@ asc-findrefs.workspace = true
 asc-rebuild.workspace = true
 asc-smali.workspace = true
 asc-axml.workspace = true
+asc-arsc.workspace = true
+regex.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

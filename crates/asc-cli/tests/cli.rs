@@ -563,3 +563,45 @@ fn memory_budget_is_a_global_flag() {
     let out = droidasc(&["listclass", path(apk.path()), "--memory-mb", "64"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+fn audit_apk() -> tempfile::NamedTempFile {
+    let (manifest, arsc) = asc_fixture::res::audit_manifest(30);
+    let files = asc_fixture::res::audit_res_files();
+    let mut entries: Vec<(&str, &[u8])> = vec![("AndroidManifest.xml", &manifest), ("resources.arsc", &arsc)];
+    entries.extend(files.iter().map(|(p, b)| (*p, b.as_slice())));
+    temp_apk_from(&make_apk(&entries, true))
+}
+
+#[test]
+fn manifest_summary_resources_and_xml() {
+    let apk = audit_apk();
+    let p = path(apk.path());
+    let out = droidasc(&["manifest-summary", p]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.lines().any(|l| l == "receiver com.demo.Boot exported=true (explicit)"), "{text}");
+    let out = droidasc(&["manifest-summary", p, "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["package"], "com.demo");
+
+    let out = droidasc(&["resources", p, "bool/exported_flag"]);
+    assert_eq!(stdout(&out), "0x7f020000 bool/exported_flag false\n0x7f020000 bool/exported_flag [v31] true\n");
+    let out = droidasc(&["resources", p, "0x7f010000", "--resolve"]);
+    assert_eq!(stdout(&out), "chain @string/app_name\n0x7f010000 string/app_name \"Demo\"\n");
+    let out = droidasc(&["resources", p, "--search", "XML/", "--in", "name", "--limit", "1"]);
+    assert_eq!(stdout(&out), "", "the regex is case-sensitive");
+    let out = droidasc(&["resources", p, "--search", "xml/", "--in", "name", "--limit", "1"]);
+    assert_eq!(stdout(&out).lines().count(), 1);
+    assert!(stderr(&out).contains("Note: 1 of 2 matches shown"), "{}", stderr(&out));
+    let out = droidasc(&["resources", p]);
+    assert_eq!(stdout(&out).lines().count(), 5);
+    let out = droidasc(&["resources", p, "--in", "bogus", "--search", "x"]);
+    assert_eq!(out.status.code(), Some(1));
+
+    let out = droidasc(&["xml", p, "res/xml/network_security_config.xml"]);
+    assert!(stdout(&out).contains("<base-config cleartextTrafficPermitted=\"false\"/>"), "{}", stdout(&out));
+    let out = droidasc(&["getmanifest", p, "--resolve"]);
+    assert!(stdout(&out).contains("android:networkSecurityConfig=\"@xml/network_security_config\""), "{}", stdout(&out));
+    let out = droidasc(&["getmanifest", p]);
+    assert!(stdout(&out).contains("android:networkSecurityConfig=\"@7F030000\""), "{}", stdout(&out));
+}

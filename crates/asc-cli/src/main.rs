@@ -25,6 +25,14 @@ examples:
   droidasc listclass app.apk -o classes.txt
   droidasc listclass app.apk --prefix com.poc
   droidasc getmanifest app.apk -o AndroidManifest.xml
+  droidasc getmanifest app.apk --resolve
+  droidasc manifest-summary app.apk | grep exported=true
+  droidasc manifest-summary app.apk --json
+  droidasc resources app.apk string/app_name
+  droidasc resources app.apk 0x7f0d0001 --resolve
+  droidasc resources app.apk --search 'https?://' --in value
+  droidasc resources app.apk -o resources.txt
+  droidasc xml app.apk res/xml/network_security_config.xml
   droidasc findrefs app.apk string token -o string_refs.txt
   droidasc findrefs app.apk string 'a.b(c)' --literal
   droidasc findrefs app.apk type com.poc.Main
@@ -53,8 +61,22 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 const EXIT_PARTIAL: u8 = 2;
 
 /// Subcommand names and aliases (`classes` / `manifest` as in rasc).
-const SUBCOMMANDS: [&str; 11] =
-    ["getclass", "disassemble", "listclass", "classes", "getmanifest", "manifest", "findrefs", "callgraph", "gui", "mcp", "cache"];
+const SUBCOMMANDS: [&str; 14] = [
+    "getclass",
+    "disassemble",
+    "listclass",
+    "classes",
+    "getmanifest",
+    "manifest",
+    "manifest-summary",
+    "resources",
+    "xml",
+    "findrefs",
+    "callgraph",
+    "gui",
+    "mcp",
+    "cache",
+];
 
 fn default_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
@@ -187,8 +209,64 @@ enum Command {
         /// Also write the decoded manifest to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Show resource references (@7F0C0001) by name, from resources.arsc.
+        #[arg(short, long)]
+        resolve: bool,
         /// Path to the input APK file.
         apk_path: PathBuf,
+    },
+    /// Summarize the manifest's attack surface, one record per line:
+    /// package, application flags, permissions, components (exported or not,
+    /// and why), intent filters, deep links, FileProvider paths, network
+    /// security config. References are resolved through resources.arsc.
+    ManifestSummary {
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+        /// Also write the output to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+    },
+    /// Query resources.arsc: one line per resource and configuration,
+    /// `0x7f0d0001 string/app_name [zh-rCN] "value"`.
+    ///
+    /// With no QUERY and no --search, dumps the whole table.
+    Resources {
+        /// Search names and string values with this regex.
+        #[arg(long, value_name = "REGEX", conflicts_with = "query")]
+        search: Option<String>,
+        /// Match --search as a plain substring.
+        #[arg(long, requires = "search")]
+        literal: bool,
+        /// What --search matches: name, value or any.
+        #[arg(long = "in", value_name = "FIELD", default_value = "any", requires = "search")]
+        field: String,
+        /// Follow QUERY's reference chain to its final value.
+        #[arg(long, requires = "query")]
+        resolve: bool,
+        /// At most this many rows for --search.
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
+        /// Write the output to this file instead of stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+        /// A resource id (0x7f0d0001) or name (string/app_name, @pkg:type/name).
+        query: Option<String>,
+    },
+    /// Decode any binary XML file of the APK (res/xml/..., layouts) with
+    /// resource references shown by name.
+    Xml {
+        /// Also write the decoded XML to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+        /// Path inside the APK, e.g. res/xml/network_security_config.xml.
+        path: String,
     },
     /// Find code references for string/type/method/field across all DEX entries in APK.
     ///
@@ -510,14 +588,56 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
             }
         }
-        Command::Getmanifest { output, apk_path } => {
+        Command::Getmanifest { output, resolve, apk_path } => {
             let engine = common.engine(&apk_path);
-            let xml = engine.manifest_xml().map_err(|e| e.to_string())?;
+            let xml = if resolve { engine.manifest_xml_resolved() } else { engine.manifest_xml() }.map_err(|e| e.to_string())?;
             write_output(output.as_ref(), &xml)?;
             emit(&xml)?;
             if common.debug {
                 eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
             }
+        }
+        Command::ManifestSummary { json, output, apk_path } => {
+            let summary = common.engine(&apk_path).manifest_summary().map_err(|e| e.to_string())?;
+            let text = if json { format!("{:#}", summary.json()) } else { summary.lines().join("\n") };
+            write_output(output.as_ref(), &text)?;
+            emit(&text)?;
+        }
+        Command::Resources { search, literal, field, resolve, limit, output, apk_path, query } => {
+            let engine = common.engine(&apk_path);
+            let stdout = std::io::stdout();
+            let mut sink = match &output {
+                Some(_) => LineSink { stdout: None, ..LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())? },
+                None => LineSink::new(BufWriter::new(stdout.lock()), None)?,
+            };
+            match (search, query) {
+                (Some(pattern), _) => {
+                    let field = match field.as_str() {
+                        "name" => asc_engine::ResourceField::Name,
+                        "value" => asc_engine::ResourceField::Value,
+                        "any" => asc_engine::ResourceField::Any,
+                        other => return Err(format!("--in must be name, value or any, not {other}")),
+                    };
+                    let (rows, total) = engine.search_resources(&pattern, literal, field, limit).map_err(|e| e.to_string())?;
+                    rows.iter().for_each(|r| sink.line(&r.line()));
+                    if total > rows.len() {
+                        eprintln!("Note: {} of {total} matches shown; raise --limit for more", rows.len());
+                    }
+                }
+                (None, Some(q)) if resolve => {
+                    let (chain, row) = engine.resolve_resource(&q, None).map_err(|e| e.to_string())?;
+                    sink.line(&format!("chain {}", chain.join(" -> ")));
+                    sink.line(&row.line());
+                }
+                (None, Some(q)) => engine.resource(&q).map_err(|e| e.to_string())?.iter().for_each(|r| sink.line(&r.line())),
+                (None, None) => engine.dump_resources(|r| sink.line(&r.line())).map_err(|e| e.to_string())?,
+            }
+            sink.finish()?;
+        }
+        Command::Xml { output, apk_path, path } => {
+            let xml = common.engine(&apk_path).xml(&path).map_err(|e| e.to_string())?;
+            write_output(output.as_ref(), &xml)?;
+            emit(&xml)?;
         }
         Command::Findrefs { apk_path, context, context_method, find } => {
             let context = match (context, context_method) {
