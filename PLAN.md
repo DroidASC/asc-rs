@@ -195,9 +195,14 @@
 
 **方向（2026-10-23）**：CLI 是一等的 agent 接口，MCP 保留为另一种接入；参考 pi 的工具设计（统一截断、可操作的续页与报错、参数修复），预算交给客户端决定，不按单一模型调参。不再做新的 agent 评测。
 
+**之后合入（2026-10-23）**：写盘队列满时延后重新解压而不是丢弃（ams 836 个 APK 冷扫后 L1 从 86 个文件增至 866 个，冷扫后单 APK 查询约快 2 倍；冷扫回答 +6%，退出前写盘 +1.4 s）；写盘线程与预建降优先级（Linux nice 19、Apple utility QoS）；删除 GUI（asc-gui 与 egui 依赖）；CLI `--limit` / `--max-bytes` / `--offset`（超出时写文件并给出续读提示）、findrefs 按 DEX 自然序输出、子命令 help 不再重复全局选项、`skills/droidasc/SKILL.md`。上游字符串下标问题已报：MG1937/ASC#54、MG1937/rust_ASC#8。
+
 **待做**：
 - 注册表最多每秒读一次，约 1 s 的突发多进程扫描看不到彼此，自动线程不收缩（N=16 时每进程 4 线程比满线程快约 16%）。
-- 多 APK 冷扫时 512 MiB 写盘队列上限丢掉了大部分 L1 写入（836 个 APK 只写了约 1.2 GB），热跑只能靠 L3；队列上限应随内存放宽，或改为限速而不是丢弃。
 - macOS 下 N=16 MCP 进程合计约 21 GB 来自解压中的数据和映射页，不是内存缓存，需另查。
-- 多 APK 扫描接 prefix-skip；findrefs 按签名过滤重载；MCP kind 的 enum 对严格受约束采样的客户端仍会拦下复数写法。
+- 多 APK 扫描接 prefix-skip；多 APK 查询的零结果提示。
+- findrefs 按签名过滤重载；MCP kind 的 enum 对严格受约束采样的客户端仍会拦下复数写法；字段零结果提示列出全部已引用字段时过长，应截断。
+- daemon：callgraph / hierarchy / getclass 断连后不能中途取消；引擎池的类图、resources 不计入内存预算；Windows 不支持；首次等待 300 ms、空闲 15 分钟为常量。
+- MCP 工具定义：参数说明与默认值、`outputSchema`、`readOnlyHint`；考虑去掉 open_apk / close_apk。
+- macOS 上降优先级对写盘与查询争用的实际效果未测。
 - 评测：不再做新的 agent 评测（2026-10-23）。若以后重启：S1 证据先用 40.8.0 重新标注，加「只用 CLI + skill」组，并换一个模型。
