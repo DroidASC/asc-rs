@@ -156,6 +156,8 @@ pub struct DiskCache {
     min_derived_cost: Duration,
     /// Tiers written and read; the others behave as permanently empty.
     tiers: [bool; 3],
+    /// Bytes this handle wrote since its last eviction walk.
+    written: std::sync::atomic::AtomicU64,
 }
 
 /// The tiers of a [`DiskCache`].
@@ -430,7 +432,14 @@ impl DiskCache {
             Ok(v) => Tier::ALL.map(|t| v.split(',').any(|n| n.trim() == t.name())),
             Err(_) => [true; 3],
         };
-        DiskCache { dir: dir.into(), cap: DiskCapacity::from_env(), min_dex_bytes, min_derived_cost: DEFAULT_MIN_DERIVED_COST, tiers }
+        DiskCache {
+            dir: dir.into(),
+            cap: DiskCapacity::from_env(),
+            min_dex_bytes,
+            min_derived_cost: DEFAULT_MIN_DERIVED_COST,
+            tiers,
+            written: Default::default(),
+        }
     }
 
     /// Use only `tiers`: reads of the others miss and writes to them are
@@ -555,7 +564,7 @@ impl DiskCache {
         if !self.uses(Tier::Dex) {
             return Ok(());
         }
-        self.write_atomic(&self.entry_path(key, entry_name), &[bytes])
+        self.write_atomic(&self.entry_path(key, entry_name), &[bytes], true)
     }
 
     /// Map the L2 index `name` (e.g. a logical DEX name) of `kind` at the
@@ -603,7 +612,7 @@ impl DiskCache {
         header[12..16].copy_from_slice(&version.to_le_bytes());
         header[16..24].copy_from_slice(&(build_cost.as_micros() as u64).to_le_bytes());
         header[24..32].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-        self.write_atomic(&self.derived_path(key, name, kind, version), &[&header, payload])
+        self.write_atomic(&self.derived_path(key, name, kind, version), &[&header, payload], false)
     }
 
     /// The L3 result stored under `query` (the query, its options and the
@@ -636,7 +645,7 @@ impl DiskCache {
         header.extend_from_slice(RENDERED_MAGIC);
         header.extend_from_slice(&(query.len() as u32).to_le_bytes());
         header.extend_from_slice(query.as_bytes());
-        self.write_atomic(&self.rendered_path(key, query), &[&header, payload])
+        self.write_atomic(&self.rendered_path(key, query), &[&header, payload], false)
     }
 
     /// Record where the APK of `key` lives, so eviction can tell the entries
@@ -648,12 +657,17 @@ impl DiskCache {
         if fs::read_to_string(&path).is_ok_and(|s| s == stamp) {
             return Ok(());
         }
-        self.write_atomic(&path, &[stamp.as_bytes()])
+        self.write_atomic(&path, &[stamp.as_bytes()], false)
     }
 
     /// Write `parts` to `path` (atomic rename; concurrent writers are
     /// harmless), refusing foreign directories and the free-space reserve.
-    fn write_atomic(&self, path: &Path, parts: &[&[u8]]) -> Result<(), CacheError> {
+    /// With `sync` the data reaches the disk before the rename. L1 entries
+    /// are only checked by length on read, so they are synced; L2 and L3
+    /// files carry headers (and L3 an end marker) that a file cut short by
+    /// a crash fails, and a sync per small file costs more than the query
+    /// that wrote it (a one-shot process per query writes one or two).
+    fn write_atomic(&self, path: &Path, parts: &[&[u8]], sync: bool) -> Result<(), CacheError> {
         // Checked before anything is created: the tag must never land in a
         // directory that holds someone else's files.
         if !self.is_cache_dir() {
@@ -681,9 +695,12 @@ impl DiskCache {
             for p in parts {
                 f.write_all(p).map_err(io_err(&tmp))?;
             }
-            f.sync_data().ok();
+            if sync {
+                f.sync_data().ok();
+            }
         }
         fs::rename(&tmp, path).map_err(io_err(path))?;
+        self.written.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -784,7 +801,7 @@ impl DiskCache {
                 let name = name.to_string_lossy();
                 match d.file_type() {
                     Ok(t) if t.is_dir() => is_cache_dir_name(&name) || TIER_DIRS.contains(&&*name),
-                    Ok(t) if t.is_file() => name == ".DS_Store",
+                    Ok(t) if t.is_file() => name == ".DS_Store" || name == EVICT_MARKER,
                     _ => false,
                 }
             }),
@@ -898,6 +915,8 @@ impl DiskCache {
         if !self.is_cache_dir() {
             return;
         }
+        self.written.store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = fs::File::create(self.dir.join(EVICT_MARKER));
         let items = self.items();
         let mut total: u64 = items.iter().map(|i| i.bytes).sum();
         let cap = self.capacity_for(total);
@@ -944,6 +963,41 @@ impl DiskCache {
         }
     }
 }
+
+impl DiskCache {
+    /// [`DiskCache::evict`], skipped when another walk happened less than
+    /// [`EVICT_INTERVAL`] ago and this handle has written less than
+    /// 1/[`EVICT_WRITE_DIVISOR`] of the budget since its own last walk. For
+    /// hosts that evict after every burst of writes: a process per query
+    /// would otherwise walk the whole cache thousands of times over a batch.
+    pub fn evict_lazily(&self) {
+        if !self.recently_evicted() {
+            self.evict();
+        }
+    }
+
+    /// Whether a walk can be skipped: some process walked the cache less
+    /// than [`EVICT_INTERVAL`] ago and this handle has written less than
+    /// 1/[`EVICT_WRITE_DIVISOR`] of the budget since its own last walk. A
+    /// walk reads every file's metadata (and every L2 header), which a
+    /// process per query would otherwise repeat thousands of times over a
+    /// batch; the overshoot is bounded, and every automatic-budget write
+    /// still checks the free-space reserve.
+    fn recently_evicted(&self) -> bool {
+        let written = self.written.load(std::sync::atomic::Ordering::Relaxed);
+        let fresh = fs::metadata(self.dir.join(EVICT_MARKER))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age < EVICT_INTERVAL);
+        fresh && written < self.capacity_for(0) / EVICT_WRITE_DIVISOR
+    }
+}
+
+/// Touched by every eviction walk; see [`DiskCache::evict`].
+const EVICT_MARKER: &str = ".last-evict";
+const EVICT_INTERVAL: Duration = Duration::from_secs(5);
+const EVICT_WRITE_DIVISOR: u64 = 16;
 
 /// Indexes of `items` in eviction order: entries of dead APKs first
 /// (largest first), then L1 by `age × size` (descending), then L3 by age
@@ -1605,6 +1659,25 @@ mod tests {
         all.put(&key, "classes.dex", b"abc").unwrap();
         assert!(cache.get(&key, "classes.dex", 3).is_none());
         assert!(cache.uses(Tier::Derived) && !cache.uses(Tier::Dex));
+    }
+
+    #[test]
+    fn lazy_eviction_skips_a_walk_right_after_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(1 << 30);
+        let key = ApkKey("app-0123456789abcdef".into());
+        cache.put(&key, "classes.dex", &[0; 100]).unwrap();
+        cache.evict();
+        assert!(dir.path().join(EVICT_MARKER).is_file());
+        assert!(cache.check_usable().is_ok(), "the marker is the cache's own");
+        // Over a lowered budget: a lazy pass right after a walk leaves it ...
+        let cache = cache.with_capacity(50);
+        cache.evict_lazily();
+        assert_eq!(cache.stats().1, 1);
+        // ... until enough was written since (1/16 of the budget), or the walk is old.
+        cache.put(&key, "classes2.dex", &[0; 100]).unwrap();
+        cache.evict_lazily();
+        assert_eq!(cache.stats().1, 0);
     }
 
     #[test]

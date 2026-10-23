@@ -520,7 +520,7 @@ impl EngineCache {
                     // Walk the cache directory once per burst, not once per entry.
                     match rx.try_recv() {
                         Ok(next) => pending = Some(next),
-                        Err(_) => thread_disk.evict(),
+                        Err(_) => thread_disk.evict_lazily(),
                     }
                 }
             });
@@ -528,7 +528,7 @@ impl EngineCache {
                 Ok(handle) => *writer = Some(Writer { tx, handle }),
                 Err(_) => {
                     run_job(disk, self.memory.as_ref(), job, &mut HashSet::new());
-                    disk.evict();
+                    disk.evict_lazily();
                     return;
                 }
             }
