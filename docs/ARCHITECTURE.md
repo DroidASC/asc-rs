@@ -213,7 +213,16 @@ lazily by the queries themselves):
 
 * `DiskCache`: `<dir>/<apk-key>/<entry>` files with the inflated bytes, keyed by size,
   mtime and an FNV hash of the central directory; atomic `rename` writes, `populate`d
-  mmap reads, LRU eviction by APK directory above a byte cap. The engine queues writes
+  mmap reads, LRU eviction by APK directory above a byte cap. The cap is a
+  `DiskCapacity`: `Fixed(bytes)` (`--cache-max-mb`, `$DROIDASC_CACHE_MAX_MB`) or `Auto`
+  (default), which `capacity_for(used)` turns into `auto_disk_bytes_for(disk_space(dir),
+  used)` = min(20 % of used + free, 4 GiB, used + free - `auto_disk_reserve(total)`),
+  the reserve being max(1 GiB, 5 % of the file system). `evict` recomputes it on every
+  pass, so a disk filled by someone else shrinks the cache below its current size;
+  `put` refuses (`CacheError::LowDiskSpace`) an entry that would leave less than the
+  reserve free, at the cost of one `statvfs` per entry. `disk_space` returns `None`
+  off Unix, where `Auto` means the old 4 GiB. `budget()` reports cap, usage and free
+  space for `cache stats`. The engine queues writes
   to one background thread (writing and syncing a 30 MiB entry costs as much as the whole
   query it came from) and evicts once per burst rather than after every entry;
   `Engine::flush_cache_writes` / `Drop` wait for the queue. Concurrent queries that need

@@ -6,7 +6,8 @@ read-only database. It locates a class, searches cross references or decodes the
 directly from the compressed artifact in milliseconds, without building any global index.
 
 ```
-usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] <COMMAND>
+usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-max-mb MIB]
+                [--memory-mb MIB] <COMMAND>
 
   getclass     Locate the target class in APK, extract one DEX in memory, then disassemble.
   disassemble  Same, without debug directives unless --debuginfo (Python's smali command).
@@ -15,12 +16,14 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] <COMMAND>
   findrefs     Find code references for string/type/method/field, or subclasses / implementors
                (extends / impl), across all DEX entries in APK.
   gui          Launch the graphical browser.
-  mcp          Serve MCP tools over stdio, keeping opened APKs resident (--memory-mb MIB).
+  mcp          Serve MCP tools over stdio, keeping opened APKs resident.
   cache        Inspect or clear the on-disk cache (path | stats | clear).
 
   --threads N      worker threads (default: number of logical CPUs); --thread N also works
   --no-cache       bypass the on-disk cache of inflated DEX files
   --cache-dir DIR  use DIR instead of the default cache directory
+  --cache-max-mb MIB  on-disk cache budget (default: automatic, see "Caching")
+  --memory-mb MIB  in-memory budget of gui / mcp (default: automatic)
   --debug          profiling output on stderr
   -v, -V, --version
 
@@ -183,13 +186,14 @@ the normal cost and fills the cache as a side effect.
 * **On-disk cache** (`~/.cache/droidasc`, or `$DROIDASC_CACHE_DIR` / `$XDG_CACHE_HOME`),
   on by default for the CLI and shared between processes. Entries are keyed by the APK's
   size, mtime and central directory, written atomically, memory-mapped on the next run and
-  evicted least-recently-used above 4 GiB. Writes are queued to a background thread, so a
+  evicted least-recently-used above its budget (see below). Writes are queued to a background thread, so a
   query never waits for its own cache entry to be written (the process still lands queued
   writes before exiting). The directory carries a `CACHEDIR.TAG`; a `--cache-dir` that
   already holds other files (dot-files included) is refused outright with a warning and the
   disk cache is disabled (nothing is written, tagged, evicted or cleared there), and eviction and `cache clear` only ever touch entry directories of the
   cache's own naming shape. `--no-cache` bypasses it,
-  `--cache-dir` moves it, `droidasc cache path|stats|clear` manages it.
+  `--cache-dir` moves it, `droidasc cache path|stats|clear` manages it (`stats` prints
+  the budget, where it comes from and the file system's free space).
 * **In-memory LRU** (GUI and embedders, `CacheConfig::resident` / `resident_auto`) that
   also keeps the locator tables built for each DEX, so a second query only runs the
   regex, the scan and the offset→method resolution. Its budget counts those tables too
@@ -200,6 +204,20 @@ the normal cost and fills the cache as a side effect.
   mapping of its cache file as soon as that file is written (after a byte-for-byte
   check), so resident entries are file-backed pages the OS can reclaim and share between
   processes rather than anonymous memory.
+
+Both caches size themselves from the machine unless given a number:
+
+| | automatic budget | explicit |
+|---|---|---|
+| disk | 20 % of what the cache could hold (its own bytes + the file system's free space), at most 4 GiB, and never so much that less than max(1 GiB, 5 % of the file system) stays free; 4 GiB where the free space cannot be read (Windows) | `--cache-max-mb MIB`, else `$DROIDASC_CACHE_MAX_MB` |
+| memory (gui, mcp) | a quarter of available memory (`MemAvailable`, or the cgroup v2 headroom when lower), 64 MiB–2 GiB; 2 GiB where it cannot be read | `--memory-mb MIB` |
+
+The disk budget is re-evaluated at every eviction pass (once per burst of writes, the
+same directory walk as before) and each automatic-budget write first checks the free
+space with one `statvfs`: an entry that would cut into the reserve is not written, and
+when another program has filled the disk the next eviction shrinks the cache below what
+it holds, oldest APKs first. One-shot CLI commands keep no memory cache, so
+`--memory-mb` only matters for `gui` and `mcp`.
 
 Resident memory of one process holding the GUI's engine state (16 threads, Douyin
 40.7.0 = 437 MB of DEX, then Kuaishou and Xiaohongshu opened in the same process; class

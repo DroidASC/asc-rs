@@ -130,21 +130,16 @@ pub struct AscApp {
 }
 
 impl AscApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, apk: PathBuf, threads: usize, debug: bool, cache: bool) -> AscApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, apk: PathBuf, threads: usize, debug: bool, cache: asc_engine::CacheConfig) -> AscApp {
         Self::with_context(cc.egui_ctx.clone(), Prefs::load(cc.storage), apk, threads, debug, cache)
     }
 
-    fn with_context(ctx: egui::Context, prefs: Prefs, apk: PathBuf, threads: usize, debug: bool, cache: bool) -> AscApp {
+    fn with_context(ctx: egui::Context, prefs: Prefs, apk: PathBuf, threads: usize, debug: bool, cache: asc_engine::CacheConfig) -> AscApp {
         let mut engine = Engine::new(&apk).with_threads(threads).with_debug(debug).with_logger(|m| eprintln!("{m}"));
-        // Keep inflated DEX files and their locator tables resident: the
-        // browser fires many queries against the same archive. The budget
-        // follows the free memory, so several open browsers do not each
-        // claim 2 GiB.
-        engine = engine.with_cache(if cache {
-            asc_engine::CacheConfig::resident_auto()
-        } else {
-            asc_engine::CacheConfig { memory_bytes: asc_engine::auto_memory_bytes(), disk: None }
-        });
+        // Inflated DEX files and their locator tables stay resident within
+        // the caller's budget (by default it follows the free memory, so
+        // several open browsers do not each claim 2 GiB).
+        engine = engine.with_cache(cache);
         let engine = Arc::new(engine);
         let (tx, rx) = channel();
         let store = Arc::new(Store { engine, tx, ctx });
@@ -1318,7 +1313,8 @@ mod tests {
     /// stays "running" for the whole test.
     fn app() -> AscApp {
         let apk = PathBuf::from("/nonexistent/asc-gui-test.apk");
-        AscApp::with_context(egui::Context::default(), Prefs::default(), apk, 1, false, false)
+        let cache = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: None };
+        AscApp::with_context(egui::Context::default(), Prefs::default(), apk, 1, false, cache)
     }
 
     fn with_class_tab(text: &str) -> AscApp {

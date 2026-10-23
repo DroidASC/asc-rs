@@ -17,7 +17,10 @@ mod tabs;
 use std::path::PathBuf;
 
 /// Open the browser window for `apk`.
-pub fn launch(apk: PathBuf, threads: usize, debug: bool, cache: bool) -> Result<(), String> {
+/// Open the browser on `apk`. `cache` is the engine's cache: the GUI fires
+/// many queries against one archive, so it wants a memory budget (see
+/// [`asc_engine::CacheConfig::resident_auto`]).
+pub fn launch(apk: PathBuf, threads: usize, debug: bool, cache: asc_engine::CacheConfig) -> Result<(), String> {
     let title = format!("Droid ASC - {}", apk.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]).with_title(&title).with_app_id("droidasc"),

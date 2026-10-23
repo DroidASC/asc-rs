@@ -1,6 +1,6 @@
 //! `droidasc` command line entry.
 
-use asc_engine::asc_cache::DiskCache;
+use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::{names, CacheConfig, Engine};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand};
@@ -82,6 +82,15 @@ struct Common {
     /// Cache directory (default: $DROIDASC_CACHE_DIR, $XDG_CACHE_HOME/droidasc or ~/.cache/droidasc).
     #[arg(long, global = true, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
+    /// On-disk cache budget, in MiB (default: $DROIDASC_CACHE_MAX_MB, else
+    /// automatic: 20% of the cache's file system room, at most 4096, never
+    /// below a 1 GiB / 5% free-space reserve).
+    #[arg(long, global = true, value_name = "MIB")]
+    cache_max_mb: Option<u64>,
+    /// In-memory cache budget of `gui` and `mcp`, in MiB (default: a quarter
+    /// of available memory, at most 2048). One-shot commands keep no memory cache.
+    #[arg(long, global = true, value_name = "MIB")]
+    memory_mb: Option<usize>,
 }
 
 impl Common {
@@ -96,9 +105,22 @@ impl Common {
     }
 
     fn disk_cache(&self) -> Option<DiskCache> {
-        match &self.cache_dir {
-            Some(d) => Some(DiskCache::open(d)),
-            None => DiskCache::open_default(),
+        let cache = match &self.cache_dir {
+            Some(d) => DiskCache::open(d),
+            None => DiskCache::open_default()?,
+        };
+        Some(match self.cache_max_mb {
+            Some(mb) => cache.with_capacity(mb.saturating_mul(1 << 20)),
+            None => cache,
+        })
+    }
+
+    /// Cache of the resident hosts (`gui`, `mcp`): the memory budget plus
+    /// the disk cache unless disabled.
+    fn resident_cache(&self) -> CacheConfig {
+        CacheConfig {
+            memory_bytes: self.memory_mb.map_or_else(asc_engine::auto_memory_bytes, |mb| mb.saturating_mul(1 << 20)),
+            disk: if self.no_cache { None } else { self.disk_cache() },
         }
     }
 }
@@ -181,12 +203,8 @@ enum Command {
     },
     /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
     /// opened APKs resident across calls.
-    Mcp {
-        /// In-memory cache budget shared by every opened APK, in MiB
-        /// (default: a quarter of available memory, at most 2048).
-        #[arg(long, value_name = "MIB")]
-        memory_mb: Option<usize>,
-    },
+    /// Every opened APK shares one `--memory-mb` budget.
+    Mcp,
     /// Inspect or clear the on-disk cache of inflated DEX files.
     Cache {
         #[command(subcommand)]
@@ -507,18 +525,10 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             }
         }
         Command::Gui { apk_path } => {
-            launch_gui(apk_path, common.threads, common.debug, !common.no_cache)?;
+            launch_gui(apk_path, common.threads, common.debug, common.resident_cache())?;
         }
-        Command::Mcp { memory_mb } => {
-            let disk = if common.no_cache { None } else { common.disk_cache() };
-            let opts = asc_mcp::Options {
-                threads: common.threads,
-                debug: common.debug,
-                cache: CacheConfig {
-                    memory_bytes: memory_mb.map_or_else(asc_engine::auto_memory_bytes, |mb| mb.saturating_mul(1 << 20)),
-                    disk,
-                },
-            };
+        Command::Mcp => {
+            let opts = asc_mcp::Options { threads: common.threads, debug: common.debug, cache: common.resident_cache() };
             asc_mcp::serve(std::io::stdin().lock(), std::io::stdout(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {
@@ -527,11 +537,21 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 CacheAction::Path => println!("{}", cache.dir().display()),
                 CacheAction::Stats => {
                     let (apks, files, bytes) = cache.stats();
-                    println!("{}\n{apks} APKs, {files} files, {:.1} MiB", cache.dir().display(), bytes as f64 / (1024.0 * 1024.0));
+                    println!("{}\n{apks} APKs, {files} files, {}", cache.dir().display(), mib(bytes));
+                    let budget = cache.budget();
+                    let source = match budget.capacity {
+                        DiskCapacity::Auto => "auto",
+                        DiskCapacity::Fixed(_) => "explicit",
+                    };
+                    println!("budget: {} ({source}), used {}", mib(budget.cap_bytes), mib(budget.used));
+                    match budget.space {
+                        Some((free, total)) => println!("file system: {} free of {}", mib(free), mib(total)),
+                        None => println!("file system: free space unknown"),
+                    }
                 }
                 CacheAction::Clear => {
                     let bytes = cache.clear().map_err(|e| e.to_string())?;
-                    println!("freed {:.1} MiB", bytes as f64 / (1024.0 * 1024.0));
+                    println!("freed {}", mib(bytes));
                 }
             }
         }
@@ -540,12 +560,16 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
 }
 
 #[cfg(feature = "gui")]
-fn launch_gui(apk_path: PathBuf, threads: usize, debug: bool, cache: bool) -> Result<(), String> {
+fn launch_gui(apk_path: PathBuf, threads: usize, debug: bool, cache: CacheConfig) -> Result<(), String> {
     asc_gui::launch(apk_path, threads, debug, cache).map_err(|e| e.to_string())
 }
 
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+}
+
 #[cfg(not(feature = "gui"))]
-fn launch_gui(_apk_path: PathBuf, _threads: usize, _debug: bool, _cache: bool) -> Result<(), String> {
+fn launch_gui(_apk_path: PathBuf, _threads: usize, _debug: bool, _cache: CacheConfig) -> Result<(), String> {
     Err("this build was compiled without the `gui` feature".into())
 }
 
