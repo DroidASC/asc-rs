@@ -21,6 +21,7 @@ asc-findrefs.workspace = true
 asc-mcp.workspace = true
 asc-gui = { path = "../asc-gui", optional = true }
 clap.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 asc-fixture.workspace = true

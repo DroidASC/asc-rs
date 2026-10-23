@@ -210,6 +210,7 @@ fn foreign_cache_dir_is_reported_and_left_alone() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.txt"), b"keep").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_droidasc"))
+        .env("DROIDASC_DAEMON", "off")
         // A fixed budget, so the test does not depend on the free space of the temp dir.
         .env("DROIDASC_CACHE_MAX_MB", "1024")
         .args(["--cache-dir", path(dir.path()), "findrefs", path(f.path()), "string", "token"])
@@ -568,6 +569,7 @@ fn cache_stats_reports_the_disk_budget() {
     let dir = tempfile::tempdir().unwrap();
     let run = |env: Option<&str>, args: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_droidasc"));
+        cmd.env("DROIDASC_DAEMON", "off");
         match env {
             Some(v) => cmd.env("DROIDASC_CACHE_MAX_MB", v),
             None => cmd.env_remove("DROIDASC_CACHE_MAX_MB"),
@@ -598,7 +600,12 @@ fn zero_disk_budget_evicts_after_the_query() {
     let f = temp_apk();
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_droidasc")).args(["--cache-dir", path(dir.path())]).args(args).output().expect("run droidasc")
+        Command::new(env!("CARGO_BIN_EXE_droidasc"))
+            .env("DROIDASC_DAEMON", "off")
+            .args(["--cache-dir", path(dir.path())])
+            .args(args)
+            .output()
+            .expect("run droidasc")
     };
     let out = run(&["--cache-max-mb", "0", "findrefs", path(f.path()), "string", "token"]);
     assert!(out.status.success(), "{}", stderr(&out));

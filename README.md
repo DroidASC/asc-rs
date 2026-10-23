@@ -374,6 +374,39 @@ The scan itself adapts to the query: up to eight target indexes are found with S
 `memchr2` over their two opcodes, and clustered index sets are prefiltered with `memchr`
 on the shared high operand byte before the linear sweep.
 
+## Daemon: warm one-shot commands
+
+On Unix every one-shot command (`findrefs`, `getclass`, `callgraph`, `hierarchy`,
+`manifest-summary`, ...) answers through a per-user daemon that keeps the APKs it has
+opened resident, so a shell or an agent calling the CLI step by step gets MCP-like latency
+without an MCP client. Nothing changes in how commands are written or what they print:
+stdout, stderr and the exit status are byte for byte those of a run without the daemon.
+
+* The first command starts the daemon (`droidasc daemon serve`, detached) and hands itself
+  over once it is up; the daemon exits after 15 idle minutes.
+* `--debug` and `--no-cache` always run in the calling process, as do `gui`, `mcp`,
+  `cache` and `daemon`. `DROIDASC_DAEMON=off` turns the daemon off.
+* One daemon per build and cache configuration (`--cache-dir`, `--cache-max-mb`,
+  `DROIDASC_*`, umask): a rebuilt binary starts a fresh daemon, which retires the old one.
+* `droidasc daemon status` lists the running daemons, `daemon stop` stops them,
+  `daemon start` starts one ahead of time.
+* The socket is in a directory only the user can enter (`$DROIDASC_RUNTIME_DIR/daemon`,
+  `$XDG_RUNTIME_DIR/droidasc/daemon`, else `<temp dir>/droidasc-<uid>/daemon`) and both ends
+  check the peer's uid. A client killed with Ctrl-C cancels its search in the daemon.
+
+Douyin (360 MB, 55 DEX, 16 threads), one process per command, disk cache warm:
+
+| | without daemon | with daemon |
+|---|---:|---:|
+| 47-step agent-audit replay | 176 ms | 135 ms (MCP session: 55 ms) |
+| first query, empty cache | 256 ms | 81 ms |
+| second query, other kind | 234 ms | 9 ms |
+| `hierarchy android.app.Activity` (1343 rows), repeated | 500 ms | 6 ms |
+| `callgraph WebView loadUrl --virtual`, repeated | 400 ms | 5 ms |
+
+About 1.6 ms of each command is the process start itself, which the daemon cannot remove;
+a long session of many calls is still cheaper over MCP.
+
 ## MCP server
 
 `droidasc mcp` is a resident session for agents: an MCP server on stdio (JSON-RPC 2.0, one
