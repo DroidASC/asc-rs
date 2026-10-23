@@ -15,6 +15,7 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
   getmanifest  Decode AndroidManifest.xml from APK and print it as XML. Alias: manifest.
   findrefs     Find code references for string/type/method/field, or subclasses / implementors
                (extends / impl), across all DEX entries in APK.
+  callgraph    Callers (default) or callees of a method across all DEX entries, as a tree.
   gui          Launch the graphical browser.
   mcp          Serve MCP tools over stdio, keeping opened APKs resident.
   cache        Inspect or clear the on-disk cache (path | stats | clear).
@@ -45,12 +46,16 @@ examples:
   droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
+  droidasc findrefs app.apk string token --context 3
+  droidasc findrefs app.apk method loadUrl --context-method
+  droidasc callgraph app.apk com.poc.Main onCreate --depth 3
+  droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
   droidasc mcp --memory-mb 4096
   droidasc cache stats
 ```
 
-Exit status is 0 on success, 1 on error and 2 when `findrefs` finished but some DEX entries
-could not be searched (a warning per entry is printed on stderr).
+Exit status is 0 on success, 1 on error and 2 when `findrefs` or `callgraph` finished but
+some DEX entries could not be searched (a warning per entry is printed on stderr).
 
 The command line, query semantics and `findrefs` output format
 (`classes2.dex | Lcom/x/Y;->m | matched=(token)`, and `classes.dex | Lcom/x/Sub; extends
@@ -60,6 +65,33 @@ Lcom/x/Base;` for `extends` / `impl`) are the same as the Python tool.
 exact signature (a bare name is rejected). `findrefs extends` / `impl` list the classes
 whose direct superclass / one of whose direct interfaces is the target (dotted or Dalvik
 form). `findrefs string --literal` matches a plain substring instead of a regex.
+
+`findrefs --context N` prints, after each result, where the references are and the smali
+around them, so the next step rarely needs a `getclass`; `--context-method` prints the
+whole method (a method over 150 lines shows 10 lines around each reference instead):
+
+```
+classes.dex | Lcom/poc/Main;->run | matched=(token)
+  @ pc 0x4 line 12
+        .line 12
+  >     const-string v0, "token"
+        invoke-static {v0}, Lcom/poc/Net;->send(Ljava/lang/String;)V
+```
+
+`callgraph APK CLASS METHOD` walks callers (or `--callees`) `--depth` levels (default 2,
+at most `--max-nodes` methods, default 500), across DEX files. `METHOD` is a name (every
+overload) or an exact `name(params)ret`. One line per call; `[no body]` marks methods no
+DEX of the APK defines (framework / SDK), `(repeated)` methods expanded elsewhere:
+
+```
+0 Landroid/webkit/WebView;->loadUrl(Ljava/lang/String;)V [no body]
+  1 <- Lcom/poc/Web;->open(Ljava/lang/String;)V
+    2 <- Lcom/poc/DeepLink;->onCreate(Landroid/os/Bundle;)V
+# 3 rows, 3 distinct methods (callers, depth 2)
+```
+
+The graph is the static references in the bytecode: a call through `Lcom/poc/Sub;->m()V`
+is not a call of `Lcom/poc/Base;->m()V`.
 
 Scripts written for the other Rust ports keep working: `classes` and `manifest` are
 aliases of `listclass` and `getmanifest` (as in rasc), `--thread` of `--threads` (as in
@@ -278,7 +310,8 @@ ending the session.
 | `open_apk` | `apk`, `warm` (default true: inflate every DEX now) | `apk_id`; the same path returns the same id |
 | `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
 | `getclass` | `class`, `debug_info`, `method` (exact signature) | smali, as `droidasc getclass [--method]` |
-| `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `offset`, `limit` (500) | `findrefs` lines in DEX order, then a `# N results` line |
+| `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; with `context`, `structuredContent` rows carry `sites` (`pc`, `line`, `matched`) and `context` |
+| `callgraph` | `class`, `method` (name or `name(params)ret`), `direction` (`callers`/`callees`), `depth` (2), `max_nodes` (200) | the `droidasc callgraph` tree; `rows` with `depth`, `parent`, `method`, `dex`, `repeated` |
 | `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
 | `getmanifest` | | decoded XML |
 

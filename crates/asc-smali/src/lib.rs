@@ -62,7 +62,7 @@ pub fn disassemble_class_method(dex: &Dex<'_>, descriptor: &str, opts: Options, 
     let (index, _) =
         dex.find_class_def(&asc_dex::mutf8::encode(descriptor))?.ok_or_else(|| SmaliError::ClassNotFound(descriptor.to_string()))?;
     let def = dex.class_def(index)?;
-    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts, method: filter.as_deref() };
+    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts, method: filter.as_deref(), marks: None };
     if let Some(sig) = w.method {
         let cd = dex.class_data(def.class_data_off)?;
         let mut found = false;
@@ -83,9 +83,70 @@ pub fn disassemble_class_method(dex: &Dex<'_>, descriptor: &str, opts: Options, 
 /// Disassemble class definition number `index`.
 pub fn disassemble_class_def(dex: &Dex<'_>, index: u32, opts: Options) -> Result<String> {
     let def = dex.class_def(index)?;
-    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts, method: None };
+    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts, method: None, marks: None };
     w.class(&def)?;
     Ok(w.out)
+}
+
+/// One method rendered on its own (`.method` .. `.end method`), with the line
+/// each instruction starts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodListing {
+    pub text: String,
+    /// `(pc, line)` per instruction in pc order: `pc` in code units from the
+    /// start of the method's code, `line` a 0-based index into `text.lines()`.
+    pub insns: Vec<(u32, u32)>,
+    /// `(pc, source line)` from the debug info, in pc order (empty without it).
+    pub positions: Vec<(u32, u32)>,
+}
+
+impl MethodListing {
+    /// Line of `text` holding the instruction at `pc` (code units).
+    pub fn line_of(&self, pc: u32) -> Option<u32> {
+        self.insns.binary_search_by_key(&pc, |&(p, _)| p).ok().map(|i| self.insns[i].1)
+    }
+
+    /// Source line (debug info) covering the instruction at `pc`.
+    pub fn source_line(&self, pc: u32) -> Option<u32> {
+        match self.positions.partition_point(|&(p, _)| p <= pc) {
+            0 => None,
+            n => Some(self.positions[n - 1].1),
+        }
+    }
+}
+
+/// Render method `method_idx` of `dex` (it must be defined by a class of
+/// this DEX), annotations and parameters included, as in a class listing.
+pub fn disassemble_method(dex: &Dex<'_>, method_idx: u32, opts: Options) -> Result<MethodListing> {
+    let id = dex.method_id(method_idx)?;
+    let not_found = || SmaliError::MethodNotFound(method_signature(dex, method_idx).unwrap_or_else(|_| format!("method@{method_idx}")));
+    let (_, def) = dex.find_class_def_by_type(id.class_idx as u32)?.ok_or_else(not_found)?;
+    let cd = dex.class_data(def.class_data_off)?;
+    let m = cd.direct_methods.iter().chain(&cd.virtual_methods).find(|m| m.method_idx == method_idx).ok_or_else(not_found)?;
+    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(4 * 1024), opts, method: None, marks: Some(Vec::new()) };
+    let ann = w.load_annotations(&def)?;
+    w.method(m, &ann)?;
+    let mut positions = Vec::new();
+    if m.code_off != 0 {
+        let code = dex.code_item(m.code_off)?;
+        if code.debug_info_off != 0 {
+            if let Ok((d, _)) = DebugInfo::parse(dex.buf(), code.debug_info_off as usize) {
+                positions = d.positions();
+                positions.sort_by_key(|&(pc, _)| pc);
+            }
+        }
+    }
+    let marks = w.marks.take().unwrap_or_default();
+    let text = w.out;
+    // Byte offset in `text` -> line index, walking both in order.
+    let mut insns = Vec::with_capacity(marks.len());
+    let (mut line, mut at) = (0u32, 0usize);
+    for (pc, off) in marks {
+        line += text.as_bytes()[at..off].iter().filter(|&&b| b == b'\n').count() as u32;
+        at = off;
+        insns.push(((pc / 2) as u32, line));
+    }
+    Ok(MethodListing { text, insns, positions })
 }
 
 /// Normalise a `--method` signature such as `run(I)V` or `put(I, Ljava/lang/String;) V`:
@@ -161,6 +222,8 @@ struct Writer<'d, 'a, 'm> {
     opts: Options,
     /// Only this normalised `name(params)ret` is rendered (and no fields).
     method: Option<&'m str>,
+    /// When set, `(pc in bytes, byte offset in out)` of every rendered instruction.
+    marks: Option<Vec<(usize, usize)>>,
 }
 
 const CLASS_FLAGS: &[(u32, &str)] = &[
@@ -438,7 +501,7 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
         }
         if let Some(code) = &code {
             self.out.push('\n');
-            insn::method_body(&mut self.names, code, debug.as_ref(), self.opts, &mut self.out)?;
+            insn::method_body(&mut self.names, code, debug.as_ref(), self.opts, &mut self.out, self.marks.as_mut())?;
         }
         self.out.push_str(".end method\n");
         Ok(())

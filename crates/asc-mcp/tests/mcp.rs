@@ -71,7 +71,7 @@ fn full_session() {
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "droidasc");
 
     let tools: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(tools, ["open_apk", "close_apk", "getclass", "findrefs", "listclass", "getmanifest"]);
+    assert_eq!(tools, ["open_apk", "close_apk", "getclass", "findrefs", "callgraph", "listclass", "getmanifest"]);
 
     let open = ok(&replies[2]);
     assert_eq!(open["apk_id"], "apk1");
@@ -185,6 +185,41 @@ fn findrefs_literal_and_class_relations_and_method_filter() {
     assert!(text(&replies[3]).contains("Lexample/Test; extends Ljava/lang/Object;"), "{}", text(&replies[3]));
     assert_eq!(ok(&replies[4])["total"], 0);
     assert_eq!(replies[5]["result"]["isError"], true, "{}", replies[5]);
+}
+
+#[test]
+fn findrefs_context_and_callgraph() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true));
+    let path = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "findrefs", json!({"apk": path, "kind": "string", "value": "llo", "context": 0})),
+        call(2, "findrefs", json!({"apk": path, "kind": "string", "value": "llo", "context": "method", "limit": 1})),
+        call(3, "findrefs", json!({"apk": path, "kind": "string", "value": "llo", "context": "lots"})),
+        call(4, "callgraph", json!({"apk": path, "class": "example.Rich", "method": "compute"})),
+        call(5, "callgraph", json!({"apk": path, "class": "Lexample/Rich;", "method": "<init>()V", "direction": "callees"})),
+        call(6, "callgraph", json!({"apk": path, "class": "example.Rich", "method": "compute", "direction": "up"})),
+        call(7, "callgraph", json!({"apk": path, "class": "example.Rich", "method": "missing"})),
+    ]);
+    let r = ok(&replies[0]);
+    let compute = r["results"].as_array().unwrap().iter().find(|r| r["method"] == "Lexample/Rich;->compute").unwrap();
+    assert_eq!(compute["sites"], json!([{"pc": 16, "line": 14, "matched": asc_fixture::RICH_STRING}]));
+    let ctx = compute["context"].as_str().unwrap();
+    assert!(ctx.starts_with("  @ pc 0x10 line 14\n  >     const-string v0, "), "{ctx}");
+    assert!(text(&replies[0]).contains("Lexample/Rich;->compute | matched=("), "{}", text(&replies[0]));
+    let r = ok(&replies[1]);
+    assert_eq!(r["returned"], 1);
+    assert!(r["results"][0]["context"].as_str().unwrap().contains(".end method"));
+    assert_eq!(replies[2]["result"]["isError"], true);
+
+    assert_eq!(
+        text(&replies[3]),
+        "0 Lexample/Rich;->compute(II)I\n  1 <- Lexample/Rich;->compute(II)I (repeated)\n# 2 rows, 1 distinct methods (callers, depth 2)\n"
+    );
+    let r = ok(&replies[3]);
+    assert_eq!((r["methods"].as_u64(), r["rows"][1]["parent"].as_u64()), (Some(1), Some(0)));
+    assert_eq!(text(&replies[4]).lines().nth(1), Some("  1 -> Ljava/lang/Object;-><init>()V [no body]"));
+    assert_eq!(replies[5]["result"]["isError"], true);
+    assert!(text(&replies[6]).contains("no method Lexample/Rich;->missing"), "{}", text(&replies[6]));
 }
 
 #[test]

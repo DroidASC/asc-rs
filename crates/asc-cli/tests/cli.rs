@@ -246,6 +246,34 @@ fn sorted_lines(o: &Output) -> Vec<String> {
 }
 
 #[test]
+fn findrefs_context_and_callgraph() {
+    let apk = temp_apk();
+    let out = droidasc(&["findrefs", path(apk.path()), "string", "token", "--context", "0", "--threads", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    // first / second share one code item: both rows show the same instruction.
+    assert!(
+        text.contains("classes.dex | Lexample/Test;->first | matched=(token)\n  @ pc 0x0\n  >     const-string v0, \"token\"\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches("  >     const-string").count(), 4, "{text}");
+    let out = droidasc(&["findrefs", path(apk.path()), "--context-method", "string", "token"]);
+    assert!(stdout(&out).contains("    .method public static second()V\n"), "{}", stdout(&out));
+    let out = droidasc(&["findrefs", path(apk.path()), "string", "token", "--context", "1", "--context-method"]);
+    assert_eq!(out.status.code(), Some(1));
+
+    let apk = rich_apk();
+    let out = droidasc(&["callgraph", path(apk.path()), "example.Rich", "<init>", "--callees"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "0 Lexample/Rich;-><init>()V\n  1 -> Ljava/lang/Object;-><init>()V [no body]\n# 2 rows, 2 distinct methods (callees, depth 2)\n"
+    );
+    let out = droidasc(&["callgraph", path(apk.path()), "example.Rich", "nope"]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
 fn findrefs_extends_and_impl_print_python_lines() {
     let apk = rich_apk();
     for target in ["java.lang.Object", "Ljava/lang/Object;", "java/lang/Object"] {

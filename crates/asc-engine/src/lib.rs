@@ -16,6 +16,7 @@
 //! [`Engine::flush_cache_writes`] waits for them to land and [`Engine::close_cache_writes`]
 //! (run on drop) additionally stops queueing new ones.
 
+mod callgraph;
 mod classes;
 pub mod names;
 
@@ -35,6 +36,7 @@ use std::time::{Instant, SystemTime};
 pub use asc_cache;
 pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
+pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +105,49 @@ pub struct RefResult {
     pub matched: Vec<String>,
     /// Set for the rows of a class relation query.
     pub relation: Option<ClassRelation>,
+    /// The referencing instructions, in offset order (none for class relations).
+    pub sites: Vec<RefSite>,
+    /// Smali around the sites, when asked for ([`RefContext`]).
+    pub context: Option<String>,
+}
+
+/// One instruction behind a [`RefResult`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefSite {
+    /// Absolute byte offset of the instruction in the DEX.
+    pub offset: u32,
+    /// Index into the row's `matched` of the constant it references.
+    pub matched: usize,
+    /// Code units from the start of the method's code (filled with a context).
+    pub pc: Option<u32>,
+    /// Source line from the debug info (filled with a context, when known).
+    pub line: Option<u32>,
+}
+
+/// How much code to return with each `findrefs` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RefContext {
+    /// The row alone (the Python output).
+    #[default]
+    None,
+    /// The referencing instructions with this many smali lines around each.
+    Lines(usize),
+    /// The whole referencing method.
+    Method,
+}
+
+/// Options of [`Engine::find_refs_opts`].
+#[derive(Debug, Clone, Copy)]
+pub struct FindOptions {
+    /// One row per method (with every matched constant) instead of one per instruction.
+    pub aggregate: bool,
+    pub context: RefContext,
+}
+
+impl Default for FindOptions {
+    fn default() -> Self {
+        FindOptions { aggregate: true, context: RefContext::None }
+    }
 }
 
 impl RefResult {
@@ -113,6 +158,16 @@ impl RefResult {
             Some(rel) => format!("{} | {} {} {}", self.dex_name, self.method, rel.verb(), self.matched.join("; ")),
             None => format!("{} | {} | matched=({})", self.dex_name, self.method, self.matched.join("; ")),
         }
+    }
+
+    /// The row followed by its context lines (just the row without one).
+    pub fn text(&self) -> String {
+        let mut out = self.line();
+        if let Some(c) = &self.context {
+            out.push('\n');
+            out.push_str(c.trim_end_matches('\n'));
+        }
+        out
     }
 }
 
@@ -987,6 +1042,17 @@ impl Engine {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(RefBatch),
     ) -> Result<RefSummary> {
+        self.find_refs_opts(query, FindOptions { aggregate, context: RefContext::None }, cancel, sink)
+    }
+
+    /// `find_refs` with every option: aggregation, context, cancellation.
+    pub fn find_refs_opts(
+        &self,
+        query: &Query,
+        opts: FindOptions,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(RefBatch),
+    ) -> Result<RefSummary> {
         let t0 = Instant::now();
         let compiled = CompiledQuery::new(query)?;
         let apk = self.open()?;
@@ -1015,7 +1081,7 @@ impl Engine {
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
-                    let batch = search_entry(apk, key, entry, compiled, aggregate, cancel, cache, stats);
+                    let batch = search_entry(apk, key, entry, compiled, opts, cancel, cache, stats);
                     if tx.send(batch).is_err() {
                         break;
                     }
@@ -1043,6 +1109,96 @@ impl Engine {
         Ok(summary)
     }
 
+    /// Fill the context of rows an earlier [`Engine::find_refs`] returned
+    /// (typically one page of them): only their DEX files are loaded, from
+    /// the cache when it holds them. Returns the entries that failed to load.
+    pub fn fill_context(&self, rows: &mut [RefResult], ctx: RefContext) -> Result<Vec<String>> {
+        if ctx == RefContext::None || rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: HashSet<String> = rows.iter().map(|r| entry_of(&r.dex_name).to_string()).collect();
+        let (views, errors) = self.load_views(Some(&wanted))?;
+        let mut errors = errors;
+        for v in &views {
+            let r = Dex::with_name(&v.data, &v.name).map_err(EngineError::from).and_then(|dex| {
+                attach_context(&FindRefs::with_state(&dex, &v.state), rows.iter_mut().filter(|r| r.dex_name == v.name), ctx)
+            });
+            if let Err(e) = r {
+                errors.push(format!("{}: {e}", v.name));
+            }
+        }
+        self.recharge_views(&views);
+        Ok(errors)
+    }
+
+    /// Load DEX entries (every one, or those named in `only`) in parallel,
+    /// as logical DEX files in entry order with their locator tables (the
+    /// cached ones when the memory cache holds the entry). Entries that fail
+    /// to load are reported as `name: error` strings.
+    fn load_views(&self, only: Option<&HashSet<String>>) -> Result<(Vec<DexView>, Vec<String>)> {
+        let apk = self.open()?;
+        let mut entries = apk.dex_entries()?;
+        if let Some(only) = only {
+            entries.retain(|e| only.contains(&e.name));
+        }
+        let key = self.apk_key(&apk);
+        let next = AtomicUsize::new(0);
+        let workers = self.threads.min(entries.len()).max(1);
+        let cache = self.cache.as_deref();
+        let mut slots: Vec<Option<std::result::Result<Vec<DexView>, String>>> = (0..entries.len()).map(|_| None).collect();
+        let done = Mutex::new(&mut slots);
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(entry) = entries.get(i) else { break };
+                    let r = load_entry(&apk, key.as_ref(), entry, cache, &self.stats, None)
+                        .map(|(loaded, _)| match loaded {
+                            Loaded::Cached(e) => e
+                                .logical()
+                                .iter()
+                                .map(|l| DexView {
+                                    name: l.name.clone(),
+                                    data: Arc::clone(&l.data),
+                                    state: Arc::clone(&l.state),
+                                    entry: Some(Arc::clone(&e)),
+                                })
+                                .collect(),
+                            borrowed => borrowed
+                                .into_logical(&entry.name)
+                                .map(|(name, data)| DexView { name, data, state: Arc::new(SearchState::new()), entry: None })
+                                .collect(),
+                        })
+                        .map_err(|e| format!("{}: {e}", entry.name));
+                    done.lock().unwrap()[i] = Some(r);
+                });
+            }
+        });
+        let mut views = Vec::new();
+        let mut errors = Vec::new();
+        for slot in slots.into_iter().flatten() {
+            match slot {
+                Ok(mut v) => views.append(&mut v),
+                Err(e) => errors.push(e),
+            }
+        }
+        Ok((views, errors))
+    }
+
+    /// Charge the memory cache for the tables a pass over `views` built.
+    fn recharge_views(&self, views: &[DexView]) {
+        let Some(cache) = self.cache.as_deref() else { return };
+        let Some(key) = self.key_cache.lock().unwrap().as_ref().map(|k| k.2.clone()) else { return };
+        let mut seen = HashSet::new();
+        for v in views {
+            if let Some(e) = &v.entry {
+                if seen.insert(Arc::as_ptr(e)) {
+                    recharge(Some(cache), Some(&key), e);
+                }
+            }
+        }
+    }
+
     /// Decode `AndroidManifest.xml`.
     pub fn manifest_xml(&self) -> Result<String> {
         let apk = self.open()?;
@@ -1058,6 +1214,21 @@ impl Drop for Engine {
             self.close_cache_writes();
         }
     }
+}
+
+/// One logical DEX loaded for a pass over the whole APK.
+struct DexView {
+    name: String,
+    data: DexBytes,
+    state: Arc<SearchState>,
+    /// The memory cache entry holding it, recharged after the pass.
+    entry: Option<Arc<CachedEntry>>,
+}
+
+/// The APK entry a (logical) DEX name belongs to: `classes2.dex!classes1.dex`
+/// is the first logical DEX of the `classes2.dex` container.
+fn entry_of(dex_name: &str) -> &str {
+    dex_name.split('!').next().unwrap_or(dex_name)
 }
 
 /// Memory or disk cache lookup (no inflation).
@@ -1182,7 +1353,7 @@ fn search_entry(
     key: Option<&ApkKey>,
     entry: &Entry,
     query: &CompiledQuery,
-    aggregate: bool,
+    opts: FindOptions,
     cancel: &AtomicBool,
     cache: Option<&EngineCache>,
     stats: &Stats,
@@ -1205,7 +1376,7 @@ fn search_entry(
             for l in e.logical() {
                 let r = Dex::with_name(&l.data, &l.name)
                     .map_err(EngineError::from)
-                    .and_then(|dex| rows_compiled(&FindRefs::with_state(&dex, &l.state), query, aggregate));
+                    .and_then(|dex| rows_compiled(&FindRefs::with_state(&dex, &l.state), query, opts));
                 match r {
                     Ok(mut rows) => batch.results.append(&mut rows),
                     Err(e) => batch.note_error(&l.name, e),
@@ -1215,7 +1386,7 @@ fn search_entry(
         }
         Loaded::Borrowed(_) => {
             for (name, buf) in logical_dex_iter(&entry.name, loaded.bytes()) {
-                match find_refs_in_dex_compiled(&name, &buf, query, aggregate) {
+                match find_refs_in_dex_compiled(&name, &buf, query, opts) {
                     Ok(mut r) => batch.results.append(&mut r),
                     Err(e) => batch.note_error(&name, e),
                 }
@@ -1248,21 +1419,30 @@ fn matched_name(dex: &Dex<'_>, kind: RefKind, idx: u32) -> Result<String> {
 
 /// Run a reference search over one DEX buffer and return structured results.
 pub fn find_refs_in_dex(dex_name: &str, buf: &[u8], query: &Query, aggregate: bool) -> Result<Vec<RefResult>> {
-    find_refs_in_dex_compiled(dex_name, buf, &CompiledQuery::new(query)?, aggregate)
+    find_refs_in_dex_opts(dex_name, buf, query, FindOptions { aggregate, context: RefContext::None })
 }
 
-fn find_refs_in_dex_compiled(dex_name: &str, buf: &[u8], query: &CompiledQuery, aggregate: bool) -> Result<Vec<RefResult>> {
+/// [`find_refs_in_dex`] with a context.
+pub fn find_refs_in_dex_opts(dex_name: &str, buf: &[u8], query: &Query, opts: FindOptions) -> Result<Vec<RefResult>> {
+    find_refs_in_dex_compiled(dex_name, buf, &CompiledQuery::new(query)?, opts)
+}
+
+fn find_refs_in_dex_compiled(dex_name: &str, buf: &[u8], query: &CompiledQuery, opts: FindOptions) -> Result<Vec<RefResult>> {
     let dex = Dex::with_name(buf, dex_name)?;
-    rows_compiled(&FindRefs::new(&dex), query, aggregate)
+    rows_compiled(&FindRefs::new(&dex), query, opts)
 }
 
 /// Result rows of `query` over the DEX `fr` searches: class relation rows
 /// straight from the class definitions, otherwise the code scan's hits.
-fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, aggregate: bool) -> Result<Vec<RefResult>> {
+fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOptions) -> Result<Vec<RefResult>> {
     let dex = fr.dex();
     let Some(classes) = fr.class_relation(query)? else {
         let hits = fr.find_ref_compiled(query)?;
-        return results_from_hits(dex, query.kind(), &hits, aggregate);
+        let mut rows = results_from_hits(dex, query.kind(), &hits, opts.aggregate)?;
+        if opts.context != RefContext::None {
+            attach_context(fr, &mut rows, opts.context)?;
+        }
+        return Ok(rows);
     };
     let target = match query.query() {
         Query::Extends(t) | Query::Implements(t) => t.as_str(),
@@ -1278,6 +1458,8 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, aggregate: bo
                 method: dex.type_descriptor(c)?,
                 matched: vec![target.to_string()],
                 relation: query.relation(),
+                sites: Vec::new(),
+                context: None,
             })
         })
         .collect()
@@ -1298,24 +1480,131 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
                     method: dex.method_display(m)?,
                     matched: vec![matched.clone()],
                     relation: None,
+                    sites: vec![RefSite { offset: hit.offset, matched: 0, pc: None, line: None }],
+                    context: None,
                 });
             }
         }
         return Ok(out);
     }
-    let mut grouped: BTreeMap<u32, std::collections::BTreeSet<u32>> = BTreeMap::new();
+    // method -> (matched indexes, (offset, matched index) per hit)
+    type Group = (std::collections::BTreeSet<u32>, Vec<(u32, u32)>);
+    let mut grouped: BTreeMap<u32, Group> = BTreeMap::new();
     for hit in hits {
         let Some(methods) = &hit.methods else { continue };
         for &m in methods.ids() {
-            grouped.entry(m).or_default().insert(hit.matched_idx);
+            let g = grouped.entry(m).or_default();
+            g.0.insert(hit.matched_idx);
+            g.1.push((hit.offset, hit.matched_idx));
         }
     }
     let mut out = Vec::with_capacity(grouped.len());
-    for (m, idxs) in grouped {
-        let matched = idxs.into_iter().map(|i| matched_name(dex, kind, i)).collect::<Result<Vec<_>>>()?;
-        out.push(RefResult { dex_name: dex_name.clone(), method_idx: m, method: dex.method_display(m)?, matched, relation: None });
+    for (m, (idxs, offsets)) in grouped {
+        let idxs: Vec<u32> = idxs.into_iter().collect();
+        let matched = idxs.iter().map(|&i| matched_name(dex, kind, i)).collect::<Result<Vec<_>>>()?;
+        let sites = offsets
+            .into_iter()
+            .map(|(offset, idx)| RefSite { offset, matched: idxs.binary_search(&idx).unwrap_or(0), pc: None, line: None })
+            .collect();
+        out.push(RefResult {
+            dex_name: dex_name.clone(),
+            method_idx: m,
+            method: dex.method_display(m)?,
+            matched,
+            relation: None,
+            sites,
+            context: None,
+        });
     }
     Ok(out)
+}
+
+/// Fill the sites' `pc` / `line` and the `context` of rows found in `fr`'s DEX.
+/// A method that cannot be rendered gets a `# context unavailable` comment.
+fn attach_context<'r>(fr: &FindRefs<'_, '_, '_>, rows: impl IntoIterator<Item = &'r mut RefResult>, ctx: RefContext) -> Result<()> {
+    let dex = fr.dex();
+    let bounds = fr.insn_locator()?.method_bounds();
+    for row in rows {
+        let start = bounds.get(row.method_idx as usize).copied().unwrap_or(u32::MAX);
+        let listing = match asc_smali::disassemble_method(dex, row.method_idx, SmaliOptions::default()) {
+            Ok(l) => l,
+            Err(e) => {
+                row.context = Some(format!("  # context unavailable: {e}\n"));
+                continue;
+            }
+        };
+        for site in &mut row.sites {
+            if let Some(pc) = site.offset.checked_sub(start).filter(|_| start != u32::MAX).map(|b| b / 2) {
+                site.pc = Some(pc);
+                site.line = listing.source_line(pc);
+            }
+        }
+        row.context = Some(render_context(&listing, &row.sites, ctx));
+    }
+    Ok(())
+}
+
+/// Most smali lines one row's context shows; beyond it the rest is summarised.
+const CONTEXT_MAX_LINES: usize = 150;
+/// A whole method longer than [`CONTEXT_MAX_LINES`] shows this many lines
+/// around each reference instead.
+const METHOD_FALLBACK_LINES: usize = 10;
+
+/// Context block of one row: an `@` line listing the sites, then the smali
+/// (`>` marks the referencing instructions; windows are separated by `--`).
+fn render_context(listing: &asc_smali::MethodListing, sites: &[RefSite], ctx: RefContext) -> String {
+    let mut out = String::from("  @");
+    for (i, s) in sites.iter().enumerate() {
+        out.push_str(if i == 0 { " " } else { ", " });
+        match (s.pc, s.line) {
+            (Some(pc), Some(line)) => out.push_str(&format!("pc 0x{pc:x} line {line}")),
+            (Some(pc), None) => out.push_str(&format!("pc 0x{pc:x}")),
+            _ => out.push_str(&format!("offset 0x{:x}", s.offset)),
+        }
+    }
+    out.push('\n');
+    let lines: Vec<&str> = listing.text.lines().collect();
+    let mut hits: Vec<usize> = sites.iter().filter_map(|s| s.pc).filter_map(|pc| listing.line_of(pc)).map(|l| l as usize).collect();
+    hits.sort_unstable();
+    hits.dedup();
+    let around = |n: usize| {
+        let mut w: Vec<(usize, usize)> = Vec::new();
+        for &h in &hits {
+            let (a, b) = (h.saturating_sub(n), (h + n + 1).min(lines.len()));
+            match w.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => w.push((a, b)),
+            }
+        }
+        w
+    };
+    let windows = match ctx {
+        RefContext::None => return out,
+        RefContext::Method if lines.len() <= CONTEXT_MAX_LINES => vec![(0, lines.len())],
+        RefContext::Method => {
+            out.push_str(&format!("  # method has {} lines; showing {METHOD_FALLBACK_LINES} around each reference\n", lines.len()));
+            around(METHOD_FALLBACK_LINES)
+        }
+        RefContext::Lines(n) => around(n),
+    };
+    let mut shown = 0;
+    for (i, &(a, b)) in windows.iter().enumerate() {
+        if shown + (b - a) > CONTEXT_MAX_LINES {
+            let rest: usize = windows[i..].iter().map(|w| w.1 - w.0).sum::<usize>();
+            out.push_str(&format!("  # cut at {CONTEXT_MAX_LINES} lines ({rest} more); read the method with getclass\n"));
+            break;
+        }
+        if i > 0 {
+            out.push_str("  --\n");
+        }
+        for (j, line) in lines[a..b].iter().enumerate() {
+            out.push_str(if hits.binary_search(&(a + j)).is_ok() { "  > " } else { "    " });
+            out.push_str(line);
+            out.push('\n');
+        }
+        shown += b - a;
+    }
+    out
 }
 
 /// Python `AscHandler.findrefs` equivalent: formatted lines for one DEX.

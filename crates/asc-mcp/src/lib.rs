@@ -20,7 +20,7 @@
 //! Tool results carry the CLI's text (same line formats as `droidasc`) as
 //! `content`, and the same data as `structuredContent`.
 
-use asc_engine::{names, CacheConfig, Engine, SharedCache, SmaliOptions};
+use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, RefContext, RefResult, SharedCache, SmaliOptions};
 use asc_findrefs::Query;
 use serde_json::{json, Map, Value};
 use std::io::{self, BufRead, Write};
@@ -35,6 +35,8 @@ pub const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
 const FINDREFS_LIMIT: usize = 500;
 const LISTCLASS_LIMIT: usize = 1000;
+const CALLGRAPH_DEPTH: usize = 2;
+const CALLGRAPH_MAX_NODES: usize = 200;
 
 /// Server settings.
 pub struct Options {
@@ -190,8 +192,9 @@ impl Server {
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "droidasc", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": "Droid ASC: query an APK without preprocessing. open_apk once (it inflates every DEX \
-                        so later calls are fast), then findrefs to locate strings / types / methods / fields and getclass \
-                        to read the smali of a class. Every tool also accepts `apk` (a path) instead of `apk_id`.",
+                        so later calls are fast), then findrefs to locate strings / types / methods / fields (with \
+                        `context` it also returns the code around each hit), callgraph to walk callers / callees, and \
+                        getclass to read the smali of a class. Every tool also accepts `apk` (a path) instead of `apk_id`.",
                 }))
             }
             "ping" => Ok(json!({})),
@@ -208,6 +211,7 @@ impl Server {
                     "close_apk" => Server::close_apk,
                     "getclass" => Server::getclass,
                     "findrefs" => Server::findrefs,
+                    "callgraph" => Server::callgraph,
                     "listclass" => Server::listclass,
                     "getmanifest" => Server::getmanifest,
                     _ => return Err((-32602, format!("unknown tool: {name}"))),
@@ -375,16 +379,20 @@ impl Server {
             _ => return Err(ToolError(format!("unknown kind {kind:?}: use string, type, method, field, extends or impl"))),
         };
         let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
+        let context = context_arg(args)?;
         let mut batches = Vec::new();
         apk.engine.find_refs(&query, |b| batches.push(b))?;
         // Entries finish in any order; page over a stable one.
         batches.sort_by_cached_key(|b| dex_order(&b.entry_name));
         let errors: Vec<String> = batches.iter().filter_map(|b| b.error.as_ref().map(|e| format!("{}: {e}", b.entry_name))).collect();
         let total: usize = batches.iter().map(|b| b.results.len()).sum();
-        let page: Vec<_> = batches.iter().flat_map(|b| &b.results).skip(offset).take(limit).collect();
+        let mut page: Vec<RefResult> = batches.iter().flat_map(|b| &b.results).skip(offset).take(limit).cloned().collect();
+        // Only the page is rendered, from the DEX files the search just loaded.
+        let mut errors = errors;
+        errors.extend(apk.engine.fill_context(&mut page, context)?);
         let mut text = String::new();
         for r in &page {
-            text.push_str(&r.line());
+            text.push_str(&r.text());
             text.push('\n');
         }
         let next = (offset + page.len() < total).then_some(offset + page.len());
@@ -392,7 +400,7 @@ impl Server {
         for e in &errors {
             text.push_str(&format!("# Warning: {e}\n"));
         }
-        let results: Vec<Value> = page.iter().map(|r| json!({"dex": r.dex_name, "method": r.method, "matched": r.matched})).collect();
+        let results: Vec<Value> = page.iter().map(|r| ref_json(r, context)).collect();
         let structured = json!({
             "apk_id": apk.id,
             "total": total,
@@ -401,6 +409,50 @@ impl Server {
             "next_offset": next,
             "results": results,
             "errors": errors,
+        });
+        Ok((text, structured))
+    }
+
+    fn callgraph(&self, args: &Value) -> ToolResult {
+        let apk = self.resolve(args)?;
+        let class = str_arg(args, "class")?.ok_or_else(|| ToolError("callgraph needs `class`".into()))?;
+        let method = str_arg(args, "method")?.ok_or_else(|| ToolError("callgraph needs `method`".into()))?;
+        let direction = match str_arg(args, "direction")?.unwrap_or("callers") {
+            "callers" => Direction::Callers,
+            "callees" => Direction::Callees,
+            d => return Err(ToolError(format!("unknown direction {d:?}: use callers or callees"))),
+        };
+        let q = CallQuery {
+            class: names::format_class_name(class)?,
+            method: method.to_string(),
+            direction,
+            depth: usize_arg(args, "depth")?.unwrap_or(CALLGRAPH_DEPTH),
+            max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES),
+        };
+        let tree = apk.engine.call_graph(&q)?;
+        let mut text = String::new();
+        for line in tree.lines() {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text.push_str(&tree.footer());
+        text.push('\n');
+        for e in &tree.errors {
+            text.push_str(&format!("# Warning: {e}\n"));
+        }
+        let rows: Vec<Value> = tree
+            .rows
+            .iter()
+            .map(|r| json!({"depth": r.depth, "parent": r.parent, "method": r.method, "dex": r.dex, "repeated": r.repeated}))
+            .collect();
+        let structured = json!({
+            "apk_id": apk.id,
+            "direction": direction.as_str(),
+            "depth": tree.depth,
+            "methods": tree.methods,
+            "truncated": tree.truncated,
+            "rows": rows,
+            "errors": tree.errors,
         });
         Ok((text, structured))
     }
@@ -481,6 +533,30 @@ fn usize_arg(args: &Value, key: &str) -> Result<Option<usize>, ToolError> {
     }
 }
 
+/// `context`: a number of smali lines around each referencing instruction,
+/// or `"method"` for the whole method.
+fn context_arg(args: &Value) -> Result<RefContext, ToolError> {
+    match args.get("context") {
+        None | Some(Value::Null) => Ok(RefContext::None),
+        Some(Value::String(s)) if s == "method" => Ok(RefContext::Method),
+        Some(v) => v
+            .as_u64()
+            .map(|n| RefContext::Lines(n as usize))
+            .ok_or_else(|| ToolError("`context` must be a non-negative integer or \"method\"".into())),
+    }
+}
+
+/// A findrefs row as JSON; with a context, also where the references are
+/// (`pc` in code units, source `line`) and the smali around them.
+fn ref_json(r: &RefResult, context: RefContext) -> Value {
+    let mut v = json!({"dex": r.dex_name, "method": r.method, "matched": r.matched});
+    if context != RefContext::None {
+        v["sites"] = r.sites.iter().map(|s| json!({"pc": s.pc, "line": s.line, "matched": r.matched.get(s.matched)})).collect();
+        v["context"] = json!(r.context);
+    }
+    v
+}
+
 fn page_args(args: &Value, default_limit: usize) -> Result<(usize, usize), ToolError> {
     let offset = usize_arg(args, "offset")?.unwrap_or(0);
     let limit = usize_arg(args, "limit")?.unwrap_or(default_limit);
@@ -540,6 +616,9 @@ fn tool_definitions() -> Value {
         "class": {"type": "string", "description": "method / field: declaring class (Lcom/poc/Main; or com.poc.Main)."},
         "fuzzy_class": {"type": "boolean", "description": "Treat `class` as a fuzzy pattern."},
         "exact": {"type": "boolean", "description": "Match `name` exactly."},
+        "context": {"type": ["integer", "string"], "description": "Also return the code: N smali lines around each \
+            referencing instruction (marked `>`, with its pc and source line), or \"method\" for the whole method. \
+            Saves a getclass per result."},
     }));
     let mut listclass_props = with_props(json!({
         "prefix": {"type": "string", "description": "Package / class prefix (com.poc or Lcom/poc)."},
@@ -579,6 +658,20 @@ fn tool_definitions() -> Value {
                 referencing method: `dex | Lcls;->method | matched=(...)`), or the classes that extend / implement a \
                 type (`dex | Lsub; extends Lbase;`). Paged; the last line says how many there are.",
             "inputSchema": {"type": "object", "properties": findrefs_props, "required": ["kind"]},
+        },
+        {
+            "name": "callgraph",
+            "description": "Callers (default) or callees of a method across every DEX, as an indented tree: one line per \
+                call, `depth <- caller` or `depth -> callee`. `[no body]` marks methods the APK does not define \
+                (framework / SDK), `(repeated)` methods expanded elsewhere. Static references only: a call through \
+                a subclass is not a call of the base method.",
+            "inputSchema": {"type": "object", "properties": with_props(json!({
+                "class": {"type": "string", "description": "Declaring class: Lcom/poc/Main; or com.poc.Main."},
+                "method": {"type": "string", "description": "Method name (every overload) or exact name(params)ret."},
+                "direction": {"type": "string", "enum": ["callers", "callees"], "description": "Default callers."},
+                "depth": {"type": "integer", "minimum": 1, "description": "Levels to expand (default 2)."},
+                "max_nodes": {"type": "integer", "minimum": 1, "description": "Stop after this many methods (default 200)."},
+            })), "required": ["class", "method"]},
         },
         {
             "name": "listclass",
