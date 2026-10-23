@@ -89,7 +89,10 @@ fn method_filter_is_validated_before_the_apk_is_read() {
 fn caches_serve_repeated_queries() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+    let cfg = asc_engine::CacheConfig {
+        memory_bytes: 64 << 20,
+        disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path()).with_capacity(1 << 30)),
+    };
     let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     let q = Query::String("token".into());
     let mut sources = Vec::new();
@@ -110,7 +113,8 @@ fn caches_serve_repeated_queries() {
     // Disk writes are asynchronous; a new process would see them once landed.
     engine.flush_cache_writes();
     // A fresh engine (new process equivalent) hits the disk cache.
-    let cfg = asc_engine::CacheConfig { memory_bytes: 0, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+    let cfg =
+        asc_engine::CacheConfig { memory_bytes: 0, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path()).with_capacity(1 << 30)) };
     let engine2 = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     let mut sources = Vec::new();
     engine2.find_refs(&q, |b| sources.push(b.source)).unwrap();
@@ -124,7 +128,10 @@ fn written_entries_are_remapped_from_the_disk_cache() {
     let apk = temp_apk(true);
     let dex = make_dex();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+    let cfg = asc_engine::CacheConfig {
+        memory_bytes: 64 << 20,
+        disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path()).with_capacity(1 << 30)),
+    };
     let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     let q = Query::String("token".into());
     let lines = |engine: &Engine| {
@@ -206,7 +213,10 @@ fn invalid_pattern_is_reported_once_up_front() {
 fn concurrent_queries_share_one_inflate() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+    let cfg = asc_engine::CacheConfig {
+        memory_bytes: 64 << 20,
+        disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path()).with_capacity(1 << 30)),
+    };
     let engine = std::sync::Arc::new(Engine::new(apk.path()).with_threads(2).with_cache(cfg));
     let q = Query::String("token".into());
     let handles: Vec<_> = (0..4)
@@ -233,7 +243,10 @@ fn dropping_the_engine_lands_cache_writes() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
     {
-        let cfg = asc_engine::CacheConfig { memory_bytes: 0, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+        let cfg = asc_engine::CacheConfig {
+            memory_bytes: 0,
+            disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path()).with_capacity(1 << 30)),
+        };
         let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
         assert!(engine.get_class("Lexample/Test;").is_ok());
     }
@@ -246,7 +259,10 @@ fn dropping_the_engine_lands_cache_writes() {
 fn engines_share_one_cache_budget() {
     let (a, b) = (temp_apk(true), temp_apk_from(&make_apk(&[("classes.dex", &make_dex())], true)));
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+    let cfg = asc_engine::CacheConfig {
+        memory_bytes: 64 << 20,
+        disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path()).with_capacity(1 << 30)),
+    };
     let shared = asc_engine::SharedCache::new(cfg, |_| {});
     let q = Query::String("token".into());
     let ea = Engine::new(a.path()).with_threads(2).with_shared_cache(&shared);
@@ -295,7 +311,8 @@ fn list_classes_follows_central_directory_order() {
     let f = temp_apk_from(&bytes);
     let dir = tempfile::tempdir().unwrap();
     for (threads, memory_bytes) in [(1, 0), (3, 0), (3, 64 << 20)] {
-        let cfg = asc_engine::CacheConfig { memory_bytes, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+        let cfg =
+            asc_engine::CacheConfig { memory_bytes, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path()).with_capacity(1 << 30)) };
         let engine = Engine::new(f.path()).with_threads(threads).with_cache(cfg);
         // Twice: the second run is served from the caches.
         for _ in 0..2 {

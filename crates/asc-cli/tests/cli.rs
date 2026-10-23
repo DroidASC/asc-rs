@@ -163,6 +163,8 @@ fn foreign_cache_dir_is_reported_and_left_alone() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.txt"), b"keep").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_droidasc"))
+        // A fixed budget, so the test does not depend on the free space of the temp dir.
+        .env("DROIDASC_CACHE_MAX_MB", "1024")
         .args(["--cache-dir", path(dir.path()), "findrefs", path(f.path()), "string", "token"])
         .output()
         .expect("run droidasc");
@@ -494,7 +496,9 @@ fn cache_stats_reports_the_disk_budget() {
         };
         cmd.args(["--cache-dir", path(dir.path())]).args(args).output().expect("run droidasc")
     };
-    let out = run(None, &["findrefs", path(f.path()), "string", "token"]);
+    // Fill with a fixed budget (the automatic one refuses writes when the temp dir is
+    // nearly full), then report with the automatic one.
+    let out = run(Some("1024"), &["findrefs", path(f.path()), "string", "token"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let out = run(None, &["cache", "stats"]);
     assert!(out.status.success(), "{}", stderr(&out));
