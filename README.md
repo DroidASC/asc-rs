@@ -12,7 +12,14 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
   getclass     Locate the target class in APK, extract one DEX in memory, then disassemble.
   disassemble  Same, without debug directives unless --debuginfo (Python's smali command).
   listclass    List classes across all DEX entries (--prefix com.poc to filter). Alias: classes.
-  getmanifest  Decode AndroidManifest.xml from APK and print it as XML. Alias: manifest.
+  getmanifest  Decode AndroidManifest.xml from APK and print it as XML (--resolve: resource
+               references by name). Alias: manifest.
+  manifest-summary  The manifest's attack surface, one record per line (--json): exported
+               components and why, permissions, providers, deep links, FileProvider paths,
+               network security config.
+  resources    Query resources.arsc: one resource (id or type/name, --resolve), --search, or
+               the whole table, one line per resource and configuration.
+  xml          Decode any binary XML file of the APK (res/xml/..., layouts) with names.
   findrefs     Find code references for string/type/method/field, or subclasses / implementors
                (extends / impl), across all DEX entries in APK.
   callgraph    Callers (default) or callees of a method across all DEX entries, as a tree.
@@ -36,6 +43,13 @@ examples:
   droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
   droidasc listclass app.apk --prefix com.poc -o classes.txt
   droidasc getmanifest app.apk -o AndroidManifest.xml
+  droidasc getmanifest app.apk --resolve
+  droidasc manifest-summary app.apk | grep exported=true
+  droidasc resources app.apk string/app_name
+  droidasc resources app.apk 0x7f0d0001 --resolve
+  droidasc resources app.apk --search 'https?://' --in value
+  droidasc xml app.apk res/xml/network_security_config.xml
+  droidasc getclass app.apk com.poc.Main --res-names
   droidasc findrefs app.apk string token -o string_refs.txt
   droidasc findrefs app.apk string 'https://' --literal
   droidasc findrefs app.apk type com.poc.Main
@@ -118,8 +132,9 @@ Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is he
 | `asc-smali` | baksmali-style disassembler used as the built-in output backend. |
 | `asc-apk` | Memory-mapped zip access: central directory (incl. zip64), root-level DEX enumeration, Deflate inflation (libdeflate, or streaming zlib-rs for prefixes / cancellation). |
 | `asc-cache` | Inflated-DEX caches: an on-disk cache shared across processes and a byte-bounded in-memory LRU for resident hosts. |
-| `asc-axml` | Android binary XML → text XML for `AndroidManifest.xml`. |
-| `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding. |
+| `asc-axml` | Android binary XML: text XML, an element tree, names for references through a resolver; lazy string pools. |
+| `asc-arsc` | `resources.arsc` reader: indexes chunks only and decodes names and values on demand (u32 / 16-bit / sparse entry tables, compact entries, bags, library / overlayable / staged-alias chunks); per-config values, AOSP config matching and reference resolution. Checked against `aapt2 dump resources` (`bench/arsc-compare`). |
+| `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding and summary, resource queries. |
 | `asc-mcp` | MCP server over stdio (`droidasc mcp`): one resident session, several APKs sharing one memory budget, CLI-format text plus structured results, paging. |
 | `asc-cli` | `droidasc` binary (clap). |
 | `asc-gui` | egui browser: package tree with context menus, tabbed disassembly with find and jump-to-method, `X` for references to the member under the cursor and Ctrl+click to its declaration, streaming reference searches kept as a history panel, class-name suggestions, manifest view; panel sizes, theme and search preferences persist across runs. |
@@ -321,11 +336,13 @@ ending the session.
 |---|---|---|
 | `open_apk` | `apk`, `warm` (default true: inflate every DEX now); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
 | `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
-| `getclass` | `class`, `debug_info`, `method` (exact signature) | smali, as `droidasc getclass [--method]` |
+| `getclass` | `class`, `debug_info`, `method` (exact signature), `resource_names` (default true) | smali, as `droidasc getclass [--method] --res-names`: constants that are resource ids end in `# @type/name` |
 | `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; with `context`, `structuredContent` rows carry `sites` (`pc`, `line`, `matched`) and `context` |
 | `callgraph` | `class`, `method` (name or `name(params)ret`), `direction` (`callers`/`callees`), `depth` (2), `max_nodes` (200) | the `droidasc callgraph` tree; `rows` with `depth`, `parent`, `method`, `dex`, `repeated` |
 | `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
-| `getmanifest` | | decoded XML |
+| `getmanifest` | `resolve` | decoded XML (references by name with `resolve`) |
+| `manifest_summary` | `filter` (`all` / `exported`); or `apks` / `dir` | the `droidasc manifest-summary` records; `exported` keeps what other apps can reach (exported components, deep links, non-signature permissions, cleartext domains). For many APKs (default `exported`): per APK `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`, then its records |
+| `resources` | `query` (+ `resolve`), `search` (+ `in`, `literal`), `limit`, or `xml` (a path in the APK); or `apks` / `dir` | `droidasc resources` rows (`0x7f0d0001 string/app_name [zh-rCN] "..."`), or the decoded XML file |
 
 Every tool except `open_apk` takes `apk_id` or an `apk` path (opened on first use). Results
 carry the CLI text as `content` and the same data as `structuredContent` (`total` and
@@ -338,7 +355,7 @@ expand more than 100:1 is refused (`--max-entry-mb`, `--max-ratio`), and only th
 
 #### Many APKs in one call
 
-`findrefs`, `listclass` and `open_apk` also take `apks` (paths) or `dir` (with `glob`,
+`findrefs`, `listclass`, `open_apk`, `manifest_summary` and `resources` also take `apks` (paths) or `dir` (with `glob`,
 default `*.apk`, and `recursive`, default true) instead of one APK. Every DEX of every APK
 goes on one work queue (heaviest APK first), and the reply has one section per APK, every
 line prefixed with its `apk_id` (excerpt of a real reply; a section can also end with

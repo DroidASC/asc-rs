@@ -27,6 +27,7 @@
 //! to a byte budget, with a `cursor` to page through the rest.
 
 pub mod multi;
+mod res;
 
 use asc_engine::{
     names, CacheConfig, CallQuery, CompiledQuery, Direction, Engine, InflateLimits, RefBatch, RefContext, RefResult, SharedCache,
@@ -213,6 +214,8 @@ const TOOLS: &[Tool] = &[
     Tool { name: "callgraph", run: Server::callgraph, definition: defs::callgraph },
     Tool { name: "listclass", run: Server::listclass, definition: defs::listclass },
     Tool { name: "getmanifest", run: Server::getmanifest, definition: defs::getmanifest },
+    Tool { name: "manifest_summary", run: Server::manifest_summary, definition: res::defs::manifest_summary },
+    Tool { name: "resources", run: Server::resources, definition: res::defs::resources },
 ];
 
 /// An APK of the session.
@@ -323,8 +326,10 @@ impl Server {
                     "instructions": "Droid ASC: query an APK without preprocessing. open_apk once (it inflates every DEX \
                         so later calls are fast), then findrefs to locate strings / types / methods / fields (with \
                         `context` it also returns the code around each hit), callgraph to walk callers / callees, and \
-                        getclass to read the smali of a class. Every tool also accepts `apk` (a path) instead of `apk_id`. To sweep \
-                        many APKs, give findrefs / listclass / open_apk `apks` (paths) or `dir` (+ `glob`) instead: the \
+                        getclass to read the smali of a class. manifest_summary lists the attack surface (exported \
+                        components and why, permissions, providers, deep links, cleartext policy); resources queries \
+                        resources.arsc and decodes res/xml files. Every tool also accepts `apk` (a path) instead of `apk_id`. To sweep \
+                        many APKs, give findrefs / listclass / open_apk / manifest_summary / resources `apks` (paths) or `dir` (+ `glob`) instead: the \
                         reply has one section per APK (every line starts with its apk_id), cut to an output budget, and \
                         a `cursor` to pass back to the same tool for the rest.",
                 }))
@@ -610,7 +615,10 @@ impl Server {
         let descriptor = names::format_class_name(class)?;
         let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
         let method = str_arg(args, "method")?;
-        let src = apk.engine.get_class_method(&descriptor, opts, method)?;
+        let mut src = apk.engine.get_class_method(&descriptor, opts, method)?;
+        if bool_arg(args, "resource_names")?.unwrap_or(true) {
+            src.source = apk.engine.annotate_resource_ids(&src.source);
+        }
         let mut text = String::new();
         if let Some(w) = &src.warning {
             // A smali comment, so the text still assembles.
@@ -857,7 +865,8 @@ impl Server {
 
     fn getmanifest(&self, args: &Value, _: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
-        let xml = apk.engine.manifest_xml()?;
+        let xml =
+            if bool_arg(args, "resolve")?.unwrap_or(false) { apk.engine.manifest_xml_resolved()? } else { apk.engine.manifest_xml()? };
         let structured = json!({"apk_id": apk.id, "xml": xml});
         Ok((xml, structured))
     }
@@ -1257,6 +1266,7 @@ pub mod defs {
                 "class": {"type": "string", "description": "Lcom/poc/Main; or com.poc.Main."},
                 "debug_info": {"type": "boolean", "description": "Emit .line / .param directives (default true)."},
                 "method": {"type": "string", "description": "Only this method, by exact signature: name(params)ret, e.g. onCreate(Landroid/os/Bundle;)V."},
+                "resource_names": {"type": "boolean", "description": "Append `# @type/name` to constants that are resource ids (default true)."},
             })]), "required": ["class"]},
         })
     }
@@ -1315,7 +1325,12 @@ pub mod defs {
     }
 
     pub fn getmanifest() -> Value {
-        json!({"description": "Decode AndroidManifest.xml.", "inputSchema": {"type": "object", "properties": apk_props()}})
+        json!({
+            "description": "Decode AndroidManifest.xml (for the attack surface as records, use manifest_summary).",
+            "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
+                "resolve": {"type": "boolean", "description": "Show resource references (@7F0C0001) by name (default false)."},
+            })])},
+        })
     }
 }
 

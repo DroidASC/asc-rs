@@ -9,6 +9,7 @@ members = [
     "crates/asc-apk",
     "crates/asc-cache",
     "crates/asc-axml",
+    "crates/asc-arsc",
     "crates/asc-engine",
     "crates/asc-mcp",
     "crates/asc-cli",
@@ -32,6 +33,7 @@ asc-smali = { path = "crates/asc-smali" }
 asc-apk = { path = "crates/asc-apk" }
 asc-cache = { path = "crates/asc-cache" }
 asc-axml = { path = "crates/asc-axml" }
+asc-arsc = { path = "crates/asc-arsc" }
 asc-engine = { path = "crates/asc-engine" }
 asc-mcp = { path = "crates/asc-mcp" }
 asc-fixture = { path = "crates/asc-fixture" }

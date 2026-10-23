@@ -14,6 +14,8 @@ use asc_dex::{mutf8, NO_INDEX};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
+pub mod res;
+
 fn uleb(value: u32) -> Vec<u8> {
     let mut v = Vec::new();
     write_uleb128(&mut v, value);

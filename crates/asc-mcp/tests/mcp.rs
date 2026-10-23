@@ -71,7 +71,10 @@ fn full_session() {
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "droidasc");
 
     let tools: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(tools, ["open_apk", "close_apk", "getclass", "findrefs", "callgraph", "listclass", "getmanifest"]);
+    assert_eq!(
+        tools,
+        ["open_apk", "close_apk", "getclass", "findrefs", "callgraph", "listclass", "getmanifest", "manifest_summary", "resources"]
+    );
 
     let open = ok(&replies[2]);
     assert_eq!(open["apk_id"], "apk1");
@@ -434,4 +437,87 @@ fn single_apk_findrefs_can_fold_sdks_and_bombs_fail_cleanly() {
     assert!(text(&replies[0]).contains("# 4 more in SDK packages (collapse_sdks=false shows them): Lexample/ 4"));
     assert_eq!(replies[1]["result"]["isError"], true);
     assert!(text(&replies[1]).contains("inflate limit"), "{}", text(&replies[1]));
+}
+
+/// The audit APK of `asc_fixture::res` (manifest, resources.arsc, res/xml).
+fn audit_apk_bytes(target_sdk: i32) -> Vec<u8> {
+    let (manifest, arsc) = asc_fixture::res::audit_manifest(target_sdk);
+    let files = asc_fixture::res::audit_res_files();
+    let dex = make_dex();
+    let mut entries: Vec<(&str, &[u8])> = vec![("AndroidManifest.xml", &manifest), ("resources.arsc", &arsc), ("classes.dex", &dex)];
+    entries.extend(files.iter().map(|(p, b)| (*p, b.as_slice())));
+    make_apk(&entries, true)
+}
+
+#[test]
+fn manifest_summary_and_resources_for_one_apk() {
+    let apk = temp_apk_from(&audit_apk_bytes(30));
+    let path = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "manifest_summary", json!({"apk": path})),
+        call(2, "manifest_summary", json!({"apk": path, "filter": "exported"})),
+        call(3, "resources", json!({"apk": path, "query": "bool/exported_flag"})),
+        call(4, "resources", json!({"apk": path, "query": "0x7f010000", "resolve": true})),
+        call(5, "resources", json!({"apk": path, "search": "res/xml", "literal": true, "in": "value", "limit": 1})),
+        call(6, "resources", json!({"apk": path, "xml": "res/xml/file_paths.xml"})),
+        call(7, "getmanifest", json!({"apk": path, "resolve": true})),
+        call(8, "resources", json!({"apk": path})),
+        call(9, "manifest_summary", json!({"apk": path, "filter": "nope"})),
+    ]);
+    let all = text(&replies[0]);
+    assert!(all.contains("activity com.demo.Implicit exported=true (intent-filter)\n"), "{all}");
+    assert!(all.contains("service com.demo.Sync exported=false (default)"), "{all}");
+    assert_eq!(ok(&replies[0])["components"].as_array().unwrap().len(), 5);
+    let exported = text(&replies[1]);
+    assert!(
+        exported.starts_with("com.demo | minSdk=21 targetSdk=30 | exported: 2 activity, 1 receiver | flags: debuggable\n"),
+        "{exported}"
+    );
+    assert!(!exported.contains("com.demo.Sync") && exported.contains("deeplink com.demo.Main https://demo.com/open*"), "{exported}");
+    assert_eq!(ok(&replies[1])["components"].as_array().unwrap().len(), 3);
+    assert_eq!(text(&replies[2]), "0x7f020000 bool/exported_flag false\n0x7f020000 bool/exported_flag [v31] true\n# 2 rows\n");
+    assert!(text(&replies[3]).starts_with("chain @string/app_name\n0x7f010000 string/app_name \"Demo\"\n"), "{}", text(&replies[3]));
+    let search = ok(&replies[4]);
+    assert_eq!((search["total"].as_u64(), search["rows"].as_array().unwrap().len()), (Some(2), 1));
+    assert!(text(&replies[5]).contains("<root-path name=\"root\" path=\"\"/>"), "{}", text(&replies[5]));
+    assert!(text(&replies[6]).contains("android:exported=\"@bool/exported_flag\""));
+    assert_eq!(replies[7]["result"]["isError"], true);
+    assert_eq!(replies[8]["result"]["isError"], true);
+}
+
+#[test]
+fn manifest_summary_and_resources_over_many_apks() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.apk"), audit_apk_bytes(30)).unwrap();
+    std::fs::write(dir.path().join("b.apk"), audit_apk_bytes(31)).unwrap();
+    std::fs::write(dir.path().join("c.apk"), make_apk(&[("classes.dex", &make_dex())], true)).unwrap();
+    let d = dir.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "manifest_summary", json!({"dir": d})),
+        call(2, "resources", json!({"dir": d, "query": "string/app_name"})),
+        call(3, "resources", json!({"dir": d, "search": "^xml/", "in": "name", "per_apk": 1})),
+        call(4, "resources", json!({"dir": d, "xml": "res/xml/file_paths.xml"})),
+    ]);
+    let survey = ok(&replies[0]);
+    let counts = (survey["apks_total"].as_u64(), survey["apks_with_exported"].as_u64(), survey["errors"].as_u64());
+    assert_eq!(counts, (Some(3), Some(2), Some(1)), "{survey}");
+    let body = text(&replies[0]);
+    // targetSdk 31: the filter-only activity is no longer implicitly exported.
+    assert!(body.contains("apk1 | com.demo | minSdk=21 targetSdk=30 | exported: 2 activity, 1 receiver | flags: debuggable | "), "{body}");
+    assert!(body.contains("apk2 | com.demo | minSdk=21 targetSdk=31 | exported: 1 activity, 1 receiver | flags: debuggable | "), "{body}");
+    assert!(body.contains("apk1 | activity com.demo.Implicit exported=true (intent-filter)\n"), "{body}");
+    assert!(body.contains("\napk3 | error | ") && body.contains("AndroidManifest.xml"), "{body}");
+    let names = text(&replies[1]);
+    assert!(
+        names.contains("apk1 | 0x7f010000 string/app_name \"Demo\"\n") && names.contains("apk2 | 0x7f010000 string/app_name"),
+        "{names}"
+    );
+    assert!(names.contains("\napk3 | error | ") && names.contains("no resources.arsc"), "{names}");
+    let search = text(&replies[2]);
+    assert!(
+        search.contains("apk1 | 2 rows | ")
+            && search.contains(r#"apk1 | more | 1 more: resources {"apk_id":"apk1","in":"name","limit":2,"search":"^xml/"}"#),
+        "{search}"
+    );
+    assert_eq!(replies[3]["result"]["isError"], true);
 }

@@ -6,7 +6,12 @@
 //! built with `panic = "abort"`.
 
 mod attrs;
+mod tree;
 
+pub use attrs::android_attr_name;
+pub use tree::{parse_tree, Attribute, Element, ANDROID_NS};
+
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 const RES_STRING_POOL_TYPE: u16 = 0x0001;
@@ -71,22 +76,29 @@ fn u32_at(b: &[u8], o: usize) -> Result<u32> {
     o.checked_add(4).and_then(|e| b.get(o..e)).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])).ok_or(AxmlError::Truncated(o))
 }
 
-/// Decoded string pool.
-#[derive(Debug, Default)]
-pub struct StringPool {
-    strings: Vec<String>,
+/// Location of a string pool chunk inside a buffer. Holds no data, so it can
+/// live next to the buffer it describes; [`PoolLayout::get`] decodes one
+/// string on demand (borrowed when the pool is valid UTF-8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoolLayout {
+    offsets_start: usize,
+    count: usize,
+    data_start: usize,
+    chunk_end: usize,
+    utf8: bool,
 }
 
-impl StringPool {
-    /// Parse the string pool chunk starting at `chunk` and ending (exclusive) at
-    /// `chunk_end`, which must already be clamped to `data.len()`.
-    fn parse(data: &[u8], chunk: usize, chunk_end: usize) -> Result<StringPool> {
+impl PoolLayout {
+    /// Validate the string pool chunk starting at `chunk` and ending
+    /// (exclusive) at `chunk_end`, which must already be clamped to `data.len()`.
+    pub fn parse(data: &[u8], chunk: usize, chunk_end: usize) -> Result<PoolLayout> {
         let header_size = u16_at(data, chunk + 2)? as usize;
         let count = u32_at(data, chunk + 8)? as usize;
         let style_count = u32_at(data, chunk + 12)? as usize;
         let flags = u32_at(data, chunk + 16)?;
         let strings_start = u32_at(data, chunk + 20)? as usize;
         let utf8 = flags & UTF8_FLAG != 0;
+        let chunk_end = chunk_end.min(data.len());
 
         // The offset arrays live between the header and the string data; they
         // bound how many entries can possibly exist, so never trust `count`
@@ -106,17 +118,51 @@ impl StringPool {
             .checked_add(strings_start)
             .filter(|&o| o <= chunk_end)
             .ok_or(AxmlError::Malformed("string pool data offset exceeds chunk"))?;
+        Ok(PoolLayout { offsets_start, count, data_start, chunk_end, utf8 })
+    }
 
-        let mut strings = Vec::with_capacity(count);
-        for i in 0..count {
-            let rel = u32_at(data, offsets_start + i * 4)? as usize;
-            match data_start.checked_add(rel) {
-                Some(off) if off < chunk_end => {
-                    strings.push(if utf8 { decode_utf8(data, off, chunk_end) } else { decode_utf16(data, off, chunk_end) })
-                }
-                _ => strings.push(String::new()),
-            }
+    /// String `idx` of the pool in `data` (the buffer the layout was parsed
+    /// from). `None` past the end; an entry whose offset points outside the
+    /// chunk decodes as `""`.
+    pub fn get<'a>(&self, data: &'a [u8], idx: u32) -> Option<Cow<'a, str>> {
+        let idx = idx as usize;
+        if idx >= self.count {
+            return None;
         }
+        let rel = u32_at(data, self.offsets_start + idx * 4).ok()? as usize;
+        Some(match self.data_start.checked_add(rel) {
+            Some(off) if off < self.chunk_end => {
+                if self.utf8 {
+                    decode_utf8(data, off, self.chunk_end)
+                } else {
+                    Cow::Owned(decode_utf16(data, off, self.chunk_end))
+                }
+            }
+            _ => Cow::Borrowed(""),
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
+/// Decoded string pool.
+#[derive(Debug, Default)]
+pub struct StringPool {
+    strings: Vec<String>,
+}
+
+impl StringPool {
+    /// Parse the string pool chunk starting at `chunk` and ending (exclusive) at
+    /// `chunk_end`, which must already be clamped to `data.len()`.
+    fn parse(data: &[u8], chunk: usize, chunk_end: usize) -> Result<StringPool> {
+        let layout = PoolLayout::parse(data, chunk, chunk_end)?;
+        let strings = (0..layout.count as u32).map(|i| layout.get(data, i).unwrap_or_default().into_owned()).collect();
         Ok(StringPool { strings })
     }
 
@@ -134,7 +180,7 @@ impl StringPool {
 }
 
 /// Decode a UTF-8 pool entry at `off`; never reads past `end` (`<= data.len()`).
-fn decode_utf8(data: &[u8], mut off: usize, end: usize) -> String {
+fn decode_utf8(data: &[u8], mut off: usize, end: usize) -> Cow<'_, str> {
     // char length (1 or 2 bytes), then byte length (1 or 2 bytes)
     let skip_len = |off: &mut usize| -> usize {
         let b0 = data.get(*off).copied().unwrap_or(0) as usize;
@@ -156,7 +202,50 @@ fn decode_utf8(data: &[u8], mut off: usize, end: usize) -> String {
         Some(p) if p < slice.len() && bytes > slice.len() => &slice[..p],
         _ => slice,
     };
-    String::from_utf8_lossy(slice).into_owned()
+    match std::str::from_utf8(slice) {
+        Ok(s) => Cow::Borrowed(s),
+        Err(_) => Cow::Owned(decode_cesu8(slice)),
+    }
+}
+
+/// Decode UTF-8 that may encode characters outside the BMP as two 3-byte
+/// surrogates (CESU-8 / Java "modified UTF-8", written by some resource
+/// obfuscators). Invalid bytes become U+FFFD.
+fn decode_cesu8(b: &[u8]) -> String {
+    let cont = |i: usize| b.get(i).filter(|&&x| x & 0xc0 == 0x80).map(|&x| (x & 0x3f) as u32);
+    let mut units: Vec<u16> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let (cp, n) = match c {
+            0x00..=0x7f => (c as u32, 1),
+            0xc0..=0xdf => match cont(i + 1) {
+                Some(x) => (((c & 0x1f) as u32) << 6 | x, 2),
+                None => (0xfffd, 1),
+            },
+            0xe0..=0xef => match (cont(i + 1), cont(i + 2)) {
+                (Some(x), Some(y)) => (((c & 0x0f) as u32) << 12 | x << 6 | y, 3),
+                _ => (0xfffd, 1),
+            },
+            0xf0..=0xf7 => match (cont(i + 1), cont(i + 2), cont(i + 3)) {
+                (Some(x), Some(y), Some(z)) => (((c & 0x07) as u32) << 18 | x << 12 | y << 6 | z, 4),
+                _ => (0xfffd, 1),
+            },
+            _ => (0xfffd, 1),
+        };
+        match cp {
+            0x1_0000..=0x10_ffff => {
+                let v = cp - 0x1_0000;
+                units.push(0xd800 | (v >> 10) as u16);
+                units.push(0xdc00 | (v & 0x3ff) as u16);
+            }
+            cp if cp > 0x10_ffff => units.push(0xfffd),
+            // Lone surrogates from CESU-8 pair up again in from_utf16_lossy.
+            cp => units.push(cp as u16),
+        }
+        i += n;
+    }
+    String::from_utf16_lossy(&units)
 }
 
 /// Decode a UTF-16 pool entry at `off`; never reads past `end` (`<= data.len()`).
@@ -245,13 +334,17 @@ fn escape_text(s: &str, out: &mut String) {
 /// name index has an entry in the resource map that is a known `android:attr`,
 /// the system name wins over whatever the string pool says (obfuscators rename
 /// e.g. `android:name` to `android:a` in the pool, but cannot change the id).
-/// Returns the name and whether it was taken from the framework table.
-fn resolve_attr_name(pool_name: &str, name_idx: u32, resource_ids: &[u32]) -> (String, bool) {
+/// With a resolver, app attribute ids are named from the resource table the
+/// same way. Returns the name and whether it was taken from the framework table.
+fn resolve_attr_name(pool_name: &str, name_idx: u32, resource_ids: &[u32], resolver: Option<&dyn Resolver>) -> (String, bool) {
     let Some(&rid) = resource_ids.get(name_idx as usize) else {
         return (pool_name.to_string(), false);
     };
     if let Some(name) = attrs::android_attr_name(rid) {
         return (name.to_string(), true);
+    }
+    if let Some(name) = resolver.and_then(|r| r.attr_name(rid)) {
+        return (name, false);
     }
     if pool_name.is_empty() {
         return (format!("attr_0x{rid:08x}"), rid >> 24 == ANDROID_PACKAGE_ID);
@@ -259,8 +352,36 @@ fn resolve_attr_name(pool_name: &str, name_idx: u32, resource_ids: &[u32]) -> (S
     (pool_name.to_string(), false)
 }
 
+/// Names for resource ids that the document itself cannot provide, normally
+/// backed by the APK's `resources.arsc`.
+pub trait Resolver {
+    /// `type/name` (or `package:type/name`) of `id`, shown after `@` / `?`.
+    fn reference(&self, id: u32) -> Option<String>;
+    /// Name of the attribute with resource id `id` (no namespace prefix).
+    fn attr_name(&self, id: u32) -> Option<String>;
+}
+
+/// [`format_value`], naming references through `resolver` when it knows them.
+fn format_value_with(data_type: u8, data: u32, pool: &StringPool, resolver: Option<&dyn Resolver>) -> String {
+    let sigil = match data_type {
+        TYPE_REFERENCE | TYPE_DYNAMIC_REFERENCE if data != 0 => '@',
+        TYPE_ATTRIBUTE | TYPE_DYNAMIC_ATTRIBUTE => '?',
+        _ => return format_value(data_type, data, pool),
+    };
+    match resolver.and_then(|r| r.reference(data)) {
+        Some(name) => format!("{sigil}{name}"),
+        None => format_value(data_type, data, pool),
+    }
+}
+
 /// Decode a binary XML document into pretty-printed text.
 pub fn decode(data: &[u8]) -> Result<String> {
+    decode_with(data, None)
+}
+
+/// [`decode`], with resource references (`@7F0C0001`) and app attribute
+/// names taken from `resolver`.
+pub fn decode_with(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<String> {
     if data.len() < 8 || u16_at(data, 0)? != RES_XML_TYPE {
         return Err(AxmlError::NotAxml);
     }
@@ -342,7 +463,7 @@ pub fn decode(data: &[u8]) -> Result<String> {
                     let raw = u32_at(data, a + 8)?;
                     let dtype = u8_at(data, a + 15)?;
                     let dval = u32_at(data, a + 16)?;
-                    let (aname, from_framework) = resolve_attr_name(sp.get(aname_idx).unwrap_or(""), aname_idx, &resource_ids);
+                    let (aname, from_framework) = resolve_attr_name(sp.get(aname_idx).unwrap_or(""), aname_idx, &resource_ids, resolver);
                     let mut qa = qualify(&namespaces, sp.get(ans), &aname);
                     if from_framework && !qa.contains(':') {
                         // The id proves this is an `android:` attribute even if the namespace was stripped.
@@ -351,7 +472,7 @@ pub fn decode(data: &[u8]) -> Result<String> {
                     let value = if dtype == TYPE_STRING && raw != 0xFFFF_FFFF {
                         sp.get(raw).unwrap_or("").to_string()
                     } else {
-                        format_value(dtype, dval, sp)
+                        format_value_with(dtype, dval, sp, resolver)
                     };
                     out.push(' ');
                     out.push_str(&qa);
@@ -565,6 +686,51 @@ mod tests {
         let xml = decode(&doc).unwrap();
         let expected = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"com.example\" android:versionCode=\"42\">\n  <application android:debuggable=\"true\"/>\n</manifest>\n";
         assert_eq!(xml, expected);
+    }
+
+    #[test]
+    fn cesu8_surrogate_pairs_decode() {
+        // U+1F4F0 (newspaper) as two 3-byte surrogates, plus plain text and a stray byte.
+        let b = [b'a', 0xed, 0xa0, 0xbd, 0xed, 0xb3, 0xb0, b'b', 0xff];
+        assert_eq!(decode_cesu8(&b), "a\u{1F4F0}b\u{FFFD}");
+        assert_eq!(decode_cesu8("中文".as_bytes()), "中文");
+    }
+
+    #[test]
+    fn tree_and_resolver() {
+        // 0 android, 1 uri, 2 manifest, 3 package, 4 com.example, 5 exported, 6 application, 7 custom
+        let strings = ["android", ANDROID_NS_URI, "manifest", "package", "com.example", "exported", "application", "custom"];
+        let mut body = resource_map(&[0, 0, 0, 0, 0, 0x0101_0010, 0, 0x7f01_0002]);
+        body.extend(start_namespace(0, 1));
+        body.extend(start_element(NONE, 2, &[attr(NONE, 3, 4, TYPE_STRING, 4)]));
+        body.extend(start_element(NONE, 6, &[attr(1, 5, NONE, TYPE_REFERENCE, 0x7f02_0001), attr(NONE, 7, NONE, TYPE_INT_DEC, 3)]));
+        body.extend(end_element(NONE, 6));
+        body.extend(end_element(NONE, 2));
+        let doc = build(&strings, &body);
+        let root = parse_tree(&doc, None).unwrap();
+        assert_eq!(root.plain("package").unwrap().value, "com.example");
+        let app = root.children_named("application").next().unwrap();
+        let exported = app.android("exported").unwrap();
+        assert_eq!((exported.reference(), exported.value.as_str()), (Some(0x7f02_0001), "@7F020001"));
+        assert_eq!(app.plain("custom").unwrap().as_int(), Some(3));
+
+        struct Names;
+        impl Resolver for Names {
+            fn reference(&self, id: u32) -> Option<String> {
+                (id == 0x7f02_0001).then(|| "bool/exported_flag".to_string())
+            }
+            fn attr_name(&self, id: u32) -> Option<String> {
+                (id == 0x7f01_0002).then(|| "renamed".to_string())
+            }
+        }
+        let xml = decode_with(&doc, Some(&Names)).unwrap();
+        assert!(xml.contains("<application android:exported=\"@bool/exported_flag\" renamed=\"3\"/>"), "{xml}");
+        let root = parse_tree(&doc, Some(&Names)).unwrap();
+        assert_eq!(root.children[0].android("exported").unwrap().value, "@bool/exported_flag");
+        assert!(matches!(parse_tree(&doc[..8], None), Err(AxmlError::Malformed(_))));
+        for cut in 0..doc.len() {
+            let _ = parse_tree(&doc[..cut], Some(&Names));
+        }
     }
 
     #[test]

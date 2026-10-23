@@ -21,7 +21,9 @@
 
 mod callgraph;
 mod classes;
+mod manifest;
 pub mod names;
+mod resources;
 mod tiers;
 
 use asc_apk::{Apk, Entry, Limits};
@@ -39,11 +41,14 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Instant, SystemTime};
 
 pub use asc_apk::Limits as InflateLimits;
+pub use asc_arsc;
 pub use asc_cache;
 pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
+pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
+pub use resources::{parse_id, ResourceField, ResourceRow};
 pub use tiers::auto_memory_share;
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +65,8 @@ pub enum EngineError {
     Smali(#[from] asc_smali::SmaliError),
     #[error(transparent)]
     Axml(#[from] asc_axml::AxmlError),
+    #[error(transparent)]
+    Arsc(#[from] asc_arsc::ArscError),
     #[error("class {0} not found in APK")]
     ClassNotFound(String),
     #[error("{0}")]
@@ -741,6 +748,8 @@ pub struct Engine {
     /// `(size, mtime, key)` of the APK the key was last computed for.
     key_cache: Mutex<Option<(u64, Option<SystemTime>, ApkKey)>>,
     limits: Limits,
+    /// Parsed `resources.arsc` for the APK version it was read from.
+    resources: Mutex<Option<resources::CachedTable>>,
 }
 
 /// An APK opened for a search whose DEX entries are scheduled by the caller,
@@ -777,6 +786,7 @@ impl Engine {
             stats: Arc::new(Stats::default()),
             key_cache: Mutex::new(None),
             limits: Limits::default(),
+            resources: Mutex::new(None),
         }
     }
 
@@ -862,9 +872,11 @@ impl Engine {
         self.cache.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
     }
 
-    /// Drop this APK's entries from the in-memory cache (shared or not) and
-    /// return the bytes released; queries still holding them keep them alive.
+    /// Drop this APK's entries from the in-memory cache (shared or not), and
+    /// its parsed resource table, and return the DEX bytes released; queries
+    /// still holding them keep them alive.
     pub fn release_memory_cache(&self) -> usize {
+        self.release_resources();
         let Some(memory) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
         let key = self.key_cache.lock().unwrap().as_ref().map(|(_, _, key)| key.clone());
         let Some(key) = key.or_else(|| self.open().ok().and_then(|apk| self.apk_key(&apk))) else { return 0 };

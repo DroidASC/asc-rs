@@ -187,6 +187,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-arsc"
+version = "0.1.0"
+dependencies = [
+ "asc-axml",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "asc-axml"
 version = "0.1.0"
 dependencies = [
@@ -236,6 +244,7 @@ name = "asc-engine"
 version = "0.1.0"
 dependencies = [
  "asc-apk",
+ "asc-arsc",
  "asc-axml",
  "asc-cache",
  "asc-dex",
@@ -243,6 +252,8 @@ dependencies = [
  "asc-fixture",
  "asc-rebuild",
  "asc-smali",
+ "regex",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
 ]

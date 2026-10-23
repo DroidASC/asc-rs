@@ -22,9 +22,18 @@ examples:
   droidasc getclass app.apk com.poc.Main --dump-dex Main.dex
   droidasc disassemble app.apk com.poc.Main --debuginfo
   droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
+  droidasc getclass app.apk com.poc.Main --res-names
   droidasc listclass app.apk -o classes.txt
   droidasc listclass app.apk --prefix com.poc
   droidasc getmanifest app.apk -o AndroidManifest.xml
+  droidasc getmanifest app.apk --resolve
+  droidasc manifest-summary app.apk | grep exported=true
+  droidasc manifest-summary app.apk --json
+  droidasc resources app.apk string/app_name
+  droidasc resources app.apk 0x7f0d0001 --resolve
+  droidasc resources app.apk --search 'https?://' --in value
+  droidasc resources app.apk -o resources.txt
+  droidasc xml app.apk res/xml/network_security_config.xml
   droidasc findrefs app.apk string token -o string_refs.txt
   droidasc findrefs app.apk string 'a.b(c)' --literal
   droidasc findrefs app.apk type com.poc.Main
@@ -53,8 +62,22 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 const EXIT_PARTIAL: u8 = 2;
 
 /// Subcommand names and aliases (`classes` / `manifest` as in rasc).
-const SUBCOMMANDS: [&str; 11] =
-    ["getclass", "disassemble", "listclass", "classes", "getmanifest", "manifest", "findrefs", "callgraph", "gui", "mcp", "cache"];
+const SUBCOMMANDS: [&str; 14] = [
+    "getclass",
+    "disassemble",
+    "listclass",
+    "classes",
+    "getmanifest",
+    "manifest",
+    "manifest-summary",
+    "resources",
+    "xml",
+    "findrefs",
+    "callgraph",
+    "gui",
+    "mcp",
+    "cache",
+];
 
 fn default_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
@@ -147,6 +170,9 @@ enum Command {
         /// Render one exact method signature, e.g. run(I)V (no fields).
         #[arg(long = "method", value_name = "SIGNATURE")]
         method_signature: Option<String>,
+        /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
+        #[arg(long)]
+        res_names: bool,
         /// Path to the input APK file.
         apk_path: PathBuf,
         /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
@@ -163,6 +189,9 @@ enum Command {
         /// Render one exact method signature, e.g. run(I)V (no fields).
         #[arg(long = "method", value_name = "SIGNATURE")]
         method_signature: Option<String>,
+        /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
+        #[arg(long)]
+        res_names: bool,
         /// Write the rebuilt single-class DEX to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
@@ -189,8 +218,64 @@ enum Command {
         /// Also write the decoded manifest to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Show resource references (@7F0C0001) by name, from resources.arsc.
+        #[arg(short, long)]
+        resolve: bool,
         /// Path to the input APK file.
         apk_path: PathBuf,
+    },
+    /// Summarize the manifest's attack surface, one record per line:
+    /// package, application flags, permissions, components (exported or not,
+    /// and why), intent filters, deep links, FileProvider paths, network
+    /// security config. References are resolved through resources.arsc.
+    ManifestSummary {
+        /// Print JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+        /// Also write the output to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+    },
+    /// Query resources.arsc: one line per resource and configuration,
+    /// `0x7f0d0001 string/app_name [zh-rCN] "value"`.
+    ///
+    /// With no QUERY and no --search, dumps the whole table.
+    Resources {
+        /// Search names and string values with this regex.
+        #[arg(long, value_name = "REGEX", conflicts_with = "query")]
+        search: Option<String>,
+        /// Match --search as a plain substring.
+        #[arg(long, requires = "search")]
+        literal: bool,
+        /// What --search matches: name, value or any.
+        #[arg(long = "in", value_name = "FIELD", default_value = "any", requires = "search")]
+        field: String,
+        /// Follow QUERY's reference chain to its final value.
+        #[arg(long, requires = "query")]
+        resolve: bool,
+        /// At most this many rows for --search.
+        #[arg(long, default_value_t = 1000)]
+        limit: usize,
+        /// Write the output to this file instead of stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+        /// A resource id (0x7f0d0001) or name (string/app_name, @pkg:type/name).
+        query: Option<String>,
+    },
+    /// Decode any binary XML file of the APK (res/xml/..., layouts) with
+    /// resource references shown by name.
+    Xml {
+        /// Also write the decoded XML to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+        /// Path inside the APK, e.g. res/xml/network_security_config.xml.
+        path: String,
     },
     /// Find code references for string/type/method/field across all DEX entries in APK.
     ///
@@ -449,6 +534,7 @@ struct ClassArgs {
     debug_info: bool,
     dump_dex: Option<PathBuf>,
     method_signature: Option<String>,
+    res_names: bool,
     apk_path: PathBuf,
     dalvik_class: String,
 }
@@ -457,7 +543,10 @@ fn getclass(common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), St
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = common.engine(&args.apk_path);
     let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
-    let src = engine.get_class_method(&descriptor, opts, args.method_signature.as_deref()).map_err(|e| e.to_string())?;
+    let mut src = engine.get_class_method(&descriptor, opts, args.method_signature.as_deref()).map_err(|e| e.to_string())?;
+    if args.res_names {
+        src.source = engine.annotate_resource_ids(&src.source);
+    }
     if let Some(w) = &src.warning {
         eprintln!("Warning: {w}");
     }
@@ -487,12 +576,14 @@ fn getclass(common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), St
 fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
     let common = cli.common.clone();
     match cli.command {
-        Command::Getclass { output, no_debug_info, dump_dex, method_signature, apk_path, dalvik_class } => {
-            let args = ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, apk_path, dalvik_class };
+        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
+            let args =
+                ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class };
             getclass(&common, args, t_start)?;
         }
-        Command::Disassemble { output, debuginfo, method_signature, dump_dex, apk_path, dalvik_class } => {
-            let args = ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, apk_path, dalvik_class };
+        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, apk_path, dalvik_class } => {
+            let args =
+                ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, res_names, apk_path, dalvik_class };
             getclass(&common, args, t_start)?;
         }
         Command::Listclass { prefix, output, apk_path } => {
@@ -512,14 +603,56 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
             }
         }
-        Command::Getmanifest { output, apk_path } => {
+        Command::Getmanifest { output, resolve, apk_path } => {
             let engine = common.engine(&apk_path);
-            let xml = engine.manifest_xml().map_err(|e| e.to_string())?;
+            let xml = if resolve { engine.manifest_xml_resolved() } else { engine.manifest_xml() }.map_err(|e| e.to_string())?;
             write_output(output.as_ref(), &xml)?;
             emit(&xml)?;
             if common.debug {
                 eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
             }
+        }
+        Command::ManifestSummary { json, output, apk_path } => {
+            let summary = common.engine(&apk_path).manifest_summary().map_err(|e| e.to_string())?;
+            let text = if json { format!("{:#}", summary.json()) } else { summary.lines().join("\n") };
+            write_output(output.as_ref(), &text)?;
+            emit(&text)?;
+        }
+        Command::Resources { search, literal, field, resolve, limit, output, apk_path, query } => {
+            let engine = common.engine(&apk_path);
+            let stdout = std::io::stdout();
+            let mut sink = match &output {
+                Some(_) => LineSink { stdout: None, ..LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())? },
+                None => LineSink::new(BufWriter::new(stdout.lock()), None)?,
+            };
+            match (search, query) {
+                (Some(pattern), _) => {
+                    let field = match field.as_str() {
+                        "name" => asc_engine::ResourceField::Name,
+                        "value" => asc_engine::ResourceField::Value,
+                        "any" => asc_engine::ResourceField::Any,
+                        other => return Err(format!("--in must be name, value or any, not {other}")),
+                    };
+                    let (rows, total) = engine.search_resources(&pattern, literal, field, limit).map_err(|e| e.to_string())?;
+                    rows.iter().for_each(|r| sink.line(&r.line()));
+                    if total > rows.len() {
+                        eprintln!("Note: {} of {total} matches shown; raise --limit for more", rows.len());
+                    }
+                }
+                (None, Some(q)) if resolve => {
+                    let (chain, row) = engine.resolve_resource(&q, None).map_err(|e| e.to_string())?;
+                    sink.line(&format!("chain {}", chain.join(" -> ")));
+                    sink.line(&row.line());
+                }
+                (None, Some(q)) => engine.resource(&q).map_err(|e| e.to_string())?.iter().for_each(|r| sink.line(&r.line())),
+                (None, None) => engine.dump_resources(|r| sink.line(&r.line())).map_err(|e| e.to_string())?,
+            }
+            sink.finish()?;
+        }
+        Command::Xml { output, apk_path, path } => {
+            let xml = common.engine(&apk_path).xml(&path).map_err(|e| e.to_string())?;
+            write_output(output.as_ref(), &xml)?;
+            emit(&xml)?;
         }
         Command::Findrefs { apk_path, context, context_method, find } => {
             let context = match (context, context_method) {
