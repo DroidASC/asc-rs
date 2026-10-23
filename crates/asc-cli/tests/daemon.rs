@@ -211,3 +211,38 @@ fn a_replaced_binary_retires_the_old_daemon() {
     assert_eq!(status.lines().count(), 1, "{status}");
     assert_eq!(pid_of(&status), new);
 }
+
+#[test]
+fn idle_and_wait_times_come_from_the_environment() {
+    let env = Env::new();
+    // No wait: the first command runs itself while the daemon starts.
+    let mut cmd = Command::new(&env.exe);
+    cmd.current_dir(env.work.path())
+        .env("DROIDASC_RUNTIME_DIR", env.runtime.path())
+        .env("DROIDASC_CACHE_MAX_MB", "256")
+        .env("DROIDASC_DAEMON_WAIT_MS", "0")
+        .env("DROIDASC_DAEMON_IDLE", "1")
+        .env_remove("DROIDASC_DAEMON")
+        .arg("--cache-dir")
+        .arg(env.cache.path())
+        .args(["listclass", "app.apk"]);
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let pid = {
+        let t0 = Instant::now();
+        loop {
+            let status = env.status();
+            if status.starts_with("pid ") {
+                break pid_of(&status);
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "daemon never came up: {status:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    // `daemon status` is not a request: the daemon exits a second after it started.
+    let t0 = Instant::now();
+    while alive(pid) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "daemon {pid} still up with DROIDASC_DAEMON_IDLE=1");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

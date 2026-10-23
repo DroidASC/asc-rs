@@ -13,11 +13,11 @@
 //! overrides of each callee in its subclasses (marked `override of`).
 
 use crate::hierarchy::{ClassGraph, Lineage};
-use crate::{DexView, Engine, EngineError, Result};
+use crate::{cancelled, DexView, Engine, EngineError, Result, NOT_CANCELLED};
 use asc_dex::Dex;
 use asc_findrefs::FindRefs;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Which way to walk.
@@ -200,6 +200,12 @@ impl Engine {
     /// error. Each method is expanded once, at its shallowest occurrence;
     /// other occurrences are marked `repeated`.
     pub fn call_graph(&self, q: &CallQuery) -> Result<CallTree> {
+        self.call_graph_cancellable(q, &NOT_CANCELLED)
+    }
+
+    /// [`Engine::call_graph`] that stops, with `ApkError::Cancelled`, once
+    /// `cancel` is raised.
+    pub fn call_graph_cancellable(&self, q: &CallQuery, cancel: &AtomicBool) -> Result<CallTree> {
         let (name, proto) = match q.method.find('(') {
             Some(p) => {
                 let sig = asc_smali::normalize_method_signature(&q.method)?;
@@ -210,8 +216,13 @@ impl Engine {
         };
         let t0 = std::time::Instant::now();
         let _query = self.prebuild.query();
-        let (views, mut errors) = self.load_views(None)?;
-        let graph = if q.virtual_calls { Some(self.class_graph(&views, &mut errors)?) } else { None };
+        let (views, mut errors) = self.load_views(None, cancel)?;
+        // The tables built before a cancellation stay charged to the cache.
+        let stop = |views: &[DexView], e: EngineError| {
+            self.recharge_views(views);
+            e
+        };
+        let graph = if q.virtual_calls { Some(self.class_graph(&views, &mut errors, cancel).map_err(|e| stop(&views, e))?) } else { None };
         let load_us = t0.elapsed().as_micros();
         // Roots: every matching signature any DEX knows.
         let mut roots = BTreeSet::new();
@@ -250,7 +261,10 @@ impl Engine {
             lookup.extend(aliases.values().flatten().map(|(alias, _)| alias.clone()));
             lookup.sort();
             lookup.dedup();
-            let found = self.expand(&views, &lookup, q.direction, expand, &mut errors);
+            let found = self.expand(&views, &lookup, q.direction, expand, &mut errors, cancel);
+            if cancel.load(Ordering::Relaxed) {
+                return Err(stop(&views, cancelled()));
+            }
             let mut following = Vec::new();
             for sig in &frontier {
                 let f = found.get(sig);
@@ -268,6 +282,9 @@ impl Engine {
                 if let (Some(g), Direction::Callees) = (&graph, q.direction) {
                     let direct: Vec<String> = neighbours.iter().map(|(n, _)| n.clone()).collect();
                     for n in direct {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(stop(&views, cancelled()));
+                        }
                         let (overrides, cut) = overrides_of(g, &views, &n, &mut errors);
                         truncated |= cut;
                         neighbours.extend(overrides.into_iter().map(|o| (o, split_signature(&n).map(|p| p.class.to_string()))));
@@ -346,6 +363,7 @@ impl Engine {
         dir: crate::Direction,
         expand: bool,
         errors: &mut Vec<String>,
+        cancel: &AtomicBool,
     ) -> HashMap<String, Found> {
         let next_view = AtomicUsize::new(0);
         let merged: Mutex<HashMap<String, Found>> = Mutex::new(HashMap::new());
@@ -354,6 +372,9 @@ impl Engine {
         std::thread::scope(|s| {
             for _ in 0..workers {
                 s.spawn(|| loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let i = next_view.fetch_add(1, Ordering::Relaxed);
                     let Some(v) = views.get(i) else { break };
                     match view_neighbours(v, frontier, dir, expand) {

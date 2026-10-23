@@ -11,7 +11,20 @@ use std::time::SystemTime;
 pub(crate) type FileIdent = (u64, Option<SystemTime>);
 
 /// A parsed table (or its absence) and the APK version it was read from.
-pub(crate) type CachedTable = (Option<FileIdent>, Option<Arc<ResTable>>);
+pub(crate) struct CachedTable {
+    ident: Option<FileIdent>,
+    table: Option<Arc<ResTable>>,
+    /// Bytes of an inflated table, on the heap (a stored one stays in the
+    /// APK mapping).
+    inflated: usize,
+}
+
+impl CachedTable {
+    /// Heap the table holds, roughly: its index and inflated bytes.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.inflated + self.table.as_ref().map_or(0, |t| t.index_bytes())
+    }
+}
 
 pub(crate) fn file_ident(apk: &Apk) -> Option<FileIdent> {
     let meta = std::fs::metadata(apk.path()).ok()?;
@@ -77,11 +90,12 @@ impl Engine {
     pub fn resources(&self) -> Result<Option<Arc<ResTable>>> {
         let apk = self.open()?;
         let ident = file_ident(&apk);
-        if let Some((cached_ident, table)) = &*self.resources.lock().unwrap() {
-            if ident.is_some() && *cached_ident == ident {
-                return Ok(table.clone());
+        if let Some(cached) = &*self.resources.lock().unwrap() {
+            if ident.is_some() && cached.ident == ident {
+                return Ok(cached.table.clone());
             }
         }
+        let mut inflated = 0;
         let t0 = std::time::Instant::now();
         let table = match apk.find_entry("resources.arsc")? {
             None => None,
@@ -93,7 +107,10 @@ impl Engine {
                         let (start, len) = (b.as_ptr() as usize - apk.data().as_ptr() as usize, b.len());
                         ResTable::parse(MappedEntry { apk, start, len })?
                     }
-                    b => ResTable::parse(b.into_owned())?,
+                    b => {
+                        inflated = b.len();
+                        ResTable::parse(b.into_owned())?
+                    }
                 };
                 if self.debug {
                     self.log(format!(
@@ -107,7 +124,7 @@ impl Engine {
                 Some(Arc::new(table))
             }
         };
-        *self.resources.lock().unwrap() = Some((ident, table.clone()));
+        *self.resources.lock().unwrap() = Some(CachedTable { ident, table: table.clone(), inflated });
         Ok(table)
     }
 

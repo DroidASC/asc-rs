@@ -9,11 +9,11 @@
 //! unknown.
 
 use crate::resources::{file_ident, FileIdent};
-use crate::{DexView, Engine, EngineError, Result};
+use crate::{cancelled, DexView, Engine, EngineError, Result, NOT_CANCELLED};
 use asc_dex::Dex;
 use asc_findrefs::ClassRelation;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// No `superclass_idx` (`java.lang.Object` itself).
@@ -200,13 +200,32 @@ fn dex_classes(v: &DexView) -> Result<Vec<DefinedClass>> {
 }
 
 impl ClassGraph {
-    fn build(views: &[DexView], threads: usize, errors: &mut Vec<String>) -> ClassGraph {
+    /// Heap held by the graph, roughly.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        // Each name is an `Arc<str>` (two counters ahead of the bytes), held
+        // by `names` and as a key of `ids` (one more word of id and padding,
+        // plus a control byte, per hash slot).
+        let names: usize = self.names.iter().map(|n| n.len() + 2 * size_of::<usize>()).sum();
+        names
+            + self.names.capacity() * size_of::<Arc<str>>()
+            + self.ids.capacity() * (size_of::<(Arc<str>, u32)>() + 1)
+            + self.defined.capacity() * size_of::<(u32, u32)>()
+            + (self.up.capacity() + self.down.capacity()) * size_of::<Edge>()
+            + self.dex_names.iter().map(|n| n.capacity() + size_of::<String>()).sum::<usize>()
+    }
+
+    /// `None` once `cancel` is raised.
+    fn build(views: &[DexView], threads: usize, errors: &mut Vec<String>, cancel: &AtomicBool) -> Option<ClassGraph> {
         let next = AtomicUsize::new(0);
         let parsed: Mutex<Vec<(usize, Vec<DefinedClass>)>> = Mutex::new(Vec::new());
         let errs = Mutex::new(Vec::new());
         std::thread::scope(|s| {
             for _ in 0..threads.min(views.len()).max(1) {
                 s.spawn(|| loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(v) = views.get(i) else { break };
                     match dex_classes(v) {
@@ -216,6 +235,9 @@ impl ClassGraph {
                 });
             }
         });
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         errors.extend(errs.into_inner().unwrap());
         let mut parsed = parsed.into_inner().unwrap();
         // Views in entry order, so "first definition" means the first DEX.
@@ -249,7 +271,7 @@ impl ClassGraph {
         g.up.sort_unstable_by_key(|&(c, p, _)| (c, p));
         g.down = g.up.clone();
         g.down.sort_unstable_by_key(|&(c, p, _)| (p, c));
-        g
+        Some(g)
     }
 
     fn intern(&mut self, name: &str) -> u32 {
@@ -355,8 +377,8 @@ pub(crate) fn split_method(method: &str) -> Result<(String, Option<String>)> {
 
 impl Engine {
     /// The class graph of the APK, built over `views` unless one built from
-    /// the same APK file is kept.
-    pub(crate) fn class_graph(&self, views: &[DexView], errors: &mut Vec<String>) -> Result<Arc<ClassGraph>> {
+    /// the same APK file is kept. A cancelled build is not kept.
+    pub(crate) fn class_graph(&self, views: &[DexView], errors: &mut Vec<String>, cancel: &AtomicBool) -> Result<Arc<ClassGraph>> {
         let ident = file_ident(&self.open()?);
         let mut slot = self.class_graph.lock().unwrap();
         if let Some((id, g)) = slot.as_ref() {
@@ -364,7 +386,7 @@ impl Engine {
                 return Ok(g.clone());
             }
         }
-        let g = Arc::new(ClassGraph::build(views, self.threads(), errors));
+        let g = Arc::new(ClassGraph::build(views, self.threads(), errors, cancel).ok_or_else(cancelled)?);
         *slot = Some((ident, g.clone()));
         Ok(g)
     }
@@ -372,9 +394,15 @@ impl Engine {
     /// Transitive subclasses / implementers (or supertypes) of a class, as a
     /// tree, with the classes defining `method` marked.
     pub fn hierarchy(&self, q: &HierarchyQuery) -> Result<HierarchyTree> {
+        self.hierarchy_cancellable(q, &NOT_CANCELLED)
+    }
+
+    /// [`Engine::hierarchy`] that stops, with `ApkError::Cancelled`, once
+    /// `cancel` is raised.
+    pub fn hierarchy_cancellable(&self, q: &HierarchyQuery, cancel: &AtomicBool) -> Result<HierarchyTree> {
         let method = q.method.as_deref().map(split_method).transpose()?;
-        let (views, mut errors) = self.load_views(None)?;
-        let g = self.class_graph(&views, &mut errors)?;
+        let (views, mut errors) = self.load_views(None, cancel)?;
+        let g = self.class_graph(&views, &mut errors, cancel)?;
         let Some(root) = g.id(&q.class) else {
             return Err(EngineError::Query(format!("no class {} in this APK", q.class)));
         };
@@ -412,6 +440,9 @@ impl Engine {
         let mut defines: HashMap<u32, Vec<String>> = HashMap::new();
         if let Some((name, proto)) = &method {
             for &c in depth_of.keys() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(cancelled());
+                }
                 match g.defines(&views, g.name(c), name, proto.as_deref()) {
                     Ok(d) if !d.is_empty() => {
                         defines.insert(c, d);

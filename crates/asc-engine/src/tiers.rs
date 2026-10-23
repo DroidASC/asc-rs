@@ -394,7 +394,10 @@ impl MemoryBudget {
             }
             *last = Some(Instant::now());
         }
-        let used = memory.lock().unwrap().used_bytes() as u64;
+        let used = {
+            let m = memory.lock().unwrap();
+            (m.used_bytes() + m.reserved_bytes()) as u64
+        };
         let previous = self.published.swap(used, Ordering::Relaxed);
         let (held, others) = {
             let mut reg = REGISTRATION.lock().unwrap();

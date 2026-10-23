@@ -1214,13 +1214,15 @@ struct Slot<T> {
 pub struct MemoryCache<T> {
     cap_bytes: usize,
     used: usize,
+    /// Bytes the host holds elsewhere against the same capacity.
+    reserved: usize,
     clock: u64,
     map: HashMap<ApkKey, HashMap<String, Slot<T>>>,
 }
 
 impl<T> MemoryCache<T> {
     pub fn new(cap_bytes: usize) -> Self {
-        MemoryCache { cap_bytes, used: 0, clock: 0, map: HashMap::new() }
+        MemoryCache { cap_bytes, used: 0, reserved: 0, clock: 0, map: HashMap::new() }
     }
 
     fn tick(&mut self) -> u64 {
@@ -1279,7 +1281,7 @@ impl<T> MemoryCache<T> {
     /// Evict least recently used entries until under capacity (always
     /// keeping the last one: a single entry larger than the cap stays usable).
     fn evict_over_cap(&mut self) {
-        while self.used > self.cap_bytes && self.len() > 1 {
+        while self.used + self.reserved > self.cap_bytes && self.len() > 1 {
             let Some((k, name)) = self.lru() else { break };
             if let Some(per_apk) = self.map.get_mut(&k) {
                 if let Some(old) = per_apk.remove(&name) {
@@ -1306,6 +1308,19 @@ impl<T> MemoryCache<T> {
 
     pub fn capacity_bytes(&self) -> usize {
         self.cap_bytes
+    }
+
+    /// Bytes counted against the capacity besides the entries
+    /// ([`MemoryCache::set_reserved`]).
+    pub fn reserved_bytes(&self) -> usize {
+        self.reserved
+    }
+
+    /// Count `bytes` the host holds elsewhere against the capacity, evicting
+    /// least recently used entries to make room.
+    pub fn set_reserved(&mut self, bytes: usize) {
+        self.reserved = bytes;
+        self.evict_over_cap();
     }
 
     /// Change the capacity, evicting least recently used entries if the
@@ -1664,6 +1679,22 @@ mod tests {
         assert_eq!((m.capacity_bytes(), m.used_bytes()), (5, 4));
         assert!(m.peek(&k, "a").is_none());
         assert!(m.peek(&k, "b").is_some());
+    }
+
+    #[test]
+    fn memory_lru_reserved_bytes_make_room_under_the_cap() {
+        let mut m: MemoryCache<u8> = MemoryCache::new(10);
+        let k = ApkKey("k".into());
+        m.insert(&k, "a", Arc::new(1), 4);
+        m.insert(&k, "b", Arc::new(2), 4);
+        m.set_reserved(3);
+        assert_eq!((m.used_bytes(), m.reserved_bytes()), (4, 3), "a evicted to fit 3 reserved bytes");
+        assert!(m.peek(&k, "a").is_none());
+        m.insert(&k, "c", Arc::new(3), 3);
+        assert_eq!(m.used_bytes(), 7);
+        m.set_reserved(0);
+        m.insert(&k, "d", Arc::new(4), 3);
+        assert_eq!(m.used_bytes(), 10, "nothing reserved: the whole cap holds entries");
     }
 
     #[test]
