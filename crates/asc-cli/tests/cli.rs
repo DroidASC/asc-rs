@@ -230,6 +230,140 @@ fn class_that_cannot_be_rebuilt_is_still_disassembled() {
     assert!(stderr(&out).contains("not rebuilt"), "{}", stderr(&out));
 }
 
+// ---- upstream parity: extends / impl, disassemble, --method -------------
+
+fn rich_apk() -> tempfile::NamedTempFile {
+    let dex = asc_fixture::make_rich_dex();
+    temp_apk_from(&make_apk(&[("classes.dex", &dex), ("classes2.dex", &make_dex())], true))
+}
+
+fn sorted_lines(o: &Output) -> Vec<String> {
+    let mut v: Vec<String> = stdout(o).lines().map(str::to_string).collect();
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn findrefs_extends_and_impl_print_python_lines() {
+    let apk = rich_apk();
+    for target in ["java.lang.Object", "Ljava/lang/Object;", "java/lang/Object"] {
+        let out = droidasc(&["findrefs", path(apk.path()), "extends", target]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(
+            sorted_lines(&out),
+            [
+                "classes.dex | Lexample/Broken; extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Custom; extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Iface; extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Rich; extends Ljava/lang/Object;",
+                "classes2.dex | Lexample/Test; extends Ljava/lang/Object;",
+            ]
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("impls.txt");
+    let out = droidasc(&["findrefs", path(apk.path()), "impl", "example.Iface", "-o", path(&file)]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "classes.dex | Lexample/Rich; implements Lexample/Iface;\n");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), stdout(&out));
+    // Direct relations only; unknown targets give no rows and no error.
+    for args in [["extends", "example.Iface"], ["impl", "java.lang.Object"], ["extends", "no.such.Clazz"]] {
+        let out = droidasc(&["findrefs", path(apk.path()), args[0], args[1]]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(out.stdout.is_empty(), "{args:?}: {}", stdout(&out));
+    }
+    let out = droidasc(&["findrefs", path(apk.path()), "extends", ""]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("Class name cannot be empty"), "{}", stderr(&out));
+}
+
+#[test]
+fn findrefs_string_literal_ignores_regex_syntax() {
+    let apk = temp_apk();
+    let regex = droidasc(&["findrefs", path(apk.path()), "string", "t.k"]);
+    assert_eq!(sorted_lines(&regex).len(), 4, "{}", stderr(&regex));
+    let literal = droidasc(&["findrefs", path(apk.path()), "string", "--literal", "t.k"]);
+    assert!(literal.status.success() && literal.stdout.is_empty(), "{}", stderr(&literal));
+    // An invalid regex is a fine literal.
+    let out = droidasc(&["findrefs", path(apk.path()), "string", "oke(", "--literal"]);
+    assert!(out.status.success() && out.stdout.is_empty(), "{}", stderr(&out));
+    assert_eq!(droidasc(&["findrefs", path(apk.path()), "string", "oke("]).status.code(), Some(1));
+    let out = droidasc(&["findrefs", path(apk.path()), "string", "--literal", "oke"]);
+    assert_eq!(sorted_lines(&out), sorted_lines(&droidasc(&["findrefs", path(apk.path()), "string", "oke"])));
+    assert_eq!(sorted_lines(&out).len(), 4);
+}
+
+#[test]
+fn disassemble_defaults_to_no_debug_directives_and_writes_only_the_file() {
+    let apk = rich_apk();
+    let a = droidasc(&["disassemble", path(apk.path()), "example.Rich"]);
+    assert!(a.status.success(), "{}", stderr(&a));
+    let text = stdout(&a);
+    assert!(text.contains(".method public static compute(II)I") && !text.contains(".line"), "{text}");
+    let b = droidasc(&["disassemble", path(apk.path()), "example.Rich", "--debuginfo"]);
+    assert!(stdout(&b).contains(".line"), "{}", stdout(&b));
+    // `--debuginfo` output is what getclass prints by default.
+    assert_eq!(stdout(&b), stdout(&droidasc(&["getclass", path(apk.path()), "example.Rich"])));
+    assert_eq!(text, stdout(&droidasc(&["getclass", path(apk.path()), "example.Rich", "--no-debug-info"])));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Rich.smali");
+    let out = droidasc(&["disassemble", path(apk.path()), "Lexample/Rich;", "-o", path(&file)]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "{}", stdout(&out));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn method_flag_renders_one_exact_signature() {
+    let apk = rich_apk();
+    for cmd in ["getclass", "disassemble"] {
+        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run()V"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let text = stdout(&out);
+        assert_eq!(text.matches(".method ").count(), 1, "{text}");
+        assert!(text.contains(".method public run()V") && !text.contains(".field"), "{text}");
+        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(stderr(&out).contains("Error: method signature must include the name"), "{}", stderr(&out));
+        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run(I)V"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            stderr(&out).contains("Error: method not found or signature is not defined in the target DEX: run(I)V"),
+            "{}",
+            stderr(&out)
+        );
+    }
+    // The dumped DEX still holds the whole class.
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a.dex"), dir.path().join("b.dex"));
+    assert!(droidasc(&["getclass", path(apk.path()), "example.Rich", "--dump-dex", path(&a)]).status.success());
+    assert!(droidasc(&["getclass", path(apk.path()), "example.Rich", "--method", "run()V", "--dump-dex", path(&b)]).status.success());
+    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+}
+
+#[test]
+fn rasc_aliases_and_version_flags() {
+    let apk = temp_apk();
+    let a = droidasc(&["classes", path(apk.path()), "--thread", "1"]);
+    assert!(a.status.success(), "{}", stderr(&a));
+    assert_eq!(stdout(&a), stdout(&droidasc(&["listclass", path(apk.path())])));
+    // No AndroidManifest.xml in the fixture: both names reach the same error.
+    let m = droidasc(&["manifest", path(apk.path())]);
+    let g = droidasc(&["getmanifest", path(apk.path())]);
+    assert_eq!(m.status.code(), Some(1));
+    assert_eq!(stderr(&m), stderr(&g));
+    assert!(stderr(&m).starts_with("Error:"), "{}", stderr(&m));
+    for flag in ["-v", "-V", "--version"] {
+        let out = droidasc(&[flag]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(stdout(&out).starts_with("droidasc "), "{}", stdout(&out));
+    }
+    // The legacy `app.apk --gui` rewrite leaves the aliases alone.
+    let out = droidasc(&["classes", path(apk.path()), "--gui"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("--gui"), "{}", stderr(&out));
+}
+
 // ---- listclass (ported from the Python `test_listclass.py`) -------------
 
 #[test]

@@ -24,6 +24,10 @@ pub enum SmaliError {
     Dex(#[from] asc_dex::DexError),
     #[error("class {0} not found")]
     ClassNotFound(String),
+    #[error("method signature must include the name, parameter descriptor and return type")]
+    BadMethodSignature(String),
+    #[error("method not found or signature is not defined in the target DEX: {0}")]
+    MethodNotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, SmaliError>;
@@ -45,17 +49,58 @@ impl Default for Options {
 
 /// Disassemble the class with the given descriptor.
 pub fn disassemble_class(dex: &Dex<'_>, descriptor: &str, opts: Options) -> Result<String> {
+    disassemble_class_method(dex, descriptor, opts, None)
+}
+
+/// Disassemble the class with the given descriptor, keeping only the method
+/// whose `name(params)ret` is `method` when one is given (fields are left out
+/// then, like the Python `disassemble --method`). The signature is
+/// normalised with [`normalize_method_signature`]; a class that defines no
+/// such method is an error.
+pub fn disassemble_class_method(dex: &Dex<'_>, descriptor: &str, opts: Options, method: Option<&str>) -> Result<String> {
+    let filter = method.map(normalize_method_signature).transpose()?;
     let (index, _) =
         dex.find_class_def(&asc_dex::mutf8::encode(descriptor))?.ok_or_else(|| SmaliError::ClassNotFound(descriptor.to_string()))?;
-    disassemble_class_def(dex, index, opts)
+    let def = dex.class_def(index)?;
+    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts, method: filter.as_deref() };
+    if let Some(sig) = w.method {
+        let cd = dex.class_data(def.class_data_off)?;
+        let mut found = false;
+        for m in cd.direct_methods.iter().chain(&cd.virtual_methods) {
+            if w.method_matches(m.method_idx)? {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(SmaliError::MethodNotFound(sig.to_string()));
+        }
+    }
+    w.class(&def)?;
+    Ok(w.out)
 }
 
 /// Disassemble class definition number `index`.
 pub fn disassemble_class_def(dex: &Dex<'_>, index: u32, opts: Options) -> Result<String> {
     let def = dex.class_def(index)?;
-    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts };
+    let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts, method: None };
     w.class(&def)?;
     Ok(w.out)
+}
+
+/// Normalise a `--method` signature such as `run(I)V` or `put(I, Ljava/lang/String;) V`:
+/// whitespace is dropped from the parameter and return descriptors. The name,
+/// both parentheses and a return type are required; a bare name is rejected.
+pub fn normalize_method_signature(signature: &str) -> Result<String> {
+    let bad = || SmaliError::BadMethodSignature(signature.to_string());
+    let (name, rest) = signature.split_once('(').ok_or_else(bad)?;
+    let (params, ret) = rest.split_once(')').ok_or_else(bad)?;
+    let compact = |s: &str| s.split_whitespace().collect::<String>();
+    let (params, ret) = (compact(params), compact(ret));
+    if name.is_empty() || ret.is_empty() {
+        return Err(bad());
+    }
+    Ok(format!("{name}({params}){ret}"))
 }
 
 /// Per-class memo of rendered type descriptors, prototypes and member
@@ -110,10 +155,12 @@ struct Annotations {
     params: HashMap<u32, Vec<Vec<AnnotationItem>>>,
 }
 
-struct Writer<'d, 'a> {
+struct Writer<'d, 'a, 'm> {
     names: Names<'d, 'a>,
     out: String,
     opts: Options,
+    /// Only this normalised `name(params)ret` is rendered (and no fields).
+    method: Option<&'m str>,
 }
 
 const CLASS_FLAGS: &[(u32, &str)] = &[
@@ -169,7 +216,17 @@ fn flags(value: u32, table: &[(u32, &str)]) -> String {
     s
 }
 
-impl<'d, 'a> Writer<'d, 'a> {
+impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
+    /// Whether method `idx` passes the `method` filter (always without one).
+    fn method_matches(&mut self, idx: u32) -> Result<bool> {
+        let Some(sig) = self.method else { return Ok(true) };
+        let dex = self.names.dex;
+        let id = dex.method_id(idx)?;
+        let name = dex.string(id.name_idx)?;
+        let Some(rest) = sig.strip_prefix(name.as_str()) else { return Ok(false) };
+        Ok(rest == self.names.proto(id.proto_idx as u32)?)
+    }
+
     fn load_annotations(&self, def: &ClassDef) -> Result<Annotations> {
         let mut ann = Annotations { class: Vec::new(), fields: HashMap::new(), methods: HashMap::new(), params: HashMap::new() };
         if def.annotations_off == 0 {
@@ -236,8 +293,25 @@ impl<'d, 'a> Writer<'d, 'a> {
             }
         }
 
-        let cd = dex.class_data(def.class_data_off)?;
-        let static_values = if def.static_values_off != 0 { parse_array(dex.buf(), def.static_values_off as usize)?.0 } else { Vec::new() };
+        let mut cd = dex.class_data(def.class_data_off)?;
+        if self.method.is_some() {
+            cd.static_fields.clear();
+            cd.instance_fields.clear();
+            for methods in [&mut cd.direct_methods, &mut cd.virtual_methods] {
+                let mut kept = Vec::new();
+                for m in methods.drain(..) {
+                    if self.method_matches(m.method_idx)? {
+                        kept.push(m);
+                    }
+                }
+                *methods = kept;
+            }
+        }
+        let static_values = if def.static_values_off != 0 && self.method.is_none() {
+            parse_array(dex.buf(), def.static_values_off as usize)?.0
+        } else {
+            Vec::new()
+        };
 
         if !cd.static_fields.is_empty() {
             self.out.push_str("\n\n# static fields\n");

@@ -208,6 +208,43 @@ fn abstract_method_keeps_param_and_annotations() {
 }
 
 #[test]
+fn method_filter_keeps_one_exact_signature() {
+    use asc_smali::{disassemble_class_method, normalize_method_signature, SmaliError};
+    let out = asc_rebuild::rebuild_class_bytes(&make_rich_dex(), RICH).unwrap();
+    let dex = Dex::parse(&out.bytes).unwrap();
+    let full = disassemble_class(&dex, RICH, Options::default()).unwrap();
+    let text = disassemble_class_method(&dex, RICH, Options::default(), Some("compute(II)I")).unwrap();
+    // The class header, interfaces and class annotations stay; fields and
+    // every other method go.
+    assert!(text.starts_with(".class public abstract Lexample/Rich;\n.super Ljava/lang/Object;\n"), "{text}");
+    assert!(text.contains(".implements Lexample/Iface;") && text.contains(".annotation runtime Lexample/Marker;"), "{text}");
+    assert!(!text.contains(".field") && !text.contains("# virtual methods"), "{text}");
+    assert_eq!(text.matches(".method ").count(), 1, "{text}");
+    let start = full.find(".method public static compute(II)I").unwrap();
+    let end = start + full[start..].find(".end method\n").unwrap() + ".end method\n".len();
+    assert!(text.ends_with(&full[start..end]), "{text}");
+    // A virtual, code-less one, with whitespace inside the descriptors.
+    let text = disassemble_class_method(&dex, RICH, Options::default(), Some("handle( Ljava/lang/String; I ) V")).unwrap();
+    assert!(text.contains("# virtual methods\n.method public abstract handle(Ljava/lang/String;I)V"), "{text}");
+    assert!(!text.contains("# direct methods"), "{text}");
+    // Constructors match by their real name.
+    assert!(disassemble_class_method(&dex, RICH, Options::default(), Some("<init>()V")).unwrap().contains("constructor <init>()V"));
+
+    assert!(matches!(
+        disassemble_class_method(&dex, RICH, Options::default(), Some("compute(I)I")),
+        Err(SmaliError::MethodNotFound(s)) if s == "compute(I)I"
+    ));
+    for bad in ["compute", "compute(II", "(II)I", "compute(II)", "compute(II)  "] {
+        assert!(matches!(normalize_method_signature(bad), Err(SmaliError::BadMethodSignature(_))), "{bad}");
+        assert!(disassemble_class_method(&dex, RICH, Options::default(), Some(bad)).is_err(), "{bad}");
+    }
+    // Only the descriptors are compacted, as in Python; the name is kept.
+    assert_eq!(normalize_method_signature("run ( I , J ) V").unwrap(), "run (I,J)V");
+    assert_eq!(normalize_method_signature("run(I J)V").unwrap(), "run(IJ)V");
+    assert_eq!(disassemble_class_method(&dex, RICH, Options::default(), None).unwrap(), full);
+}
+
+#[test]
 fn options_disable_lines_and_param_names() {
     let text = rebuilt_rich(Options { line_numbers: false, param_names: true });
     assert!(!text.contains(".line"), "{text}");

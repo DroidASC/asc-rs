@@ -40,6 +40,52 @@ fn findrefs_and_getclass_on_stored_and_deflated_apk() {
 }
 
 #[test]
+fn class_relations_and_literals_stream_like_reference_queries() {
+    use asc_engine::ClassRelation;
+    let dex = asc_fixture::make_rich_dex();
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex), ("classes2.dex", &make_dex())], true));
+    // Cold and warm (memory-cached locator state) must agree.
+    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: None };
+    let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
+    let run = |q: &Query| {
+        let mut rows = Vec::new();
+        engine.find_refs(q, |b| rows.extend(b.results)).unwrap();
+        rows.sort_by_key(|r| r.line());
+        rows
+    };
+    for _ in 0..2 {
+        let rows = run(&Query::Implements("Lexample/Iface;".into()));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].relation, Some(ClassRelation::Implements));
+        assert_eq!(rows[0].method, "Lexample/Rich;");
+        assert_eq!(rows[0].matched, ["Lexample/Iface;"]);
+        assert_eq!(rows[0].line(), "classes.dex | Lexample/Rich; implements Lexample/Iface;");
+        let rows = run(&Query::Extends("Ljava/lang/Object;".into()));
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|r| r.relation == Some(ClassRelation::Extends) && r.line().ends_with(" extends Ljava/lang/Object;")));
+        let lit = run(&Query::StringLiteral("token".into()));
+        assert_eq!(lit, run(&Query::String("token".into())));
+        assert!(lit.iter().all(|r| r.relation.is_none()));
+        assert!(run(&Query::StringLiteral("t.ken".into())).is_empty());
+    }
+    // The one-DEX helper takes the same path.
+    let lines = asc_engine::find_refs_lines("classes.dex", &dex, &Query::Implements("Lexample/Iface;".into()), true).unwrap();
+    assert_eq!(lines, ["classes.dex | Lexample/Rich; implements Lexample/Iface;"]);
+}
+
+#[test]
+fn method_filter_is_validated_before_the_apk_is_read() {
+    let engine = Engine::new("/nonexistent/app.apk");
+    let err = engine.get_class_method("Lexample/Test;", Default::default(), Some("first")).err().unwrap();
+    assert!(err.to_string().starts_with("method signature must include"), "{err}");
+    let apk = temp_apk(true);
+    let engine = Engine::new(apk.path());
+    let src = engine.get_class_method("Lexample/Test;", Default::default(), Some("second()V")).unwrap();
+    assert!(src.source.contains(".method public static second()V") && !src.source.contains("first"), "{}", src.source);
+    assert!(src.rebuilt.is_some());
+}
+
+#[test]
 fn caches_serve_repeated_queries() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();

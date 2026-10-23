@@ -9,26 +9,34 @@ directly from the compressed artifact in milliseconds, without building any glob
 usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] <COMMAND>
 
   getclass     Locate the target class in APK, extract one DEX in memory, then disassemble.
-  listclass    List classes across all DEX entries (--prefix com.poc to filter).
-  getmanifest  Decode AndroidManifest.xml from APK and print it as XML.
-  findrefs     Find code references for string/type/method/field across all DEX entries in APK.
+  disassemble  Same, without debug directives unless --debuginfo (Python's smali command).
+  listclass    List classes across all DEX entries (--prefix com.poc to filter). Alias: classes.
+  getmanifest  Decode AndroidManifest.xml from APK and print it as XML. Alias: manifest.
+  findrefs     Find code references for string/type/method/field, or subclasses / implementors
+               (extends / impl), across all DEX entries in APK.
   gui          Launch the graphical browser.
   mcp          Serve MCP tools over stdio, keeping opened APKs resident (--memory-mb MIB).
   cache        Inspect or clear the on-disk cache (path | stats | clear).
 
-  --threads N      worker threads (default: number of logical CPUs)
+  --threads N      worker threads (default: number of logical CPUs); --thread N also works
   --no-cache       bypass the on-disk cache of inflated DEX files
   --cache-dir DIR  use DIR instead of the default cache directory
   --debug          profiling output on stderr
+  -v, -V, --version
 
 examples:
   droidasc app.apk --gui
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16 --dump-dex Main.dex
+  droidasc disassemble app.apk com.poc.Main --debuginfo
+  droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
   droidasc listclass app.apk --prefix com.poc -o classes.txt
   droidasc getmanifest app.apk -o AndroidManifest.xml
   droidasc findrefs app.apk string token -o string_refs.txt
+  droidasc findrefs app.apk string 'https://' --literal
   droidasc findrefs app.apk type com.poc.Main
+  droidasc findrefs app.apk extends android.app.Activity -o subclasses.txt
+  droidasc findrefs app.apk impl android.os.IInterface
   droidasc findrefs app.apk method onCreate --class com.poc.Main
   droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
   droidasc findrefs app.apk method run --class com.poc.Main --exact
@@ -42,7 +50,17 @@ Exit status is 0 on success, 1 on error and 2 when `findrefs` finished but some 
 could not be searched (a warning per entry is printed on stderr).
 
 The command line, query semantics and `findrefs` output format
-(`classes2.dex | Lcom/x/Y;->m | matched=(token)`) are the same as the Python tool.
+(`classes2.dex | Lcom/x/Y;->m | matched=(token)`, and `classes.dex | Lcom/x/Sub; extends
+Lcom/x/Base;` for `extends` / `impl`) are the same as the Python tool.
+
+`getclass` and `disassemble` take `--method 'run(I)V'` to render a single method given its
+exact signature (a bare name is rejected). `findrefs extends` / `impl` list the classes
+whose direct superclass / one of whose direct interfaces is the target (dotted or Dalvik
+form). `findrefs string --literal` matches a plain substring instead of a regex.
+
+Scripts written for the other Rust ports keep working: `classes` and `manifest` are
+aliases of `listclass` and `getmanifest` (as in rasc), `--thread` of `--threads` (as in
+rust_ASC), and `--literal` gives their literal string matching.
 
 ## Build
 
@@ -60,7 +78,7 @@ Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is he
 |---|---|
 | `asc-dex` | Zero-copy DEX parser: header, id tables, MUTF-8, LEB128, class data, code items, encoded values, debug info, annotations, DEX 041 containers, checksum/signature. |
 | `asc-dalvik` | Dalvik opcode table (generated from ART's `dex_instruction_list.h`), instruction formats, operand decoding, payload-aware instruction walk. |
-| `asc-findrefs` | Cross-reference search on one DEX: regex string locator, type/method/field locators, dense 16-byte-bucket instruction→method resolver, raw code-region opcode scan. |
+| `asc-findrefs` | Cross-reference search on one DEX: regex / literal (`memmem`) string locator, subclass / implementor lookup over `class_def_item`s, type/method/field locators, dense 16-byte-bucket instruction→method resolver, raw code-region opcode scan. |
 | `asc-rebuild` | Extracts one class plus everything it references and writes a minimal, spec-valid DEX (sorted id tables, annotations, debug info, try/catch, static values, Adler-32 + SHA-1). |
 | `asc-smali` | baksmali-style disassembler used as the built-in output backend. |
 | `asc-apk` | Memory-mapped zip access: central directory (incl. zip64), root-level DEX enumeration, Deflate inflation (libdeflate, or streaming zlib-rs for prefixes / cancellation). |
@@ -81,7 +99,9 @@ modules and where the port deliberately differs.
   decompiler; there is no equivalent Rust library. Instead the rebuilt DEX is a fully valid
   single-class DEX (canonically sorted tables, correct checksum and signature), so it can be
   written out with `--dump-dex` and fed to jadx, baksmali, dexdump or any other tool. jadx
-  has been verified to decompile such DEX files to Java.
+  has been verified to decompile such DEX files to Java. `disassemble` (upstream's smali
+  command) shares the same backend: baksmali-style output rather than dadguard's format,
+  and `--debug` adds timings but no per-instruction offset comments.
 * **Correct string decoding.** Non-ASCII class and member names (common in obfuscated apps)
   are decoded as MUTF-8; the Python version truncates them.
 * **Threads instead of processes** for `findrefs`; results still stream per DEX as they
@@ -102,6 +122,12 @@ modules and where the port deliberately differs.
   `regex` Unicode semantics, so `.` does not cross MUTF-8-encoded NUL bytes or
   surrogates the way Python's byte-`re` does; an empty `string` pattern matches nothing
   (Python: every string).
+* `findrefs extends` compares each `class_def_item`'s superclass field directly; Python
+  scans the packed table with a non-overlapping regex, which could in principle hide an
+  aligned match behind an unaligned one (no row differs on the reference fixtures).
+  `findrefs string --literal` and the `classes` / `manifest` aliases are extensions with
+  no Python counterpart; `classes` keeps the `listclass` output (not rasc's
+  `dex | descriptor | java name | package= | class=` rows) and has no `-f/--filter`.
 * `getmanifest` names attributes from the resource id whenever it is a known framework
   attribute (androguard only when the pool name is empty), so obfuscated manifests show
   `android:name` instead of `android:a`; unknown ids print as `attr_0x........`.

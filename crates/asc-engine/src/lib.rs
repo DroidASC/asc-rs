@@ -33,7 +33,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Instant, SystemTime};
 
 pub use asc_cache;
-pub use asc_findrefs::{ClassQuery, MemberQuery};
+pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 
@@ -89,6 +89,10 @@ pub struct ClassSource {
 }
 
 /// One aggregated reference result: a method and what it references.
+///
+/// For a class relation query (`Extends` / `Implements`) the row is a class
+/// instead: `method_idx` is its type index, `method` its descriptor, `matched`
+/// the target descriptor and `relation` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefResult {
     pub dex_name: String,
@@ -97,12 +101,18 @@ pub struct RefResult {
     pub method: String,
     /// Display names of the matched constants (strings, descriptors, members).
     pub matched: Vec<String>,
+    /// Set for the rows of a class relation query.
+    pub relation: Option<ClassRelation>,
 }
 
 impl RefResult {
-    /// The Python CLI line format: `dex | Lcls;->m | matched=(a; b)`.
+    /// The Python CLI line format: `dex | Lcls;->m | matched=(a; b)`, or
+    /// `dex | Lsub; extends Lbase;` for a class relation.
     pub fn line(&self) -> String {
-        format!("{} | {} | matched=({})", self.dex_name, self.method, self.matched.join("; "))
+        match self.relation {
+            Some(rel) => format!("{} | {} {} {}", self.dex_name, self.method, rel.verb(), self.matched.join("; ")),
+            None => format!("{} | {} | matched=({})", self.dex_name, self.method, self.matched.join("; ")),
+        }
     }
 }
 
@@ -917,10 +927,21 @@ impl Engine {
     }
 
     pub fn get_class_with(&self, descriptor: &str, opts: SmaliOptions) -> Result<ClassSource> {
+        self.get_class_method(descriptor, opts, None)
+    }
+
+    /// [`Engine::get_class_with`] that renders only the method whose
+    /// `name(params)ret` is `method` (no fields) when one is given. A malformed
+    /// signature is rejected before the APK is read; a class without such a
+    /// method is an error. The rebuilt DEX still holds the whole class.
+    pub fn get_class_method(&self, descriptor: &str, opts: SmaliOptions, method: Option<&str>) -> Result<ClassSource> {
+        if let Some(m) = method {
+            asc_smali::normalize_method_signature(m)?;
+        }
         let t0 = Instant::now();
         let hit = self.get_class_dex(descriptor)?.ok_or_else(|| EngineError::ClassNotFound(descriptor.to_string()))?;
         let scan_us = t0.elapsed().as_micros();
-        let (rebuilt, source, warning) = match decompile_dex_class(&hit.dex, descriptor, opts) {
+        let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, descriptor, opts, method) {
             Ok((r, s)) => (Some(r), s, None),
             // The class is there but cannot be rebuilt faithfully (undefined
             // opcode, invoke-custom, too many members for 16-bit indexes...):
@@ -928,7 +949,7 @@ impl Engine {
             // there is no DEX to dump.
             Err(EngineError::Rebuild(e)) if e.is_input_limitation() => {
                 let dex = Dex::with_name(&hit.dex, &hit.dex_name)?;
-                let source = asc_smali::disassemble_class(&dex, descriptor, opts)?;
+                let source = asc_smali::disassemble_class_method(&dex, descriptor, opts, method)?;
                 let warning = format!("class not rebuilt ({e}); disassembled from the original DEX instead");
                 self.log(format!("[DEBUG] {warning}"));
                 (None, source, Some(warning))
@@ -1182,12 +1203,9 @@ fn search_entry(
     match &loaded {
         Loaded::Cached(e) => {
             for l in e.logical() {
-                let r = Dex::with_name(&l.data, &l.name).map_err(EngineError::from).and_then(|dex| {
-                    FindRefs::with_state(&dex, &l.state)
-                        .find_ref_compiled(query)
-                        .map_err(EngineError::from)
-                        .and_then(|hits| results_from_hits(&dex, query.kind(), &hits, aggregate))
-                });
+                let r = Dex::with_name(&l.data, &l.name)
+                    .map_err(EngineError::from)
+                    .and_then(|dex| rows_compiled(&FindRefs::with_state(&dex, &l.state), query, aggregate));
                 match r {
                     Ok(mut rows) => batch.results.append(&mut rows),
                     Err(e) => batch.note_error(&l.name, e),
@@ -1235,9 +1253,34 @@ pub fn find_refs_in_dex(dex_name: &str, buf: &[u8], query: &Query, aggregate: bo
 
 fn find_refs_in_dex_compiled(dex_name: &str, buf: &[u8], query: &CompiledQuery, aggregate: bool) -> Result<Vec<RefResult>> {
     let dex = Dex::with_name(buf, dex_name)?;
-    let fr = FindRefs::new(&dex);
-    let hits = fr.find_ref_compiled(query)?;
-    results_from_hits(&dex, query.kind(), &hits, aggregate)
+    rows_compiled(&FindRefs::new(&dex), query, aggregate)
+}
+
+/// Result rows of `query` over the DEX `fr` searches: class relation rows
+/// straight from the class definitions, otherwise the code scan's hits.
+fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, aggregate: bool) -> Result<Vec<RefResult>> {
+    let dex = fr.dex();
+    let Some(classes) = fr.class_relation(query)? else {
+        let hits = fr.find_ref_compiled(query)?;
+        return results_from_hits(dex, query.kind(), &hits, aggregate);
+    };
+    let target = match query.query() {
+        Query::Extends(t) | Query::Implements(t) => t.as_str(),
+        _ => "",
+    };
+    let dex_name = dex.name().to_string();
+    classes
+        .into_iter()
+        .map(|c| {
+            Ok(RefResult {
+                dex_name: dex_name.clone(),
+                method_idx: c,
+                method: dex.type_descriptor(c)?,
+                matched: vec![target.to_string()],
+                relation: query.relation(),
+            })
+        })
+        .collect()
 }
 
 /// Turn raw hits into display results (grouped per method when `aggregate`).
@@ -1254,6 +1297,7 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
                     method_idx: m,
                     method: dex.method_display(m)?,
                     matched: vec![matched.clone()],
+                    relation: None,
                 });
             }
         }
@@ -1269,7 +1313,7 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
     let mut out = Vec::with_capacity(grouped.len());
     for (m, idxs) in grouped {
         let matched = idxs.into_iter().map(|i| matched_name(dex, kind, i)).collect::<Result<Vec<_>>>()?;
-        out.push(RefResult { dex_name: dex_name.clone(), method_idx: m, method: dex.method_display(m)?, matched });
+        out.push(RefResult { dex_name: dex_name.clone(), method_idx: m, method: dex.method_display(m)?, matched, relation: None });
     }
     Ok(out)
 }
@@ -1281,10 +1325,15 @@ pub fn find_refs_lines(dex_name: &str, buf: &[u8], query: &Query, aggregate: boo
 
 /// Rebuild `descriptor` out of `buf` and disassemble it.
 pub fn decompile_dex_class(buf: &[u8], descriptor: &str, opts: SmaliOptions) -> Result<(Rebuilt, String)> {
+    decompile_dex_class_method(buf, descriptor, opts, None)
+}
+
+/// [`decompile_dex_class`] rendering only `method` (`name(params)ret`) when given.
+pub fn decompile_dex_class_method(buf: &[u8], descriptor: &str, opts: SmaliOptions, method: Option<&str>) -> Result<(Rebuilt, String)> {
     let dex = Dex::parse(buf)?;
     let rebuilt = asc_rebuild::rebuild_class(&dex, descriptor)?;
     let new_dex = Dex::parse(&rebuilt.bytes)?;
-    let source = asc_smali::disassemble_class(&new_dex, descriptor, opts)?;
+    let source = asc_smali::disassemble_class_method(&new_dex, descriptor, opts, method)?;
     Ok((rebuilt, source))
 }
 

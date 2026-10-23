@@ -85,6 +85,40 @@ impl StringLocator {
         out
     }
 
+    /// All string indexes whose data contains the literal bytes `finder`
+    /// searches for (a plain substring, attributed to the string where the
+    /// occurrence starts exactly like a regex match).
+    pub fn locate_literal(&self, buf: &[u8], finder: &memchr::memmem::Finder<'_>) -> BTreeSet<u32> {
+        let mut out = BTreeSet::new();
+        if self.offsets.is_empty() || finder.needle().is_empty() {
+            return out;
+        }
+        let region = self.region(buf);
+        let needle = finder.needle();
+        // Without a NUL in the needle an occurrence never crosses a string's
+        // terminator, so after a hit the rest of that string can be skipped.
+        let skip_rest = !needle.contains(&0);
+        let mut at = 0;
+        while at < region.len() {
+            let Some(pos) = finder.find(&region[at..]) else { break };
+            let start = at + pos;
+            let abs = self.strdata_start + start;
+            // Non-overlapping, like `find_iter`.
+            at = start + needle.len();
+            let i = self.offsets.partition_point(|&(off, _)| (off as usize) <= abs);
+            if i == 0 {
+                continue;
+            }
+            out.insert(self.offsets[i - 1].1);
+            if skip_rest {
+                if let Some(&(next, _)) = self.offsets.get(i) {
+                    at = at.max((next as usize).saturating_sub(self.strdata_start));
+                }
+            }
+        }
+        out
+    }
+
     /// All string indexes whose data matches `pattern` (a regex compiled on
     /// the spot; an empty pattern matches nothing).
     pub fn locate_pattern(&self, buf: &[u8], pattern: &str) -> Result<BTreeSet<u32>> {
