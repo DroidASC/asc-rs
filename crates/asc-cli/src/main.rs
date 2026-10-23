@@ -168,8 +168,9 @@ enum Command {
         /// Write the rebuilt single-class DEX to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
-        /// Render one exact method signature, e.g. run(I)V (no fields).
-        #[arg(long = "method", value_name = "SIGNATURE")]
+        /// Render only these methods (no fields): a name (every overload) or a
+        /// signature, e.g. run or run(I)V.
+        #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method_signature: Option<String>,
         /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
         #[arg(long)]
@@ -187,8 +188,9 @@ enum Command {
         /// Include DEX .line and .param debug directives.
         #[arg(long)]
         debuginfo: bool,
-        /// Render one exact method signature, e.g. run(I)V (no fields).
-        #[arg(long = "method", value_name = "SIGNATURE")]
+        /// Render only these methods (no fields): a name (every overload) or a
+        /// signature, e.g. run or run(I)V.
+        #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method_signature: Option<String>,
         /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
         #[arg(long)]
@@ -229,6 +231,7 @@ enum Command {
     /// package, application flags, permissions, components (exported or not,
     /// and why), intent filters, deep links, FileProvider paths, network
     /// security config. References are resolved through resources.arsc.
+    #[command(alias = "manifest_summary")]
     ManifestSummary {
         /// Print JSON instead of lines.
         #[arg(long)]
@@ -286,11 +289,12 @@ enum Command {
         /// Path to the input APK file.
         apk_path: PathBuf,
         /// After each result, show the referencing instructions (marked `>`)
-        /// with N smali lines around them, and their pc / source line.
-        #[arg(long, global = true, value_name = "N", conflicts_with = "context_method")]
-        context: Option<usize>,
-        /// After each result, show the whole referencing method.
-        #[arg(long, global = true)]
+        /// with N smali lines around them, and their pc / source line; or
+        /// `method` for the whole referencing method.
+        #[arg(long, global = true, value_name = "N|method", value_parser = parse_context, conflicts_with = "context_method")]
+        context: Option<RefContext>,
+        /// Same as `--context method`.
+        #[arg(long, global = true, hide = true)]
         context_method: bool,
         #[command(subcommand)]
         find: Find,
@@ -391,6 +395,14 @@ enum Command {
     },
 }
 
+/// `--context`: a number of lines, or `method`.
+fn parse_context(s: &str) -> Result<RefContext, String> {
+    match s.trim() {
+        "method" => Ok(RefContext::Method),
+        n => n.parse().map(RefContext::Lines).map_err(|_| format!("{s:?} is neither a number of lines nor `method`")),
+    }
+}
+
 /// `mcp --structured`.
 #[derive(Clone, Copy, ValueEnum)]
 enum StructuredArg {
@@ -445,7 +457,8 @@ enum Find {
     Method {
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Fuzzy method name.
+        /// Fuzzy method name, or the whole target: Lcom/a/B;->name,
+        /// com.a.B.name, com.a.B#name, B.name (any package).
         name: Option<String>,
         /// Dalvik class or fuzzy class pattern.
         #[arg(long = "class")]
@@ -461,9 +474,11 @@ enum Find {
     /// e.g. `all string:http:// method:android.webkit.WebView->loadUrl`.
     ///
     /// Conditions are KIND:VALUE: string:REGEX, literal:TEXT, type:PATTERN,
-    /// method:[CLASS->]NAME, field:[CLASS->]NAME (CLASS exact, or `~CLASS`
-    /// fuzzy; NAME a regex / substring, or `=NAME` exact). The last column
-    /// lists what each condition matched, in order.
+    /// method:TARGET, field:TARGET. TARGET is [CLASS->]NAME, also written
+    /// com.a.B.name or com.a.B#name (CLASS exact, `~CLASS` fuzzy, without
+    /// package any package; NAME a regex / substring, `=NAME` or a name
+    /// with its signature exact). The last column lists what each condition
+    /// matched, in order.
     All {
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -492,7 +507,8 @@ enum Find {
     Field {
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Fuzzy field name.
+        /// Fuzzy field name, or the whole target: Lcom/a/B;->name,
+        /// com.a.B.name, com.a.B#name, B.name (any package).
         name: Option<String>,
         /// Dalvik class or fuzzy class pattern.
         #[arg(long = "class")]
@@ -523,18 +539,7 @@ fn findrefs_rules(
     if specs.is_empty() {
         return Err("findrefs rules needs at least one rule".into());
     }
-    let rules = specs
-        .iter()
-        .map(|spec| {
-            let parts: Vec<&str> = spec.split('&').map(str::trim).collect();
-            if parts.len() == 1 {
-                return names::parse_condition(parts[0]);
-            }
-            let all = parts.iter().map(|p| names::parse_condition(p)).collect::<Result<Vec<_>, _>>()?;
-            Ok(Query::All { all, none: Vec::new() })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+    let rules = specs.iter().map(|spec| names::parse_rule(spec)).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
     let engine = common.engine(apk_path);
     let stdout = std::io::stdout();
     let mut sink = LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())?;
@@ -689,11 +694,40 @@ struct ClassArgs {
     dalvik_class: String,
 }
 
+/// The class, or only the methods `method` names: an exact signature is
+/// rendered on its own; a name, a signature prefix or a Java-style signature
+/// is picked from the whole class (as MCP `getclass` does).
+fn class_methods(
+    engine: &Engine,
+    descriptor: &str,
+    opts: asc_engine::SmaliOptions,
+    method: Option<&str>,
+) -> Result<asc_engine::ClassSource, String> {
+    // `name(params)ret`: what the engine renders on its own.
+    let full_signature = |m: &&str| m.split_once(')').is_some_and(|(head, ret)| head.contains('(') && !ret.trim().is_empty());
+    if let Some(m) = method.filter(full_signature) {
+        if let Ok(src) = engine.get_class_method(descriptor, opts, Some(m)) {
+            return Ok(src);
+        }
+    }
+    let mut src = engine.get_class_method(descriptor, opts, None).map_err(|e| e.to_string())?;
+    if let Some(m) = method {
+        let parsed = asc_mcp::class_text::ClassText::parse(&src.source);
+        let picked = parsed.select(m);
+        if picked.is_empty() {
+            return Err(format!("{descriptor} has no method {m:?}; its methods: {}", parsed.signatures(4 << 10)));
+        }
+        let text = parsed.with_methods(&picked);
+        src.source = text;
+    }
+    Ok(src)
+}
+
 fn getclass(common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), String> {
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = common.engine(&args.apk_path);
     let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
-    let mut src = engine.get_class_method(&descriptor, opts, args.method_signature.as_deref()).map_err(|e| e.to_string())?;
+    let mut src = class_methods(&engine, &descriptor, opts, args.method_signature.as_deref())?;
     if args.res_names {
         src.source = engine.annotate_resource_ids(&src.source);
     }
@@ -806,8 +840,8 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
         }
         Command::Findrefs { apk_path, context, context_method, find } => {
             let context = match (context, context_method) {
-                (_, true) => RefContext::Method,
-                (Some(n), false) => RefContext::Lines(n),
+                (Some(c), _) => c,
+                (None, true) => RefContext::Method,
                 (None, false) => RefContext::None,
             };
             if let Find::Rules { output, file, rules } = find {
@@ -846,7 +880,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             let mut sink = LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())?;
             let mut errors = Vec::new();
             let opts = FindOptions { aggregate: true, context };
-            engine
+            let summary = engine
                 .find_refs_opts(&query, opts, &std::sync::atomic::AtomicBool::new(false), &mut |batch| {
                     if let Some(e) = batch.error {
                         errors.push(format!("{}: {e}", batch.entry_name));
@@ -860,6 +894,11 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             let io_result = sink.finish();
             for e in &errors {
                 eprintln!("Warning: {e}");
+            }
+            if summary.total_results == 0 && errors.is_empty() {
+                for h in engine.no_results_hints(&query, summary.entries) {
+                    eprintln!("hint: {h}");
+                }
             }
             if common.debug {
                 let st = engine.cache_stats();

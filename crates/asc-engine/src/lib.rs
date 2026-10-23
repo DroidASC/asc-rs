@@ -22,6 +22,7 @@
 mod callgraph;
 mod classes;
 mod hierarchy;
+pub mod hints;
 mod manifest;
 pub mod names;
 mod prebuild;
@@ -77,8 +78,9 @@ pub enum EngineError {
     Axml(#[from] asc_axml::AxmlError),
     #[error(transparent)]
     Arsc(#[from] asc_arsc::ArscError),
-    #[error("class {0} not found in APK")]
-    ClassNotFound(String),
+    /// `hint` (empty, or starting with `:` / `;`) says why and what to try.
+    #[error("class {class} not found in APK{hint}")]
+    ClassNotFound { class: String, hint: String },
     #[error("{0}")]
     Query(String),
     #[error("{dex}: {reason}")]
@@ -1291,7 +1293,9 @@ impl Engine {
             asc_smali::normalize_method_signature(m)?;
         }
         let t0 = Instant::now();
-        let hit = self.get_class_dex(descriptor)?.ok_or_else(|| EngineError::ClassNotFound(descriptor.to_string()))?;
+        let hit = self
+            .get_class_dex(descriptor)?
+            .ok_or_else(|| EngineError::ClassNotFound { class: descriptor.to_string(), hint: self.class_not_found_hint(descriptor) })?;
         let scan_us = t0.elapsed().as_micros();
         let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, descriptor, opts, method) {
             Ok((r, s)) => (Some(r), s, None),

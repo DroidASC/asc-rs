@@ -120,7 +120,13 @@ impl Engine {
     /// Decode a binary XML file of the APK (`res/xml/...`, a layout, the
     /// manifest), naming references and app attributes from the resource table.
     pub fn xml(&self, path: &str) -> Result<String> {
-        let data = self.open()?.read(path)?;
+        let data = match self.open()?.read(path) {
+            Ok(d) => d,
+            Err(asc_apk::ApkError::NotFound(_)) => {
+                return Err(EngineError::Query(format!("entry {path} not found{}", self.entry_not_found_hint(path))))
+            }
+            Err(e) => return Err(e.into()),
+        };
         let table = self.resources()?;
         Ok(asc_axml::decode_with(&data, table.as_deref().map(|t| t as &dyn asc_axml::Resolver))?)
     }
@@ -147,7 +153,9 @@ impl Engine {
     /// (`0x7f0d0001`) or a name (`string/app_name`, `@pkg:type/name`).
     pub fn resource(&self, query: &str) -> Result<Vec<ResourceRow>> {
         let table = self.resources()?.ok_or_else(|| EngineError::Query("APK has no resources.arsc".into()))?;
-        let id = parse_id(query).or_else(|| table.lookup(query)).ok_or_else(|| EngineError::Query(format!("no resource {query}")))?;
+        let id = parse_id(query)
+            .or_else(|| table.lookup(query))
+            .ok_or_else(|| EngineError::Query(format!("no resource {query}{}", self.resource_not_found_hint(&table, query))))?;
         let name = table.ref_name(id);
         let rows: Vec<ResourceRow> = table
             .values(id)
@@ -165,7 +173,9 @@ impl Engine {
     /// chain (`@string/a -> @string/b`) and the final value.
     pub fn resolve_resource(&self, query: &str, config: Option<&Config>) -> Result<(Vec<String>, ResourceRow)> {
         let table = self.resources()?.ok_or_else(|| EngineError::Query("APK has no resources.arsc".into()))?;
-        let id = parse_id(query).or_else(|| table.lookup(query)).ok_or_else(|| EngineError::Query(format!("no resource {query}")))?;
+        let id = parse_id(query)
+            .or_else(|| table.lookup(query))
+            .ok_or_else(|| EngineError::Query(format!("no resource {query}{}", self.resource_not_found_hint(&table, query))))?;
         let r = table.resolve(id, config.unwrap_or(&Config::any_device())).map_err(|e| EngineError::Query(e.to_string()))?;
         let last = *r.chain.last().expect("chain starts with id");
         let chain = r.chain.iter().map(|&id| format!("@{}", table.ref_name(id))).collect();

@@ -26,7 +26,8 @@
 //! (`apks` or `dir`, see [`multi`]): the reply has one section per APK, cut
 //! to a byte budget, with a `cursor` to page through the rest.
 
-mod class_text;
+pub mod class_text;
+mod lenient;
 pub mod multi;
 pub mod output;
 mod res;
@@ -376,6 +377,8 @@ impl Server {
                 let Some(tool) = TOOLS.iter().find(|t| t.name == name) else {
                     return Err((-32602, format!("unknown tool: {name}")));
                 };
+                let normalized = lenient::normalize(name, args);
+                let args = normalized.as_ref().unwrap_or(args);
                 // A `more` / `next` hint passed back as the cursor is a call.
                 let followed = follow_up(args);
                 let args = followed.as_ref().unwrap_or(args);
@@ -731,6 +734,7 @@ impl Server {
         let mut batches = Vec::new();
         apk.engine.find_refs_with(&query, true, &call.cancel, &mut |b| batches.push(b))?;
         call.check()?;
+        let entries = batches.len();
         let mut found = Found::new(batches, sdks.as_deref());
         let total = found.rows.len();
         let mut page: Vec<RefResult> = found.rows.iter().skip(offset).take(limit).cloned().collect();
@@ -749,9 +753,14 @@ impl Server {
         for e in &found.errors {
             text.push_str(&format!("# Warning: {e}\n"));
         }
+        let hints = if total == 0 && found.sdk_hits == 0 { apk.engine.no_results_hints(&query, entries) } else { Vec::new() };
+        for h in &hints {
+            text.push_str(&format!("# hint: {h}\n"));
+        }
         let structured = json!({
             "apk_id": apk.id,
             "total": total,
+            "hints": hints,
             "offset": offset,
             "returned": page.len(),
             "next_offset": next,
@@ -1180,29 +1189,49 @@ fn result_json(r: &RefResult) -> Value {
 }
 
 /// The findrefs query `args` describe.
+///
+/// Lenient where intent is clear: the kind is read by [`names::parse_kind`]
+/// (`methods`, `Strings`, `literal`), a member target may come whole in
+/// `value` or `name` (`Landroid/webkit/WebView;->loadUrl`, `WebView.loadUrl`),
+/// a type / class relation may name its class in `class`, and a single
+/// query given beside `all` joins its conditions.
 fn parse_query(args: &Value) -> Result<Query, ToolError> {
     if let Some(q) = rules::compound(args)? {
         return Ok(q);
     }
-    let kind =
-        str_arg(args, "kind")?.ok_or_else(|| ToolError("findrefs needs `kind` (string, type, method, field, extends or impl)".into()))?;
+    let kind = str_arg(args, "kind")?
+        .ok_or_else(|| ToolError("findrefs needs `kind` (string, type, method, field, extends or impl), or `all` / `rules`".into()))?;
+    let kind = names::parse_kind(kind)?;
     Ok(match kind {
-        "string" | "type" | "extends" | "impl" => {
-            let value = str_arg(args, "value")?.ok_or_else(|| ToolError(format!("a {kind} query needs `value`")))?;
+        "string" | "literal" | "type" | "extends" | "impl" => {
+            let value = match str_arg(args, "value")? {
+                Some(v) => v,
+                // `{kind: "type", class: "Lc;"}`
+                None if kind != "string" && kind != "literal" => {
+                    str_arg(args, "class")?.ok_or_else(|| ToolError(format!("a {kind} query needs `value` (the class)")))?
+                }
+                None => return Err(ToolError(format!("a {kind} query needs `value`"))),
+            };
             match kind {
+                "literal" => Query::StringLiteral(value.to_string()),
                 "string" if bool_arg(args, "literal")?.unwrap_or(false) => Query::StringLiteral(value.to_string()),
                 "string" => Query::String(value.to_string()),
                 "type" => Query::Type(value.to_string()),
-                "extends" => Query::Extends(names::format_class_name(value)?),
-                _ => Query::Implements(names::format_class_name(value)?),
+                "extends" => Query::Extends(names::format_class_name(value.trim())?),
+                _ => Query::Implements(names::format_class_name(value.trim())?),
             }
         }
-        "method" | "field" => {
+        _ => {
+            // The target may come whole in `value` (as for the other kinds).
+            let name = match str_arg(args, "name")? {
+                Some(n) => Some(n),
+                None => str_arg(args, "value")?,
+            };
             let m = names::member_query(
                 kind,
                 str_arg(args, "class")?,
                 bool_arg(args, "fuzzy_class")?.unwrap_or(false),
-                str_arg(args, "name")?,
+                name,
                 bool_arg(args, "exact")?.unwrap_or(false),
             )?;
             if kind == "method" {
@@ -1211,7 +1240,6 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
                 Query::Field(m)
             }
         }
-        _ => return Err(ToolError(format!("unknown kind {kind:?}: use string, type, method, field, extends or impl"))),
     })
 }
 
@@ -1296,12 +1324,18 @@ fn as_usize(v: &Value) -> Option<usize> {
     }
 }
 
+/// Smali lines around each hit for `context: true`.
+const CONTEXT_LINES: usize = 3;
+
 /// `context`: a number of smali lines around each referencing instruction,
-/// or `"method"` for the whole method.
+/// or `"method"` for the whole method (`true`: [`CONTEXT_LINES`]).
 fn context_arg(args: &Value) -> Result<RefContext, ToolError> {
     match args.get("context") {
         None | Some(Value::Null) => Ok(RefContext::None),
         Some(Value::String(s)) if s == "method" => Ok(RefContext::Method),
+        // `context: true` asks for some code around each hit.
+        Some(Value::Bool(true)) => Ok(RefContext::Lines(CONTEXT_LINES)),
+        Some(Value::Bool(false)) => Ok(RefContext::None),
         Some(v) => {
             as_usize(v).map(RefContext::Lines).ok_or_else(|| ToolError("`context` must be a non-negative integer or \"method\"".into()))
         }
@@ -1451,13 +1485,13 @@ pub mod defs {
                 a section per APK, SDK hits folded.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "kind": {"type": "string", "enum": ["string", "type", "method", "field", "extends", "impl"]},
-                "value": {"type": "string", "description": "string: regex (literal=true: text); type, extends, impl: a type."},
+                "value": {"type": "string", "description": "string: regex (literal=true: text); type, extends, impl: a type; method / field: a whole target also works, e.g. Landroid/webkit/WebView;->loadUrl or android.webkit.WebView.loadUrl."},
                 "literal": {"type": "boolean"},
                 "name": {"type": "string", "description": "method / field name, regex (exact=true: equal)."},
                 "class": {"type": "string", "description": "method / field: declaring class."},
                 "fuzzy_class": {"type": "boolean"},
                 "exact": {"type": "boolean"},
-                "context": {"type": ["integer", "string"], "description": "Lines of smali around each hit, or \"method\"."},
+                "context": {"type": ["integer", "string", "boolean"], "description": "Lines of smali around each hit, or \"method\"."},
                 "collapse_sdks": {"type": "boolean", "description": "Fold androidx, kotlin, gms... hits into counts."},
                 "sdk_prefixes": {"type": "array", "items": {"type": "string"}},
                 "group": {"type": "string", "enum": ["none", "package"]},

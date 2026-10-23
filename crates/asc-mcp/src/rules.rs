@@ -21,27 +21,64 @@ const RULE_LIMIT: usize = 100;
 const HIERARCHY_DEPTH: usize = 16;
 const HIERARCHY_MAX_NODES: usize = 500;
 
-/// The condition objects under `key` (`all` / `none`), parsed.
-fn conditions(args: &Value, key: &str) -> Result<Vec<Query>, ToolError> {
-    match args.get(key) {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(list)) => list
-            .iter()
-            .map(|c| if c.is_object() { parse_query(c) } else { Err(ToolError(format!("`{key}` must be a list of condition objects"))) })
-            .collect(),
-        Some(_) => Err(ToolError(format!("`{key}` must be a list of condition objects"))),
+/// One condition: an object as for one query, or a `KIND:VALUE` string as
+/// the CLI takes them (`"method:android.webkit.WebView->loadUrl"`).
+fn condition(c: &Value, key: &str) -> Result<Query, ToolError> {
+    match c {
+        Value::Object(_) => parse_query(c),
+        Value::String(s) => parse_query(&condition_object(s)?),
+        _ => Err(ToolError(format!("`{key}` must be a list of condition objects (or KIND:VALUE strings)"))),
     }
 }
 
-/// `all` / `none` as a compound query, if either is given.
+/// `"method:Lc;->m"` → `{"kind": "method", "value": "Lc;->m"}`, the object
+/// [`parse_query`] reads the same way.
+fn condition_object(spec: &str) -> Result<Value, ToolError> {
+    let (kind, value) = spec.split_once(':').ok_or_else(|| {
+        ToolError(format!("bad condition {spec:?}: use KIND:VALUE, KIND one of string, literal, type, method, field, extends, impl"))
+    })?;
+    Ok(json!({"kind": names::parse_kind(kind)?, "value": value}))
+}
+
+/// A rule given as a string, as an object: one condition, or `a & b` as `all`.
+fn rule_object(spec: &str) -> Result<Value, ToolError> {
+    let parts: Vec<&str> = spec.split('&').map(str::trim).collect();
+    if let [one] = parts.as_slice() {
+        return condition_object(one);
+    }
+    Ok(json!({"all": parts.iter().map(|p| condition_object(p)).collect::<Result<Vec<_>, _>>()?}))
+}
+
+/// The conditions under `key` (`all` / `none`), parsed.
+fn conditions(args: &Value, key: &str) -> Result<Vec<Query>, ToolError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(list)) => list.iter().map(|c| condition(c, key)).collect(),
+        Some(_) => Err(ToolError(format!("`{key}` must be a list of condition objects (or KIND:VALUE strings)"))),
+    }
+}
+
+/// `all` / `none` as a compound query, if either is given. A complete
+/// single query beside them (`kind` …) is one more `all` condition.
 pub(crate) fn compound(args: &Value) -> Result<Option<Query>, ToolError> {
     if args.get("all").is_none() && args.get("none").is_none() {
         return Ok(None);
     }
+    let mut all = conditions(args, "all")?;
     if args.get("kind").is_some() {
-        return Err(ToolError("give either `kind` or `all` / `none`, not both".into()));
+        let mut single = args.as_object().cloned().unwrap_or_default();
+        single.remove("all");
+        single.remove("none");
+        match parse_query(&Value::Object(single)) {
+            Ok(q) => all.insert(0, q),
+            Err(e) => {
+                return Err(ToolError(format!(
+                    "`kind` beside `all` / `none` must be a complete query to join them ({}), or be left out",
+                    e.0
+                )))
+            }
+        }
     }
-    let all = conditions(args, "all")?;
     if all.is_empty() {
         return Err(ToolError("`all` needs at least one condition (`none` only removes methods)".into()));
     }
@@ -74,18 +111,25 @@ fn parse_rules(args: &Value) -> Result<(Vec<Value>, Vec<Query>), ToolError> {
     if args.get("kind").is_some() || args.get("all").is_some() {
         return Err(ToolError("give either `rules` or one query (`kind` / `all`), not both".into()));
     }
+    // String rules become objects, so follow-up hints carry them like any other.
+    let list: Vec<Value> = list
+        .iter()
+        .enumerate()
+        .map(|(i, r)| match r {
+            Value::String(s) => rule_object(s).map_err(|e| ToolError(format!("rule r{}: {}", i + 1, e.0))),
+            Value::Object(_) => Ok(r.clone()),
+            _ => Err(ToolError(format!("rule {} is not an object (or a KIND:VALUE string)", i + 1))),
+        })
+        .collect::<Result<_, _>>()?;
     let mut queries = Vec::with_capacity(list.len());
     for (i, r) in list.iter().enumerate() {
-        if !r.is_object() {
-            return Err(ToolError(format!("rule {} is not an object", i + 1)));
-        }
         let q = match compound(r)? {
             Some(q) => q,
             None => parse_query(r).map_err(|e| ToolError(format!("rule r{}: {}", i + 1, e.0)))?,
         };
         queries.push(q);
     }
-    Ok((list.clone(), queries))
+    Ok((list, queries))
 }
 
 /// The arguments of a single-APK findrefs that continues `rule` at `offset`.
