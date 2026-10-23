@@ -240,16 +240,27 @@ lazily by the queries themselves):
   hash of the central directory), atomic `rename` writes, lazily faulted mmap reads (a
   `populate`d mapping of every entry of an APK cost more than a getclass reading one of
   them):
-  - L1 `<dir>/<apk-key>/<entry>`: inflated bytes. The engine only writes entries of at
+  - L1 `<dir>/<apk-key>/<entry>`: inflated bytes, then an 8-byte trailer (`ASC1`, CRC-32
+    of the bytes) that the mapping leaves out. The engine only writes entries of at
     least `min_dex_bytes` (4 MiB): below that, re-inflating is cheaper than the write.
   - L2 `<dir>/derived/<apk-key>/<name>~<kind>.v<format>.<version>`: a 64-byte header
-    (magic, versions, rebuild cost, payload length) and a payload the mapping exposes
+    (magic, versions, rebuild cost, payload length, payload CRC-32) and a payload the mapping exposes
     64-byte aligned (`Derived`). `put_derived` / `get_derived` take an opaque payload;
     the engine stores `SearchState::persist` there (kind `locators`), only for tables
     that took `min_derived_cost` (2 ms) or more to build.
-  - L3 `<dir>/rendered/<apk-key>/<fnv of the key>`: the full key (`rendered_key(producer,
-    version, query)`) followed by the payload; a read compares the key, so a hash
-    collision is a miss.
+  - L3 `<dir>/rendered/<apk-key>/<fnv of the key>`: a CRC-32 of the rest, the full key
+    (`rendered_key(producer, version, query)`) and the payload; a read compares the key,
+    so a hash collision is a miss.
+  - Integrity: nothing is synced (Rust's `sync_data` is `F_FULLFSYNC` on macOS, about
+    10 ms per 8 MiB file, which doubled cold-cache runs there; the cache holds nothing
+    that cannot be rebuilt). `rename` keeps a running system from showing half a file;
+    a crash can still leave one whose pages never reached the disk (zeros, a cut tail).
+    So a read checks the CRC of an L1 or L2 file whose mtime predates the boot
+    (`/proc/stat` `btime`, `kern.boottime` on Apple; unknown elsewhere, where every read
+    checks) or lies in the future, then touches it, so it is checked once per boot; a
+    damaged file is deleted and read as a miss. Files written since the boot are
+    trusted: the kernel serves them from the page cache. L3 files are small and checked
+    on every read.
   - `<dir>/sources/<apk-key>`: size, mtime and path of the APK the key came from, written
     with the first write for it (`note_source`).
 
@@ -267,7 +278,7 @@ lazily by the queries themselves):
   reserve free, at the cost of one `statvfs` per entry. `disk_space` returns `None`
   off Unix, where `Auto` means the old 4 GiB. `budget()` reports cap, usage and free
   space for `cache stats`, `tier_stats()` the usage per tier. The engine queues writes
-  to one background thread (writing and syncing a 30 MiB entry costs as much as the whole
+  to one background thread (writing a 30 MiB entry costs as much as the whole
   query it came from) and evicts once per burst rather than after every entry;
   `Engine::flush_cache_writes` / `Drop` wait for the queue. Concurrent queries that need
   the same entry share a single inflate, so a burst of GUI requests cannot replace each

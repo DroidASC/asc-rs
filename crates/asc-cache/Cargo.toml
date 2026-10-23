@@ -9,6 +9,7 @@ description = "Inflated-DEX caches for Droid ASC: an on-disk cache shared across
 
 [dependencies]
 asc-apk.workspace = true
+crc32fast = "1.5"
 memmap2.workspace = true
 thiserror.workspace = true
 

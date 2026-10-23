@@ -279,7 +279,10 @@ the normal cost and fills the cache as a side effect.
 * **On-disk cache** (`~/.cache/droidasc`, or `$DROIDASC_CACHE_DIR` / `$XDG_CACHE_HOME`),
   on by default for the CLI and shared between processes. Entries are keyed by the APK's
   size, mtime and central directory, written atomically and memory-mapped on the next run,
-  in three tiers under one budget (see below):
+  in three tiers under one budget (see below). Writes are not synced (the cache can always
+  be rebuilt); every file carries a CRC-32 that is checked the first time a file written
+  before the last reboot is read, so a file a crash cut short is a miss, never a wrong
+  answer:
 
   | tier | holds | written when | evicted |
   |---|---|---|---|
