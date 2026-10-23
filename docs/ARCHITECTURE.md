@@ -145,6 +145,15 @@ central-directory slot, so the listing is in DEX order like the Python `list_cla
 `list_classes` fails on the first unreadable entry or bad `class_def`; the GUI keeps the
 classes of the other entries and reports the broken ones.
 
+The GUI turns that listing into a `ClassIndex` that stores each descriptor once: sorted and
+deduplicated in one string arena with end offsets, the DEX label as a `u16` into a name
+table, and the package tree as a flat node table whose children and classes are ranges
+into two `u32` arrays (children by name, as the old `BTreeMap` had them; classes in
+descriptor order). `contains` is a binary search; the class filter searches the whole arena
+at once ignoring ASCII case and lower-cases (Unicode rules) only the non-ASCII
+descriptors, so it returns exactly what `to_lowercase().contains(..)` would. On a
+551,080-class APK the index builds in about 70 ms and holds about 22 MB.
+
 A DEX 041 container is split lazily (`asc_dex::container::logical_dex_iter`): every
 logical DEX after the first is a full copy of the container with its header moved to
 offset 0, so the uncached paths hold one such copy at a time. The memory cache keeps all
