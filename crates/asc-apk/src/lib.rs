@@ -160,6 +160,11 @@ impl Apk {
         &self.path
     }
 
+    /// The limits every read enforces ([`Apk::with_limits`]).
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// The raw archive bytes.
     #[inline]
     pub fn data(&self) -> &[u8] {
