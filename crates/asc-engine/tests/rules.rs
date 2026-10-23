@@ -375,6 +375,20 @@ fn definition_predicates_compose_with_code_conditions() {
             lines(&engine, &rule("in:{extends:a.Base} & override:b.Api->run")),
             ["classes.dex | La/Base;->run()V | in, override run", "classes.dex | La/Sub;->run()V | in, override run"]
         );
+        // `!` definition parts drop candidates by their own declaration.
+        assert_eq!(lines(&engine, &rule("string:token & !flag:static")), Vec::<String>::new());
+        assert_eq!(
+            lines(&engine, &rule("override:b.Api->run & !in:{extends:a.Base}")),
+            ["classes2.dex | Lb/Api;->run()V | override run", "classes2.dex | Lb/Impl;->run()V | override run"]
+        );
+        assert_eq!(
+            lines(&engine, &rule("flag:static & !override:b.Api->run & !annotation:x.Absent")),
+            [
+                "classes.dex | La/Caller;->call()V | flag",
+                "classes.dex | La/Caller;->go()V | flag",
+                "classes.dex | La/Caller;->only()V | flag"
+            ]
+        );
     }
 }
 
