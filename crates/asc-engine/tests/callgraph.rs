@@ -112,7 +112,7 @@ fn callers_and_callees_cross_dex_files() {
     let apk = temp_apk();
     for engine in [
         Engine::new(apk.path()).with_threads(2),
-        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: None }),
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, ..Default::default() }),
     ] {
         for _ in 0..2 {
             let t = engine.call_graph(&query(LIB, "helper", Direction::Callers, 3)).unwrap();
@@ -171,7 +171,7 @@ fn call_graph_limits_and_errors() {
 #[test]
 fn findrefs_context_marks_the_referencing_instructions() {
     let apk = temp_apk();
-    let engine = Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: None });
+    let engine = Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
     let run = |q: &Query, context| {
         let mut rows = Vec::new();
         engine

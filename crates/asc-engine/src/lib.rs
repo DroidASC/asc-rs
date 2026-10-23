@@ -12,6 +12,9 @@
 //! Optionally the engine keeps inflated DEX entries in an on-disk cache
 //! (shared across processes) and/or an in-memory LRU together with the locator
 //! tables built for them, so repeated queries skip inflation and table builds.
+//! The disk cache also keeps the locator tables (L2, mapped by later
+//! processes instead of rebuilt) and `find_refs` results (L3); see
+//! [`asc_cache`] for the tiers.
 //! Disk writes happen on a background thread so a query never waits on them;
 //! [`Engine::flush_cache_writes`] waits for them to land and [`Engine::close_cache_writes`]
 //! (run on drop) additionally stops queueing new ones.
@@ -19,9 +22,10 @@
 mod callgraph;
 mod classes;
 pub mod names;
+mod tiers;
 
 use asc_apk::{Apk, Entry, Limits};
-use asc_cache::{ApkKey, DexData, DiskCache, MemoryCache};
+use asc_cache::{ApkKey, DexData, DiskCache, MemoryCache, Tier};
 use asc_dex::container::{dex041_logical_offsets, logical_dex_buffers, logical_dex_iter};
 use asc_dex::Dex;
 pub use asc_findrefs::CompiledQuery;
@@ -40,6 +44,7 @@ pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
+pub use tiers::auto_memory_share;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -208,28 +213,35 @@ pub struct RefSummary {
 }
 
 /// Cache configuration for an [`Engine`].
+#[derive(Default)]
 pub struct CacheConfig {
     /// In-memory LRU capacity for inflated entries (0 disables it).
     pub memory_bytes: usize,
     /// On-disk cache shared across processes.
     pub disk: Option<DiskCache>,
+    /// Treat `memory_bytes` as a starting point and keep resizing the LRU to
+    /// this process's share of one budget for every resident host the user
+    /// runs ([`auto_memory_share`]), instead of a fixed capacity.
+    pub memory_auto: bool,
 }
 
 impl CacheConfig {
     /// Disk cache in the default directory, no in-memory cache (CLI default).
     pub fn disk_default() -> CacheConfig {
-        CacheConfig { memory_bytes: 0, disk: DiskCache::open_default() }
+        CacheConfig { disk: DiskCache::open_default(), ..CacheConfig::default() }
     }
 
-    /// Disk cache plus an in-memory LRU (GUI / server default).
+    /// Disk cache plus an in-memory LRU of a fixed capacity.
     pub fn resident(memory_bytes: usize) -> CacheConfig {
-        CacheConfig { memory_bytes, disk: DiskCache::open_default() }
+        CacheConfig { memory_bytes, disk: DiskCache::open_default(), memory_auto: false }
     }
 
-    /// [`CacheConfig::resident`] sized by [`auto_memory_bytes`], so several
-    /// resident hosts on one machine do not each claim 2 GiB.
+    /// Disk cache plus an in-memory LRU sized automatically (GUI / server
+    /// default): [`auto_memory_bytes`] to start with, then this process's
+    /// share once other resident hosts run, so several of them on one
+    /// machine do not each claim 2 GiB.
     pub fn resident_auto() -> CacheConfig {
-        CacheConfig::resident(auto_memory_bytes())
+        CacheConfig { memory_auto: true, ..CacheConfig::resident(auto_memory_bytes()) }
     }
 }
 
@@ -338,6 +350,7 @@ pub struct LogicalDex {
     pub name: String,
     pub data: DexBytes,
     pub state: Arc<SearchState>,
+    persisted: Arc<tiers::Persisted>,
 }
 
 /// A cached inflated entry.
@@ -362,7 +375,7 @@ impl CachedEntry {
                         Cow::Borrowed(_) => Arc::clone(&self.data),
                         Cow::Owned(v) => Arc::new(DexData::Owned(v)),
                     };
-                    LogicalDex { name, data, state: Arc::new(SearchState::new()) }
+                    LogicalDex { name, data, state: Arc::new(SearchState::new()), persisted: Arc::default() }
                 })
                 .collect()
         })
@@ -376,10 +389,10 @@ impl CachedEntry {
         self.data.len() * dex041_logical_offsets(&self.data).len()
     }
 
-    /// Heap bytes of the locator tables built so far for this entry's
-    /// logical DEX files (0 before the first search).
+    /// Bytes of the locator tables built (on the heap) or mapped (from L2)
+    /// so far for this entry's logical DEX files (0 before the first search).
     pub fn state_bytes(&self) -> usize {
-        self.logical.get().map_or(0, |l| l.iter().map(|d| d.state.heap_bytes()).sum())
+        self.logical.get().map_or(0, |l| l.iter().map(|d| d.state.heap_bytes() + d.state.mapped_bytes()).sum())
     }
 
     /// What the in-memory cache charges for this entry: its bytes plus the
@@ -400,11 +413,32 @@ impl CachedEntry {
                     name: l.name.clone(),
                     data: if Arc::ptr_eq(&l.data, &self.data) { Arc::clone(&data) } else { Arc::clone(&l.data) },
                     state: Arc::clone(&l.state),
+                    persisted: Arc::clone(&l.persisted),
                 })
                 .collect();
             let _ = logical.set(moved);
         }
         CachedEntry { name: self.name.clone(), data, logical }
+    }
+
+    /// The same entry with the locator tables of logical DEX `idx` replaced
+    /// by `state` (the same tables viewed from L2).
+    fn with_state(&self, idx: usize, state: Arc<SearchState>) -> CachedEntry {
+        let logical = OnceLock::new();
+        if let Some(old) = self.logical.get() {
+            let moved = old
+                .iter()
+                .enumerate()
+                .map(|(i, l)| LogicalDex {
+                    name: l.name.clone(),
+                    data: Arc::clone(&l.data),
+                    state: if i == idx { Arc::clone(&state) } else { Arc::clone(&l.state) },
+                    persisted: Arc::clone(&l.persisted),
+                })
+                .collect();
+            let _ = logical.set(moved);
+        }
+        CachedEntry { name: self.name.clone(), data: Arc::clone(&self.data), logical }
     }
 
     /// Whether the entry's bytes are mapped from the disk cache.
@@ -413,15 +447,27 @@ impl CachedEntry {
     }
 }
 
-/// A queued disk write: the bytes are shared with the query that produced
-/// them, so queueing costs nothing.
+/// A queued disk write for the APK of `key` at `apk`.
 struct WriteJob {
     key: ApkKey,
-    name: String,
-    data: DexBytes,
-    /// The in-memory cache entry holding `data`, if any: once the file is in
-    /// place its heap bytes are swapped for a mapping of that file.
-    remap: Option<Weak<CachedEntry>>,
+    apk: Arc<Path>,
+    kind: Job,
+}
+
+enum Job {
+    /// An inflated entry for L1: the bytes are shared with the query that
+    /// produced them, so queueing costs nothing.
+    Dex {
+        name: String,
+        data: DexBytes,
+        /// The in-memory cache entry holding `data`, if any: once the file is
+        /// in place its heap bytes are swapped for a mapping of that file.
+        remap: Option<Weak<CachedEntry>>,
+    },
+    /// Locator tables for L2.
+    Derived(tiers::DerivedJob),
+    /// A query result for L3.
+    Rendered { query: String, payload: Vec<u8> },
 }
 
 struct Writer {
@@ -433,6 +479,8 @@ type SharedMemory = Arc<Mutex<MemoryCache<CachedEntry>>>;
 
 struct EngineCache {
     memory: Option<SharedMemory>,
+    /// Publishes (and, when automatic, adjusts) the memory cache's size.
+    budget: Option<tiers::MemoryBudget>,
     disk: Option<Arc<DiskCache>>,
     writer: Mutex<Option<Writer>>,
     /// Set by `flush`: later writes are dropped rather than handed to a new
@@ -447,9 +495,8 @@ struct EngineCache {
 impl EngineCache {
     /// Queue a disk write; falls back to a synchronous write only when the
     /// writer thread cannot be started.
-    fn put_async(&self, key: &ApkKey, name: &str, data: &DexBytes, remap: Option<Weak<CachedEntry>>) {
+    fn put_async(&self, job: WriteJob) {
         let Some(disk) = &self.disk else { return };
-        let job = WriteJob { key: key.clone(), name: name.to_string(), data: Arc::clone(data), remap };
         let mut writer = self.writer.lock().unwrap();
         if self.closed.load(Ordering::Relaxed) {
             return;
@@ -460,6 +507,7 @@ impl EngineCache {
             let thread_memory = self.memory.clone();
             let spawned = std::thread::Builder::new().name("droidasc-cache-writer".into()).spawn(move || {
                 let mut pending: Option<WriteJob> = None;
+                let mut noted = HashSet::new();
                 loop {
                     let job = match pending.take() {
                         Some(j) => j,
@@ -468,9 +516,7 @@ impl EngineCache {
                             Err(_) => break,
                         },
                     };
-                    if thread_disk.put(&job.key, &job.name, &job.data).is_ok() {
-                        remap_entry(&thread_disk, thread_memory.as_ref(), job);
-                    }
+                    run_job(&thread_disk, thread_memory.as_ref(), job, &mut noted);
                     // Walk the cache directory once per burst, not once per entry.
                     match rx.try_recv() {
                         Ok(next) => pending = Some(next),
@@ -481,9 +527,7 @@ impl EngineCache {
             match spawned {
                 Ok(handle) => *writer = Some(Writer { tx, handle }),
                 Err(_) => {
-                    if disk.put(&job.key, &job.name, &job.data).is_ok() {
-                        remap_entry(disk, self.memory.as_ref(), job);
-                    }
+                    run_job(disk, self.memory.as_ref(), job, &mut HashSet::new());
                     disk.evict();
                     return;
                 }
@@ -514,6 +558,13 @@ impl EngineCache {
         }
     }
 
+    /// Account for bytes just charged to the memory cache.
+    fn charged(&self) {
+        if let (Some(budget), Some(memory)) = (&self.budget, &self.memory) {
+            budget.maybe_rebalance(memory);
+        }
+    }
+
     fn begin_inflate(&self, id: String) -> InflightGuard<'_> {
         let mut set = self.inflight.lock().unwrap();
         while set.contains(&id) {
@@ -524,15 +575,41 @@ impl EngineCache {
     }
 }
 
+/// Run a queued write on the writer thread. The first write for an APK
+/// also records where it lives (`noted` remembers which were).
+fn run_job(disk: &DiskCache, memory: Option<&SharedMemory>, job: WriteJob, noted: &mut HashSet<ApkKey>) {
+    let WriteJob { key, apk, kind } = job;
+    if noted.insert(key.clone()) {
+        let _ = disk.note_source(&key, &apk);
+    }
+    match kind {
+        Job::Dex { name, data, remap } => {
+            if disk.put(&key, &name, &data).is_ok() {
+                remap_entry(disk, memory, key, name, data, remap);
+            }
+        }
+        Job::Derived(d) => tiers::write_derived(disk, memory, &key, d),
+        Job::Rendered { query, payload } => {
+            let _ = disk.put_rendered(&key, &query, &payload);
+        }
+    }
+}
+
 /// Swap a freshly written entry's heap bytes for a mapping of its cache file:
 /// the pages become file-backed (reclaimable by the OS and shared with other
 /// processes) and the heap copy is freed once the queries still holding the
 /// old entry drop it. The mapping is compared byte for byte first, so a file
 /// changed underneath (another writer, a cleared cache) is never served.
-fn remap_entry(disk: &DiskCache, memory: Option<&SharedMemory>, job: WriteJob) {
+fn remap_entry(
+    disk: &DiskCache,
+    memory: Option<&SharedMemory>,
+    key: ApkKey,
+    name: String,
+    data: DexBytes,
+    remap: Option<Weak<CachedEntry>>,
+) {
     // The job's own handle on the bytes goes first, so the heap copy is freed
     // as soon as the superseded entry is.
-    let WriteJob { key, name, data, remap } = job;
     drop(data);
     let (Some(memory), Some(entry)) = (memory, remap.and_then(|w| w.upgrade())) else { return };
     if entry.is_mapped() {
@@ -587,6 +664,8 @@ impl Drop for InflightGuard<'_> {
 pub struct CacheStats {
     pub memory_hits: u64,
     pub disk_hits: u64,
+    /// Logical DEX files whose locator tables were mapped from L2.
+    pub derived_hits: u64,
     pub inflates: u64,
 }
 
@@ -677,6 +756,7 @@ pub struct SearchTarget {
 struct Stats {
     memory_hits: AtomicUsize,
     disk_hits: AtomicUsize,
+    derived_hits: AtomicUsize,
     inflates: AtomicUsize,
 }
 
@@ -736,14 +816,18 @@ impl Engine {
         if config.memory_bytes == 0 && config.disk.is_none() {
             self.cache = None;
         } else {
-            self.cache = Some(Arc::new(EngineCache {
+            let cache = EngineCache {
                 memory: (config.memory_bytes > 0).then(|| Arc::new(Mutex::new(MemoryCache::new(config.memory_bytes)))),
+                budget: (config.memory_bytes > 0).then(|| tiers::MemoryBudget::new(config.memory_auto)),
                 disk: config.disk.map(Arc::new),
                 writer: Mutex::new(None),
                 closed: AtomicBool::new(false),
                 inflight: Mutex::new(HashSet::new()),
                 inflight_done: Condvar::new(),
-            }));
+            };
+            // Registers this process and takes its share right away.
+            cache.charged();
+            self.cache = Some(Arc::new(cache));
         }
         self
     }
@@ -767,6 +851,7 @@ impl Engine {
         CacheStats {
             memory_hits: self.stats.memory_hits.load(Ordering::Relaxed) as u64,
             disk_hits: self.stats.disk_hits.load(Ordering::Relaxed) as u64,
+            derived_hits: self.stats.derived_hits.load(Ordering::Relaxed) as u64,
             inflates: self.stats.inflates.load(Ordering::Relaxed) as u64,
         }
     }
@@ -791,6 +876,15 @@ impl Engine {
     pub fn memory_cache_mapped_bytes(&self) -> usize {
         let Some(m) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
         m.lock().unwrap().values().filter(|e| e.is_mapped()).map(|e| e.data.len()).sum()
+    }
+
+    /// Bytes of the in-memory cache's locator tables that are viewed in L2
+    /// files (file-backed pages shared with other processes) rather than
+    /// held on the heap.
+    pub fn memory_cache_mapped_table_bytes(&self) -> usize {
+        let Some(m) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
+        let m = m.lock().unwrap();
+        m.values().filter_map(|e| e.logical.get()).flatten().map(|l| l.state.mapped_bytes()).sum()
     }
 
     /// Block until every queued disk-cache write has been renamed into place.
@@ -1119,6 +1213,19 @@ impl Engine {
         if entries.is_empty() {
             return Ok(summary);
         }
+        // L3: the rows of an earlier run of this query on this APK.
+        let disk = self.cache.as_ref().and_then(|c| c.disk.as_ref()).filter(|d| d.uses(Tier::Rendered));
+        let rendered = disk.zip(key.as_ref()).map(|(d, k)| (d, k, tiers::findrefs_key(query, opts)));
+        if let Some(batches) = rendered.as_ref().and_then(|(d, k, q)| d.get_rendered(k, q)).and_then(|b| tiers::decode_batches(&b)) {
+            for batch in batches {
+                summary.total_results += batch.results.len();
+                sink(batch);
+            }
+            summary.total_us = t0.elapsed().as_micros();
+            self.log(format!("[APK] for_each_findrefs total={} us count={} source=result", summary.total_us, entries.len()));
+            return Ok(summary);
+        }
+        let mut recorder = rendered.as_ref().map(|_| tiers::ResultRecorder::new());
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<RefBatch>();
         let workers = self.threads.min(entries.len()).max(1);
@@ -1155,9 +1262,19 @@ impl Engine {
                     ));
                 }
                 summary.total_results += batch.results.len();
+                if let Some(r) = recorder.as_mut() {
+                    r.record(&batch);
+                }
                 sink(batch);
             }
         });
+        if let (Some((_, k, q)), Some(payload)) = (rendered, recorder.and_then(tiers::ResultRecorder::finish)) {
+            // A cancelled run may be missing entries.
+            if !cancel.load(Ordering::Relaxed) {
+                let job = WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Rendered { query: q, payload } };
+                self.cache.as_ref().expect("rendered implies a cache").put_async(job);
+            }
+        }
         summary.total_us = t0.elapsed().as_micros();
         self.log(format!("[APK] for_each_findrefs total={} us count={} workers={}", summary.total_us, entries.len(), workers));
         Ok(summary)
@@ -1199,6 +1316,7 @@ impl Engine {
         let next = AtomicUsize::new(0);
         let workers = self.threads.min(entries.len()).max(1);
         let cache = self.cache.as_deref();
+        let l2 = cache.and_then(|c| c.disk.as_deref()).filter(|d| d.uses(Tier::Derived)).zip(key.as_ref());
         let mut slots: Vec<Option<std::result::Result<Vec<DexView>, String>>> = (0..entries.len()).map(|_| None).collect();
         let done = Mutex::new(&mut slots);
         std::thread::scope(|s| {
@@ -1211,16 +1329,35 @@ impl Engine {
                             Loaded::Cached(e) => e
                                 .logical()
                                 .iter()
-                                .map(|l| DexView {
-                                    name: l.name.clone(),
-                                    data: Arc::clone(&l.data),
-                                    state: Arc::clone(&l.state),
-                                    entry: Some(Arc::clone(&e)),
+                                .enumerate()
+                                .map(|(idx, l)| {
+                                    if let (Some((disk, k)), Ok(dex)) = (l2, Dex::with_name(&l.data, &l.name)) {
+                                        if tiers::load_derived(disk, k, l, &dex) {
+                                            self.stats.derived_hits.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    DexView {
+                                        name: l.name.clone(),
+                                        data: Arc::clone(&l.data),
+                                        state: Arc::clone(&l.state),
+                                        entry: Some(Arc::clone(&e)),
+                                        idx,
+                                        mask: l.state.table_mask(),
+                                        loaded: Instant::now(),
+                                    }
                                 })
                                 .collect(),
                             borrowed => borrowed
                                 .into_logical(&entry.name)
-                                .map(|(name, data)| DexView { name, data, state: Arc::new(SearchState::new()), entry: None })
+                                .map(|(name, data)| DexView {
+                                    name,
+                                    data,
+                                    state: Arc::new(SearchState::new()),
+                                    entry: None,
+                                    idx: 0,
+                                    mask: 0,
+                                    loaded: Instant::now(),
+                                })
                                 .collect(),
                         })
                         .map_err(|e| format!("{}: {e}", entry.name));
@@ -1239,16 +1376,20 @@ impl Engine {
         Ok((views, errors))
     }
 
-    /// Charge the memory cache for the tables a pass over `views` built.
+    /// Charge the memory cache for the tables a pass over `views` built,
+    /// and queue the new tables for L2.
     fn recharge_views(&self, views: &[DexView]) {
         let Some(cache) = self.cache.as_deref() else { return };
         let Some(key) = self.key_cache.lock().unwrap().as_ref().map(|k| k.2.clone()) else { return };
+        let disk = cache.disk.as_deref().filter(|d| d.uses(Tier::Derived));
         let mut seen = HashSet::new();
         for v in views {
-            if let Some(e) = &v.entry {
-                if seen.insert(Arc::as_ptr(e)) {
-                    recharge(Some(cache), Some(&key), e);
-                }
+            let Some(e) = &v.entry else { continue };
+            if let Some(job) = disk.and_then(|d| tiers::derived_job(d, e, v.idx, v.mask, v.loaded.elapsed())) {
+                cache.put_async(WriteJob { key: key.clone(), apk: Arc::from(self.apk_path.as_path()), kind: Job::Derived(job) });
+            }
+            if seen.insert(Arc::as_ptr(e)) {
+                recharge(Some(cache), Some(&key), e);
             }
         }
     }
@@ -1277,6 +1418,12 @@ struct DexView {
     state: Arc<SearchState>,
     /// The memory cache entry holding it, recharged after the pass.
     entry: Option<Arc<CachedEntry>>,
+    /// Its index among the entry's logical DEX files.
+    idx: usize,
+    /// Its tables (`SearchState::table_mask`) when loaded, and when that was:
+    /// tables built during the pass are queued for L2 with the pass's time.
+    mask: u32,
+    loaded: Instant,
 }
 
 /// The APK entry a (logical) DEX name belongs to: `classes2.dex!classes1.dex`
@@ -1304,6 +1451,7 @@ fn lookup_cached(cache: &EngineCache, key: Option<&ApkKey>, entry: &Entry, stats
                     // container's logical copies; charge what will be resident.
                     let size = e.resident_bytes();
                     mem.lock().unwrap().insert(key, &entry.name, Arc::clone(&e), size);
+                    cache.charged();
                 }
                 return Some((e, Source::Disk));
             }
@@ -1352,11 +1500,18 @@ fn load_entry<'a>(
                 // Account for the container copies too, so the LRU cap holds.
                 let size = e.resident_bytes();
                 mem.lock().unwrap().insert(k, &entry.name, Arc::clone(&e), size);
+                c.charged();
                 remap = Some(Arc::downgrade(&e));
             }
         }
-        if source == Source::Inflate {
-            c.put_async(k, &entry.name, &e.data, remap);
+        // Small entries are cheaper to inflate again than to write.
+        if source == Source::Inflate && c.disk.as_ref().is_some_and(|d| d.admits_dex(e.data.len() as u64)) {
+            let job = WriteJob {
+                key: k.clone(),
+                apk: Arc::from(apk.path()),
+                kind: Job::Dex { name: entry.name.clone(), data: Arc::clone(&e.data), remap },
+            };
+            c.put_async(job);
         }
         return Ok((Loaded::Cached(e), source));
     }
@@ -1427,10 +1582,23 @@ fn search_entry(
     batch.inflate_us = (t1 - t0).as_micros();
     match &loaded {
         Loaded::Cached(e) => {
-            for l in e.logical() {
-                let r = Dex::with_name(&l.data, &l.name)
-                    .map_err(EngineError::from)
-                    .and_then(|dex| rows_compiled(&FindRefs::with_state(&dex, &l.state), query, opts));
+            let l2 = cache.and_then(|c| c.disk.as_deref().filter(|d| d.uses(Tier::Derived)).map(|d| (c, d))).zip(key);
+            for (i, l) in e.logical().iter().enumerate() {
+                let r = Dex::with_name(&l.data, &l.name).map_err(EngineError::from).and_then(|dex| {
+                    if let Some(((_, disk), k)) = l2 {
+                        if tiers::load_derived(disk, k, l, &dex) {
+                            stats.derived_hits.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    let (mask, t) = (l.state.table_mask(), Instant::now());
+                    let rows = rows_compiled(&FindRefs::with_state(&dex, &l.state), query, opts);
+                    if let Some(((c, disk), k)) = l2 {
+                        if let Some(job) = tiers::derived_job(disk, e, i, mask, t.elapsed()) {
+                            c.put_async(WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Derived(job) });
+                        }
+                    }
+                    rows
+                });
                 match r {
                     Ok(mut rows) => batch.results.append(&mut rows),
                     Err(e) => batch.note_error(&l.name, e),
@@ -1456,9 +1624,15 @@ fn search_entry(
 fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEntry>) {
     let (Some(mem), Some(key)) = (cache.and_then(|c| c.memory.as_ref()), key) else { return };
     let size = e.charged_bytes();
-    let mut mem = mem.lock().unwrap();
-    if mem.charged_bytes(key, &e.name).is_some_and(|old| old != size) {
+    {
+        let mut mem = mem.lock().unwrap();
+        if !mem.charged_bytes(key, &e.name).is_some_and(|old| old != size) {
+            return;
+        }
         mem.resize(key, &e.name, e, size);
+    }
+    if let Some(c) = cache {
+        c.charged();
     }
 }
 

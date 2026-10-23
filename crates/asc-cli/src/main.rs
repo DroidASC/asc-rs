@@ -103,7 +103,7 @@ impl Common {
     fn engine(&self, apk_path: &Path) -> Engine {
         let mut engine = Engine::new(apk_path).with_debug(self.debug).with_threads(self.threads).with_logger(|m| eprintln!("{m}"));
         if !self.no_cache {
-            engine = engine.with_cache(CacheConfig { memory_bytes: 0, disk: self.disk_cache() });
+            engine = engine.with_cache(CacheConfig { disk: self.disk_cache(), ..CacheConfig::default() });
         }
         engine
     }
@@ -125,6 +125,8 @@ impl Common {
         CacheConfig {
             memory_bytes: self.memory_mb.map_or_else(asc_engine::auto_memory_bytes, |mb| mb.saturating_mul(1 << 20)),
             disk: if self.no_cache { None } else { self.disk_cache() },
+            // Without an explicit budget, share one with the user's other resident hosts.
+            memory_auto: self.memory_mb.is_none(),
         }
     }
 }

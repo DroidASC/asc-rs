@@ -35,7 +35,9 @@ fn queries() -> Vec<Query> {
 }
 
 fn hits(fr: &FindRefs<'_, '_, '_>) -> Vec<String> {
-    queries().iter().map(|q| format!("{:?}", fr.find_ref(q).unwrap())).collect()
+    let mut out: Vec<String> = queries().iter().map(|q| format!("{:?}", fr.find_ref(q).unwrap())).collect();
+    out.push(format!("{:?}", fr.call_graph().unwrap()));
+    out
 }
 
 #[test]
@@ -48,7 +50,8 @@ fn persisted_tables_answer_like_freshly_built_ones() {
         let bytes = built.persist(&dex);
         let loaded = SearchState::from_persisted(&dex, backing(&bytes)).expect("loads");
         assert_eq!(loaded.table_mask(), built.table_mask());
-        assert_eq!(loaded.heap_bytes(), 0, "every table is viewed in place");
+        // Every table is viewed in place but the call graph, which is copied.
+        assert_eq!(loaded.heap_bytes(), loaded.call_graph().unwrap().heap_bytes());
         assert!(loaded.mapped_bytes() > 0 && loaded.mapped_bytes() <= bytes.len());
         // Adopting a loaded state fills only what is missing.
         let target = SearchState::new();
@@ -56,7 +59,8 @@ fn persisted_tables_answer_like_freshly_built_ones() {
         let heap = target.heap_bytes();
         target.fill_from(SearchState::from_persisted(&dex, backing(&bytes)).unwrap());
         assert_eq!(target.table_mask(), built.table_mask());
-        assert_eq!(target.heap_bytes(), heap, "its own string table is kept");
+        // Its own string table is kept; the copied call graph is added.
+        assert_eq!(target.heap_bytes(), heap + target.call_graph().unwrap().heap_bytes());
         assert_eq!(hits(&FindRefs::with_state(&dex, &target)), expected);
         assert_eq!(hits(&FindRefs::with_state(&dex, &loaded)), expected);
         // Re-persisting a loaded state gives the same bytes.

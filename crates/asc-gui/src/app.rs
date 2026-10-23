@@ -1313,7 +1313,7 @@ mod tests {
     /// stays "running" for the whole test.
     fn app() -> AscApp {
         let apk = PathBuf::from("/nonexistent/asc-gui-test.apk");
-        let cache = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: None };
+        let cache = asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() };
         AscApp::with_context(egui::Context::default(), Prefs::default(), apk, 1, false, cache)
     }
 

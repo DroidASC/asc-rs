@@ -15,11 +15,15 @@
 //! ..   tables, each 8-byte aligned
 //! ```
 //!
+//! The call graph is stored in its own flat form ([`CallGraph::to_bytes`])
+//! and copied out on load.
+//!
 //! The DEX identity in the header ties the file to the buffer it was built
 //! from; every table is bounds-checked against that DEX on load. Lookups stay
 //! bounds-checked too, so a damaged file gives wrong answers at worst, never
 //! a crash.
 
+use crate::callgraph::CallGraph;
 use crate::insn_locator::InsnLocator;
 use crate::locators::{FieldLocator, MemberLocator, MethodLocator, StringLocator, TypeLocator};
 use crate::table::{Backing, Pod, Table};
@@ -28,7 +32,7 @@ use asc_dex::Dex;
 
 /// Version of the persisted layout; part of the cache key of persisted
 /// states, so a format change simply misses old files.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 const MAGIC: &[u8; 8] = b"ASCLOCS\0";
 const ENDIAN: u32 = 0x0102_0304;
@@ -44,6 +48,7 @@ const TYPES: u32 = 1 << 1;
 const METHODS: u32 = 1 << 2;
 const FIELDS: u32 = 1 << 3;
 const INSNS: u32 = 1 << 4;
+const CALLS: u32 = 1 << 5;
 
 // Scalar indexes.
 const S_STRDATA_START: usize = 0;
@@ -68,6 +73,8 @@ const T_INSN_TABLE: usize = 6;
 const T_INSN_BOUNDS: usize = 7;
 const T_INSN_SHARED_STARTS: usize = 8;
 const T_INSN_SHARED_IDS: usize = 9;
+/// Raw bytes (count = byte length).
+const T_CALLS: usize = 10;
 const ABSENT: u64 = u64::MAX;
 
 impl SearchState {
@@ -79,12 +86,13 @@ impl SearchState {
             | (self.methods.get().is_some() as u32 * METHODS)
             | (self.fields.get().is_some() as u32 * FIELDS)
             | (self.insns.get().is_some() as u32 * INSNS)
+            | (self.calls.get().is_some() as u32 * CALLS)
     }
 
     /// Adopt the tables of `other` (built from the same buffer) that this
     /// state lacks; tables it already has are kept.
     pub fn fill_from(&self, other: SearchState) {
-        let SearchState { strings, types, methods, fields, insns } = other;
+        let SearchState { strings, types, methods, fields, insns, calls } = other;
         if let Some(t) = strings.into_inner() {
             let _ = self.strings.set(t);
         }
@@ -99,6 +107,9 @@ impl SearchState {
         }
         if let Some(t) = insns.into_inner() {
             let _ = self.insns.set(t);
+        }
+        if let Some(t) = calls.into_inner() {
+            let _ = self.calls.set(t);
         }
     }
 
@@ -151,6 +162,9 @@ impl SearchState {
             w.table(T_INSN_BOUNDS, &i.method_bounds);
             w.table(T_INSN_SHARED_STARTS, &i.shared_starts);
             w.table(T_INSN_SHARED_IDS, &i.shared_ids);
+        }
+        if let Some(g) = self.calls.get() {
+            w.blob(T_CALLS, &g.to_bytes());
         }
         w.finish()
     }
@@ -225,6 +239,15 @@ impl SearchState {
                 code_item_end: code_end,
             });
         }
+        if mask & CALLS != 0 {
+            let (off, len) = r.slot(T_CALLS)?;
+            let graph = CallGraph::from_bytes(r.bytes.get(off..off.checked_add(len)?)?)?;
+            // As many method ids as the graph is built for (at most 2^16).
+            if graph.method_count() != (dex.method_count() as usize).min(buf_len / 8).min(1 << 16) {
+                return None;
+            }
+            let _ = state.calls.set(graph);
+        }
         Some(state)
     }
 }
@@ -246,6 +269,13 @@ impl Writer {
         // Keep every table 8-byte aligned.
         self.out.resize(self.out.len().next_multiple_of(8), 0);
         self.dir[slot] = (off as u64, t.len() as u64);
+    }
+
+    fn blob(&mut self, slot: usize, bytes: &[u8]) {
+        let off = self.out.len();
+        self.out.extend_from_slice(bytes);
+        self.out.resize(self.out.len().next_multiple_of(8), 0);
+        self.dir[slot] = (off as u64, bytes.len() as u64);
     }
 
     fn member(&mut self, m: &MemberLocator, s_off: usize, s_count: usize, t_names: usize, t_classes: usize) {
