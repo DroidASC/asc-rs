@@ -704,10 +704,21 @@ impl Engine {
     }
 
     pub fn get_class_with(&self, descriptor: &str, opts: SmaliOptions) -> Result<ClassSource> {
+        self.get_class_method(descriptor, opts, None)
+    }
+
+    /// [`Engine::get_class_with`] that renders only the method whose
+    /// `name(params)ret` is `method` (no fields) when one is given. A malformed
+    /// signature is rejected before the APK is read; a class without such a
+    /// method is an error. The rebuilt DEX still holds the whole class.
+    pub fn get_class_method(&self, descriptor: &str, opts: SmaliOptions, method: Option<&str>) -> Result<ClassSource> {
+        if let Some(m) = method {
+            asc_smali::normalize_method_signature(m)?;
+        }
         let t0 = Instant::now();
         let hit = self.get_class_dex(descriptor)?.ok_or_else(|| EngineError::ClassNotFound(descriptor.to_string()))?;
         let scan_us = t0.elapsed().as_micros();
-        let (rebuilt, source, warning) = match decompile_dex_class(&hit.dex, descriptor, opts) {
+        let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, descriptor, opts, method) {
             Ok((r, s)) => (Some(r), s, None),
             // The class is there but cannot be rebuilt faithfully (undefined
             // opcode, invoke-custom, too many members for 16-bit indexes...):
@@ -715,7 +726,7 @@ impl Engine {
             // there is no DEX to dump.
             Err(EngineError::Rebuild(e)) if e.is_input_limitation() => {
                 let dex = Dex::with_name(&hit.dex, &hit.dex_name)?;
-                let source = asc_smali::disassemble_class(&dex, descriptor, opts)?;
+                let source = asc_smali::disassemble_class_method(&dex, descriptor, opts, method)?;
                 let warning = format!("class not rebuilt ({e}); disassembled from the original DEX instead");
                 self.log(format!("[DEBUG] {warning}"));
                 (None, source, Some(warning))
@@ -1074,9 +1085,14 @@ pub fn find_refs_lines(dex_name: &str, buf: &[u8], query: &Query, aggregate: boo
 
 /// Rebuild `descriptor` out of `buf` and disassemble it.
 pub fn decompile_dex_class(buf: &[u8], descriptor: &str, opts: SmaliOptions) -> Result<(Rebuilt, String)> {
+    decompile_dex_class_method(buf, descriptor, opts, None)
+}
+
+/// [`decompile_dex_class`] rendering only `method` (`name(params)ret`) when given.
+pub fn decompile_dex_class_method(buf: &[u8], descriptor: &str, opts: SmaliOptions, method: Option<&str>) -> Result<(Rebuilt, String)> {
     let dex = Dex::parse(buf)?;
     let rebuilt = asc_rebuild::rebuild_class(&dex, descriptor)?;
     let new_dex = Dex::parse(&rebuilt.bytes)?;
-    let source = asc_smali::disassemble_class(&new_dex, descriptor, opts)?;
+    let source = asc_smali::disassemble_class_method(&new_dex, descriptor, opts, method)?;
     Ok((rebuilt, source))
 }

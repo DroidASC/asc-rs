@@ -293,6 +293,54 @@ fn findrefs_string_literal_ignores_regex_syntax() {
     assert_eq!(sorted_lines(&out).len(), 4);
 }
 
+#[test]
+fn disassemble_defaults_to_no_debug_directives_and_writes_only_the_file() {
+    let apk = rich_apk();
+    let a = droidasc(&["disassemble", path(apk.path()), "example.Rich"]);
+    assert!(a.status.success(), "{}", stderr(&a));
+    let text = stdout(&a);
+    assert!(text.contains(".method public static compute(II)I") && !text.contains(".line"), "{text}");
+    let b = droidasc(&["disassemble", path(apk.path()), "example.Rich", "--debuginfo"]);
+    assert!(stdout(&b).contains(".line"), "{}", stdout(&b));
+    // `--debuginfo` output is what getclass prints by default.
+    assert_eq!(stdout(&b), stdout(&droidasc(&["getclass", path(apk.path()), "example.Rich"])));
+    assert_eq!(text, stdout(&droidasc(&["getclass", path(apk.path()), "example.Rich", "--no-debug-info"])));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Rich.smali");
+    let out = droidasc(&["disassemble", path(apk.path()), "Lexample/Rich;", "-o", path(&file)]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "{}", stdout(&out));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn method_flag_renders_one_exact_signature() {
+    let apk = rich_apk();
+    for cmd in ["getclass", "disassemble"] {
+        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run()V"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let text = stdout(&out);
+        assert_eq!(text.matches(".method ").count(), 1, "{text}");
+        assert!(text.contains(".method public run()V") && !text.contains(".field"), "{text}");
+        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(stderr(&out).contains("Error: method signature must include the name"), "{}", stderr(&out));
+        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run(I)V"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            stderr(&out).contains("Error: method not found or signature is not defined in the target DEX: run(I)V"),
+            "{}",
+            stderr(&out)
+        );
+    }
+    // The dumped DEX still holds the whole class.
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a.dex"), dir.path().join("b.dex"));
+    assert!(droidasc(&["getclass", path(apk.path()), "example.Rich", "--dump-dex", path(&a)]).status.success());
+    assert!(droidasc(&["getclass", path(apk.path()), "example.Rich", "--method", "run()V", "--dump-dex", path(&b)]).status.success());
+    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+}
+
 // ---- listclass (ported from the Python `test_listclass.py`) -------------
 
 #[test]

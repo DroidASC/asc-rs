@@ -74,6 +74,18 @@ fn class_relations_and_literals_stream_like_reference_queries() {
 }
 
 #[test]
+fn method_filter_is_validated_before_the_apk_is_read() {
+    let engine = Engine::new("/nonexistent/app.apk");
+    let err = engine.get_class_method("Lexample/Test;", Default::default(), Some("first")).err().unwrap();
+    assert!(err.to_string().starts_with("method signature must include"), "{err}");
+    let apk = temp_apk(true);
+    let engine = Engine::new(apk.path());
+    let src = engine.get_class_method("Lexample/Test;", Default::default(), Some("second()V")).unwrap();
+    assert!(src.source.contains(".method public static second()V") && !src.source.contains("first"), "{}", src.source);
+    assert!(src.rebuilt.is_some());
+}
+
+#[test]
 fn caches_serve_repeated_queries() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
