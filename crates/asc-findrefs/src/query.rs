@@ -4,7 +4,8 @@
 //! regexes it needs are compiled once here and reused by every
 //! [`FindRefs`](crate::FindRefs) through `find_ref_compiled`.
 
-use crate::{ClassQuery, MemberQuery, Query, RefKind, Result};
+use crate::{ClassQuery, ClassRelation, MemberQuery, Query, RefKind, Result};
+use memchr::memmem::Finder;
 use regex::bytes::Regex;
 
 /// Class constraint of a member query, ready to run.
@@ -35,7 +36,11 @@ pub(crate) struct CompiledMember {
 pub(crate) enum Parts {
     /// String / type query; `None` when the pattern is empty (matches nothing).
     Pattern(Option<Regex>),
+    /// Literal string query: the MUTF-8 encoded needle, `None` when empty.
+    Literal(Option<Finder<'static>>),
     Member(CompiledMember),
+    /// Class-definition query: the MUTF-8 encoded target descriptor.
+    Relation(ClassRelation, Vec<u8>),
 }
 
 /// A [`Query`] with every regular expression it needs compiled up front.
@@ -56,7 +61,12 @@ impl CompiledQuery {
     pub fn new(q: &Query) -> Result<CompiledQuery> {
         let parts = match q {
             Query::String(p) | Query::Type(p) => Parts::Pattern(compile_opt(p)?),
+            // MUTF-8, like the string data it is searched in, so a supplementary
+            // character (a surrogate pair there) is found too.
+            Query::StringLiteral(p) => Parts::Literal((!p.is_empty()).then(|| Finder::new(&asc_dex::mutf8::encode(p)).into_owned())),
             Query::Method(m) | Query::Field(m) => Parts::Member(compile_member(m)?),
+            Query::Extends(d) => Parts::Relation(ClassRelation::Extends, asc_dex::mutf8::encode(d)),
+            Query::Implements(d) => Parts::Relation(ClassRelation::Implements, asc_dex::mutf8::encode(d)),
         };
         Ok(CompiledQuery { query: q.clone(), kind: q.kind(), parts })
     }
@@ -69,6 +79,12 @@ impl CompiledQuery {
     #[inline]
     pub fn query(&self) -> &Query {
         &self.query
+    }
+
+    /// The class relation an `Extends` / `Implements` query asks for.
+    #[inline]
+    pub fn relation(&self) -> Option<ClassRelation> {
+        self.query.relation()
     }
 
     #[inline]
@@ -152,6 +168,19 @@ mod tests {
         assert!(CompiledQuery::new(&q).is_err());
         let q = Query::String("[".into());
         assert!(CompiledQuery::new(&q).is_err());
+
+        // A literal is never a regex; an empty one matches nothing.
+        let c = CompiledQuery::new(&Query::StringLiteral("[".into())).unwrap();
+        assert_eq!(c.kind(), RefKind::String);
+        assert!(matches!(c.parts(), Parts::Literal(Some(f)) if f.needle() == b"["));
+        let c = CompiledQuery::new(&Query::StringLiteral("\u{1F600}".into())).unwrap();
+        assert!(matches!(c.parts(), Parts::Literal(Some(f)) if f.needle() == [0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]));
+        assert!(matches!(CompiledQuery::new(&Query::StringLiteral(String::new())).unwrap().parts(), Parts::Literal(None)));
+
+        let c = CompiledQuery::new(&Query::Implements("Lexample/Iface;".into())).unwrap();
+        assert_eq!(c.relation(), Some(ClassRelation::Implements));
+        assert!(matches!(c.parts(), Parts::Relation(ClassRelation::Implements, d) if d == b"Lexample/Iface;"));
+        assert_eq!(CompiledQuery::new(&Query::String("x".into())).unwrap().relation(), None);
 
         let c = CompiledQuery::new(&Query::Type(String::new())).unwrap();
         assert!(matches!(c.parts(), Parts::Pattern(None)));

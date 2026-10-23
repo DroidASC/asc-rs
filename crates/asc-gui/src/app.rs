@@ -7,7 +7,7 @@
 use crate::members::{char_to_byte, member_at, member_spans_in_line, MemberKind, MemberSpan};
 use crate::prefs::{row_cap_label, Prefs, ROW_CAPS};
 use crate::search::{SearchKind, SearchPanel};
-use crate::store::{ClassEntry, ClassIndex, Event, LoadedIndex, PackageNode, Store};
+use crate::store::{ClassEntry, ClassIndex, Event, LoadedIndex, Package, Store};
 use crate::tabs::{active_after_close, const_string_in_line, descriptors_in_line, regex_escape, short_name, Jump, Tab, TabContent};
 use asc_engine::{names, Engine};
 use asc_findrefs::{ClassQuery, MemberQuery, Query};
@@ -130,19 +130,16 @@ pub struct AscApp {
 }
 
 impl AscApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, apk: PathBuf, threads: usize, debug: bool, cache: bool) -> AscApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, apk: PathBuf, threads: usize, debug: bool, cache: asc_engine::CacheConfig) -> AscApp {
         Self::with_context(cc.egui_ctx.clone(), Prefs::load(cc.storage), apk, threads, debug, cache)
     }
 
-    fn with_context(ctx: egui::Context, prefs: Prefs, apk: PathBuf, threads: usize, debug: bool, cache: bool) -> AscApp {
+    fn with_context(ctx: egui::Context, prefs: Prefs, apk: PathBuf, threads: usize, debug: bool, cache: asc_engine::CacheConfig) -> AscApp {
         let mut engine = Engine::new(&apk).with_threads(threads).with_debug(debug).with_logger(|m| eprintln!("{m}"));
-        // Keep inflated DEX files and their locator tables resident: the
-        // browser fires many queries against the same archive.
-        engine = engine.with_cache(if cache {
-            asc_engine::CacheConfig::resident(2 << 30)
-        } else {
-            asc_engine::CacheConfig { memory_bytes: 2 << 30, disk: None }
-        });
+        // Inflated DEX files and their locator tables stay resident within
+        // the caller's budget (by default it follows the free memory, so
+        // several open browsers do not each claim 2 GiB).
+        engine = engine.with_cache(cache);
         let engine = Arc::new(engine);
         let (tx, rx) = channel();
         let store = Arc::new(Store { engine, tx, ctx });
@@ -191,11 +188,11 @@ impl AscApp {
             match ev {
                 Event::LoadProgress { done, total } => self.load_progress = (done, total),
                 Event::Loaded { result: Ok(LoadedIndex { index, failed }), elapsed_ms } => {
-                    let mut msg = format!("{} classes in {} DEX, indexed in {elapsed_ms} ms", index.all.len(), index.dex_count);
+                    let mut msg = format!("{} classes in {} DEX, indexed in {elapsed_ms} ms", index.len(), index.dex_count);
                     if !failed.is_empty() {
                         msg.push_str(&format!("; {} DEX could not be indexed: {}", failed.len(), failed.join("; ")));
                     }
-                    self.load_info = Some(LoadInfo { classes: index.all.len(), dex: index.dex_count, ms: elapsed_ms, failed });
+                    self.load_info = Some(LoadInfo { classes: index.len(), dex: index.dex_count, ms: elapsed_ms, failed });
                     self.load_error = None;
                     self.class_filter_cache = (String::new(), Vec::new());
                     self.suggest_cache = (String::new(), Vec::new());
@@ -458,6 +455,10 @@ impl AscApp {
         let title = match &query {
             Query::String(v) => format!("string: {v}"),
             Query::Type(v) => format!("type: {v}"),
+            // Not issued by the GUI; named for completeness.
+            Query::StringLiteral(v) => format!("string (literal): {v}"),
+            Query::Extends(v) => format!("extends: {v}"),
+            Query::Implements(v) => format!("impl: {v}"),
             Query::Method(MemberQuery { class, name, exact_name }) | Query::Field(MemberQuery { class, name, exact_name }) => format!(
                 "{}: {}{}{}",
                 kind.as_str(),
@@ -615,7 +616,7 @@ impl AscApp {
         }
         let Some(index) = &self.index else { return };
         if self.suggest_cache.0 != text {
-            let matches = index.filter(text, MAX_SUGGESTIONS).into_iter().map(|i| index.all[i].descriptor.clone()).collect();
+            let matches = index.filter(text, MAX_SUGGESTIONS).into_iter().map(|i| index.descriptor(i).to_string()).collect();
             self.suggest_cache = (text.to_string(), matches);
         }
         let matches = &self.suggest_cache.1;
@@ -689,7 +690,7 @@ impl AscApp {
         let cache = &self.class_filter_cache.1;
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             if filter.is_empty() {
-                render_package(ui, &index.root, "", actions, selected);
+                render_package(ui, index.root(), "", actions, selected);
             } else {
                 if cache.len() >= MAX_FILTER_RESULTS {
                     ui.label(RichText::new(format!("showing the first {MAX_FILTER_RESULTS} matches")).weak());
@@ -697,7 +698,7 @@ impl AscApp {
                     ui.label(RichText::new(format!("{} matches", cache.len())).weak());
                 }
                 for &i in cache {
-                    render_class(ui, &index.all[i], actions, selected, true);
+                    render_class(ui, index.get(i), actions, selected, true);
                 }
             }
         });
@@ -1184,16 +1185,16 @@ fn line_menu(ui: &mut egui::Ui, line: &str, class: &str, index: Option<&ClassInd
     }
 }
 
-fn render_class(ui: &mut egui::Ui, c: &ClassEntry, actions: &mut Vec<Action>, selected: Option<&str>, full: bool) {
-    let label = if full { names::dalvik_to_dot(&c.descriptor) } else { short_name(&c.descriptor) };
-    let is_selected = selected == Some(c.descriptor.as_str());
+fn render_class(ui: &mut egui::Ui, c: ClassEntry<'_>, actions: &mut Vec<Action>, selected: Option<&str>, full: bool) {
+    let label = if full { names::dalvik_to_dot(c.descriptor) } else { short_name(c.descriptor) };
+    let is_selected = selected == Some(c.descriptor);
     let r = ui.selectable_label(is_selected, label).on_hover_ui(|ui| {
         ui.label(format!("{}  [{}]", c.descriptor, c.dex_name));
     });
     if r.clicked() {
-        actions.push(Action::open(&c.descriptor, None));
+        actions.push(Action::open(c.descriptor, None));
     }
-    r.context_menu(|ui| class_menu(ui, &c.descriptor, actions));
+    r.context_menu(|ui| class_menu(ui, c.descriptor, actions));
 }
 
 fn class_menu(ui: &mut egui::Ui, descriptor: &str, actions: &mut Vec<Action>) {
@@ -1238,27 +1239,28 @@ fn class_menu(ui: &mut egui::Ui, descriptor: &str, actions: &mut Vec<Action>) {
 
 /// Package tree. `CollapsingHeader` lays out a body only while it is open, so
 /// closed packages cost one header each; the counts are precomputed.
-fn render_package(ui: &mut egui::Ui, node: &PackageNode, path: &str, actions: &mut Vec<Action>, selected: Option<&str>) {
-    for (name, child) in &node.children {
-        let full = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
+fn render_package(ui: &mut egui::Ui, node: Package<'_>, path: &str, actions: &mut Vec<Action>, selected: Option<&str>) {
+    for child in node.children() {
+        let name = child.name();
+        let full = if path.is_empty() { name.to_string() } else { format!("{path}/{name}") };
         // Collapse single-child chains (com -> example -> app) into one header.
-        let (label, target) = collapse_chain(name, child);
-        egui::CollapsingHeader::new(format!("{label}  ({})", target.count)).id_salt(&full).show(ui, |ui| {
+        let (label, target) = collapse_chain(child);
+        egui::CollapsingHeader::new(format!("{label}  ({})", target.count())).id_salt(&full).show(ui, |ui| {
             render_package(ui, target, &full, actions, selected);
         });
     }
-    for c in &node.classes {
+    for c in node.classes() {
         render_class(ui, c, actions, selected, false);
     }
 }
 
-fn collapse_chain<'a>(name: &str, node: &'a PackageNode) -> (String, &'a PackageNode) {
-    let mut label = name.to_string();
+fn collapse_chain(node: Package<'_>) -> (String, Package<'_>) {
+    let mut label = node.name().to_string();
     let mut cur = node;
-    while cur.classes.is_empty() && cur.children.len() == 1 {
-        let (n, next) = cur.children.iter().next().unwrap();
+    while cur.classes().len() == 0 && cur.children().len() == 1 {
+        let next = cur.children().next().unwrap();
         label.push('.');
-        label.push_str(n);
+        label.push_str(next.name());
         cur = next;
     }
     (label, cur)
@@ -1311,7 +1313,8 @@ mod tests {
     /// stays "running" for the whole test.
     fn app() -> AscApp {
         let apk = PathBuf::from("/nonexistent/asc-gui-test.apk");
-        AscApp::with_context(egui::Context::default(), Prefs::default(), apk, 1, false, false)
+        let cache = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: None };
+        AscApp::with_context(egui::Context::default(), Prefs::default(), apk, 1, false, cache)
     }
 
     fn with_class_tab(text: &str) -> AscApp {

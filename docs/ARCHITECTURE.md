@@ -16,8 +16,8 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
                  │                               │                          │
                  └──────────────► asc-engine ◄───┴──────────────────────────┘
                                      │              (+ asc-axml for the manifest)
-                          ┌──────────┴──────────┐
-                       asc-cli                asc-gui
+                          ┌──────────┼──────────┐
+                       asc-cli ── asc-mcp    asc-gui
 ```
 
 ## Mapping to the Python modules
@@ -37,12 +37,16 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
 | `.../type_locator.py`, `method_locator.py`, `field_locator.py` | `asc_findrefs::{TypeLocator, MethodLocator, FieldLocator}` |
 | `.../insn_locator.py` (16-byte bucket table in a dict, `INSN_VERIFY` regex) | `asc_findrefs::InsnLocator` (same buckets in a dense `Vec<u32>` over the code region, filled by ranges; verification is a linear opcode-length walk, `asc_dalvik::verify_range`) |
 | `.../scan/code_item_scan.py` (regex / translate prefilter over the code region) | `asc_findrefs::CodeScanner` (single pass with a 256-entry opcode table and a bitset of target indexes) |
+| `.../scan/class_def_item_scan.py` (`findrefs extends` / `impl`) | `asc_findrefs::FindRefs::class_relation` (`classdefs` module) |
+| `asc_client/apk/dex_reader.py::class_defines_prefix_len` + `loader.py::_inflate_dex_prefix` (prefix-only inflate for `getclass`) | `asc_dex::quick::probe_needed_len` + `asc_apk::Apk::inflate_until` (already there before upstream added it) |
+| `dadguard/disassembler.py` (`disassemble`, `--method`, `--debuginfo`) | `asc_smali::disassemble_class_method` behind `getclass` / `disassemble` |
 | `asc_core/core/dex/dex_constructor.py` (DexHollower) | `asc_rebuild::hollow` |
 | `asc_core/core/dex/dex_remapper.py` (DexIndexMapper) | `asc_rebuild::{collect, tables}` |
 | `asc_core/core/dex/dex_builder.py` (DexBuilder) | `asc_rebuild::writer` |
 | `asc_core/utils/decompiler.py` (androguard DAD) | `asc-smali` (disassembly) — see below |
 | `asc_client/gui/*` (Tk) | `asc-gui` (egui) |
 | — (no equivalent) | `asc-cache` (disk + memory caches of inflated entries), `asc_findrefs::SearchState` (reusable locator tables) |
+| — (no equivalent) | `asc-mcp` (`droidasc mcp`: resident MCP session over stdio; one `Engine` per opened APK, all attached to one `asc_engine::SharedCache`) |
 | `tests/dex_fixture.py` | `asc-fixture` |
 
 ## Where the port deliberately differs
@@ -84,6 +88,17 @@ static initialisers, `.registers`, `.param` names and `.line` directives from de
 labels for branches, switch payloads, `fill-array-data` and try/catch blocks. The engine's
 `Rebuilt::bytes` is exposed (and `--dump-dex` on the CLI) for external decompilers.
 
+Upstream later added its own smali renderer as a separate `disassemble` command (the Java
+`getclass` stays). Here both commands share one path (`Engine::get_class_method`) and
+differ only as Python's do: `disassemble` leaves out debug directives unless
+`--debuginfo` is given and `-o` writes only the file, while `getclass` keeps `.line` /
+`.param` (`--no-debug-info`) and also prints to stdout. The output stays baksmali-style
+rather than copying dadguard's format (`# CLASS:` / `## METHOD:` comments, `.locals`), and
+`--debug` does not add per-instruction offset comments. `--method 'name(params)ret'`
+(both commands) is normalised as in Python (whitespace dropped from the descriptors, a
+bare name rejected) and keeps the class header, interfaces and class annotations, no
+fields, and only that method; the rebuilt DEX (`--dump-dex`) still holds the whole class.
+
 ### Search semantics kept from Python
 
 * String and type queries are **regular expressions** matched against raw MUTF-8 string
@@ -98,6 +113,22 @@ labels for branches, switch payloads, `fill-array-data` and try/catch blocks. Th
   cannot) but not either half of a surrogate pair (Python's can, byte by byte). Spell a
   supplementary character as its surrogate bytes (`\xED\xA0\xBD\xED\xB8\x80`, with
   `(?-u)`) to find it.
+* `Query::StringLiteral` (`findrefs string --literal`, an extension compatible with the
+  literal string queries of rasc / rust_ASC) skips the regex: the value is MUTF-8 encoded
+  (so a supplementary character does match) and found with `memchr::memmem` over the same
+  region, attributed to the string where it starts. After a hit the rest of that string is
+  skipped, which is exact because a needle without NUL never crosses a terminator. It
+  returns the same rows as the regex `regex::escape(value)`.
+* `Query::Extends` / `Query::Implements` (`findrefs extends` / `impl`) do no code scan:
+  the target descriptor is resolved with the same binary search as a precise class, then
+  every `class_def_item`'s `superclass_idx` / interface list is compared with it (direct
+  relations only, in `class_defs` order). Rows carry `RefResult::relation` and print as
+  `classes.dex | Lsub; extends Lbase;`. Python finds the superclass with a regex over the
+  packed table and keeps 32-byte-aligned matches; because `finditer` does not overlap, a
+  match straddling the preceding `access_flags` could in principle hide an aligned one.
+  The direct comparison has no such blind spot (no row differed on the fixtures).
+  Upstream's "grouped" `find_ref(group=True)` (one result list per key of a multi-key
+  query) is not ported: no CLI path builds a multi-key query.
 * Member queries: with a precise class, the member name is a **substring** match; with a
   fuzzy or absent class the member name is a regex against the string table.
   `MemberQuery::exact_name` (`--exact`, and the GUI's "references to this member") makes
@@ -144,6 +175,15 @@ central-directory slot, so the listing is in DEX order like the Python `list_cla
 `list_classes` fails on the first unreadable entry or bad `class_def`; the GUI keeps the
 classes of the other entries and reports the broken ones.
 
+The GUI turns that listing into a `ClassIndex` that stores each descriptor once: sorted and
+deduplicated in one string arena with end offsets, the DEX label as a `u16` into a name
+table, and the package tree as a flat node table whose children and classes are ranges
+into two `u32` arrays (children by name, as the old `BTreeMap` had them; classes in
+descriptor order). `contains` is a binary search; the class filter searches the whole arena
+at once ignoring ASCII case and lower-cases (Unicode rules) only the non-ASCII
+descriptors, so it returns exactly what `to_lowercase().contains(..)` would. On a
+551,080-class APK the index builds in about 70 ms and holds about 22 MB.
+
 A DEX 041 container is split lazily (`asc_dex::container::logical_dex_iter`): every
 logical DEX after the first is a full copy of the container with its header moved to
 offset 0, so the uncached paths hold one such copy at a time. The memory cache keeps all
@@ -173,19 +213,72 @@ lazily by the queries themselves):
 
 * `DiskCache`: `<dir>/<apk-key>/<entry>` files with the inflated bytes, keyed by size,
   mtime and an FNV hash of the central directory; atomic `rename` writes, `populate`d
-  mmap reads, LRU eviction by APK directory above a byte cap. The engine queues writes
+  mmap reads, LRU eviction by APK directory above a byte cap. The cap is a
+  `DiskCapacity`: `Fixed(bytes)` (`--cache-max-mb`, `$DROIDASC_CACHE_MAX_MB`) or `Auto`
+  (default), which `capacity_for(used)` turns into `auto_disk_bytes_for(disk_space(dir),
+  used)` = min(20 % of used + free, 4 GiB, used + free - `auto_disk_reserve(total)`),
+  the reserve being max(1 GiB, 5 % of the file system). `evict` recomputes it on every
+  pass, so a disk filled by someone else shrinks the cache below its current size;
+  `put` refuses (`CacheError::LowDiskSpace`) an entry that would leave less than the
+  reserve free, at the cost of one `statvfs` per entry. `disk_space` returns `None`
+  off Unix, where `Auto` means the old 4 GiB. `budget()` reports cap, usage and free
+  space for `cache stats`. The engine queues writes
   to one background thread (writing and syncing a 30 MiB entry costs as much as the whole
   query it came from) and evicts once per burst rather than after every entry;
   `Engine::flush_cache_writes` / `Drop` wait for the queue. Concurrent queries that need
   the same entry share a single inflate, so a burst of GUI requests cannot replace each
   other's locator tables.
 * `MemoryCache<T>`: byte-bounded LRU keyed by `(apk key, entry name)`; the engine stores a
-  `CachedEntry` per entry, which owns the bytes and, per logical DEX, a `SearchState`
-  (`OnceLock`s for the string/type/member/instruction locators). `FindRefs::with_state`
-  reuses those tables; `FindRefs::new` builds throw-away ones.
+  `CachedEntry` per entry, which owns the bytes and, per logical DEX, an
+  `Arc<SearchState>` (`OnceLock`s for the string/type/member/instruction locators).
+  `FindRefs::with_state` reuses those tables; `FindRefs::new` builds throw-away ones.
+  An entry is charged `resident_bytes` on insertion; after each search `recharge` adds
+  `SearchState::heap_bytes` (vector capacities of the built locators) through
+  `MemoryCache::resize`, which evicts least recently used entries when that crosses the
+  cap. `CacheConfig::resident_auto` sizes the cap with `auto_memory_bytes` (a quarter of
+  `available_memory()`, clamped to 64 MiB–2 GiB; 2 GiB where it cannot be read).
+* Remapping: a freshly inflated entry that goes into the memory cache is queued for the
+  disk writer together with a `Weak` handle to it. Once the file is renamed into place
+  the writer maps it, compares it with the heap bytes, and swaps the LRU slot for a
+  `CachedEntry` over the mapping that shares the old `SearchState`s
+  (`MemoryCache::replace`, only if the slot still holds that entry). Queries that hold
+  the old entry keep using the heap copy until they drop it. Container entries keep
+  their normalised logical copies (owned) and only remap the container itself.
+* Allocator: the first engine with a memory cache fixes glibc's mmap threshold at 1 MiB
+  (`mallopt(M_MMAP_THRESHOLD)`, Linux/glibc only, process-wide). glibc otherwise raises
+  the threshold to every large block freed (up to 32 MiB), after which DEX-sized buffers
+  are carved from the heap arenas, interleaved with long-lived locator tables, and a
+  remapped or evicted entry's bytes stay resident (`malloc_trim` cannot return them).
+
+Mapped files and cache maintenance: entries are only ever replaced by `rename`, never
+rewritten in place, and `evict` / `cache clear` unlink whole directories, so a live
+mapping keeps its inode (POSIX) and stays valid. A third party truncating a cache file in
+place would fault the mapping (SIGBUS), exactly as for disk hits; on Windows a mapped file
+cannot be deleted, so eviction skips it and `cache clear` reports the error.
 
 Stored (uncompressed) entries are borrowed straight from the APK mapping and never copied
 unless an in-memory cache wants to keep their tables.
+
+`SharedCache` wraps one such cache (memory LRU, disk cache, writer thread) for several
+engines. Because the LRU is keyed by APK, engines over different APKs attached with
+`Engine::with_shared_cache` compete for one byte budget; dropping one of them leaves the
+writer running, and dropping the `SharedCache` lands the queued writes.
+
+### MCP session
+
+`asc-mcp` is the resident front end for agents. `serve` reads one JSON-RPC message per
+line. `initialize`, `ping` and `tools/list` are answered on the reading thread; each tool
+call runs on its own scoped thread (and the engine's worker threads, as in the CLI), so a
+slow query does not hold up the next message, and replies are written as calls finish. To
+keep request order where it matters, the APK a call opens is registered (and gets its
+`apk_id`) before the next line is read, and `close_apk` first joins the calls still
+running. Each call runs under `catch_unwind` (the release profile unwinds for this), so a
+panic in the engine becomes an `isError` result instead of ending the process. Each `open_apk` (or first use of an `apk` path) creates an `Engine` attached
+to the server's `SharedCache`; `open_apk` with `warm` runs `scan_classes`, which inflates
+every entry into the LRU, so later `findrefs` / `getclass` calls only build locator tables
+once and then scan. Results are paged over a stable order (entries sorted as
+`classes.dex, classes2.dex, …`), because the engine streams entries as they finish. Tool
+failures are `isError` results, protocol errors JSON-RPC errors; neither ends the session.
 
 ### Scan strategy
 

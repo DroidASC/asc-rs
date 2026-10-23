@@ -11,6 +11,8 @@
 //!   Writes are plain `put`s; eviction is a separate [`DiskCache::evict`] step
 //!   so a host can batch it (writing a 30 MiB entry and walking the whole cache
 //!   directory after every one of them is what a query must never wait on).
+//!   Its capacity follows the free space of its file system by default
+//!   ([`auto_disk_bytes_for`]).
 //! * [`MemoryCache`] is a byte-bounded LRU of inflated entries for hosts that
 //!   stay alive between queries (GUI, servers).
 
@@ -100,6 +102,8 @@ pub enum CacheError {
     Io { path: PathBuf, source: std::io::Error },
     #[error("{path} is not a droidasc cache directory (no {tag} marker); refusing to touch it")]
     NotACacheDir { path: PathBuf, tag: &'static str },
+    #[error("{path}: too little free disk space left to cache {bytes} bytes")]
+    LowDiskSpace { path: PathBuf, bytes: u64 },
 }
 
 fn io_err(path: &Path) -> impl Fn(std::io::Error) -> CacheError + '_ {
@@ -109,7 +113,114 @@ fn io_err(path: &Path) -> impl Fn(std::io::Error) -> CacheError + '_ {
 /// On-disk cache of inflated entries.
 pub struct DiskCache {
     dir: PathBuf,
-    cap_bytes: u64,
+    cap: DiskCapacity,
+}
+
+/// How a [`DiskCache`] is bounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskCapacity {
+    /// Follow the free space of the cache's file system ([`auto_disk_bytes_for`]).
+    Auto,
+    /// A fixed number of bytes.
+    Fixed(u64),
+}
+
+/// Upper bound of the automatic disk budget.
+pub const AUTO_DISK_MAX: u64 = 4 << 30;
+/// Smallest free space the automatic budget leaves on the file system; the
+/// reserve is the larger of this and [`AUTO_DISK_RESERVE_PERCENT`] of it.
+pub const AUTO_DISK_RESERVE_MIN: u64 = 1 << 30;
+pub const AUTO_DISK_RESERVE_PERCENT: u64 = 5;
+/// Share of (free space + the cache's own bytes) the automatic budget takes.
+pub const AUTO_DISK_PERCENT: u64 = 20;
+
+/// Free space the automatic budget never writes into on a file system of
+/// `total` bytes.
+pub fn auto_disk_reserve(total: u64) -> u64 {
+    AUTO_DISK_RESERVE_MIN.max(total / 100 * AUTO_DISK_RESERVE_PERCENT)
+}
+
+/// The automatic disk budget for a cache holding `used` bytes on a file
+/// system with `(free, total)` bytes (`None`: unknown, e.g. on Windows,
+/// giving [`AUTO_DISK_MAX`]).
+///
+/// [`AUTO_DISK_PERCENT`] of what the cache could occupy (its own bytes plus
+/// the free space), at most [`AUTO_DISK_MAX`], and never more than leaves
+/// [`auto_disk_reserve`] free. When the disk is already below the reserve,
+/// that last bound falls under `used`, so eviction gives the shortfall back.
+/// (No separate floor: with a reserve of at least 1 GiB, the reserve is
+/// always the tighter bound on a disk too small for 20 % to reach 256 MiB.)
+pub fn auto_disk_bytes_for(space: Option<(u64, u64)>, used: u64) -> u64 {
+    let Some((free, total)) = space else { return AUTO_DISK_MAX };
+    let room = used.saturating_add(free);
+    let budget = (room / 100 * AUTO_DISK_PERCENT).min(AUTO_DISK_MAX);
+    budget.min(room.saturating_sub(auto_disk_reserve(total)))
+}
+
+/// `(free, total)` bytes of the file system holding `path` (or its nearest
+/// existing ancestor). `None` where it cannot be determined.
+pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+    let mut p = path;
+    loop {
+        if p.exists() {
+            return fs_space(p);
+        }
+        p = p.parent()?;
+    }
+}
+
+#[cfg(unix)]
+fn fs_space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `c` is a NUL-terminated path and `st` a properly sized out buffer.
+    if unsafe { libc::statvfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs succeeded, so it filled `st`.
+    let st = unsafe { st.assume_init() };
+    // The field types differ between platforms.
+    #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+    let (frsize, bavail, blocks) = (st.f_frsize as u64, st.f_bavail as u64, st.f_blocks as u64);
+    Some((bavail.saturating_mul(frsize), blocks.saturating_mul(frsize)))
+}
+
+#[cfg(not(unix))]
+fn fs_space(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// Environment variable fixing the disk budget, in MiB (default: automatic).
+pub const CACHE_MAX_ENV: &str = "DROIDASC_CACHE_MAX_MB";
+
+impl DiskCapacity {
+    /// [`DiskCapacity::Fixed`] from [`CACHE_MAX_ENV`] when it holds a number,
+    /// [`DiskCapacity::Auto`] otherwise.
+    pub fn from_env() -> DiskCapacity {
+        DiskCapacity::from_mib(std::env::var(CACHE_MAX_ENV).ok().as_deref())
+    }
+
+    /// [`DiskCapacity::Fixed`] for a MiB count, [`DiskCapacity::Auto`] for
+    /// `None` or anything that is not one.
+    pub fn from_mib(value: Option<&str>) -> DiskCapacity {
+        match value.and_then(|v| v.trim().parse::<u64>().ok()) {
+            Some(mb) => DiskCapacity::Fixed(mb.saturating_mul(1 << 20)),
+            None => DiskCapacity::Auto,
+        }
+    }
+}
+
+/// What [`DiskCache::budget`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskBudget {
+    pub capacity: DiskCapacity,
+    /// Bytes the cache may hold right now.
+    pub cap_bytes: u64,
+    /// Bytes it holds.
+    pub used: u64,
+    /// `(free, total)` of its file system, when known.
+    pub space: Option<(u64, u64)>,
 }
 
 /// Temporary files older than this are leftovers of a killed writer.
@@ -140,8 +251,8 @@ fn is_cache_dir_name(name: &str) -> bool {
 }
 
 impl DiskCache {
-    /// Default capacity: 4 GiB of inflated DEX files.
-    pub const DEFAULT_CAP: u64 = 4 << 30;
+    /// Capacity of [`DiskCapacity::Auto`] when the free space is unknown.
+    pub const DEFAULT_CAP: u64 = AUTO_DISK_MAX;
 
     /// The default cache directory: `$DROIDASC_CACHE_DIR`, else
     /// `$XDG_CACHE_HOME/droidasc`, else `~/.cache/droidasc`.
@@ -155,8 +266,10 @@ impl DiskCache {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("droidasc"))
     }
 
+    /// A cache in `dir` bounded by [`DiskCapacity::from_env`] (automatic
+    /// unless [`CACHE_MAX_ENV`] is set).
     pub fn open(dir: impl Into<PathBuf>) -> DiskCache {
-        DiskCache { dir: dir.into(), cap_bytes: Self::DEFAULT_CAP }
+        DiskCache { dir: dir.into(), cap: DiskCapacity::from_env() }
     }
 
     /// Open the default directory, if one can be determined.
@@ -164,17 +277,42 @@ impl DiskCache {
         Self::default_dir().map(Self::open)
     }
 
-    pub fn with_capacity(mut self, cap_bytes: u64) -> DiskCache {
-        self.cap_bytes = cap_bytes;
+    /// A fixed capacity of `cap_bytes`.
+    pub fn with_capacity(self, cap_bytes: u64) -> DiskCache {
+        self.with_capacity_mode(DiskCapacity::Fixed(cap_bytes))
+    }
+
+    pub fn with_capacity_mode(mut self, cap: DiskCapacity) -> DiskCache {
+        self.cap = cap;
         self
+    }
+
+    pub fn capacity_mode(&self) -> DiskCapacity {
+        self.cap
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    pub fn capacity(&self) -> u64 {
-        self.cap_bytes
+    /// Bytes the cache may hold when it holds `used`: the fixed capacity, or
+    /// the automatic budget for the file system's current free space.
+    pub fn capacity_for(&self, used: u64) -> u64 {
+        match self.cap {
+            DiskCapacity::Fixed(b) => b,
+            DiskCapacity::Auto => auto_disk_bytes_for(disk_space(&self.dir), used),
+        }
+    }
+
+    /// Capacity, usage and free space right now (walks the cache directory).
+    pub fn budget(&self) -> DiskBudget {
+        let used = self.stats().2;
+        let space = disk_space(&self.dir);
+        let cap_bytes = match self.cap {
+            DiskCapacity::Fixed(b) => b,
+            DiskCapacity::Auto => auto_disk_bytes_for(space, used),
+        };
+        DiskBudget { capacity: self.cap, cap_bytes, used, space }
     }
 
     fn entry_path(&self, key: &ApkKey, entry_name: &str) -> PathBuf {
@@ -206,6 +344,16 @@ impl DiskCache {
         // directory that holds someone else's files.
         if !self.is_cache_dir() {
             return Err(self.not_a_cache_dir());
+        }
+        // One statvfs per entry: with the automatic budget, never write into
+        // the reserve the file system needs (another program may have filled
+        // the disk since the last eviction).
+        if self.cap == DiskCapacity::Auto {
+            if let Some((free, total)) = disk_space(&self.dir) {
+                if free.saturating_sub(bytes.len() as u64) < auto_disk_reserve(total) {
+                    return Err(CacheError::LowDiskSpace { path: self.dir.clone(), bytes: bytes.len() as u64 });
+                }
+            }
         }
         let path = self.entry_path(key, entry_name);
         let parent = path.parent().expect("entry path has a parent");
@@ -350,8 +498,9 @@ impl DiskCache {
         out
     }
 
-    /// Evict least recently used APK directories until under capacity. Does
-    /// nothing in a directory that is not a cache directory (see
+    /// Evict least recently used APK directories until under capacity
+    /// ([`DiskCache::capacity_for`], re-evaluated against the current free
+    /// space). Does nothing in a directory that is not a cache directory (see
     /// [`CACHEDIR_TAG`]).
     pub fn evict(&self) {
         if !self.is_cache_dir() {
@@ -359,12 +508,13 @@ impl DiskCache {
         }
         let mut dirs = self.apk_dirs();
         let mut total: u64 = dirs.iter().map(|d| d.3).sum();
-        if total <= self.cap_bytes {
+        let cap = self.capacity_for(total);
+        if total <= cap {
             return;
         }
         dirs.sort();
         for (_, path, _, size) in dirs {
-            if total <= self.cap_bytes {
+            if total <= cap {
                 break;
             }
             if fs::remove_dir_all(&path).is_ok() {
@@ -425,6 +575,43 @@ impl<T> MemoryCache<T> {
             self.used -= old.size;
         }
         self.used += size;
+        self.evict_over_cap();
+    }
+
+    /// Re-charge `value` (still the entry cached under `entry_name`) at
+    /// `size` bytes, e.g. once per-entry state built after insertion has
+    /// grown it, and evict least recently used entries if that exceeds the
+    /// capacity. Does nothing when the slot holds something else by now.
+    pub fn resize(&mut self, key: &ApkKey, entry_name: &str, value: &Arc<T>, size: usize) {
+        let Some(slot) = self.map.get_mut(key).and_then(|m| m.get_mut(entry_name)) else { return };
+        if !Arc::ptr_eq(&slot.value, value) {
+            return;
+        }
+        let old = std::mem::replace(&mut slot.size, size);
+        self.used = self.used - old + size;
+        self.evict_over_cap();
+    }
+
+    /// Swap the entry cached under `entry_name` for `new` when it is still
+    /// `current`, keeping its size and recency. Returns whether it swapped.
+    pub fn replace(&mut self, key: &ApkKey, entry_name: &str, current: &Arc<T>, new: Arc<T>) -> bool {
+        match self.map.get_mut(key).and_then(|m| m.get_mut(entry_name)) {
+            Some(slot) if Arc::ptr_eq(&slot.value, current) => {
+                slot.value = new;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Size the entry cached under `entry_name` is charged at.
+    pub fn charged_bytes(&self, key: &ApkKey, entry_name: &str) -> Option<usize> {
+        self.map.get(key)?.get(entry_name).map(|s| s.size)
+    }
+
+    /// Evict least recently used entries until under capacity (always
+    /// keeping the last one: a single entry larger than the cap stays usable).
+    fn evict_over_cap(&mut self) {
         while self.used > self.cap_bytes && self.len() > 1 {
             let Some((k, name)) = self.lru() else { break };
             if let Some(per_apk) = self.map.get_mut(&k) {
@@ -450,12 +637,24 @@ impl<T> MemoryCache<T> {
         self.used
     }
 
+    /// Every cached value, in no particular order (recency is not touched).
+    pub fn values(&self) -> impl Iterator<Item = &Arc<T>> {
+        self.map.values().flat_map(|per| per.values().map(|s| &s.value))
+    }
+
     pub fn len(&self) -> usize {
         self.map.values().map(HashMap::len).sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Drop every entry cached for `key` and return the bytes released.
+    pub fn remove_apk(&mut self, key: &ApkKey) -> usize {
+        let freed: usize = self.map.remove(key).map(|per| per.values().map(|s| s.size).sum()).unwrap_or(0);
+        self.used -= freed;
+        freed
     }
 
     pub fn clear(&mut self) {
@@ -467,6 +666,19 @@ impl<T> MemoryCache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_remove_apk_releases_only_that_apk() {
+        let (a, b) = (ApkKey("a-0123456789abcdef".into()), ApkKey("b-0123456789abcdef".into()));
+        let mut mem = MemoryCache::new(1 << 20);
+        mem.insert(&a, "classes.dex", Arc::new(1), 100);
+        mem.insert(&a, "classes2.dex", Arc::new(2), 50);
+        mem.insert(&b, "classes.dex", Arc::new(3), 7);
+        assert_eq!(mem.remove_apk(&a), 150);
+        assert_eq!(mem.remove_apk(&a), 0);
+        assert_eq!((mem.used_bytes(), mem.len()), (7, 1));
+        assert!(mem.get(&b, "classes.dex").is_some());
+    }
 
     #[test]
     fn disk_roundtrip_and_clear() {
@@ -499,6 +711,76 @@ mod tests {
         assert_eq!(cache.stats(), (1, 1, 6));
         assert!(cache.get(&new, "classes.dex", 6).is_some());
         assert!(cache.get(&old, "classes.dex", 6).is_none());
+    }
+
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+
+    #[test]
+    fn auto_disk_budget_follows_free_space() {
+        // Unknown file system (Windows): the old fixed cap.
+        assert_eq!(auto_disk_bytes_for(None, 0), AUTO_DISK_MAX);
+        // Large disk: capped at 4 GiB.
+        assert_eq!(auto_disk_bytes_for(Some((500 * GIB, 1000 * GIB)), 0), AUTO_DISK_MAX);
+        // Small disk: 20 % of free + own bytes.
+        assert_eq!(auto_disk_bytes_for(Some((10 * GIB, 20 * GIB)), 0), 10 * GIB / 100 * 20);
+        assert_eq!(auto_disk_bytes_for(Some((9 * GIB, 20 * GIB)), GIB), 10 * GIB / 100 * 20);
+        // Never eats into the reserve (1 GiB here).
+        assert_eq!(auto_disk_bytes_for(Some((GIB + 100 * MIB, 16 * GIB)), 0), 100 * MIB);
+        assert_eq!(auto_disk_bytes_for(Some((GIB, 16 * GIB)), 0), 0);
+    }
+
+    #[test]
+    fn auto_disk_budget_shrinks_below_usage_on_a_nearly_full_disk() {
+        // 100 GiB disk: 5 GiB reserve. 6 GiB cached, 0.5 GiB free: 20 % of
+        // the 6.5 GiB the cache could hold, well below what it holds now.
+        assert_eq!(auto_disk_bytes_for(Some((GIB / 2, 100 * GIB)), 6 * GIB), (6 * GIB + GIB / 2) / 100 * 20);
+        // 5.5 GiB cached, 0.5 GiB free: the reserve binds (1 GiB < 20 % of
+        // 6 GiB), giving back the 4.5 GiB shortfall.
+        assert_eq!(auto_disk_bytes_for(Some((GIB / 2, 100 * GIB)), 5 * GIB + GIB / 2), GIB);
+        // Nothing left to give: evict everything.
+        assert_eq!(auto_disk_bytes_for(Some((GIB / 2, 100 * GIB)), 3 * GIB), 0);
+        assert_eq!(auto_disk_reserve(100 * GIB), 5 * GIB);
+        assert_eq!(auto_disk_reserve(4 * GIB), GIB);
+    }
+
+    #[test]
+    fn explicit_disk_capacity_wins() {
+        assert_eq!(DiskCapacity::from_mib(Some(" 512 ")), DiskCapacity::Fixed(512 * MIB));
+        assert_eq!(DiskCapacity::from_mib(Some("lots")), DiskCapacity::Auto);
+        assert_eq!(DiskCapacity::from_mib(None), DiskCapacity::Auto);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity_mode(DiskCapacity::Auto).with_capacity(7);
+        assert_eq!(cache.capacity_mode(), DiskCapacity::Fixed(7));
+        assert_eq!(cache.capacity_for(1 << 40), 7);
+        let b = cache.budget();
+        assert_eq!((b.capacity, b.cap_bytes, b.used), (DiskCapacity::Fixed(7), 7, 0));
+        // The file system of a real directory is known on Unix.
+        assert_eq!(b.space.is_some(), cfg!(unix));
+        let auto = DiskCache::open(dir.path()).with_capacity_mode(DiskCapacity::Auto);
+        assert_eq!(auto.budget().cap_bytes, auto_disk_bytes_for(disk_space(dir.path()), 0));
+        // A directory that does not exist yet is measured on its parent.
+        assert_eq!(disk_space(&dir.path().join("a/b")).is_some(), cfg!(unix));
+    }
+
+    #[test]
+    fn eviction_follows_a_lowered_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys: Vec<ApkKey> = (0..3).map(|i| ApkKey(format!("app-000000000000000{i}"))).collect();
+        let cache = DiskCache::open(dir.path()).with_capacity(100);
+        for (i, k) in keys.iter().enumerate() {
+            cache.put(k, "classes.dex", &[0; 10]).unwrap();
+            let t = SystemTime::now() + Duration::from_secs(10 * i as u64);
+            fs::File::open(dir.path().join(k.as_str())).unwrap().set_modified(t).unwrap();
+        }
+        cache.evict();
+        assert_eq!(cache.stats(), (3, 3, 30));
+        // Same directory, smaller budget (as when the free space drops): the
+        // next eviction pass trims to it, oldest first.
+        let cache = cache.with_capacity(15);
+        cache.evict();
+        assert_eq!(cache.stats(), (1, 1, 10));
+        assert!(cache.get(&keys[2], "classes.dex", 10).is_some());
     }
 
     #[test]
@@ -630,6 +912,47 @@ mod tests {
         assert_eq!(m.used_bytes(), 6);
         m.clear();
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn memory_lru_resize_charges_and_evicts() {
+        let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
+        let k = ApkKey("k".into());
+        let a = Arc::new(vec![0; 4]);
+        m.insert(&k, "a", Arc::clone(&a), 4);
+        let b = Arc::new(vec![0; 4]);
+        m.insert(&k, "b", Arc::clone(&b), 4);
+        // Growing b past the cap evicts a (least recently used).
+        m.resize(&k, "b", &b, 7);
+        assert_eq!(m.used_bytes(), 7);
+        assert!(m.get(&k, "a").is_none());
+        assert_eq!(m.charged_bytes(&k, "b"), Some(7));
+        // A stale handle does not re-charge whatever replaced it.
+        let b2 = Arc::new(vec![1; 4]);
+        m.insert(&k, "b", Arc::clone(&b2), 4);
+        m.resize(&k, "b", &b, 9);
+        assert_eq!(m.charged_bytes(&k, "b"), Some(4));
+        // The last entry is kept even when it alone exceeds the cap.
+        m.resize(&k, "b", &b2, 50);
+        assert_eq!((m.len(), m.used_bytes()), (1, 50));
+    }
+
+    #[test]
+    fn memory_lru_replace_keeps_size_and_recency() {
+        let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
+        let k = ApkKey("k".into());
+        let a = Arc::new(vec![0; 4]);
+        m.insert(&k, "a", Arc::clone(&a), 4);
+        m.insert(&k, "b", Arc::new(vec![0; 4]), 4);
+        assert!(m.get(&k, "a").is_some()); // a most recent
+        let a2 = Arc::new(vec![9; 4]);
+        assert!(m.replace(&k, "a", &a, Arc::clone(&a2)));
+        assert!(!m.replace(&k, "a", &a, Arc::new(vec![])), "stale handle");
+        assert!(!m.replace(&k, "missing", &a, Arc::new(vec![])));
+        assert_eq!(m.used_bytes(), 8);
+        m.insert(&k, "c", Arc::new(vec![0; 4]), 4); // evicts b, not the replaced a
+        assert!(Arc::ptr_eq(&m.get(&k, "a").unwrap(), &a2));
+        assert!(m.get(&k, "b").is_none());
     }
 
     #[test]

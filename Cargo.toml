@@ -10,6 +10,7 @@ members = [
     "crates/asc-cache",
     "crates/asc-axml",
     "crates/asc-engine",
+    "crates/asc-mcp",
     "crates/asc-cli",
     "crates/asc-gui",
     "crates/asc-fixture",
@@ -32,6 +33,7 @@ asc-apk = { path = "crates/asc-apk" }
 asc-cache = { path = "crates/asc-cache" }
 asc-axml = { path = "crates/asc-axml" }
 asc-engine = { path = "crates/asc-engine" }
+asc-mcp = { path = "crates/asc-mcp" }
 asc-fixture = { path = "crates/asc-fixture" }
 
 thiserror = "2"
@@ -42,13 +44,15 @@ memchr = "2.7"
 clap = { version = "4.5", features = ["derive"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 tempfile = "3"
+serde_json = "1"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
 egui = "0.33"
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Unwind so `droidasc mcp` can turn a panic in one tool call into an error result.
+panic = "unwind"
 debug = false
 opt-level = 3
 

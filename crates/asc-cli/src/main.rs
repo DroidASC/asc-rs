@@ -1,6 +1,6 @@
 //! `droidasc` command line entry.
 
-use asc_engine::asc_cache::DiskCache;
+use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::{names, CacheConfig, Engine};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand};
@@ -10,21 +10,32 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const EXAMPLES: &str = "examples:
+const EXAMPLES: &str = "common:
+  Class names accept both com.poc.Main and Lcom/poc/Main;.
+  Commands with -o/--output write to stdout when the option is omitted.
+  --threads N controls parallel APK scanning; --debug enables timing output.
+
+examples:
   droidasc app.apk --gui
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16
   droidasc getclass app.apk com.poc.Main --dump-dex Main.dex
+  droidasc disassemble app.apk com.poc.Main --debuginfo
+  droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
   droidasc listclass app.apk -o classes.txt
   droidasc listclass app.apk --prefix com.poc
   droidasc getmanifest app.apk -o AndroidManifest.xml
   droidasc findrefs app.apk string token -o string_refs.txt
+  droidasc findrefs app.apk string 'a.b(c)' --literal
   droidasc findrefs app.apk type com.poc.Main
+  droidasc findrefs app.apk extends android.app.Activity -o subclasses.txt
+  droidasc findrefs app.apk impl android.os.IInterface
   droidasc findrefs app.apk method onCreate --class com.poc.Main
   droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
   droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
+  droidasc mcp --memory-mb 4096
   droidasc cache stats
 
 exit status:
@@ -37,15 +48,20 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
 
-const SUBCOMMANDS: [&str; 6] = ["getclass", "listclass", "getmanifest", "findrefs", "gui", "cache"];
+/// Subcommand names and aliases (`classes` / `manifest` as in rasc).
+const SUBCOMMANDS: [&str; 10] =
+    ["getclass", "disassemble", "listclass", "classes", "getmanifest", "manifest", "findrefs", "gui", "mcp", "cache"];
 
 fn default_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
 }
 
 #[derive(Parser)]
-#[command(name = "droidasc", about = "ASC tooling entry.", after_help = EXAMPLES, version)]
+#[command(name = "droidasc", about = "ASC tooling entry.", after_help = EXAMPLES, version, disable_version_flag = true)]
 struct Cli {
+    /// Print version.
+    #[arg(short = 'V', visible_short_alias = 'v', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
     #[command(flatten)]
     common: Common,
     #[command(subcommand)]
@@ -66,6 +82,15 @@ struct Common {
     /// Cache directory (default: $DROIDASC_CACHE_DIR, $XDG_CACHE_HOME/droidasc or ~/.cache/droidasc).
     #[arg(long, global = true, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
+    /// On-disk cache budget, in MiB (default: $DROIDASC_CACHE_MAX_MB, else
+    /// automatic: 20% of the cache's file system room, at most 4096, never
+    /// below a 1 GiB / 5% free-space reserve).
+    #[arg(long, global = true, value_name = "MIB")]
+    cache_max_mb: Option<u64>,
+    /// In-memory cache budget of `gui` and `mcp`, in MiB (default: a quarter
+    /// of available memory, at most 2048). One-shot commands keep no memory cache.
+    #[arg(long, global = true, value_name = "MIB")]
+    memory_mb: Option<usize>,
 }
 
 impl Common {
@@ -80,9 +105,22 @@ impl Common {
     }
 
     fn disk_cache(&self) -> Option<DiskCache> {
-        match &self.cache_dir {
-            Some(d) => Some(DiskCache::open(d)),
-            None => DiskCache::open_default(),
+        let cache = match &self.cache_dir {
+            Some(d) => DiskCache::open(d),
+            None => DiskCache::open_default()?,
+        };
+        Some(match self.cache_max_mb {
+            Some(mb) => cache.with_capacity(mb.saturating_mul(1 << 20)),
+            None => cache,
+        })
+    }
+
+    /// Cache of the resident hosts (`gui`, `mcp`): the memory budget plus
+    /// the disk cache unless disabled.
+    fn resident_cache(&self) -> CacheConfig {
+        CacheConfig {
+            memory_bytes: self.memory_mb.map_or_else(asc_engine::auto_memory_bytes, |mb| mb.saturating_mul(1 << 20)),
+            disk: if self.no_cache { None } else { self.disk_cache() },
         }
     }
 }
@@ -100,12 +138,35 @@ enum Command {
         /// Write the rebuilt single-class DEX to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
+        /// Render one exact method signature, e.g. run(I)V (no fields).
+        #[arg(long = "method", value_name = "SIGNATURE")]
+        method_signature: Option<String>,
         /// Path to the input APK file.
         apk_path: PathBuf,
         /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
         dalvik_class: String,
     },
+    /// Extract a class, rebuild a small DEX, then disassemble it (getclass without debug directives by default).
+    Disassemble {
+        /// Write disassembly to this file; default is stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Include DEX .line and .param debug directives.
+        #[arg(long)]
+        debuginfo: bool,
+        /// Render one exact method signature, e.g. run(I)V (no fields).
+        #[arg(long = "method", value_name = "SIGNATURE")]
+        method_signature: Option<String>,
+        /// Write the rebuilt single-class DEX to this file.
+        #[arg(long)]
+        dump_dex: Option<PathBuf>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+        /// Class name in dotted or Dalvik form, e.g. com.poc.Main or Lcom/poc/Main;.
+        dalvik_class: String,
+    },
     /// List classes across all DEX entries; use --prefix to filter by package/class prefix.
+    #[command(visible_alias = "classes")]
     Listclass {
         /// Only list classes with this package/class prefix (e.g., com.poc or Lcom/poc).
         #[arg(long)]
@@ -117,6 +178,7 @@ enum Command {
         apk_path: PathBuf,
     },
     /// Decode AndroidManifest.xml from APK and print it as XML.
+    #[command(visible_alias = "manifest")]
     Getmanifest {
         /// Also write the decoded manifest to this file.
         #[arg(short, long)]
@@ -139,6 +201,10 @@ enum Command {
         /// Path to the input APK file.
         apk_path: PathBuf,
     },
+    /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
+    /// opened APKs resident across calls.
+    /// Every opened APK shares one `--memory-mb` budget.
+    Mcp,
     /// Inspect or clear the on-disk cache of inflated DEX files.
     Cache {
         #[command(subcommand)]
@@ -162,6 +228,9 @@ enum Find {
     String {
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Match VALUE as a plain substring instead of a regex.
+        #[arg(long)]
+        literal: bool,
         /// Fuzzy string pattern.
         value: String,
     },
@@ -170,6 +239,20 @@ enum Find {
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Fuzzy type pattern.
+        value: String,
+    },
+    /// Find classes that extend the target class.
+    Extends {
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Target class in dotted or Dalvik form, e.g. android.app.Activity or Lcom/poc/Base;.
+        value: String,
+    },
+    /// Find classes that implement the target interface.
+    Impl {
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Target interface in dotted or Dalvik form, e.g. android.os.IInterface.
         value: String,
     },
     /// Find references to methods.
@@ -306,41 +389,61 @@ impl<W: Write> LineSink<W> {
     }
 }
 
+/// Arguments shared by `getclass` and `disassemble`, which differ (as in
+/// Python) in whether debug directives are on by default and whether `-o`
+/// also prints to stdout.
+struct ClassArgs {
+    output: Option<PathBuf>,
+    /// Print to stdout even with `-o`.
+    tee: bool,
+    debug_info: bool,
+    dump_dex: Option<PathBuf>,
+    method_signature: Option<String>,
+    apk_path: PathBuf,
+    dalvik_class: String,
+}
+
+fn getclass(common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), String> {
+    let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
+    let engine = common.engine(&args.apk_path);
+    let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
+    let src = engine.get_class_method(&descriptor, opts, args.method_signature.as_deref()).map_err(|e| e.to_string())?;
+    if let Some(w) = &src.warning {
+        eprintln!("Warning: {w}");
+    }
+    if let Some(p) = &args.dump_dex {
+        let rebuilt = src.rebuilt.as_ref().ok_or_else(|| format!("cannot write {}: the class was not rebuilt", p.display()))?;
+        std::fs::write(p, &rebuilt.bytes).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+    }
+    if common.debug {
+        eprintln!("[DEBUG] Hit DEX: {}", src.dex_name);
+        eprintln!("[DEBUG] APK Scan Time: {} us", src.scan_us);
+        if let Some(r) = &src.rebuilt {
+            eprintln!(
+                "[DEBUG] Rebuilt DEX: {} bytes, {} strings, {} types, {} protos, {} fields, {} methods ({} with code)",
+                r.stats.size, r.stats.strings, r.stats.types, r.stats.protos, r.stats.fields, r.stats.methods, r.stats.methods_with_code
+            );
+        }
+        eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+        eprintln!("{}", "-".repeat(50));
+    }
+    write_output(args.output.as_ref(), &src.source)?;
+    if args.output.is_some() && !args.tee {
+        return Ok(());
+    }
+    emit(&src.source)
+}
+
 fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
     let common = cli.common.clone();
     match cli.command {
-        Command::Getclass { output, no_debug_info, dump_dex, apk_path, dalvik_class } => {
-            let descriptor = names::format_class_name(&dalvik_class).map_err(|e| e.to_string())?;
-            let engine = common.engine(&apk_path);
-            let opts = asc_engine::SmaliOptions { line_numbers: !no_debug_info, param_names: !no_debug_info };
-            let src = engine.get_class_with(&descriptor, opts).map_err(|e| e.to_string())?;
-            if let Some(w) = &src.warning {
-                eprintln!("Warning: {w}");
-            }
-            if let Some(p) = &dump_dex {
-                let rebuilt = src.rebuilt.as_ref().ok_or_else(|| format!("cannot write {}: the class was not rebuilt", p.display()))?;
-                std::fs::write(p, &rebuilt.bytes).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
-            }
-            if common.debug {
-                eprintln!("[DEBUG] Hit DEX: {}", src.dex_name);
-                eprintln!("[DEBUG] APK Scan Time: {} us", src.scan_us);
-                if let Some(r) = &src.rebuilt {
-                    eprintln!(
-                        "[DEBUG] Rebuilt DEX: {} bytes, {} strings, {} types, {} protos, {} fields, {} methods ({} with code)",
-                        r.stats.size,
-                        r.stats.strings,
-                        r.stats.types,
-                        r.stats.protos,
-                        r.stats.fields,
-                        r.stats.methods,
-                        r.stats.methods_with_code
-                    );
-                }
-                eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
-                eprintln!("{}", "-".repeat(50));
-            }
-            write_output(output.as_ref(), &src.source)?;
-            emit(&src.source)?;
+        Command::Getclass { output, no_debug_info, dump_dex, method_signature, apk_path, dalvik_class } => {
+            let args = ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, apk_path, dalvik_class };
+            getclass(&common, args, t_start)?;
+        }
+        Command::Disassemble { output, debuginfo, method_signature, dump_dex, apk_path, dalvik_class } => {
+            let args = ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, apk_path, dalvik_class };
+            getclass(&common, args, t_start)?;
         }
         Command::Listclass { prefix, output, apk_path } => {
             let engine = common.engine(&apk_path);
@@ -370,8 +473,12 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
         }
         Command::Findrefs { apk_path, find } => {
             let (query, output) = match find {
-                Find::String { output, value } => (Query::String(value), output),
+                Find::String { output, literal: false, value } => (Query::String(value), output),
+                Find::String { output, literal: true, value } => (Query::StringLiteral(value), output),
                 Find::Type { output, value } => (Query::Type(value), output),
+                // The class-def lookups need the precise Dalvik form.
+                Find::Extends { output, value } => (Query::Extends(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
+                Find::Impl { output, value } => (Query::Implements(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
                 Find::Method { output, name, class_name, fuzzy_class, exact } => (
                     Query::Method(
                         names::member_query("method", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
@@ -418,7 +525,11 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             }
         }
         Command::Gui { apk_path } => {
-            launch_gui(apk_path, common.threads, common.debug, !common.no_cache)?;
+            launch_gui(apk_path, common.threads, common.debug, common.resident_cache())?;
+        }
+        Command::Mcp => {
+            let opts = asc_mcp::Options { threads: common.threads, debug: common.debug, cache: common.resident_cache() };
+            asc_mcp::serve(std::io::stdin().lock(), std::io::stdout(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {
             let Some(cache) = common.disk_cache() else { return Err("no cache directory could be determined".into()) };
@@ -426,11 +537,21 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 CacheAction::Path => println!("{}", cache.dir().display()),
                 CacheAction::Stats => {
                     let (apks, files, bytes) = cache.stats();
-                    println!("{}\n{apks} APKs, {files} files, {:.1} MiB", cache.dir().display(), bytes as f64 / (1024.0 * 1024.0));
+                    println!("{}\n{apks} APKs, {files} files, {}", cache.dir().display(), mib(bytes));
+                    let budget = cache.budget();
+                    let source = match budget.capacity {
+                        DiskCapacity::Auto => "auto",
+                        DiskCapacity::Fixed(_) => "explicit",
+                    };
+                    println!("budget: {} ({source}), used {}", mib(budget.cap_bytes), mib(budget.used));
+                    match budget.space {
+                        Some((free, total)) => println!("file system: {} free of {}", mib(free), mib(total)),
+                        None => println!("file system: free space unknown"),
+                    }
                 }
                 CacheAction::Clear => {
                     let bytes = cache.clear().map_err(|e| e.to_string())?;
-                    println!("freed {:.1} MiB", bytes as f64 / (1024.0 * 1024.0));
+                    println!("freed {}", mib(bytes));
                 }
             }
         }
@@ -439,12 +560,16 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
 }
 
 #[cfg(feature = "gui")]
-fn launch_gui(apk_path: PathBuf, threads: usize, debug: bool, cache: bool) -> Result<(), String> {
+fn launch_gui(apk_path: PathBuf, threads: usize, debug: bool, cache: CacheConfig) -> Result<(), String> {
     asc_gui::launch(apk_path, threads, debug, cache).map_err(|e| e.to_string())
 }
 
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+}
+
 #[cfg(not(feature = "gui"))]
-fn launch_gui(_apk_path: PathBuf, _threads: usize, _debug: bool, _cache: bool) -> Result<(), String> {
+fn launch_gui(_apk_path: PathBuf, _threads: usize, _debug: bool, _cache: CacheConfig) -> Result<(), String> {
     Err("this build was compiled without the `gui` feature".into())
 }
 

@@ -84,6 +84,53 @@ fn last_string_is_searchable() {
 }
 
 #[test]
+fn literal_strings_are_plain_substrings() {
+    let data = make_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let fr = FindRefs::new(&dex);
+    let lit = |s: &str| fr.locate(&Query::StringLiteral(s.into())).unwrap();
+    let set = |v: &[u32]| v.iter().copied().collect::<BTreeSet<u32>>();
+    // Strings: Lexample/Test; Ljava/lang/Object; V first second token
+    assert_eq!(lit("e"), set(&[0, 1, 4, 5]));
+    assert_eq!(lit("/"), set(&[0, 1]));
+    assert_eq!(lit("Object;"), set(&[1]));
+    // Regex syntax is literal: `.` is a dot (no string has one), `f|s` a bar.
+    assert!(lit(".").is_empty() && lit("f|s").is_empty() && lit("^t").is_empty());
+    assert_eq!(fr.locate(&Query::String(".".into())).unwrap().len(), 6);
+    assert!(lit("").is_empty());
+    assert!(lit("tokens").is_empty());
+    // Same set as the escaped regex for every substring of every string.
+    let words = ["Lexample/Test;", "Ljava/lang/Object;", "V", "first", "second", "token"];
+    for w in words {
+        for i in 0..w.len() {
+            for j in i + 1..=w.len() {
+                let needle = &w[i..j];
+                assert_eq!(lit(needle), fr.locate(&Query::String(regex::escape(needle))).unwrap(), "{needle}");
+            }
+        }
+    }
+    // End to end: the code scan runs on the located strings like a regex query.
+    let hits = fr.find_ref(&Query::StringLiteral("oke".into())).unwrap();
+    assert_eq!(hits, fr.find_ref(&Query::String("oke".into())).unwrap());
+    assert_eq!(hits.len(), 1);
+}
+
+#[test]
+fn class_relations_resolve_without_a_code_scan() {
+    let data = make_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let fr = FindRefs::new(&dex);
+    let q = CompiledQuery::new(&Query::Extends("Ljava/lang/Object;".into())).unwrap();
+    assert_eq!(fr.class_relation(&q).unwrap(), Some(vec![0]));
+    assert_eq!(fr.locate_compiled(&q).unwrap(), [0].into_iter().collect());
+    assert!(fr.find_ref_compiled(&q).unwrap().is_empty());
+    let q = CompiledQuery::new(&Query::Implements("Ljava/lang/Object;".into())).unwrap();
+    assert_eq!(fr.class_relation(&q).unwrap(), Some(vec![]));
+    let q = CompiledQuery::new(&Query::String("token".into())).unwrap();
+    assert_eq!(fr.class_relation(&q).unwrap(), None);
+}
+
+#[test]
 fn empty_string_table() {
     let mut data = make_dex();
     data[56..64].copy_from_slice(&[0u8; 8]);
@@ -201,6 +248,25 @@ fn search_state_is_reusable() {
     assert!(state.is_warm());
     let again = FindRefs::with_state(&dex, &state).find_ref(&Query::String("token".into())).unwrap();
     assert_eq!(hits, again);
+}
+
+#[test]
+fn search_state_reports_its_table_bytes() {
+    let data = make_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let state = asc_findrefs::SearchState::new();
+    assert_eq!(state.heap_bytes(), 0);
+    let fr = FindRefs::with_state(&dex, &state);
+    fr.find_ref(&Query::String("token".into())).unwrap();
+    // String table plus the instruction bucket table.
+    let strings = fr.string_locator().unwrap().heap_bytes() + fr.insn_locator().unwrap().heap_bytes();
+    assert!(strings > 0);
+    assert_eq!(state.heap_bytes(), strings);
+    // A method query adds the type and method tables on top.
+    fr.find_ref(&Query::Method(MemberQuery { class: None, name: Some("run".into()), exact_name: false })).unwrap();
+    let grown = state.heap_bytes();
+    assert_eq!(grown, strings + fr.type_locator().unwrap().heap_bytes() + fr.method_locator().unwrap().heap_bytes());
+    assert!(grown > strings);
 }
 
 /// Offset of the single code_item in `make_dex()`.
