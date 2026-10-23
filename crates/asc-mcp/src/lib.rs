@@ -11,7 +11,7 @@
 //! they are read; tool calls run concurrently, so a slow query never holds up
 //! a `ping` or a quick lookup, and replies may come back out of order (each
 //! carries its request `id`). The APK a call opens gets its `apk_id` before
-//! the next message is read, and `close_apk` waits for the calls already running.
+//! the next message is read.
 //! A panic inside a tool call becomes an `isError` result. Supported methods:
 //! `initialize`, `notifications/initialized` (and any other notification,
 //! ignored), `notifications/cancelled`, `ping`, `tools/list` and `tools/call`.
@@ -22,9 +22,14 @@
 //! Tool results carry the CLI's text (same line formats as `droidasc`) as
 //! `content`, and the same data as `structuredContent`.
 //!
-//! `findrefs`, `listclass` and `open_apk` also take many APKs at once
+//! `findrefs` and `listclass` also take many APKs at once
 //! (`apks` or `dir`, see [`multi`]): the reply has one section per APK, cut
 //! to a byte budget, with a `cursor` to page through the rest.
+//!
+//! The class graphs and resource tables of the open APKs count against the
+//! memory budget: beyond their share the least recently used APKs close
+//! ([`SharedCache::fit_resident`]). Their `apk_id`s stay valid; the next call
+//! naming one opens the APK again.
 
 pub mod class_text;
 mod lenient;
@@ -46,7 +51,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Instant;
@@ -131,17 +136,10 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
                     }
                 }
                 Message::Other => send(server.handle_line(&line)),
-                Message::Call { name, .. } if name == "close_apk" => {
-                    for h in running.drain(..) {
-                        let _ = h.join();
-                    }
-                    send(server.handle_line(&line));
-                }
-                Message::Call { id, .. } => {
-                    // Open the APK a call names (open_apk, or any tool given a
-                    // new `apk` path) before reading on, so apk_ids follow request
-                    // order and later calls can use them; a failure is reported by
-                    // the call itself.
+                Message::Call { id } => {
+                    // Open the APK a call names by a new `apk` path before
+                    // reading on, so apk_ids follow request order and later
+                    // calls can use them; a failure is reported by the call itself.
                     let _ = server.register(&line);
                     let cancel = Arc::new(AtomicBool::new(false));
                     lock(&inflight).insert(id.clone(), Arc::clone(&cancel));
@@ -152,6 +150,7 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
                         if !cancel.load(Ordering::Relaxed) {
                             send(reply);
                         }
+                        server.trim_sessions();
                     }));
                 }
             }
@@ -166,8 +165,8 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
 
 /// How the reader thread routes a message.
 enum Message {
-    /// A `tools/call` request: its id (as JSON text) and tool name.
-    Call { id: String, name: String },
+    /// A `tools/call` request: its id (as JSON text).
+    Call { id: String },
     /// `notifications/cancelled` for the request with this id.
     Cancel(String),
     /// Anything else, answered inline.
@@ -179,10 +178,7 @@ fn classify(line: &str) -> Message {
     let method = msg.get("method").and_then(Value::as_str);
     let params = msg.get("params");
     match (method, msg.get("id")) {
-        (Some("tools/call"), Some(id)) => match params.and_then(|p| p.get("name")).and_then(Value::as_str) {
-            Some(name) => Message::Call { id: id.to_string(), name: name.to_string() },
-            None => Message::Other,
-        },
+        (Some("tools/call"), Some(id)) => Message::Call { id: id.to_string() },
         (Some("notifications/cancelled"), None) => match params.and_then(|p| p.get("requestId")) {
             Some(id) => Message::Cancel(id.to_string()),
             None => Message::Other,
@@ -224,8 +220,6 @@ struct Tool {
 
 /// Every tool, in `tools/list` order.
 const TOOLS: &[Tool] = &[
-    Tool { name: "open_apk", run: Server::open_apk, definition: defs::open_apk },
-    Tool { name: "close_apk", run: Server::close_apk, definition: defs::close_apk },
     Tool { name: "getclass", run: Server::getclass, definition: defs::getclass },
     Tool { name: "findrefs", run: Server::findrefs, definition: defs::findrefs },
     Tool { name: "callgraph", run: Server::callgraph, definition: defs::callgraph },
@@ -241,11 +235,27 @@ pub struct OpenApk {
     pub id: String,
     pub path: PathBuf,
     pub engine: Engine,
+    /// [`Sessions::tick`] of its last use.
+    used: AtomicU64,
 }
 
+#[derive(Default)]
 struct Sessions {
     apks: Vec<Arc<OpenApk>>,
+    /// APKs closed to keep within the memory budget, by apk_id: a call
+    /// naming one opens it again under the same id.
+    closed: HashMap<String, PathBuf>,
     next_id: usize,
+    tick: u64,
+}
+
+impl Sessions {
+    /// Mark `apk` as just used and hand it out.
+    fn touch(&mut self, apk: &Arc<OpenApk>) -> Arc<OpenApk> {
+        self.tick += 1;
+        apk.used.store(self.tick, Ordering::Relaxed);
+        Arc::clone(apk)
+    }
 }
 
 /// Session state: the opened APKs and the cache they share. Tool calls take
@@ -303,7 +313,7 @@ impl Server {
             debug: opts.debug,
             limits: opts.limits,
             sdk_prefixes: opts.sdk_prefixes.iter().map(|p| multi::normalize_prefix(p)).collect(),
-            sessions: Mutex::new(Sessions { apks: Vec::new(), next_id: 1 }),
+            sessions: Mutex::new(Sessions { next_id: 1, ..Sessions::default() }),
             reports: Mutex::new(Reports::default()),
             spill: opts.spill_dir.map(|d| SpillDir::new(d, opts.spill_bytes)),
             structured: opts.structured,
@@ -353,8 +363,8 @@ impl Server {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "droidasc", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "asc-rs: Android APK code search and smali. Pass `apk` (a path) to any tool, or \
-                        open_apk once and use its apk_id. Usual flow: findrefs with context=\"method\" (finds the code \
+                    "instructions": "asc-rs: Android APK code search and smali. Pass `apk` (a path) to any tool; replies \
+                        name it by apk_id, which later calls may pass instead. Usual flow: findrefs with context=\"method\" (finds the code \
                         and shows it, often no getclass needed) -> getclass with method=\"name\" for more of a class \
                         (a large class comes as an outline first) -> callgraph / hierarchy to follow calls. \
                         manifest_summary gives the attack surface (kind=\"provider\" etc. to narrow); resources reads \
@@ -413,45 +423,51 @@ impl Server {
 
     // ---- APK sessions ------------------------------------------------------
 
-    fn index_of(sessions: &Sessions, args: &Value) -> Result<Option<usize>, ToolError> {
-        if let Some(id) = str_arg(args, "apk_id")? {
-            return match sessions.apks.iter().position(|a| a.id == id) {
-                Some(i) => Ok(Some(i)),
-                None => Err(ToolError(format!("no open APK with apk_id {id:?}"))),
-            };
-        }
-        match str_arg(args, "apk")? {
-            Some(path) => {
-                let path = canonical(path)?;
-                Ok(sessions.apks.iter().position(|a| a.path == path))
-            }
-            None => Err(ToolError("pass `apk_id` (from open_apk) or `apk` (a path)".into())),
-        }
-    }
-
-    /// The APK `args` names, opening it when given by a path not yet open.
+    /// The APK `args` names, opening it when given by a path not yet open
+    /// (or by the apk_id of one closed to keep within the memory budget).
     fn resolve(&self, args: &Value) -> Result<Arc<OpenApk>, ToolError> {
         // Held while opening, so two calls naming a new path get one session.
         let mut sessions = lock(&self.sessions);
-        if let Some(i) = Self::index_of(&sessions, args)? {
-            return Ok(Arc::clone(&sessions.apks[i]));
+        let (id, path) = match str_arg(args, "apk_id")? {
+            Some(id) => {
+                if let Some(apk) = sessions.apks.iter().find(|a| a.id == id).cloned() {
+                    return Ok(sessions.touch(&apk));
+                }
+                match sessions.closed.remove(id) {
+                    Some(path) => (Some(id.to_string()), path),
+                    None => return Err(ToolError(format!("no APK with apk_id {id:?}; pass `apk` (a path)"))),
+                }
+            }
+            None => match str_arg(args, "apk")? {
+                Some(path) => (None, canonical(path)?),
+                None => return Err(ToolError("pass `apk` (a path)".into())),
+            },
+        };
+        if let Some(apk) = sessions.apks.iter().find(|a| a.path == path).cloned() {
+            return Ok(sessions.touch(&apk));
         }
-        // `index_of` only returns `Ok(None)` for an `apk` path.
-        let path = canonical(str_arg(args, "apk")?.unwrap_or_default())?;
-        self.open_locked(&mut sessions, path)
+        let apk = self.open_locked(&mut sessions, path, id)?;
+        // Build the search tables of what the caches already hold, in the
+        // background (queries go first); a cold APK has nothing to build.
+        let warm = Arc::clone(&apk);
+        let _ = thread::Builder::new().name("droidasc-prebuild".into()).spawn(move || {
+            let _ = warm.engine.prebuild();
+        });
+        Ok(apk)
     }
 
     /// The session for `path`, opening it if needed.
     pub fn open_path(&self, path: &Path) -> Result<Arc<OpenApk>, ToolError> {
         let path = canonical(&path.to_string_lossy())?;
         let mut sessions = lock(&self.sessions);
-        if let Some(apk) = sessions.apks.iter().find(|a| a.path == path) {
-            return Ok(Arc::clone(apk));
+        if let Some(apk) = sessions.apks.iter().find(|a| a.path == path).cloned() {
+            return Ok(sessions.touch(&apk));
         }
-        self.open_locked(&mut sessions, path)
+        self.open_locked(&mut sessions, path, None)
     }
 
-    fn open_locked(&self, sessions: &mut Sessions, path: PathBuf) -> Result<Arc<OpenApk>, ToolError> {
+    /// Open `path` as a new session, under `id` or the next free one.
+    fn open_locked(&self, sessions: &mut Sessions, path: PathBuf, id: Option<String>) -> Result<Arc<OpenApk>, ToolError> {
         let engine = Engine::new(&path)
             .with_threads(self.threads)
             .with_debug(self.debug)
@@ -460,104 +476,39 @@ impl Server {
             .with_shared_cache(&self.cache);
         // Fail now on a file that is not a readable APK, not on the first query.
         engine.dex_entries()?;
-        let id = format!("apk{}", sessions.next_id);
-        sessions.next_id += 1;
-        let apk = Arc::new(OpenApk { id, path, engine });
-        sessions.apks.push(Arc::clone(&apk));
-        Ok(apk)
-    }
-
-    fn open_apk(&self, args: &Value, call: &Call) -> ToolResult {
-        if let Some(paths) = multi::targets(args)? {
-            return self.open_apks(args, call, &paths);
-        }
-        let t = Instant::now();
-        let apk = self.resolve(args)?;
-        let warm = bool_arg(args, "warm")?.unwrap_or(true);
-        let dex_entries = apk.engine.dex_entries()?.len();
-        let mut classes = Value::Null;
-        let mut prebuild = false;
-        if warm {
-            classes = json!(warm_classes(&apk)?);
-            // The locator tables too, in the background, so the first query
-            // of each kind skips its builds (queries take priority).
-            if bool_arg(args, "prebuild")?.unwrap_or(true) {
-                let apk = Arc::clone(&apk);
-                prebuild = thread::Builder::new()
-                    .name("droidasc-prebuild".into())
-                    .spawn(move || {
-                        let _ = apk.engine.prebuild();
-                    })
-                    .is_ok();
-            }
-        }
-        let open_ms = t.elapsed().as_secs_f64() * 1e3;
-        let mut text = format!("apk_id: {}\npath: {}\ndex entries: {dex_entries}", apk.id, apk.path.display());
-        if let Some(n) = classes.as_u64() {
-            text.push_str(&format!("\nclasses: {n}"));
-        }
-        let structured = json!({
-            "apk_id": apk.id,
-            "path": apk.path.display().to_string(),
-            "dex_entries": dex_entries,
-            "classes": classes,
-            "prebuild": prebuild,
-            "open_ms": open_ms,
-            "memory_cache_bytes": self.cache.memory_bytes(),
+        let id = id.unwrap_or_else(|| {
+            sessions.next_id += 1;
+            format!("apk{}", sessions.next_id - 1)
         });
-        Ok((text, structured))
+        let apk = Arc::new(OpenApk { id, path, engine, used: AtomicU64::new(0) });
+        sessions.apks.push(Arc::clone(&apk));
+        Ok(sessions.touch(&apk))
     }
 
-    /// `open_apk` over many APKs: register them (an inventory with apk_ids),
-    /// inflating nothing unless `warm` is set.
-    fn open_apks(&self, args: &Value, call: &Call, paths: &[PathBuf]) -> ToolResult {
-        let t = Instant::now();
-        let warm = bool_arg(args, "warm")?.unwrap_or(false);
-        let (sections, _, stats) = self.sweep(
-            paths,
-            call,
-            Some(false),
-            |apk| {
-                let entries = apk.engine.dex_entries().map_err(|e| e.to_string())?;
-                let bytes: u64 = entries.iter().map(|e| e.uncomp_size).sum();
-                Ok(((), vec![(bytes, (entries.len(), bytes))]))
-            },
-            |apk, (), &(dex, bytes)| {
-                let classes = if warm { warm_classes(apk).map(Some).map_err(|e| e.0) } else { Ok(None) };
-                (dex, bytes, classes)
-            },
-            |apk, r| {
-                let (dex, bytes, classes) = r.into_iter().next().expect("one unit");
-                let classes = match classes {
-                    Err(e) => return (0, Some(Section::error(&apk.id, &apk.path, &e))),
-                    Ok(n) => n,
-                };
-                let mut line = format!("{} | {dex} dex | {:.1} MiB | {}", apk.id, bytes as f64 / 1048576.0, apk.path.display());
-                if let Some(n) = classes {
-                    line.push_str(&format!(" | {n} classes"));
-                }
-                let json = json!({"apk_id": apk.id, "path": apk.path.display().to_string(), "dex_entries": dex,
-                    "dex_bytes": bytes, "classes": classes});
-                (1, Some(Section { lines: vec![line], json }))
-            },
-        );
-        let header = format!("# opened {} APKs ({} errors), {:.0} ms", stats.with_hits, stats.errors, t.elapsed().as_secs_f64() * 1e3);
-        let summary = json!({"apks_total": paths.len(), "opened": stats.with_hits, "errors": stats.errors});
-        self.report(Report { tool: "open_apk", header, summary, sections, empty: Vec::new(), max_bytes: max_bytes(args)? })
-    }
-
-    fn close_apk(&self, args: &Value, _: &Call) -> ToolResult {
-        let apk = {
-            let mut sessions = lock(&self.sessions);
-            let Some(i) = Self::index_of(&sessions, args)? else { return Err(ToolError("that APK is not open".into())) };
-            sessions.apks.remove(i)
-        };
-        apk.engine.cancel_prebuild();
-        let released = apk.engine.release_memory_cache();
-        Ok((
-            format!("closed {} (released {} MiB of cached DEX)", apk.id, released >> 20),
-            json!({"apk_id": apk.id, "closed": true, "released_bytes": released}),
-        ))
+    /// Close the least recently used APKs whose class graphs and resource
+    /// tables exceed their share of the memory budget
+    /// ([`SharedCache::fit_resident`]); their apk_ids open them again.
+    pub fn trim_sessions(&self) {
+        // Sized outside the sessions lock: an engine building its class
+        // graph holds the graph's lock until done.
+        let mut open: Vec<_> = lock(&self.sessions).apks.iter().map(|a| (a.used.load(Ordering::Relaxed), Arc::clone(a))).collect();
+        open.sort_unstable_by_key(|(used, _)| std::cmp::Reverse(*used));
+        let engines: Vec<&Engine> = open.iter().map(|(_, a)| &a.engine).collect();
+        let closing = self.cache.fit_resident(&engines);
+        if closing.is_empty() {
+            return;
+        }
+        let mut sessions = lock(&self.sessions);
+        for i in closing {
+            let (used, apk) = &open[i];
+            // Used again since it was sized: it stays.
+            if apk.used.load(Ordering::Relaxed) != *used {
+                continue;
+            }
+            sessions.apks.retain(|a| !Arc::ptr_eq(a, apk));
+            sessions.closed.insert(apk.id.clone(), apk.path.clone());
+            apk.engine.cancel_prebuild();
+        }
     }
 
     // ---- many APKs -----------------------------------------------------------
@@ -1041,18 +992,6 @@ fn follow_up(args: &Value) -> Option<Value> {
     Some(Value::Object(hint))
 }
 
-/// Inflate every DEX into the shared cache (as a side effect of listing its
-/// classes) and return the class count.
-fn warm_classes(apk: &OpenApk) -> Result<usize, ToolError> {
-    let mut n = 0;
-    for entry in apk.engine.scan_classes(None, |_, _| {})? {
-        for dex in entry.result.into_iter().flatten() {
-            n += dex.descriptors.len();
-        }
-    }
-    Ok(n)
-}
-
 /// How a multi-APK findrefs shows one APK.
 struct View {
     per_apk: usize,
@@ -1441,8 +1380,8 @@ fn tool_definitions() -> Value {
 pub mod defs {
     use serde_json::{json, Map, Value};
 
-    /// What every tool but close_apk is: it reads the APK and answers;
-    /// caches are not part of what the tool changes.
+    /// What every tool is: it reads the APK and answers; caches are not
+    /// part of what the tool changes.
     pub fn read_only() -> Value {
         json!({"readOnlyHint": true, "openWorldHint": false})
     }
@@ -1464,10 +1403,19 @@ pub mod defs {
         json!({"type": "object", "properties": props})
     }
 
+    /// [`shape`] of a tool that also takes many APKs: its single-APK fields
+    /// plus the fields every multi-APK reply has (one `apks` item per APK).
+    pub fn shape_many(fields: &[(&str, &str)]) -> Value {
+        // `errors` too, but a rule set's single-APK reply lists them instead.
+        const MANY: [(&str, &str); 5] =
+            [("apks_total", "integer"), ("apks", "array"), ("shown", "array"), ("cursor", "string?"), ("empty", "array")];
+        shape(&[fields, &MANY[..]].concat())
+    }
+
     pub fn apk_props() -> Value {
         json!({
             "apk_id": {"type": "string"},
-            "apk": {"type": "string", "description": "APK path instead of apk_id (opened on first use)."},
+            "apk": {"type": "string", "description": "APK path (opened on first use)."},
         })
     }
 
@@ -1511,28 +1459,6 @@ pub mod defs {
         base
     }
 
-    pub fn open_apk() -> Value {
-        json!({
-            "description": "Open an APK (inflating its DEX unless warm=false) and return its apk_id. With apks / dir: \
-                register each (apk_id, DEX size, path).",
-            "inputSchema": {"type": "object", "properties": merge(json!({
-                "apk": {"type": "string"},
-                "warm": {"type": "boolean", "description": "Default true (false with apks / dir)."},
-                "prebuild": {"type": "boolean", "description": "Build search tables in the background, default true."},
-            }), &[many()])},
-            "outputSchema": shape(&[("apk_id", "string"), ("path", "string"), ("dex_entries", "integer"), ("classes", "integer?")]),
-        })
-    }
-
-    pub fn close_apk() -> Value {
-        json!({
-            "description": "Forget an opened APK.",
-            "inputSchema": {"type": "object", "properties": apk_props()},
-            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
-            "outputSchema": shape(&[("apk_id", "string"), ("closed", "boolean"), ("released_bytes", "integer")]),
-        })
-    }
-
     pub fn getclass() -> Value {
         json!({
             "description": "A class as smali. Over the budget: an outline (fields, method signatures and sizes) unless \
@@ -1572,7 +1498,7 @@ pub mod defs {
                 "group": {"type": "string", "description": "none (default) or package: rows per package."},
                 "package_depth": {"type": "integer", "description": "Default 3."},
             }), crate::rules::defs::findrefs_props(), page_props(super::FINDREFS_LIMIT), many()])},
-            "outputSchema": shape(&[
+            "outputSchema": shape_many(&[
                 ("apk_id", "string"), ("total", "integer"), ("returned", "integer"), ("next_offset", "integer?"),
                 ("results", "array"), ("hints", "array"), ("rules", "array"),
             ]),
@@ -1604,7 +1530,7 @@ pub mod defs {
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "prefix": {"type": "string", "description": "com.a or Lcom/a"},
             }), page_props(super::LISTCLASS_LIMIT), many()])},
-            "outputSchema": shape(&[("apk_id", "string"), ("total", "integer"), ("next_offset", "integer?"), ("classes", "array")]),
+            "outputSchema": shape_many(&[("apk_id", "string"), ("total", "integer"), ("next_offset", "integer?"), ("classes", "array")]),
         })
     }
 
@@ -1622,6 +1548,35 @@ pub mod defs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apks_beyond_their_memory_share_close_and_reopen_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let apk = asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true);
+        let paths: Vec<PathBuf> = (0..2)
+            .map(|i| {
+                let p = dir.path().join(format!("{i}.apk"));
+                std::fs::write(&p, &apk).unwrap();
+                p
+            })
+            .collect();
+        // A one-byte memory cache: room for no class graph but the newest one's.
+        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 1, ..CacheConfig::default() }));
+        let hierarchy = |args: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hierarchy", "arguments": args}});
+            server.handle_line(&line.to_string()).unwrap()["result"]["structuredContent"]["apk_id"].clone()
+        };
+        let open = || lock(&server.sessions).apks.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        for p in &paths {
+            hierarchy(json!({"apk": p, "class": "java.lang.Object"}));
+        }
+        server.trim_sessions();
+        assert_eq!(open(), ["apk2"]);
+        assert!(server.cache.memory_reserved() > 0, "the class graph that stays is reserved");
+        assert_eq!(hierarchy(json!({"apk_id": "apk1", "class": "java.lang.Object"})), "apk1", "reopened under its id");
+        server.trim_sessions();
+        assert_eq!(open(), ["apk1"]);
+    }
 
     #[test]
     fn a_panicking_tool_becomes_a_tool_error() {
@@ -1648,7 +1603,7 @@ mod tests {
     #[test]
     fn messages_are_routed() {
         let call = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"findrefs"}}"#;
-        assert!(matches!(classify(call), Message::Call { id, name } if id == "7" && name == "findrefs"));
+        assert!(matches!(classify(call), Message::Call { id } if id == "7"));
         let cancel = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"a"}}"#;
         assert!(matches!(classify(cancel), Message::Cancel(id) if id == "\"a\""));
         assert!(matches!(classify(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#), Message::Other));

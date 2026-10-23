@@ -66,14 +66,14 @@ fn full_session() {
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}),
         json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
-        call(3, "open_apk", json!({"apk": path})),
+        call(3, "listclass", json!({"apk": path})),
         call(4, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token"})),
         call(5, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token", "limit": 3, "offset": 1})),
         call(6, "findrefs", json!({"apk_id": "apk1", "kind": "method", "name": "first", "class": "example.Test", "exact": true})),
         call(7, "getclass", json!({"apk_id": "apk1", "class": "example.Test"})),
         call(8, "listclass", json!({"apk_id": "apk1", "prefix": "example"})),
-        call(9, "open_apk", json!({"apk": path})),
-        call(10, "close_apk", json!({"apk_id": "apk1"})),
+        call(9, "listclass", json!({"apk": path})),
+        call(10, "listclass", json!({"apk_id": "apk1"})),
         json!({"jsonrpc": "2.0", "id": 11, "method": "ping"}),
     ]);
     // The notification gets no reply.
@@ -83,29 +83,9 @@ fn full_session() {
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "droidasc");
 
     let tools: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(
-        tools,
-        [
-            "open_apk",
-            "close_apk",
-            "getclass",
-            "findrefs",
-            "callgraph",
-            "hierarchy",
-            "listclass",
-            "getmanifest",
-            "manifest_summary",
-            "resources"
-        ]
-    );
+    assert_eq!(tools, ["getclass", "findrefs", "callgraph", "hierarchy", "listclass", "getmanifest", "manifest_summary", "resources"]);
 
-    let open = ok(&replies[2]);
-    assert_eq!(open["apk_id"], "apk1");
-    assert_eq!(open["dex_entries"], 2);
-    assert_eq!(open["classes"], 2);
-    // Its tables are being built in the background; close_apk stops that.
-    assert_eq!(open["prebuild"], true);
-    assert!(open["memory_cache_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(ok(&replies[2])["apk_id"], "apk1");
 
     // CLI line format, stable order across entries, footer with the total.
     let all = ok(&replies[3]);
@@ -139,11 +119,9 @@ fn full_session() {
     assert_eq!(classes["total"], 2);
     assert_eq!(text(&replies[7]), "Lexample/Test;\nLexample/Test;\n# 2 classes\n");
 
-    // Same path → same session.
+    // Same path → same session, also by its apk_id.
     assert_eq!(ok(&replies[8])["apk_id"], "apk1");
-    let closed = ok(&replies[9]);
-    assert_eq!(closed["closed"], true);
-    assert!(closed["released_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(ok(&replies[9])["apk_id"], "apk1");
     assert_eq!(replies[10]["result"], json!({}));
 }
 
@@ -172,8 +150,8 @@ fn errors_keep_the_session_alive() {
         call(2, "findrefs", json!({"apk": path, "kind": "string", "value": "("})),
         call(3, "findrefs", json!({"apk": path, "kind": "bogus"})),
         call(4, "getclass", json!({"apk_id": "apk99", "class": "a.B"})),
-        call(5, "open_apk", json!({"apk": "/nonexistent/x.apk"})),
-        call(6, "open_apk", json!({"apk": not_apk.path().to_str().unwrap()})),
+        call(5, "listclass", json!({"apk": "/nonexistent/x.apk"})),
+        call(6, "listclass", json!({"apk": not_apk.path().to_str().unwrap()})),
         call(7, "listclass", json!({"apk": path, "limit": 0})),
         call(8, "no_such_tool", json!({})),
         json!({"jsonrpc": "2.0", "id": 9, "method": "resources/list"}),
@@ -255,10 +233,10 @@ fn findrefs_context_and_callgraph() {
 }
 
 #[test]
-fn concurrent_calls_all_answer_and_close_waits_for_running_ones() {
+fn concurrent_calls_all_answer() {
     let apk = temp_apk();
     let path = apk.path().to_str().unwrap();
-    let mut msgs = vec![call(1, "open_apk", json!({"apk": path}))];
+    let mut msgs = vec![call(1, "listclass", json!({"apk": path}))];
     for id in 2..40 {
         msgs.push(if id % 3 == 0 {
             json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
@@ -266,22 +244,17 @@ fn concurrent_calls_all_answer_and_close_waits_for_running_ones() {
             call(id, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token"}))
         });
     }
-    msgs.push(call(40, "close_apk", json!({"apk_id": "apk1"})));
-    msgs.push(call(41, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token"})));
     let replies = session(&msgs);
     let ids: Vec<u64> = replies.iter().map(|r| r["id"].as_u64().unwrap()).collect();
-    assert_eq!(ids, (1..=41).collect::<Vec<_>>());
+    assert_eq!(ids, (1..40).collect::<Vec<_>>());
     let first = ok(&replies[1]).clone();
-    for r in &replies[1..39] {
+    for r in &replies[1..] {
         if r["id"].as_u64().unwrap() % 3 == 0 {
             assert_eq!(r["result"], json!({}));
         } else {
-            // Every call issued before close_apk ran against the open APK.
             assert_eq!(ok(r)["results"], first["results"]);
         }
     }
-    assert_eq!(ok(&replies[39])["closed"], true);
-    assert_eq!(replies[40]["result"]["isError"], true);
 }
 
 /// A directory of APKs: two with hits, one without, one bomb, one not a zip,
@@ -416,7 +389,7 @@ fn more_hints_are_complete_follow_up_calls() {
 }
 
 #[test]
-fn listclass_and_open_apk_over_many_apks() {
+fn listclass_over_many_apks() {
     let dir = apk_dir();
     let d = dir.path().to_str().unwrap();
     let b = dir.path().join("b.apk");
@@ -424,26 +397,21 @@ fn listclass_and_open_apk_over_many_apks() {
     // reuses them waits for the reply first.
     let server = asc_mcp::Server::new(opts());
     let replies: Vec<Value> = [
-        call(1, "open_apk", json!({"dir": d})),
-        call(2, "listclass", json!({"dir": d, "prefix": "other"})),
-        call(3, "listclass", json!({"apks": [b.to_str().unwrap()]})),
-        call(4, "open_apk", json!({"apks": [], "dir": d})),
+        call(1, "listclass", json!({"dir": d, "prefix": "other"})),
+        call(2, "listclass", json!({"apks": [b.to_str().unwrap()]})),
+        call(3, "listclass", json!({"apks": [], "dir": d})),
     ]
     .iter()
     .map(|m| server.handle_line(&m.to_string()).unwrap())
     .collect();
-    let open = ok(&replies[0]);
-    assert_eq!((open["opened"].as_u64(), open["errors"].as_u64()), (Some(4), Some(1)));
-    let body = text(&replies[0]);
-    assert!(body.lines().any(|l| l.starts_with("apk1 | 2 dex | ") && l.ends_with("a.apk")), "{body}");
-    let classes = ok(&replies[1]);
+    let classes = ok(&replies[0]);
     assert_eq!(classes["apks_with_hits"], 1);
-    assert!(text(&replies[1]).contains("apk2 | 1 classes | ") && text(&replies[1]).contains("apk2 | Lother/Only;\n"));
-    // The bomb cannot be listed either.
+    assert!(text(&replies[0]).contains("apk2 | 1 classes | ") && text(&replies[0]).contains("apk2 | Lother/Only;\n"));
+    // The bomb and the file that is not a zip cannot be listed.
     assert_eq!(classes["errors"], 2);
     // Same path, same session as the directory sweep.
-    assert_eq!(ok(&replies[2])["apks"][0]["apk_id"], "apk2");
-    assert!(text(&replies[3]).contains("not both"));
+    assert_eq!(ok(&replies[1])["apks"][0]["apk_id"], "apk2");
+    assert!(text(&replies[2]).contains("not both"));
 }
 
 #[test]
@@ -1045,10 +1013,9 @@ fn tool_definitions_stay_small_and_take_the_output_options() {
         assert!(p.as_object().unwrap().values().all(|v| v.get("enum").is_none()), "{}", t["name"]);
         assert_eq!(t["outputSchema"]["type"], "object", "{}", t["name"]);
         assert_eq!(t["annotations"]["openWorldHint"], false, "{}", t["name"]);
-        let read_only = t["name"] != "close_apk";
-        assert_eq!(t["annotations"]["readOnlyHint"], read_only, "{}", t["name"]);
+        assert_eq!(t["annotations"]["readOnlyHint"], true, "{}", t["name"]);
     }
-    assert!(tools[3]["inputSchema"]["properties"]["kind"]["description"].as_str().unwrap().contains("implements"));
+    assert!(tools[1]["inputSchema"]["properties"]["kind"]["description"].as_str().unwrap().contains("implements"));
 }
 
 /// Whether `v` is of JSON Schema type `ty` (a name or a list of names).
@@ -1087,7 +1054,10 @@ fn output_schemas_describe_the_structured_content() {
         ("hierarchy", json!({"apk": a, "class": "java.lang.Object"})),
         ("listclass", json!({"apk": a})),
         ("getmanifest", json!({"apk": m})),
-        ("open_apk", json!({"apk": a})),
+        ("findrefs", json!({"apks": [a, m], "kind": "string", "value": "llo"})),
+        ("listclass", json!({"apks": [a, m]})),
+        ("manifest_summary", json!({"apks": [m]})),
+        ("resources", json!({"apks": [m], "search": "app"})),
     ];
     let mut msgs = vec![json!({"jsonrpc": "2.0", "id": 0, "method": "tools/list"})];
     msgs.extend(calls.iter().enumerate().map(|(i, (tool, args))| call(i as u64 + 1, tool, args.clone())));
@@ -1105,8 +1075,7 @@ fn output_schemas_describe_the_structured_content() {
         }
     }
     // Every field the schemas of these tools promise shows up in some reply.
-    for tool in ["findrefs", "getclass", "manifest_summary", "resources", "callgraph", "hierarchy", "listclass", "getmanifest", "open_apk"]
-    {
+    for tool in ["findrefs", "getclass", "manifest_summary", "resources", "callgraph", "hierarchy", "listclass", "getmanifest"] {
         let missing: Vec<String> = schema(tool).keys().filter(|k| !seen[tool].contains(*k)).cloned().collect();
         assert!(missing.is_empty(), "{tool}: {missing:?}");
     }

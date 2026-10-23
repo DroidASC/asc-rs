@@ -108,8 +108,9 @@ Caches are filled by queries themselves, so the "no preprocessing" property hold
 * **Memory LRU.** Holds inflated entries and their `SearchState` tables. Heap bytes count in
   full, file-backed mappings at 1/8 (shared, reclaimable page cache). Once written to L1,
   an entry's heap copy is swapped for a mapping.
-* **Background prebuild.** After `open_apk` with `warm`, idle low-priority threads map or
-  build the locator tables of cached entries, pausing whenever a query runs.
+* **Background prebuild.** When the MCP session opens an APK, idle low-priority threads map
+  or build the locator tables of the entries the caches already hold, pausing whenever a
+  query runs.
 
 ## Several processes
 
@@ -138,11 +139,15 @@ output is byte-identical with or without it (`crates/asc-cli/tests/daemon.rs`).
 * A missing daemon is spawned on demand (wait `DROIDASC_DAEMON_WAIT_MS`, default 300 ms)
   and exits after `DROIDASC_DAEMON_IDLE` seconds idle (default 900).
 * A client hang-up cancels the request.
-* Open engines' class graphs and resource tables count against the memory budget.
+* Open engines' class graphs and resource tables count against the memory budget
+  (`SharedCache::fit_resident`, shared with the MCP session): beyond half of it the least
+  recently used APKs close.
 * `DROIDASC_DAEMON=off` disables it.
 
 **MCP session.**
-* One `Engine` per opened APK, all on one shared cache.
+* One `Engine` per opened APK, all on one shared cache. An APK opens when a call first names
+  its path; replies name it by `apk_id`. Class graphs and resource tables count against the
+  memory budget as in the daemon; an APK closed for it keeps its `apk_id` and reopens on use.
 * Each tool call runs on its own thread, so a slow query does not block the next message.
   Panics become `isError` results, and `notifications/cancelled` stops the work.
 * Multi-APK tools (`apks` / `dir`) plan every APK into weighted units on one worker pool,

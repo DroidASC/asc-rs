@@ -8,7 +8,7 @@ translated to the matching MCP tool call, so both tools do the same lookups.
 
 Measured like dexsql_replay.py / whole_suite.py:
   * whole session: a new `droidasc mcp` process per trial: initialize,
-    open_apk (inflates every DEX), every goal once, close; median of TRIALS;
+    listclass (opens the APK and inflates every DEX), every goal once, close; median of TRIALS;
   * hot per goal: one session, goals shuffled with seed 1937, TRIALS each,
     median per goal, geometric mean over goals;
   * peak RSS (VmHWM) of the server process at the end of a session.
@@ -117,7 +117,7 @@ def session_trial() -> dict:
     client = McpClient()
     init_ms = (time.perf_counter() - start) * 1000
     t = time.perf_counter()
-    opened = client.request("tools/call", {"name": "open_apk", "arguments": {"apk": APK}})["structuredContent"]
+    opened = client.request("tools/call", {"name": "listclass", "arguments": {"apk": APK, "limit": 1}})["structuredContent"]
     open_ms = (time.perf_counter() - t) * 1000
     t = time.perf_counter()
     for steps in GOALS.values():
@@ -131,7 +131,7 @@ def session_trial() -> dict:
 
 def main() -> None:
     client = McpClient()
-    apk_id = client.request("tools/call", {"name": "open_apk", "arguments": {"apk": APK}})["structuredContent"]["apk_id"]
+    apk_id = client.request("tools/call", {"name": "listclass", "arguments": {"apk": APK, "limit": 1}})["structuredContent"]["apk_id"]
     validation = {}
     for name, steps in GOALS.items():
         out = run_goal(client, apk_id, steps)

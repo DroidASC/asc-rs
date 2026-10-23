@@ -15,7 +15,6 @@ def rpc(m):
     return json.loads(p.stdout.readline()) if "id" in m else None
 rpc({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "r", "version": "1"}}})
 rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
-rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_apk", "arguments": {"apk": APK, "warm": False}}})
 def fix(v):
     if isinstance(v, dict): return {k: (APK if k == "apk" else fix(x)) for k, x in v.items()}
     if isinstance(v, list): return [fix(x) for x in v]

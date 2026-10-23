@@ -106,3 +106,29 @@ fn rule_sets_skip_an_entry_only_when_no_rule_can_match() {
     assert_eq!(run(&["string:absent", "type:Lmissing/Type;"]), (vec![0, 0], 1));
     assert_eq!(run(&["string:absent", "string:tok"]), (vec![0, 2], 0));
 }
+
+#[test]
+fn signatures_and_their_zero_result_hints_read_the_prefix() {
+    let dex = make_padded_dex(0, PAD);
+    let (deflated, stored) = (temp_apk(&dex, true), temp_apk(&dex, false));
+    let (probed, plain) = (Engine::new(deflated.path()).with_threads(1), Engine::new(stored.path()).with_threads(1));
+    // `first()V` is defined, called by no code; `first(I)V` does not exist.
+    let rules = [
+        ("method:Lexample/Test;->first()V", false, "no code calls it"),
+        ("method:Lexample/Test;->first(I)V", true, "has no overload (I)V"),
+        ("method:example.Test.first(int)", true, "has no overload (I)"),
+    ];
+    for (rule, ruled_out, hint) in rules {
+        let q = names::parse_condition(rule).unwrap();
+        let (rows, skipped) = search(&probed, &q);
+        assert_eq!(rows, search(&plain, &q).0, "{rule}");
+        assert_eq!(skipped, u64::from(ruled_out), "{rule}");
+        if rows.is_empty() {
+            let inflates = probed.cache_stats().inflates;
+            let hints = probed.no_results_hints(&q, 1);
+            assert_eq!(hints, plain.no_results_hints(&q, 1), "{rule}");
+            assert!(hints.iter().any(|h| h.contains(hint)), "{hints:?}");
+            assert_eq!(probed.cache_stats().inflates, inflates, "the hint reads the prefix, not the whole entry");
+        }
+    }
+}

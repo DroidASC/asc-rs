@@ -26,6 +26,7 @@ pub mod hints;
 mod manifest;
 pub mod names;
 mod prebuild;
+mod resident;
 mod resources;
 mod rules;
 mod skip;
