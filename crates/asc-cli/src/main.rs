@@ -446,7 +446,7 @@ enum Find {
     ///
     /// Conditions are KIND:VALUE: string:REGEX, literal:TEXT, type:PATTERN,
     /// method:[CLASS->]NAME, field:[CLASS->]NAME (CLASS exact, or `~CLASS`
-    /// fuzzy; NAME a regex / substring, or `=NAME` exact). `matched=(...)`
+    /// fuzzy; NAME a regex / substring, or `=NAME` exact). The last column
     /// lists what each condition matched, in order.
     All {
         #[arg(short, long)]

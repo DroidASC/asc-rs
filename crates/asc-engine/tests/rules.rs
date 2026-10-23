@@ -131,12 +131,12 @@ fn compound_queries_intersect_per_method() {
     let apk = temp_apk();
     for engine in engines(apk.path()) {
         let both = Query::All { all: vec![cond("string:tok"), cond("method:La/Base;->run")], none: vec![] };
-        assert_eq!(lines(&engine, &both), ["classes.dex | La/Caller;->go | matched=(token; La/Base;->run)"]);
+        assert_eq!(lines(&engine, &both), ["classes.dex | La/Caller;->go()V | \"token\", La/Base;->run()V"]);
         // The order of the parts is the order of `matched`.
         let swapped = Query::All { all: vec![cond("method:La/Base;->=run"), cond("literal:token")], none: vec![] };
-        assert_eq!(lines(&engine, &swapped), ["classes.dex | La/Caller;->go | matched=(La/Base;->run; token)"]);
+        assert_eq!(lines(&engine, &swapped), ["classes.dex | La/Caller;->go()V | La/Base;->run()V, \"token\""]);
         let without = Query::All { all: vec![cond("string:token")], none: vec![cond("method:~Base->run")] };
-        assert_eq!(lines(&engine, &without), ["classes.dex | La/Caller;->only | matched=(token)"]);
+        assert_eq!(lines(&engine, &without), ["classes.dex | La/Caller;->only()V | \"token\""]);
         let nothing = Query::All { all: vec![cond("string:token"), cond("type:Lnowhere;")], none: vec![] };
         assert!(lines(&engine, &nothing).is_empty());
     }
@@ -183,7 +183,7 @@ fn a_rule_set_answers_like_one_query_per_rule() {
             assert_eq!(got[i], lines(&engine, rule), "rule {i}");
         }
         assert_eq!(got[1].len(), 2, "{:?}", got[1]);
-        assert_eq!(got[3], ["classes.dex | La/Leaf; extends La/Sub;"]);
+        assert_eq!(got[3], ["classes.dex | La/Leaf; | extends La/Sub;"]);
         assert_eq!(summary.total_results, got.iter().map(Vec::len).sum::<usize>());
     }
 }

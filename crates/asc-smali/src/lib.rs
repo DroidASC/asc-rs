@@ -16,7 +16,7 @@ use asc_dex::{access, ClassDef, Dex, NO_INDEX};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-pub use format::{escape_string, method_signature, proto_descriptor};
+pub use format::{escape_string, field_signature, method_signature, proto_descriptor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SmaliError {

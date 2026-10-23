@@ -1,4 +1,4 @@
-use asc_engine::{names, Engine};
+use asc_engine::{names, Engine, Matched};
 use asc_findrefs::Query;
 use asc_fixture::{make_apk, make_dex};
 use std::io::Write;
@@ -38,7 +38,7 @@ fn findrefs_and_getclass_on_stored_and_deflated_apk() {
         assert_eq!(summary.entries, 2);
         assert_eq!(lines.len(), 4, "{lines:?}");
         lines.sort();
-        assert_eq!(lines[0], "classes.dex | Lexample/Test;->first | matched=(token)");
+        assert_eq!(lines[0], "classes.dex | Lexample/Test;->first()V | \"token\"");
         let src = engine.get_class(&names::format_class_name("example.Test").unwrap()).unwrap();
         assert!(src.source.contains(".class public Lexample/Test;"));
         assert!(src.source.contains("const-string v0, \"token\""));
@@ -65,8 +65,8 @@ fn class_relations_and_literals_stream_like_reference_queries() {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].relation, Some(ClassRelation::Implements));
         assert_eq!(rows[0].method, "Lexample/Rich;");
-        assert_eq!(rows[0].matched, ["Lexample/Iface;"]);
-        assert_eq!(rows[0].line(), "classes.dex | Lexample/Rich; implements Lexample/Iface;");
+        assert_eq!(rows[0].matched, [Matched::Symbol("Lexample/Iface;".into())]);
+        assert_eq!(rows[0].line(), "classes.dex | Lexample/Rich; | implements Lexample/Iface;");
         let rows = run(&Query::Extends("Ljava/lang/Object;".into()));
         assert_eq!(rows.len(), 5);
         assert!(rows.iter().all(|r| r.relation == Some(ClassRelation::Extends) && r.line().ends_with(" extends Ljava/lang/Object;")));
@@ -77,7 +77,7 @@ fn class_relations_and_literals_stream_like_reference_queries() {
     }
     // The one-DEX helper takes the same path.
     let lines = asc_engine::find_refs_lines("classes.dex", &dex, &Query::Implements("Lexample/Iface;".into()), true).unwrap();
-    assert_eq!(lines, ["classes.dex | Lexample/Rich; implements Lexample/Iface;"]);
+    assert_eq!(lines, ["classes.dex | Lexample/Rich; | implements Lexample/Iface;"]);
 }
 
 #[test]

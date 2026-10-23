@@ -28,6 +28,7 @@ mod prebuild;
 mod resources;
 mod rules;
 mod sweep;
+pub mod text;
 mod tiers;
 
 use asc_apk::{Apk, Entry, Limits};
@@ -115,16 +116,18 @@ pub struct ClassSource {
 /// One aggregated reference result: a method and what it references.
 ///
 /// For a class relation query (`Extends` / `Implements`) the row is a class
-/// instead: `method_idx` is its type index, `method` its descriptor, `matched`
-/// the target descriptor and `relation` is set.
+/// instead: `method_idx` is its type index, `method` and `signature` its
+/// descriptor, `matched` the target descriptor and `relation` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefResult {
     pub dex_name: String,
     pub method_idx: u32,
     /// `Lcls;->name`
     pub method: String,
-    /// Display names of the matched constants (strings, descriptors, members).
-    pub matched: Vec<String>,
+    /// `Lcls;->name(params)ret`
+    pub signature: String,
+    /// The matched constants (strings, descriptors, members).
+    pub matched: Vec<Matched>,
     /// Set for the rows of a class relation query.
     pub relation: Option<ClassRelation>,
     /// The referencing instructions, in offset order (none for class relations).
@@ -172,13 +175,43 @@ impl Default for FindOptions {
     }
 }
 
+/// A constant a [`RefResult`] matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Matched {
+    /// The value of a string constant.
+    String(String),
+    /// A type descriptor, `Lcls;->name(params)ret` or `Lcls;->name:type`.
+    Symbol(String),
+}
+
+impl Matched {
+    /// The string value or the symbol, unquoted.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Matched::String(s) | Matched::Symbol(s) => s,
+        }
+    }
+}
+
+/// Strings are quoted and escaped (one line, readable as JSON); symbols are
+/// written as they are, since descriptors never hold `, ` or a newline.
+impl std::fmt::Display for Matched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Matched::String(s) => f.write_str(&text::quoted(s)),
+            Matched::Symbol(s) => f.write_str(s),
+        }
+    }
+}
+
 impl RefResult {
-    /// The Python CLI line format: `dex | Lcls;->m | matched=(a; b)`, or
-    /// `dex | Lsub; extends Lbase;` for a class relation.
+    /// `dex | Lcls;->m(params)ret | "a", Lx;->f:I`, or `dex | Lsub; | extends
+    /// Lbase;` for a class relation: three `|` columns, one line.
     pub fn line(&self) -> String {
+        let matched = self.matched.iter().map(Matched::to_string).collect::<Vec<_>>().join(", ");
         match self.relation {
-            Some(rel) => format!("{} | {} {} {}", self.dex_name, self.method, rel.verb(), self.matched.join("; ")),
-            None => format!("{} | {} | matched=({})", self.dex_name, self.method, self.matched.join("; ")),
+            Some(rel) => format!("{} | {} | {} {matched}", self.dex_name, self.signature, rel.verb()),
+            None => format!("{} | {} | {matched}", self.dex_name, self.signature),
         }
     }
 
@@ -1749,13 +1782,29 @@ fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEnt
     }
 }
 
-fn matched_name(dex: &Dex<'_>, kind: RefKind, idx: u32) -> Result<String> {
+fn matched_name(dex: &Dex<'_>, kind: RefKind, idx: u32) -> Result<Matched> {
     Ok(match kind {
-        RefKind::String => dex.string(idx)?,
-        RefKind::Type => dex.type_descriptor(idx)?,
-        RefKind::Method => dex.method_display(idx)?,
-        RefKind::Field => dex.field_display(idx)?,
+        RefKind::String => Matched::String(dex.string(idx)?),
+        RefKind::Type => Matched::Symbol(dex.type_descriptor(idx)?),
+        RefKind::Method => Matched::Symbol(asc_smali::method_signature(dex, idx)?),
+        RefKind::Field => Matched::Symbol(asc_smali::field_signature(dex, idx)?),
     })
+}
+
+impl RefResult {
+    /// The row of method `m` of `dex`, with no context yet.
+    fn method_row(dex: &Dex<'_>, m: u32, matched: Vec<Matched>, sites: Vec<RefSite>) -> Result<RefResult> {
+        Ok(RefResult {
+            dex_name: dex.name().to_string(),
+            method_idx: m,
+            method: dex.method_display(m)?,
+            signature: asc_smali::method_signature(dex, m)?,
+            matched,
+            relation: None,
+            sites,
+            context: None,
+        })
+    }
 }
 
 /// Run a reference search over one DEX buffer and return structured results.
@@ -1796,11 +1845,13 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOpt
     classes
         .into_iter()
         .map(|c| {
+            let class = dex.type_descriptor(c)?;
             Ok(RefResult {
                 dex_name: dex_name.clone(),
                 method_idx: c,
-                method: dex.type_descriptor(c)?,
-                matched: vec![target.to_string()],
+                method: class.clone(),
+                signature: class,
+                matched: vec![Matched::Symbol(target.to_string())],
                 relation: query.relation(),
                 sites: Vec::new(),
                 context: None,
@@ -1811,22 +1862,14 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOpt
 
 /// Turn raw hits into display results (grouped per method when `aggregate`).
 pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: bool) -> Result<Vec<RefResult>> {
-    let dex_name = dex.name().to_string();
     if !aggregate {
         let mut out = Vec::new();
         for hit in hits {
             let Some(methods) = &hit.methods else { continue };
             let matched = matched_name(dex, kind, hit.matched_idx)?;
             for &m in methods.ids() {
-                out.push(RefResult {
-                    dex_name: dex_name.clone(),
-                    method_idx: m,
-                    method: dex.method_display(m)?,
-                    matched: vec![matched.clone()],
-                    relation: None,
-                    sites: vec![RefSite { offset: hit.offset, matched: 0, pc: None, line: None }],
-                    context: None,
-                });
+                let site = RefSite { offset: hit.offset, matched: 0, pc: None, line: None };
+                out.push(RefResult::method_row(dex, m, vec![matched.clone()], vec![site])?);
             }
         }
         return Ok(out);
@@ -1850,15 +1893,7 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
             .into_iter()
             .map(|(offset, idx)| RefSite { offset, matched: idxs.binary_search(&idx).unwrap_or(0), pc: None, line: None })
             .collect();
-        out.push(RefResult {
-            dex_name: dex_name.clone(),
-            method_idx: m,
-            method: dex.method_display(m)?,
-            matched,
-            relation: None,
-            sites,
-            context: None,
-        });
+        out.push(RefResult::method_row(dex, m, matched, sites)?);
     }
     Ok(out)
 }

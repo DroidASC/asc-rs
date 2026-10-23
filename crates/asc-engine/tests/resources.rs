@@ -38,14 +38,14 @@ fn summary_lists_the_attack_surface() {
     has("activity com.demo.Implicit exported=true (intent-filter)");
     has("service com.demo.Sync exported=false (default) permission=com.demo.SECRET");
     has("provider androidx.core.content.FileProvider exported=false (explicit) authorities=com.demo.files grantUriPermissions=true");
-    has("provider-path com.demo.files root-path name=root path=");
+    has("provider-path com.demo.files root-path name=root path=\"\"");
     has("receiver com.demo.Boot exported=true (explicit)");
     has("deeplink com.demo.Main https://demo.com/open*");
     has("deeplink com.demo.Implicit demo://x/open*");
     has("nsc base-config cleartextTrafficPermitted=false trust-anchors=");
     let json = s.json();
     assert_eq!(json["components"][1]["exported_reason"], "intent-filter");
-    assert_eq!(json["components"][3]["provider_paths"][0], "root-path name=root path=");
+    assert_eq!(json["components"][3]["provider_paths"][0], "root-path name=root path=\"\"");
     assert_eq!(json["components"][0]["deep_links"][0], "https://demo.com/open*");
     assert_eq!(json["application"]["cleartext_source"], "networkSecurityConfig");
 }
@@ -65,7 +65,7 @@ fn resources_query_resolve_search_and_xml() {
         let apk = audit_apk(30, stored);
         let e = Engine::new(apk.path());
         let rows: Vec<String> = e.resource("bool/exported_flag").unwrap().iter().map(|r| r.line()).collect();
-        assert_eq!(rows, ["0x7f020000 bool/exported_flag false", "0x7f020000 bool/exported_flag [v31] true"]);
+        assert_eq!(rows, ["0x7f020000 | bool/exported_flag | false", "0x7f020000 | bool/exported_flag [v31] | true"]);
         assert_eq!(e.resource("0x7f010000").unwrap()[0].value, "\"Demo\"");
         let (chain, row) = e.resolve_resource("@string/app_name", None).unwrap();
         assert_eq!((chain, row.value.as_str()), (vec!["@string/app_name".to_string()], "\"Demo\""));
