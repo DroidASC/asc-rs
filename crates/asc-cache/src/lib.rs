@@ -38,7 +38,7 @@
 //!   a damaged one is deleted and read as a miss. L3 files are small and
 //!   always checked.
 //! * [`MemoryCache`] is a byte-bounded LRU of inflated entries for hosts that
-//!   stay alive between queries (GUI, servers).
+//!   stay alive between queries (MCP servers, the daemon).
 //! * [`ProcessRegistry`] lets resident hosts of one user see each other, so
 //!   their memory budgets add up to one machine-wide budget.
 

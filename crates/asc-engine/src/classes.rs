@@ -1,4 +1,4 @@
-//! Class enumeration (`listclass` and the GUI package tree).
+//! Class enumeration (`listclass`, MCP `listclass`).
 
 use crate::{load_entry, names, Engine, EngineError, Result};
 use asc_dex::container::logical_dex_iter;

@@ -7,7 +7,7 @@
 //! daemon declines and the client runs the command itself:
 //!
 //! * not forwarded at all: `--debug` (timings), `--no-cache`, and the
-//!   resident or maintenance commands (`gui`, `mcp`, `cache`, `daemon`);
+//!   resident or maintenance commands (`mcp`, `cache`, `daemon`);
 //! * declined: arguments the daemon cannot parse, an APK it cannot open
 //!   (the error names the path as given, which only the client knows).
 //!

@@ -11,15 +11,10 @@ description = "Droid ASC command line: getclass / getmanifest / findrefs over an
 name = "droidasc"
 path = "src/main.rs"
 
-[features]
-default = ["gui"]
-gui = ["dep:asc-gui"]
-
 [dependencies]
 asc-engine.workspace = true
 asc-findrefs.workspace = true
 asc-mcp.workspace = true
-asc-gui = { path = "../asc-gui", optional = true }
 clap.workspace = true
 libc = "0.2"
 

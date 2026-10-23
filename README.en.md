@@ -26,20 +26,21 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
                (extends / impl), across all DEX entries in APK.
   callgraph    Callers (default) or callees of a method across all DEX entries, as a tree.
   hierarchy    Transitive subclasses / implementers (or --supers) of a class, and overrides.
-  gui          Launch the graphical browser.
   mcp          Serve MCP tools over stdio, keeping opened APKs resident.
   cache        Inspect or clear the on-disk cache (path | stats | clear).
 
-  --threads N      worker threads (default: logical CPUs split with your other busy mcp/gui processes); --thread N also works
+  --threads N      worker threads (default: logical CPUs split with your other busy mcp / daemon processes); --thread N also works
   --no-cache       bypass the on-disk cache of inflated DEX files
   --cache-dir DIR  use DIR instead of the default cache directory
   --cache-max-mb MIB  on-disk cache budget (default: automatic, see "Caching")
-  --memory-mb MIB  in-memory budget of gui / mcp (default: automatic)
+  --memory-mb MIB  in-memory budget of mcp / the daemon (default: automatic)
   --debug          profiling output on stderr
+  --limit N / --max-bytes N / --offset N
+                   keep stdout to N records / bytes (whole records), from record N;
+                   the whole output goes to a file the last line names
   -v, -V, --version
 
 examples:
-  droidasc app.apk --gui
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16 --dump-dex Main.dex
   droidasc disassemble app.apk com.poc.Main --debuginfo
@@ -174,12 +175,11 @@ rust_ASC), and `--literal` gives their literal string matching.
 ## Build
 
 ```sh
-cargo build --release                       # CLI + GUI  -> target/release/droidasc
-cargo build --release --no-default-features # CLI only (no egui/winit dependencies)
+cargo build --release                       # -> target/release/droidasc
 cargo test --workspace
 ```
 
-Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is headless.
+Rust 1.85 or newer.
 
 ## Workspace layout
 
@@ -197,7 +197,6 @@ Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is he
 | `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding and summary, resource queries. |
 | `asc-mcp` | MCP server over stdio (`droidasc mcp`): one resident session, several APKs sharing one memory budget, CLI-format text plus structured results, paging. |
 | `asc-cli` | `droidasc` binary (clap). |
-| `asc-gui` | egui browser: package tree with context menus, tabbed disassembly with find and jump-to-method, `X` for references to the member under the cursor and Ctrl+click to its declaration, streaming reference searches kept as a history panel, class-name suggestions, manifest view; panel sizes, theme and search preferences persist across runs. |
 | `asc-fixture` | Synthetic DEX/APK fixtures shared by the tests. |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces map onto the Python
@@ -214,8 +213,8 @@ modules and where the port deliberately differs.
   and `--debug` adds timings but no per-instruction offset comments.
 * **Correct string decoding.** Non-ASCII class and member names (common in obfuscated apps)
   are decoded as MUTF-8; the Python version truncates them.
-* **Threads instead of processes** for `findrefs`; results still stream per DEX as they
-  complete. `getclass` returns as soon as one worker finds the class; workers still
+* **Threads instead of processes** for `findrefs`; results stream per DEX in DEX order
+  (each as soon as the earlier ones are done). `getclass` returns as soon as one worker finds the class; workers still
   inflating another DEX finish in the background.
 * Global `--debug` / `--threads` flags can appear anywhere on the command line;
   `--threads 0` runs one worker (Python's `listclass` rejects it).
@@ -241,7 +240,8 @@ modules and where the port deliberately differs.
 * `getmanifest` names attributes from the resource id whenever it is a known framework
   attribute (androguard only when the pool name is empty), so obfuscated manifests show
   `android:name` instead of `android:a`; unknown ids print as `attr_0x........`.
-* `gui` runs in the foreground; the Python tool forks a detached process.
+* No GUI: the Python tool's Tk browser is not ported (an egui browser existed until
+  2026-10; agents use the CLI and MCP).
 
 ## Performance
 
@@ -314,12 +314,12 @@ the normal cost and fills the cache as a side effect.
   cache's own naming shape. `--no-cache` bypasses it,
   `--cache-dir` moves it, `droidasc cache path|stats|clear` manages it (`stats` prints
   each tier's usage, the budget, where it comes from and the file system's free space).
-* **In-memory LRU** (GUI and embedders, `CacheConfig::resident` / `resident_auto`) that
+* **In-memory LRU** (`mcp`, the daemon and embedders, `CacheConfig::resident`) that
   also keeps the locator tables built for each DEX, so a second query only runs the
   regex, the scan and the offset→method resolution. Its budget counts those tables too
-  (102 MB on top of Douyin's 437 MB of DEX after string and type queries), and the GUI sizes it
+  (102 MB on top of Douyin's 437 MB of DEX after string and type queries), and resident hosts size it
   from the machine: a quarter of the available memory (`MemAvailable`, or the cgroup v2
-  headroom when lower), clamped to 64 MiB–2 GiB, so several open browsers do not each
+  headroom when lower), clamped to 64 MiB–2 GiB, so several resident processes do not each
   claim 2 GiB. With the disk cache on, an entry inflated on the heap is swapped for a
   mapping of its cache file as soon as that file is written (after a byte-for-byte
   check), and locator tables for a view of their L2 file, so resident entries are
@@ -332,17 +332,17 @@ Both caches size themselves from the machine unless given a number:
 | | automatic budget | explicit |
 |---|---|---|
 | disk | 20 % of what the cache could hold (its own bytes + the file system's free space), at most 32 GiB, and never so much that less than max(1 GiB, 5 % of the file system) stays free; 4 GiB where the free space cannot be read (Windows) | `--cache-max-mb MIB`, else `$DROIDASC_CACHE_MAX_MB` |
-| memory (gui, mcp) | one budget for all of the user's running `gui` / `mcp` processes, split evenly: a quarter of (available memory + what their caches hold), divided by the number of processes, 64 MiB–2 GiB each; 2 GiB where it cannot be read. Each process registers in `$XDG_RUNTIME_DIR/droidasc` and re-reads the registry at most once a second | `--memory-mb MIB` (fixed; still registered, so the others count it) |
-| threads | the logical CPUs split evenly between this process and the user's other registered `gui` / `mcp` processes that loaded entries in the last 5 s (idle servers between an agent's calls do not count), with up to 4 workers per CPU in all: each keeps every CPU while at most 4 are busy, at least 2; read again by every search, the registry at most once a second. One-shot commands count the resident processes but do not register | `--threads N` |
+| memory (mcp, daemon) | one budget for all of the user's running `mcp` / daemon processes, split evenly: a quarter of (available memory + what their caches hold), divided by the number of processes, 64 MiB–2 GiB each; 2 GiB where it cannot be read. Each process registers in `$XDG_RUNTIME_DIR/droidasc` and re-reads the registry at most once a second | `--memory-mb MIB` (fixed; still registered, so the others count it) |
+| threads | the logical CPUs split evenly between this process and the user's other registered `mcp` / daemon processes that loaded entries in the last 5 s (idle servers between an agent's calls do not count), with up to 4 workers per CPU in all: each keeps every CPU while at most 4 are busy, at least 2; read again by every search, the registry at most once a second. One-shot commands count the resident processes but do not register | `--threads N` |
 
 The disk budget is re-evaluated at every eviction pass (once per burst of writes, the
 same directory walk as before) and each automatic-budget write first checks the free
 space with one `statvfs`: an entry that would cut into the reserve is not written, and
 when another program has filled the disk the next eviction shrinks the cache below what
 it holds, oldest APKs first. One-shot CLI commands keep no memory cache, so
-`--memory-mb` only matters for `gui` and `mcp`.
+`--memory-mb` only matters for `mcp` and the daemon.
 
-Resident memory of one process holding the GUI's engine state (16 threads, Douyin
+Resident memory of one process holding a resident engine (16 threads, Douyin
 40.7.0 = 437 MB of DEX, then Kuaishou and Xiaohongshu opened in the same process; class
 scan plus three queries each):
 
@@ -377,6 +377,38 @@ The scan itself adapts to the query: up to eight target indexes are found with S
 `memchr2` over their two opcodes, and clustered index sets are prefiltered with `memchr`
 on the shared high operand byte before the linear sweep.
 
+## Output for agents
+
+Every one-shot command prints one record per line (`dex | Lcls;->m(..)V | "matched"`,
+columns separated by ` | `); lines starting with `#` are headers, totals and hints.
+`findrefs` (single queries and `rules`) prints in DEX order (`classes.dex`,
+`classes2.dex`, ..., then other names), the same on every run, streaming as soon as the
+earlier DEX files are done.
+
+Long outputs are cut only when asked to, so scripts keep the whole stream:
+
+| option | effect |
+|---|---|
+| `--limit N` | at most N records on stdout (a findrefs result with its `--context` lines is one record; smali, class and tree lines are one each) |
+| `--max-bytes N` | at most N bytes of records on stdout, whole records only |
+| `--offset N` | skip the first N records (the next page) |
+| `--spill-mb MIB` | budget of the directory cut outputs go to (`out/` in the cache directory, default 64; 0: no file) |
+| `$DROIDASC_LIMIT`, `$DROIDASC_MAX_BYTES` | defaults for `--limit` / `--max-bytes`, for an agent host to set once |
+
+When the window cuts the output, the whole output is written to a file (named by its
+content, so a rerun names the same file; `-o FILE` holds it instead) and the last stdout
+line says what was shown and where the rest is:
+
+```
+# records 1-50 of 523 shown; full output in /home/u/.cache/droidasc/out/3f2a….txt (grep it, or rerun with --offset 50)
+```
+
+`#` header and total lines (`# r1 ...`, `# r1 523 results`, a tree's footer) are always
+shown. Subcommand help lists only the command's own options; the cache and thread options
+are listed once by `droidasc --help`. [`skills/droidasc/SKILL.md`](skills/droidasc/SKILL.md)
+is an [Agent Skill](https://agentskills.io/specification) with the commands, the query
+syntax and an audit workflow, for agents that work through a shell.
+
 ## Daemon: warm one-shot commands
 
 On Unix every one-shot command (`findrefs`, `getclass`, `callgraph`, `hierarchy`,
@@ -387,7 +419,7 @@ stdout, stderr and the exit status are byte for byte those of a run without the 
 
 * The first command starts the daemon (`droidasc daemon serve`, detached) and hands itself
   over once it is up; the daemon exits after 15 idle minutes.
-* `--debug` and `--no-cache` always run in the calling process, as do `gui`, `mcp`,
+* `--debug` and `--no-cache` always run in the calling process, as do `mcp`,
   `cache` and `daemon`. `DROIDASC_DAEMON=off` turns the daemon off.
 * One daemon per build and cache configuration (`--cache-dir`, `--cache-max-mb`,
   `DROIDASC_*`, umask): a rebuilt binary starts a fresh daemon, which retires the old one.

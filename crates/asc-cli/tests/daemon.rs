@@ -119,6 +119,13 @@ fn daemon_output_is_byte_identical() {
         &["callgraph", "app.apk", "example.Test", "first", "--virtual"],
         &["callgraph", "app.apk", "example.Test", "nope"],
         &["hierarchy", "app.apk", "java.lang.Object", "--method", "second"],
+        // Cut output (the spill file is named by content, so both name the same one).
+        &["findrefs", "app.apk", "string", "token", "--limit", "1"],
+        &["findrefs", "app.apk", "string", "token", "--offset", "1", "--max-bytes", "4096"],
+        &["findrefs", "app.apk", "rules", "string:token", "extends:java.lang.Object", "--limit", "2"],
+        &["getclass", "app.apk", "example.Test", "--limit", "3"],
+        &["listclass", "app.apk", "--offset", "9"],
+        &["callgraph", "app.apk", "example.Test", "first", "--limit", "1", "--spill-mb", "0"],
         // Declined by the daemon (the error names the path as given).
         &["findrefs", "missing.apk", "string", "token"],
     ];

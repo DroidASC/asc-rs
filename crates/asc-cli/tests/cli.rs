@@ -234,22 +234,11 @@ fn broken_dex_entry_gives_partial_exit_status() {
 }
 
 #[test]
-fn legacy_gui_rewrite_does_not_touch_normal_invocations() {
-    let apk = temp_apk();
-    // `--gui` inside a real subcommand is rejected by clap, not rewritten into `gui`.
-    let out = droidasc(&["findrefs", path(apk.path()), "string", "token", "--gui"]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("--gui"), "{}", stderr(&out));
-    let out = droidasc(&["findrefs", path(apk.path()), "string", "token"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-}
-
-#[test]
 fn help_explains_thread_default() {
     let out = droidasc(&["--help"]);
     assert!(out.status.success());
     let text = stdout(&out);
-    assert!(text.contains("other busy `mcp` / `gui` processes"), "{text}");
+    assert!(text.contains("busy mcp / daemon processes"), "{text}");
     assert!(text.contains("exit status"), "{text}");
 }
 
@@ -438,10 +427,6 @@ fn rasc_aliases_and_version_flags() {
         assert!(out.status.success(), "{}", stderr(&out));
         assert!(stdout(&out).starts_with("droidasc "), "{}", stdout(&out));
     }
-    // The legacy `app.apk --gui` rewrite leaves the aliases alone.
-    let out = droidasc(&["classes", path(apk.path()), "--gui"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("--gui"), "{}", stderr(&out));
 }
 
 // ---- listclass (ported from the Python `test_listclass.py`) -------------
@@ -647,9 +632,10 @@ fn manifest_summary_resources_and_xml() {
     assert_eq!(stdout(&out), "chain @string/app_name\n0x7f010000 | string/app_name | \"Demo\"\n");
     let out = droidasc(&["resources", p, "--search", "XML/", "--in", "name", "--limit", "1"]);
     assert_eq!(stdout(&out), "", "the regex is case-sensitive");
-    let out = droidasc(&["resources", p, "--search", "xml/", "--in", "name", "--limit", "1"]);
-    assert_eq!(stdout(&out).lines().count(), 1);
-    assert!(stderr(&out).contains("Note: 1 of 2 matches shown"), "{}", stderr(&out));
+    let out = droidasc(&["resources", p, "--search", "xml/", "--in", "name", "--limit", "1", "--spill-mb", "0"]);
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert_eq!(text.lines().last(), Some("# records 1-1 of 2 shown; rerun with --offset 1"), "{text}");
     let out = droidasc(&["resources", p]);
     assert_eq!(stdout(&out).lines().count(), 5);
     let out = droidasc(&["resources", p, "--in", "bogus", "--search", "x"]);
@@ -696,4 +682,153 @@ fn misses_print_hints_on_stderr() {
     assert!(stderr(&out).contains("did you mean Lexample/Rich;"), "{}", stderr(&out));
     let out = droidasc(&["manifest_summary", p]);
     assert!(!stderr(&out).contains("unrecognized subcommand"), "{}", stderr(&out));
+}
+
+// ---- output window (--limit / --max-bytes / --offset) and DEX order -------
+
+/// An APK of `n` copies of the token DEX: classes.dex, classes2.dex, ...
+fn many_dex_apk(n: usize) -> tempfile::NamedTempFile {
+    let dex = make_dex();
+    let names: Vec<String> = (1..=n).map(|i| if i == 1 { "classes.dex".to_string() } else { format!("classes{i}.dex") }).collect();
+    let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), dex.as_slice())).collect();
+    temp_apk_from(&make_apk(&entries, true))
+}
+
+/// `droidasc --no-cache` with cut outputs spilled under `runtime`.
+fn droidasc_in(runtime: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_droidasc"))
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env_remove("DROIDASC_LIMIT")
+        .env_remove("DROIDASC_MAX_BYTES")
+        .envs(envs.iter().copied())
+        .arg("--no-cache")
+        .args(args)
+        .output()
+        .expect("run droidasc")
+}
+
+/// The file a cut output's hint names.
+fn spilled(hint: &str) -> String {
+    let path = hint.split("full output in ").nth(1).and_then(|r| r.split(" (").next()).unwrap_or_else(|| panic!("no file in {hint:?}"));
+    std::fs::read_to_string(path).unwrap()
+}
+
+#[test]
+fn findrefs_rows_follow_dex_order() {
+    let apk = many_dex_apk(12);
+    let order: Vec<String> = (1..=12).map(|i| if i == 1 { "classes.dex".into() } else { format!("classes{i}.dex") }).collect();
+    for _ in 0..3 {
+        let out = droidasc(&["findrefs", path(apk.path()), "string", "token", "--threads", "8"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let mut dex: Vec<String> = stdout(&out).lines().map(|l| l.split(" | ").next().unwrap().to_string()).collect();
+        assert_eq!(dex.len(), 24, "two hits per DEX");
+        dex.dedup();
+        assert_eq!(dex, order);
+        let out = droidasc(&["findrefs", path(apk.path()), "rules", "string:token", "literal:token", "--threads", "8"]);
+        let rows: Vec<String> =
+            stdout(&out).lines().filter(|l| !l.starts_with('#')).map(|l| l.split(" | ").take(2).collect::<Vec<_>>().join(" ")).collect();
+        let expected: Vec<String> = order.iter().flat_map(|d| [1, 1, 2, 2].map(|r| format!("r{r} {d}"))).collect();
+        assert_eq!(rows, expected, "grouped by DEX, then by rule");
+    }
+}
+
+#[test]
+fn limit_cuts_stdout_and_spills_the_whole_output() {
+    let apk = many_dex_apk(12);
+    let runtime = tempfile::tempdir().unwrap();
+    let full = stdout(&droidasc(&["findrefs", path(apk.path()), "string", "token"]));
+    let rows: Vec<&str> = full.lines().collect();
+    assert_eq!(rows.len(), 24);
+
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--limit", "3"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[..3], rows[..3]);
+    let hint = lines[3];
+    assert!(hint.starts_with("# records 1-3 of 24 shown; full output in "), "{hint}");
+    assert!(hint.ends_with(" (grep it, or rerun with --offset 3)"), "{hint}");
+    assert_eq!(spilled(hint), full);
+    assert!(spilled(hint).starts_with(&rows[0].to_string()));
+
+    // The next page, and past the end.
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--offset", "3", "--limit", "3"], &[]);
+    let text = stdout(&out);
+    assert_eq!(text.lines().take(3).collect::<Vec<_>>(), rows[3..6]);
+    assert!(text.lines().nth(3).unwrap().starts_with("# records 4-6 of 24 shown"), "{text}");
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--offset", "22"], &[]);
+    assert_eq!(stdout(&out), format!("{}\n{}\n", rows[22], rows[23]), "the rest fits: no hint");
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--offset", "30"], &[]);
+    assert_eq!(stdout(&out), "# no records after --offset 30 (24 in all)\n");
+
+    // Whole records within --max-bytes.
+    let budget = rows[0].len() + 1 + rows[1].len() + 1 + 2;
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--max-bytes", &budget.to_string()], &[]);
+    let text = stdout(&out);
+    assert_eq!(text.lines().take(2).collect::<Vec<_>>(), rows[..2]);
+    assert!(text.lines().nth(2).unwrap().starts_with("# records 1-2 of 24 shown"), "{text}");
+
+    // An agent host sets the limit once.
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token"], &[("DROIDASC_LIMIT", "2")]);
+    assert!(stdout(&out).lines().nth(2).unwrap().starts_with("# records 1-2 of 24 shown"), "{}", stdout(&out));
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--limit", "5"], &[("DROIDASC_LIMIT", "2")]);
+    assert!(stdout(&out).contains("# records 1-5 of 24 shown"), "the flag wins: {}", stdout(&out));
+
+    // No spill directory: the hint pages instead.
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--limit", "3", "--spill-mb", "0"], &[]);
+    assert_eq!(stdout(&out).lines().last(), Some("# records 1-3 of 24 shown; rerun with --offset 3"));
+
+    // With -o the file holds everything and the hint names it.
+    let dir = tempfile::tempdir().unwrap();
+    let o = dir.path().join("refs.txt");
+    let out = droidasc_in(runtime.path(), &["findrefs", path(apk.path()), "string", "token", "--limit", "1", "-o", path(&o)], &[]);
+    assert_eq!(std::fs::read_to_string(&o).unwrap(), full);
+    assert!(stdout(&out).lines().last().unwrap().contains(&format!("full output in {}", o.display())), "{}", stdout(&out));
+}
+
+#[test]
+fn every_text_command_takes_the_window() {
+    let apk = many_dex_apk(2);
+    let runtime = tempfile::tempdir().unwrap();
+    let p = path(apk.path());
+    let whole = stdout(&droidasc(&["getclass", p, "example.Test"]));
+    let out = droidasc_in(runtime.path(), &["getclass", p, "example.Test", "--limit", "4"], &[]);
+    let text = stdout(&out);
+    assert_eq!(text.lines().take(4).collect::<Vec<_>>(), whole.lines().take(4).collect::<Vec<_>>());
+    let hint = text.lines().nth(4).unwrap();
+    assert!(hint.starts_with(&format!("# records 1-4 of {} shown", whole.lines().count())), "{hint}");
+    assert_eq!(spilled(hint), whole);
+
+    // A tree's footer is always shown.
+    let tree = stdout(&droidasc(&["callgraph", p, "example.Test", "first", "--callees"]));
+    let out = droidasc_in(runtime.path(), &["callgraph", p, "example.Test", "first", "--callees", "--limit", "1", "--spill-mb", "0"], &[]);
+    let text = stdout(&out);
+    assert_eq!(text.lines().next(), tree.lines().next());
+    assert_eq!(text.lines().nth(1), tree.lines().last(), "{text}");
+
+    // Without a window nothing changes, byte for byte.
+    for args in [&["listclass", p][..], &["getclass", p, "example.Test"], &["callgraph", p, "example.Test", "first"]] {
+        let plain = droidasc(args);
+        let huge = droidasc_in(runtime.path(), &[args, &["--limit", "100000"]].concat(), &[]);
+        assert_eq!(stdout(&huge), stdout(&plain), "{args:?}");
+    }
+}
+
+#[test]
+fn subcommand_help_leaves_out_the_global_options() {
+    let top = stdout(&droidasc(&["--help"]));
+    for opt in ["--threads", "--cache-dir", "--cache-max-mb", "--memory-mb", "--no-cache", "--limit", "--max-bytes", "--offset"] {
+        assert!(top.contains(opt), "{opt} in droidasc --help:\n{top}");
+    }
+    for sub in [&["getclass", "--help"][..], &["findrefs", "x.apk", "string", "--help"], &["callgraph", "--help"]] {
+        let help = stdout(&droidasc(sub));
+        for opt in ["--threads", "--cache-dir", "--cache-max-mb", "--memory-mb", "--no-cache", "--debug"] {
+            assert!(!help.contains(opt), "{opt} in {sub:?}:\n{help}");
+        }
+        assert!(help.contains("--limit"), "{sub:?}:\n{help}");
+    }
+    // Still accepted after the subcommand.
+    let apk = temp_apk();
+    let out = droidasc(&["findrefs", path(apk.path()), "string", "token", "--threads", "1", "--cache-dir", "/nonexistent-x"]);
+    assert!(out.status.success(), "{}", stderr(&out));
 }
