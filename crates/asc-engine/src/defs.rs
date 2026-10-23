@@ -13,7 +13,7 @@ use asc_dex::annotations::AnnotationsDirectory;
 use asc_dex::{encoded, Dex};
 use asc_findrefs::{Defined, Query};
 use regex::bytes::Regex;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 
 /// The method ids of `dex` whose declaration matches `d`, sorted. `d` must be
@@ -78,6 +78,118 @@ pub(crate) fn defined_methods(dex: &Dex<'_>, d: &Defined) -> Result<Vec<u32>> {
     out.sort_unstable();
     out.dedup();
     Ok(out)
+}
+
+/// A resolved predicate answered method by method: only the classes of the
+/// methods asked about are read, where [`defined_methods`] reads every class
+/// of the DEX. For narrowing a set of candidate methods, which are always
+/// methods the DEX defines.
+pub(crate) struct DefinedFilter<'d, 'a> {
+    dex: &'d Dex<'a>,
+    test: Test,
+    /// `type_idx` -> class_def index, built on the first class lookup.
+    defs: Option<HashMap<u32, u32>>,
+    /// The class read last and its methods that match: candidates come in
+    /// method-id order, which groups them by class.
+    last: Option<(u32, Vec<u32>)>,
+}
+
+enum Test {
+    /// Answered from the method's id alone.
+    Members { classes: HashSet<Vec<u8>>, name: Option<String>, proto: Option<String> },
+    /// Answered from the class definition.
+    Class(ClassTest),
+    /// The annotation type is not in this DEX: nothing matches.
+    Nothing,
+}
+
+#[derive(Clone, Copy)]
+enum ClassTest {
+    Flags(u32),
+    Annotation(u32),
+}
+
+impl<'d, 'a> DefinedFilter<'d, 'a> {
+    /// `d` must be resolved, as for [`defined_methods`].
+    pub(crate) fn new(dex: &'d Dex<'a>, d: &Defined) -> Result<Self> {
+        let test = match d {
+            Defined::Flags(mask) => Test::Class(ClassTest::Flags(*mask)),
+            Defined::Annotation(a) => match dex.find_type_idx(&asc_dex::mutf8::encode(a))? {
+                Some(t) => Test::Class(ClassTest::Annotation(t)),
+                None => Test::Nothing,
+            },
+            Defined::Members { classes, name, proto } => Test::Members {
+                classes: classes.iter().map(|c| asc_dex::mutf8::encode(c)).collect(),
+                name: name.clone(),
+                proto: proto.clone(),
+            },
+            Defined::Override(_) | Defined::In(_) => {
+                return Err(EngineError::Query("override: / in:{...} must be resolved before a search".into()))
+            }
+        };
+        Ok(DefinedFilter { dex, test, defs: None, last: None })
+    }
+
+    /// Whether the definition of `method_idx` matches.
+    pub(crate) fn matches(&mut self, method_idx: u32) -> Result<bool> {
+        let id = self.dex.method_id(method_idx)?;
+        let class_test = match &self.test {
+            Test::Nothing => return Ok(false),
+            Test::Members { classes, name, proto } => {
+                return Ok(classes.contains(self.dex.type_bytes(u32::from(id.class_idx))?)
+                    && name.as_ref().is_none_or(|n| self.dex.string_bytes(id.name_idx).is_ok_and(|b| b == n.as_bytes()))
+                    && match proto {
+                        Some(want) => asc_smali::proto_descriptor(self.dex, u32::from(id.proto_idx))? == *want,
+                        None => true,
+                    })
+            }
+            Test::Class(t) => *t,
+        };
+        let class = u32::from(id.class_idx);
+        if self.last.as_ref().is_none_or(|(c, _)| *c != class) {
+            let matching = self.class_matches(class, class_test)?;
+            self.last = Some((class, matching));
+        }
+        Ok(self.last.as_ref().is_some_and(|(_, ms)| ms.contains(&method_idx)))
+    }
+
+    /// The methods of class `type_idx` (none when this DEX does not define
+    /// it) that pass `test`.
+    fn class_matches(&mut self, type_idx: u32, test: ClassTest) -> Result<Vec<u32>> {
+        let dex = self.dex;
+        let defs = match &mut self.defs {
+            Some(defs) => defs,
+            None => {
+                let mut defs = HashMap::new();
+                for (i, def) in (0..).zip(dex.class_defs()) {
+                    defs.entry(def?.class_idx).or_insert(i);
+                }
+                self.defs.insert(defs)
+            }
+        };
+        let Some(&i) = defs.get(&type_idx) else { return Ok(Vec::new()) };
+        let def = dex.class_def(i)?;
+        let mut out = Vec::new();
+        match test {
+            ClassTest::Flags(mask) => {
+                if def.class_data_off != 0 {
+                    out.extend(
+                        dex.class_data(def.class_data_off)?.methods().filter(|m| m.access_flags & mask == mask).map(|m| m.method_idx),
+                    );
+                }
+            }
+            ClassTest::Annotation(want) => {
+                if def.annotations_off != 0 {
+                    for (method_idx, set_off) in AnnotationsDirectory::parse(dex.buf(), def.annotations_off as usize)?.method_annotations {
+                        if annotation_set_has(dex, set_off, want)? {
+                            out.push(method_idx);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Whether the `annotation_set_item` at `off` holds an annotation of type

@@ -45,6 +45,11 @@ fn annotation_predicates_match_method_and_class_annotations() {
     assert!(statics.iter().any(|l| l.contains("->compute(II)I")), "{statics:?}");
     assert!(!statics.iter().any(|l| l.contains("->handle(")), "handle is abstract, not static: {statics:?}");
 
+    // A `!annotation:` part drops the annotated method only.
+    let unmarked = lines(&engine, "in:{annotation:example.Marker} & !annotation:example.Marker");
+    assert_eq!(unmarked.len(), in_marker.len() - 1, "{unmarked:?}");
+    assert!(!unmarked.iter().any(|l| l.contains("->handle(")), "{unmarked:?}");
+
     // in:{type:...}: methods of classes whose descriptor matches the regex.
     let iface = lines(&engine, "in:{type:Lexample/Iface;}");
     assert_eq!(iface, ["classes.dex | Lexample/Iface;->run()V | in"]);
