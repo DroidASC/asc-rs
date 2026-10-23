@@ -39,8 +39,8 @@ mod res;
 mod rules;
 
 use asc_engine::{
-    hints, names, Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched,
-    RefBatch, RefContext, RefResult, SharedCache, SmaliOptions, Threads,
+    condition, hints, names, Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits,
+    Matched, RefBatch, RefContext, RefResult, SharedCache, SmaliOptions, Threads,
 };
 use asc_findrefs::Query;
 use class_text::ClassText;
@@ -1216,6 +1216,10 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
                 Some(n) => Some(n),
                 None => str_arg(args, "value")?,
             };
+            // `X[arg0=1]`: a call-constrained target reads as a rule.
+            if let Some(target) = name.filter(|n| kind == "method" && args.get("class").is_none() && condition::has_constraints(n)) {
+                return Ok(names::parse_rule(&format!("method:{target}"))?);
+            }
             let m = names::member_query(
                 kind,
                 str_arg(args, "class")?,

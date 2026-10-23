@@ -70,6 +70,7 @@ fn nested_rules<'q>(q: &'q Query, out: &mut Vec<&'q Query>) {
     match q {
         Query::Nested(inner) => out.push(inner),
         Query::All { all, none } => all.iter().chain(none).for_each(|p| nested_rules(p, out)),
+        Query::Call { target, .. } => nested_rules(target, out),
         Query::String(_)
         | Query::StringLiteral(_)
         | Query::Type(_)
@@ -92,6 +93,9 @@ fn substitute(q: &Query, sets: &mut impl Iterator<Item = BTreeSet<String>>) -> R
             all: all.iter().map(|p| substitute(p, sets)).collect::<Result<_>>()?,
             none: none.iter().map(|p| substitute(p, sets)).collect::<Result<_>>()?,
         },
+        Query::Call { target, constraints } => {
+            Query::Call { target: Box::new(substitute(target, sets)?), constraints: constraints.clone() }
+        }
         q => q.clone(),
     })
 }

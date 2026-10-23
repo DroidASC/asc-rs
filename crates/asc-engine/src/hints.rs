@@ -365,6 +365,9 @@ pub fn query_hint(query: &Query) -> Option<String> {
         Query::Nested(_) => {
             "method:{RULE} lists calls naming exactly the methods whose code matches RULE: run RULE alone to see those methods".into()
         }
+        Query::Call { .. } => {
+            "only the calls whose values the [...] constraints accept are listed: drop them, or use [argN=*] to see the values".into()
+        }
         Query::MethodSet(_) => {
             "calls match the class the call site names: a call through a subclass or an interface names another one".into()
         }

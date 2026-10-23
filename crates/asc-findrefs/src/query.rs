@@ -4,6 +4,7 @@
 //! regexes it needs are compiled once here and reused by every
 //! [`FindRefs`](crate::FindRefs) through `find_ref_compiled`.
 
+use crate::calls::CompiledCall;
 use crate::{ClassQuery, ClassRelation, FindError, MemberQuery, MemberSignature, Query, RefKind, Result, TypeMatch};
 use memchr::memmem::Finder;
 use regex::bytes::Regex;
@@ -80,6 +81,8 @@ pub(crate) enum Parts {
     /// Class-definition query: the MUTF-8 encoded target descriptor.
     Relation(ClassRelation, Vec<u8>),
     Compound(Compound),
+    /// A method query whose call sites are judged by their values.
+    Call(CompiledCall),
 }
 
 /// The compiled parts of a [`Query::All`].
@@ -118,6 +121,7 @@ impl CompiledQuery {
                     "method:{...} has to be resolved over every DEX first (by the engine), not compiled for one".into(),
                 ))
             }
+            Query::Call { target, constraints } => Parts::Call(CompiledCall::new(target, constraints)?),
             Query::Field(m) => Parts::Member(compile_member(m, RefKind::Field)?),
             Query::Extends(d) => Parts::Relation(ClassRelation::Extends, asc_dex::mutf8::encode(d)),
             Query::Implements(d) => Parts::Relation(ClassRelation::Implements, asc_dex::mutf8::encode(d)),

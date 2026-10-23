@@ -3,21 +3,35 @@
 //! ```text
 //! rule  := part ( '&' part )*
 //! part  := [ '!' ] KIND ':' value
-//! value := '{' rule '}'      method only: calls of the methods whose code matches the rule
-//!        | '@' PATH          method only: calls of the methods listed in a file
-//!        | TEXT              the KIND's own syntax, e.g. a regex or Lc;->m(I)V
+//! value := '{' rule '}' calls  method only: calls of the methods whose code matches the rule
+//!        | '@' PATH calls    method only: calls of the methods listed in a file
+//!        | TEXT calls        method: a method target, e.g. Lc;->m(I)V
+//!        | TEXT              the other KINDs' own syntax, e.g. a regex
+//! calls := ( '[' constraint ( ',' constraint )* ']' )*
+//! constraint := ( 'arg' N | 'this' ) ( '=' | '==' ) arg
+//!             | 'ret' ( '=' | '==' ) ( 'used' | 'unused' )
+//! arg   := '*' | INT | 'true' | 'false' | 'null' | '"' TEXT '"' | '~' REGEX
+//!        | 'param' [ K ] | 'class:' TYPE | 'new:' TYPE | 'ret:' METHOD | 'field:' FIELD
 //! ```
 //!
 //! A rule of one positive part is that condition; several parts make a
 //! compound ([`Query::All`]) whose `!` parts are its `none` list. TEXT runs
 //! to the next `&` outside `{}` / `()`, or to the `}` closing the enclosing
 //! body; `\` keeps the next character from ending it (`string:a\&b` is the
-//! regex `a\&b`). `[...]` after a method target is reserved for argument
-//! constraints (`[arg0=...]`, `[ret=...]`), not accepted yet.
+//! regex `a\&b`).
+//!
+//! Constraints keep the calls whose values they accept ([`Query::Call`]):
+//! `argN` is the Nth declared parameter of the called method (from 0),
+//! `this` its receiver, `paramK` the calling method's own `pK` (smali
+//! numbering), `ret:` / `field:` the result of a call / a field read the
+//! target matches. Values are what the call site may hold: `=` keeps a site
+//! the analysis cannot decide (marked `?`), `==` drops it. `*` only shows
+//! the values. A REGEX runs to the next `,` / `]` outside `()` / `{}`, or is
+//! quoted like TEXT (`\"`, `\\` escape).
 
-use crate::names::{exact_method, member_query, parse_kind};
+use crate::names::{exact_method, format_class_name, member_query, parse_kind};
 use crate::{EngineError, Result};
-use asc_findrefs::{MemberQuery, Query};
+use asc_findrefs::{CallConstraint, Certainty, MemberQuery, Query, ResultWant, Slot, Want};
 use std::path::Path;
 
 /// Parse a rule (see the module docs). `@PATH` files are read relative to
@@ -122,42 +136,176 @@ impl<'a> Parser<'a> {
         self.pos += kind_len + 1;
         self.skip_ws();
         if kind == "method" {
-            if self.eat('{') {
-                let inner = self.rule(true)?;
-                if !self.eat('}') {
-                    return Err(self.error("expected `}`"));
-                }
-                let trailing = self.rest()[..text_len(self.rest(), nested)].trim();
-                if !trailing.is_empty() {
-                    return Err(self.error(if is_constraint(trailing) { NO_CONSTRAINTS } else { "unexpected text after `}`" }));
-                }
-                return Ok(Query::Nested(Box::new(inner)));
-            }
-            if self.eat('@') {
-                let path = self.text(nested)?.trim();
-                return self.method_file(path);
-            }
+            return self.method(nested);
         }
         let value = self.text(nested)?.trim();
-        if kind == "method" && is_constraint(value) {
-            return Err(self.error(NO_CONSTRAINTS));
-        }
         Ok(match kind {
             "string" => Query::String(value.to_string()),
             "literal" => Query::StringLiteral(value.to_string()),
             "type" => Query::Type(value.to_string()),
             "extends" => Query::Extends(crate::names::format_class_name(value)?),
             "impl" => Query::Implements(crate::names::format_class_name(value)?),
-            "method" => Query::Method(member_query("method", None, false, Some(value), false)?),
             _ => Query::Field(member_query("field", None, false, Some(value), false)?),
         })
+    }
+
+    /// The value of a `method:` condition: `{RULE}`, `@PATH` or a target,
+    /// then its constraints.
+    fn method(&mut self, nested: bool) -> Result<Query> {
+        let target = if self.eat('{') {
+            let inner = self.rule(true)?;
+            if !self.eat('}') {
+                return Err(self.error("expected `}`"));
+            }
+            Query::Nested(Box::new(inner))
+        } else if self.eat('@') {
+            let path = self.text_until(nested, Stop::Constraint)?.trim();
+            self.method_file(path)?
+        } else {
+            let target = self.text_until(nested, Stop::Constraint)?.trim();
+            Query::Method(member_query("method", None, false, Some(target), false)?)
+        };
+        let mut constraints = Vec::new();
+        while self.eat('[') {
+            loop {
+                constraints.push(self.constraint()?);
+                if self.eat(']') {
+                    break;
+                }
+                if !self.eat(',') {
+                    return Err(self.error("expected `,` or `]` after a constraint"));
+                }
+            }
+        }
+        if !self.rest()[..text_len(self.rest(), nested)].trim().is_empty() {
+            return Err(self.error("unexpected text after the method"));
+        }
+        Ok(if constraints.is_empty() { target } else { Query::Call { target: Box::new(target), constraints } })
+    }
+
+    /// One constraint inside `[...]`.
+    fn constraint(&mut self) -> Result<CallConstraint> {
+        self.skip_ws();
+        let key_len = self.rest().find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(self.rest().len());
+        let key = &self.rest()[..key_len];
+        let slot = match key {
+            "ret" => None,
+            "this" => Some(Slot::This),
+            _ => match key.strip_prefix("arg").and_then(|n| n.parse().ok()) {
+                Some(n) => Some(Slot::Arg(n)),
+                None => return Err(self.error("expected argN, this or ret in a constraint")),
+            },
+        };
+        self.pos += key_len;
+        let certainty = if self.eat('=') {
+            if self.rest().starts_with('=') {
+                self.pos += 1;
+                Certainty::Must
+            } else {
+                Certainty::May
+            }
+        } else {
+            return Err(self.error("expected `=` or `==` in a constraint"));
+        };
+        self.skip_ws();
+        let Some(slot) = slot else {
+            let len = item_len(self.rest());
+            let want = match self.rest()[..len].trim() {
+                "used" => ResultWant::Used,
+                "unused" => ResultWant::Unused,
+                _ => return Err(self.error("ret takes used or unused")),
+            };
+            self.pos += len;
+            return Ok(CallConstraint::Result { want, certainty });
+        };
+        let want = self.want()?;
+        Ok(CallConstraint::Value { slot, want, certainty })
+    }
+
+    /// The value an argument has to hold.
+    fn want(&mut self) -> Result<Want> {
+        if self.rest().starts_with('"') {
+            return Ok(Want::Str(self.quoted()?));
+        }
+        let regex = self.rest().starts_with('~');
+        if regex {
+            self.pos += 1;
+            if self.rest().starts_with('"') {
+                return Ok(Want::StrRegex(self.quoted()?));
+            }
+        }
+        let len = item_len(self.rest());
+        let src: &'a str = self.src;
+        let raw = src[self.pos..self.pos + len].trim();
+        if raw.is_empty() {
+            return Err(self.error("empty value in a constraint"));
+        }
+        self.pos += len;
+        if regex {
+            return Ok(Want::StrRegex(raw.to_string()));
+        }
+        let bad = |what: &str| EngineError::Query(format!("bad rule {:?}: {what} in constraint value {raw:?}", self.src));
+        if let Some((kind, target)) = raw.split_once(':') {
+            let target = target.trim();
+            return Ok(match kind {
+                "class" => Want::Class(format_class_name(target)?),
+                "new" => Want::New(format_class_name(target)?),
+                "ret" => Want::Ret(member_query("method", None, false, Some(target), false)?),
+                "field" => Want::Field(member_query("field", None, false, Some(target), false)?),
+                _ => return Err(bad("expected class:, new:, ret: or field:")),
+            });
+        }
+        Ok(match raw {
+            "*" => Want::Any,
+            "true" => Want::Int(1),
+            "false" | "null" => Want::Int(0),
+            "param" => Want::Param(None),
+            _ => match raw.strip_prefix("param") {
+                Some(k) => Want::Param(Some(k.parse().map_err(|_| bad("expected paramK"))?)),
+                None => Want::Int(
+                    parse_int(raw).ok_or_else(|| bad("expected *, a number, \"text\", ~regex, param, class:, new:, ret: or field:"))?,
+                ),
+            },
+        })
+    }
+
+    /// A `"..."` string at the cursor, its `\"` / `\\` unescaped.
+    fn quoted(&mut self) -> Result<String> {
+        let mut out = String::new();
+        let mut chars = self.rest().char_indices().skip(1);
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '"' => {
+                    self.pos += i + 1;
+                    return Ok(out);
+                }
+                '\\' => match chars.next() {
+                    Some((_, 'n')) => out.push('\n'),
+                    Some((_, 't')) => out.push('\t'),
+                    Some((_, c)) => out.push(c),
+                    None => break,
+                },
+                c => out.push(c),
+            }
+        }
+        Err(self.error("unterminated `\"`"))
     }
 
     /// Consume TEXT: up to a `&` outside brackets, or the `}` that closes
     /// the enclosing body (`nested`).
     fn text(&mut self, nested: bool) -> Result<&'a str> {
+        self.text_until(nested, Stop::Text)
+    }
+
+    /// [`Parser::text`], ending before the first constraint too with
+    /// [`Stop::Constraint`].
+    fn text_until(&mut self, nested: bool, stop: Stop) -> Result<&'a str> {
         let start = self.pos;
-        self.pos += text_len(self.rest(), nested);
+        let len = text_len(self.rest(), nested);
+        self.pos += match stop {
+            Stop::Text => len,
+            Stop::Constraint => constraint_start(&self.rest()[..len]).unwrap_or(len),
+        };
         let value = &self.src[start..self.pos];
         if value.trim().is_empty() {
             return Err(self.error("empty value"));
@@ -175,15 +323,64 @@ impl<'a> Parser<'a> {
     }
 }
 
-const NO_CONSTRAINTS: &str = "argument constraints ([argN=...], [ret=...]) are not supported yet";
+/// Where a value's TEXT ends.
+#[derive(Clone, Copy)]
+enum Stop {
+    /// At the end of the TEXT.
+    Text,
+    /// Also at the `[` of a call constraint.
+    Constraint,
+}
 
-/// Whether `value` ends in an argument constraint, `[argN...]` or `[ret...]`
-/// (an array descriptor such as `([B)V` has no closing `]`).
-fn is_constraint(value: &str) -> bool {
-    value
-        .strip_suffix(']')
-        .and_then(|v| v.rfind('[').map(|i| v[i + 1..].trim_start()))
-        .is_some_and(|c| c.starts_with("ret") || c.strip_prefix("arg").is_some_and(|n| n.starts_with(|d: char| d.is_ascii_digit())))
+/// Whether a method target carries call constraints (`X[arg0=1]`).
+pub fn has_constraints(target: &str) -> bool {
+    constraint_start(target).is_some()
+}
+
+/// The offset of the first `[argN`, `[this` or `[ret` in a method target.
+/// Dalvik names hold no `[`, and in a descriptor one is followed by a type
+/// (`[B`, `[Lx;`, `[[I`), never by these words.
+fn constraint_start(s: &str) -> Option<usize> {
+    s.match_indices('[').map(|(i, _)| i).find(|&i| {
+        let c = s[i + 1..].trim_start();
+        c.starts_with("ret") || c.starts_with("this") || c.strip_prefix("arg").is_some_and(|n| n.starts_with(|d: char| d.is_ascii_digit()))
+    })
+}
+
+/// Bytes of a constraint value at the start of `s`: up to a `,` or `]`
+/// outside `()` / `{}`; `\` keeps the next character in.
+fn item_len(s: &str) -> usize {
+    let mut depth = 0usize;
+    let mut chars = s.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '(' | '{' => depth += 1,
+            ')' | '}' if depth > 0 => depth -= 1,
+            ',' | ']' if depth == 0 => return i,
+            _ => {}
+        }
+    }
+    s.len()
+}
+
+/// A decimal or `0x` integer, maybe negative.
+fn parse_int(s: &str) -> Option<i64> {
+    let (neg, digits) = s.strip_prefix('-').map_or((false, s), |d| (true, d));
+    let n = match digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        // Hex is the bits of the value: 0xffffffff is -1 as an int.
+        Some(hex) => {
+            let n = u64::from_str_radix(hex, 16).ok()?;
+            match u32::try_from(n) {
+                Ok(int) => i64::from(i32::from_ne_bytes(int.to_ne_bytes())),
+                Err(_) => i64::from_ne_bytes(n.to_ne_bytes()),
+            }
+        }
+        None => digits.parse().ok()?,
+    };
+    Some(if neg { n.checked_neg()? } else { n })
 }
 
 /// Bytes of TEXT at the start of `s`: up to a `&` outside `{}` / `()`, or an
@@ -253,6 +450,66 @@ mod tests {
         assert_eq!(parse_rule("method:{string:a{2}}").unwrap(), Query::Nested(Box::new(Query::String("a{2}".into()))));
     }
 
+    fn call(target: Query, constraints: Vec<CallConstraint>) -> Query {
+        Query::Call { target: Box::new(target), constraints }
+    }
+
+    fn arg(n: u16, want: Want, certainty: Certainty) -> CallConstraint {
+        CallConstraint::Value { slot: Slot::Arg(n), want, certainty }
+    }
+
+    #[test]
+    fn method_targets_take_call_constraints() {
+        use Certainty::{May, Must};
+        let target = || method("Lc;->m([BLjava/lang/String;)V");
+        assert_eq!(
+            parse_rule(r#"method:Lc;->m([BLjava/lang/String;)V [arg1="a,]\"b", this==new:x.Y][ret=unused]"#).unwrap(),
+            call(
+                target(),
+                vec![
+                    arg(1, Want::Str("a,]\"b".into()), May),
+                    CallConstraint::Value { slot: Slot::This, want: Want::New("Lx/Y;".into()), certainty: Must },
+                    CallConstraint::Result { want: ResultWant::Unused, certainty: May },
+                ]
+            )
+        );
+        for (value, want) in [
+            ("*", Want::Any),
+            ("-12", Want::Int(-12)),
+            ("0x10", Want::Int(16)),
+            ("0xffffffff", Want::Int(-1)),
+            ("true", Want::Int(1)),
+            ("null", Want::Int(0)),
+            ("param", Want::Param(None)),
+            ("param3", Want::Param(Some(3))),
+            ("~^ro\\.(serial|boot){1,2}", Want::StrRegex("^ro\\.(serial|boot){1,2}".into())),
+            ("~\"a]b\"", Want::StrRegex("a]b".into())),
+            ("class:java.lang.String", Want::Class("Ljava/lang/String;".into())),
+            ("ret:android.content.Context->getSystemService", Want::Ret(method_query("android.content.Context->getSystemService"))),
+            ("field:Lc;->f:I", Want::Field(member_query("field", None, false, Some("Lc;->f:I"), false).unwrap())),
+        ] {
+            assert_eq!(parse_rule(&format!("method:x[arg0={value}]")).unwrap(), call(method("x"), vec![arg(0, want, May)]), "{value}");
+        }
+        // `&` inside a constraint stays in it; after `]` it joins the next part.
+        assert_eq!(
+            parse_rule("method:x[arg0=~a&b] & string:s").unwrap(),
+            Query::All {
+                all: vec![call(method("x"), vec![arg(0, Want::StrRegex("a&b".into()), May)]), Query::String("s".into())],
+                none: vec![]
+            }
+        );
+        // Nested bodies and method sets take them too.
+        let q = parse_rule("method:{literal:imei}[arg0=*]").unwrap();
+        assert_eq!(q, call(Query::Nested(Box::new(Query::StringLiteral("imei".into()))), vec![arg(0, Want::Any, May)]));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("set.txt"), "Lc;->m()V\n").unwrap();
+        let q = parse_rule_in("method:@set.txt[ret==used]", Some(dir.path())).unwrap();
+        assert!(matches!(&q, Query::Call { target, .. } if matches!(**target, Query::MethodSet(_))), "{q:?}");
+        // Array descriptors and regex classes are not constraints.
+        assert!(!has_constraints("Lc;->m([B[Ljava/lang/String;)V") && has_constraints("x[ret=used]"));
+        assert_eq!(parse_rule("string:[arg0]").unwrap(), Query::String("[arg0]".into()));
+    }
+
     #[test]
     fn errors_name_the_problem() {
         for (spec, want) in [
@@ -260,10 +517,17 @@ mod tests {
             ("method:", "empty value"),
             ("metod:x", "closest: method"),
             ("method:{string:a", "expected `}`"),
-            ("method:{string:a} x", "unexpected text after `}`"),
-            ("method:{string:a}[arg0=1]", "not supported yet"),
-            ("method:Lc;->m(I)V[arg0=true]", "not supported yet"),
-            ("method:x[ret=unused]", "not supported yet"),
+            ("method:{string:a} x", "unexpected text after the method"),
+            ("method:x[arg0=1] y", "unexpected text after the method"),
+            ("method:x[arg0=1", "expected `,` or `]`"),
+            ("method:x[arg0=1, foo=2]", "expected argN, this or ret"),
+            ("method:x[arg0 1]", "expected `=` or `==`"),
+            ("method:x[arg0=]", "empty value"),
+            ("method:x[arg0=\"a]", "unterminated"),
+            ("method:x[arg0=bogus:y]", "expected class:, new:, ret: or field:"),
+            ("method:x[arg0=paramx]", "expected paramK"),
+            ("method:x[arg0=1.5]", "expected *, a number"),
+            ("method:x[ret=maybe]", "ret takes used or unused"),
             ("!string:a", "needs a condition without `!`"),
             ("string:a & ", "expected KIND:VALUE"),
             ("method:@", "empty value"),

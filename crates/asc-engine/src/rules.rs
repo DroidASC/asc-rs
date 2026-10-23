@@ -6,7 +6,7 @@
 //! per kind, then splits the hits back per part.
 
 use crate::{
-    attach_context, matched_name, results_from_hits, rows_compiled, search_entry_with, skip, tiers, Engine, FindOptions, Job, RefBatch,
+    attach_context, hit_matched, results_from_hits, rows_compiled, search_entry_with, skip, tiers, Engine, FindOptions, Job, RefBatch,
     RefContext, RefResult, RefSite, RefSummary, Result, SearchTarget, WriteJob,
 };
 use asc_apk::Entry;
@@ -26,8 +26,9 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
     let parts: Vec<&CompiledQuery> = c.all.iter().chain(&c.none).collect();
     let hits = fr.find_many(&parts)?;
     let n = c.all.len();
-    // method -> per `all` part, its (offset, matched index) hits
-    let mut methods: BTreeMap<u32, Vec<Vec<(u32, u32)>>> = BTreeMap::new();
+    // method -> per `all` part, its (offset, matched index, note) hits
+    type PartHits<'h> = Vec<(u32, u32, Option<&'h str>)>;
+    let mut methods: BTreeMap<u32, Vec<PartHits<'_>>> = BTreeMap::new();
     for (p, part_hits) in hits[..n].iter().enumerate() {
         for h in part_hits {
             let Some(ms) = &h.methods else { continue };
@@ -35,7 +36,7 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
                 // The first part proposes the methods, the others can only keep them.
                 let slot = if p == 0 { Some(methods.entry(m).or_insert_with(|| vec![Vec::new(); n])) } else { methods.get_mut(&m) };
                 if let Some(slot) = slot {
-                    slot[p].push((h.offset, h.matched_idx));
+                    slot[p].push((h.offset, h.matched_idx, h.note.as_deref()));
                 }
             }
         }
@@ -51,15 +52,15 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
         let mut matched = Vec::new();
         let mut sites = Vec::new();
         for (part, part_hits) in c.all.iter().zip(per_part) {
-            let mut idxs: Vec<u32> = part_hits.iter().map(|&(_, i)| i).collect();
+            let mut idxs: Vec<(u32, Option<&str>)> = part_hits.iter().map(|&(_, i, note)| (i, note)).collect();
             idxs.sort_unstable();
             idxs.dedup();
             let base = matched.len();
-            for &i in &idxs {
-                matched.push(matched_name(dex, part.kind(), i)?);
+            for &(i, note) in &idxs {
+                matched.push(hit_matched(dex, part.kind(), i, note)?);
             }
-            for (offset, i) in part_hits {
-                sites.push(RefSite { offset, matched: base + idxs.binary_search(&i).unwrap_or(0), pc: None, line: None });
+            for (offset, i, note) in part_hits {
+                sites.push(RefSite { offset, matched: base + idxs.binary_search(&(i, note)).unwrap_or(0), pc: None, line: None });
             }
         }
         sites.sort_by_key(|s| s.offset);
