@@ -318,18 +318,25 @@ lazily by the queries themselves):
   27 MB of anonymous memory. Without `--memory-mb`, `mcp` and the daemon size the cap with `auto_memory_bytes` (a quarter of
   `available_memory()`, clamped to 64 MiB–2 GiB; 2 GiB where it cannot be read) and sets
   `memory_auto`: the cache then registers the process in a `ProcessRegistry` (one file per
-  pid in `$XDG_RUNTIME_DIR/droidasc` holding its start time and the bytes its caches hold;
-  stale pids are recognised by the start time and removed by readers) and, at most once a
+  pid in `$XDG_RUNTIME_DIR/droidasc` holding its start time, the bytes its caches hold and
+  whether it is serving a request; stale pids are recognised by the start time and removed by readers) and, at most once a
   second after charging bytes, resizes itself (`MemoryCache::set_capacity`) to
   `auto_memory_share` = (available + held by every registered process) / 4 / processes.
   A fixed `--memory-mb` cache registers too but keeps its size. The registry needs a
   process start time to tell a reused pid apart: `/proc/<pid>/stat` on Linux,
   `proc_pidinfo(PROC_PIDTBSDINFO)` on macOS; elsewhere processes do not register.
-* Threads: `Threads::Auto` (no `--threads`) is resolved by every search through
-  `auto_threads` = clamp(4 x CPUs / (1 + other registered processes whose entry is under
-  5 s old), 2, CPUs). An entry is rewritten only by `maybe_rebalance`, i.e. while its process
-  charges loaded entries, so its age separates processes scanning now from servers
-  waiting for their next call. N servers scanning together then share the CPUs instead
+* Threads: `Threads::Auto` (no `--threads`) is resolved through `auto_threads` =
+  clamp(4 x CPUs / (1 + other busy registered processes), 2, CPUs), the registry re-read
+  at most every 100 ms. A process is busy while an MCP tool call or a daemon command runs:
+  `Busy::enter` rewrites its entry when the first request starts and when the last ends,
+  so servers waiting for an agent's next call do not count and a burst is seen at once
+  (entries of older versions, which do not say, count while under 5 s old). A multi-APK
+  sweep (`fan_out`) starts `Threads::most` workers and each waits its turn
+  (`Threads::wait_turn`) between units while the count is below its index: the
+  processes of a burst all start before any sees the others, so a count read once at the
+  start would give each every CPU. On 32 CPUs, 16 servers given one warm rules sweep at
+  once after 7 s idle took 2.5–4.3 s that way (512 workers) and 0.25–0.75 s following the
+  count, like `--threads 8`. N servers scanning together then share the CPUs instead
   of each starting one worker per CPU. The factor 4 is measured: an exact split leaves
   CPUs idle while the processes holding the largest APKs finish alone (8 servers over
   312 APKs on 16 CPUs: 223 ms with 2 workers each, 180 ms with 8, 176 ms with 16).

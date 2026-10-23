@@ -26,6 +26,9 @@ RULES = [
     {"kind": "method", "name": "getDeviceId"},
     {"kind": "method", "name": "loadLibrary", "class": "java.lang.System"},
 ]
+# RULES=i,j: only these rules (indexes into RULES).
+if os.environ.get("RULES"):
+    RULES = [RULES[int(i)] for i in os.environ["RULES"].split(",")]
 argv = sys.argv[1:]
 EXTRA = argv[argv.index("--") + 1:] if "--" in argv else []
 argv = argv[:argv.index("--")] if "--" in argv else argv
@@ -108,6 +111,8 @@ def mcp(n, rules=False):
     servers = [Mcp([BIN, *EXTRA, *([] if auto else ["--threads", threads]), "mcp"]) for _ in range(n)]
     threads = "0" if auto else threads
     props = servers[0].tool_names()["findrefs"]
+    # IDLE=S: let the servers sit idle S seconds first, as agents' servers do between calls.
+    time.sleep(float(os.environ.get("IDLE", "0")))
     tree = TreeSampler([s.p.pid for s in servers])
     res = [None] * n
 

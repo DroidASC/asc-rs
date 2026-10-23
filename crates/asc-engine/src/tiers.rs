@@ -361,9 +361,47 @@ struct Registration {
     registry: Option<ProcessRegistry>,
     /// Bytes held by all of this process's memory caches.
     held: u64,
+    /// Requests in progress ([`Busy`]).
+    requests: usize,
 }
 
-static REGISTRATION: Mutex<Registration> = Mutex::new(Registration { caches: 0, registry: None, held: 0 });
+impl Registration {
+    fn publish(&self) {
+        if let Some(registry) = &self.registry {
+            let _ = registry.update(self.held, self.requests > 0);
+        }
+    }
+}
+
+static REGISTRATION: Mutex<Registration> = Mutex::new(Registration { caches: 0, registry: None, held: 0, requests: 0 });
+
+/// Marks this process busy in the user's process registry while a request
+/// (an MCP tool call, a daemon command) runs, so the others split the CPUs
+/// with it from its first moment ([`auto_threads`]) and take them back as soon
+/// as it ends. Nested and concurrent requests count once.
+#[must_use = "the process is busy only while the guard lives"]
+pub struct Busy(());
+
+impl Busy {
+    pub fn enter() -> Busy {
+        let mut reg = REGISTRATION.lock().unwrap();
+        reg.requests += 1;
+        if reg.requests == 1 {
+            reg.publish();
+        }
+        Busy(())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let mut reg = REGISTRATION.lock().unwrap();
+        reg.requests -= 1;
+        if reg.requests == 0 {
+            reg.publish();
+        }
+    }
+}
 
 /// The memory budget of one memory cache: published to the user's process
 /// registry and, when automatic, resized to this process's share of one
@@ -402,8 +440,8 @@ impl MemoryBudget {
         let (held, others) = {
             let mut reg = REGISTRATION.lock().unwrap();
             reg.held = (reg.held + used).saturating_sub(previous);
+            reg.publish();
             let Some(registry) = &reg.registry else { return };
-            let _ = registry.update(reg.held);
             (reg.held, registry.others())
         };
         if self.auto {
@@ -421,8 +459,8 @@ impl Drop for MemoryBudget {
         if reg.caches == 0 {
             // Unregisters (removes this process's entry).
             reg.registry = None;
-        } else if let Some(registry) = &reg.registry {
-            let _ = registry.update(reg.held);
+        } else {
+            reg.publish();
         }
     }
 }
@@ -439,21 +477,29 @@ pub fn auto_memory_share(available: Option<u64>, held_here: u64, others: &[Proce
     usize::try_from(share).unwrap_or(usize::MAX).clamp(AUTO_MEMORY_MIN, AUTO_MEMORY_MAX)
 }
 
-/// A registered process that updated its entry this recently is busy for
-/// [`auto_threads`]: memory caches republish at most every
-/// [`REBALANCE_EVERY`] while they load entries, and not at all when idle
-/// (an MCP server waiting for an agent's next call).
+/// Busy for [`auto_threads`], for an entry that does not say ([`Busy`]
+/// came later): one updated this recently. Memory caches republish at most
+/// every [`REBALANCE_EVERY`] while they load entries, and not at all when
+/// idle (an MCP server waiting for an agent's next call).
 const BUSY_WINDOW: Duration = Duration::from_secs(5);
+
+/// How often [`auto_threads`] re-reads the registry: a burst of scans
+/// started together by several agents lasts about a second. A read checks
+/// every entry's process: about 1 ms for 31 servers on macOS, which callers
+/// wait for (letting them go on with the last count made 16 servers' cold
+/// sweep 10 % slower).
+const THREADS_EVERY: Duration = Duration::from_millis(100);
 
 /// Worker threads of a search whose caller fixed none: this machine's CPUs
 /// split between this process and the user's other busy registered ones
-/// ([`auto_threads_for`]). Re-read at most once per [`REBALANCE_EVERY`], so
-/// a server follows the others starting and finishing their scans.
+/// ([`auto_threads_for`]). Re-read at most once per [`THREADS_EVERY`], so
+/// a sweep follows the others starting and finishing their scans
+/// ([`crate::Threads::wait_turn`]).
 pub fn auto_threads() -> usize {
     static LAST: Mutex<Option<(Instant, usize)>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap();
     if let Some((at, threads)) = *last {
-        if at.elapsed() < REBALANCE_EVERY {
+        if at.elapsed() < THREADS_EVERY {
             return threads;
         }
     }
@@ -463,11 +509,16 @@ pub fn auto_threads() -> usize {
         // still give way to the resident hosts.
         None => ProcessRegistry::default_dir().map(|d| ProcessRegistry::others_in(&d)).unwrap_or_default(),
     };
-    let busy = others.iter().filter(|o| o.idle < BUSY_WINDOW).count();
-    let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
+    let busy = others.iter().filter(|o| o.busy.unwrap_or(o.idle < BUSY_WINDOW)).count();
+    let cpus = cpus();
     let threads = auto_threads_for(cpus, busy);
     *last = Some((Instant::now(), threads));
     threads
+}
+
+/// This machine's CPUs.
+pub(crate) fn cpus() -> usize {
+    std::thread::available_parallelism().map_or(8, |n| n.get())
 }
 
 /// Workers the busy processes may start together, per CPU. An exact split
@@ -491,7 +542,7 @@ mod tests {
     #[test]
     fn share_splits_one_budget_between_processes() {
         const GIB: u64 = 1 << 30;
-        let other = |bytes| ProcessUsage { pid: 1, bytes, idle: Duration::ZERO };
+        let other = |bytes| ProcessUsage { pid: 1, bytes, idle: Duration::ZERO, busy: None };
         // Alone: a quarter of what is available plus what we hold.
         assert_eq!(auto_memory_share(Some(4 * GIB), 0, &[]), GIB as usize);
         assert_eq!(auto_memory_share(Some(3 * GIB), GIB, &[]), GIB as usize);
@@ -513,6 +564,17 @@ mod tests {
         assert_eq!(auto_threads_for(32, 255), 2, "never below 2");
         assert_eq!(auto_threads_for(1, 3), 1, "nor above the CPUs");
         assert!(auto_threads() >= 1);
+    }
+
+    #[test]
+    fn workers_wait_for_their_turn() {
+        use crate::Threads;
+        Threads::Auto.wait_turn(0, || panic!("the first worker always runs"));
+        Threads::Fixed(1).wait_turn(5, || panic!("fixed counts never hold a worker back"));
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        // Past every CPU a worker waits until the search tells it to stop.
+        Threads::Auto.wait_turn(Threads::Auto.most(), || asked.fetch_add(1, Ordering::Relaxed) >= 2);
+        assert_eq!(asked.load(Ordering::Relaxed), 3);
     }
 
     #[test]

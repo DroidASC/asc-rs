@@ -3,9 +3,9 @@
 //! of every process claiming a quarter of the free memory for itself, and
 //! split the CPUs with the others that are busy.
 //!
-//! Each process keeps a small file `<dir>/<pid>` holding its start time and
-//! the bytes its memory cache holds, rewritten while it works (the file's
-//! age tells a busy process from an idle one). Entries of processes that are gone
+//! Each process keeps a small file `<dir>/<pid>` holding its start time, the
+//! bytes its memory cache holds and whether it is serving a request, rewritten
+//! when a request starts or ends and while it loads entries. Entries of processes that are gone
 //! (killed without unregistering, or whose pid was reused) are recognised by
 //! the start time and removed by whoever reads them.
 
@@ -25,6 +25,9 @@ pub struct ProcessUsage {
     pub bytes: u64,
     /// Time since that update.
     pub idle: Duration,
+    /// Whether it is serving a request; `None` from versions that did not
+    /// say (only the update's age tells).
+    pub busy: Option<bool>,
 }
 
 /// This process's entry in a registry directory; removed on drop.
@@ -56,7 +59,7 @@ impl ProcessRegistry {
         let start = start_time(pid)?;
         create_private_dir(&dir)?;
         let reg = ProcessRegistry { dir, pid, start };
-        reg.update(0).ok()?;
+        reg.update(0, false).ok()?;
         Some(reg)
     }
 
@@ -64,11 +67,12 @@ impl ProcessRegistry {
         &self.dir
     }
 
-    /// Publish the bytes this process's memory cache holds now.
-    pub fn update(&self, bytes: u64) -> std::io::Result<()> {
+    /// Publish the bytes this process's memory cache holds now, and whether
+    /// it is serving a request.
+    pub fn update(&self, bytes: u64, busy: bool) -> std::io::Result<()> {
         let path = self.dir.join(self.pid.to_string());
         let tmp = self.dir.join(format!(".{}.tmp", self.pid));
-        fs::File::create(&tmp)?.write_all(format!("{} {bytes}\n", self.start).as_bytes())?;
+        fs::File::create(&tmp)?.write_all(format!("{} {bytes} {}\n", self.start, u8::from(busy)).as_bytes())?;
         fs::rename(&tmp, path)
     }
 
@@ -91,9 +95,10 @@ impl ProcessRegistry {
             let Ok(text) = fs::read_to_string(f.path()) else { continue };
             let mut fields = text.split_whitespace().map(|v| v.parse::<u64>().ok());
             let (Some(Some(start)), Some(Some(bytes))) = (fields.next(), fields.next()) else { continue };
+            let busy = fields.next().flatten().map(|b| b != 0);
             if start_time(pid) == Some(start) {
                 let idle = f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
-                out.push(ProcessUsage { pid, bytes, idle });
+                out.push(ProcessUsage { pid, bytes, idle, busy });
             } else {
                 let _ = fs::remove_file(f.path());
             }
@@ -177,16 +182,19 @@ mod tests {
     fn processes_see_each_other_and_stale_entries_go() {
         let dir = tempfile::tempdir().unwrap();
         let me = ProcessRegistry::open(dir.path()).unwrap();
-        me.update(123).unwrap();
+        me.update(123, true).unwrap();
         assert!(me.others().is_empty(), "never lists itself");
         // A live process (pid 1 is init) and a dead one (start time mismatch).
         let init_start = start_time(1).unwrap();
-        fs::write(dir.path().join("1"), format!("{init_start} 456\n")).unwrap();
+        fs::write(dir.path().join("1"), format!("{init_start} 456 1\n")).unwrap();
         fs::write(dir.path().join("2"), "1 789\n").unwrap();
         fs::write(dir.path().join("notes"), "x").unwrap();
         // Another registry for the same pid stands in for a second process.
-        let others: Vec<_> = me.others().iter().map(|o| (o.pid, o.bytes)).collect();
-        assert_eq!(others, vec![(1, 456)]);
+        let others: Vec<_> = me.others().iter().map(|o| (o.pid, o.bytes, o.busy)).collect();
+        assert_eq!(others, vec![(1, 456, Some(true))]);
+        // Entries of older versions say nothing about being busy.
+        fs::write(dir.path().join("1"), format!("{init_start} 456\n")).unwrap();
+        assert_eq!(me.others()[0].busy, None);
         assert_eq!(ProcessRegistry::others_in(dir.path()).len(), 1, "readable without registering");
         assert!(me.others()[0].idle < Duration::from_secs(60), "just written");
         assert!(!dir.path().join("2").exists(), "dead entry removed");

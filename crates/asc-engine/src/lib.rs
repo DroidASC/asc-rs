@@ -60,7 +60,7 @@ pub use prebuild::PrebuildReport;
 pub use resources::{parse_id, ResourceField, ResourceRow};
 pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
-pub use tiers::{auto_memory_share, auto_threads, auto_threads_for};
+pub use tiers::{auto_memory_share, auto_threads, auto_threads_for, Busy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -1032,12 +1032,37 @@ pub enum Threads {
     Fixed(usize),
 }
 
+/// How often a worker [`Threads::wait_turn`] holds back looks again.
+const TURN_POLL: Duration = Duration::from_millis(10);
+
 impl Threads {
     /// The thread count for a search starting now (at least 1).
     pub fn count(self) -> usize {
         match self {
             Threads::Auto => auto_threads(),
             Threads::Fixed(n) => n.max(1),
+        }
+    }
+
+    /// The most workers [`Threads::wait_turn`] ever lets run at once.
+    pub fn most(self) -> usize {
+        match self {
+            Threads::Auto => tiers::cpus(),
+            Threads::Fixed(n) => n.max(1),
+        }
+    }
+
+    /// For a long search that starts [`Threads::most`] workers: hold worker
+    /// `k` back (between units of work) while [`auto_threads`] allows fewer
+    /// than `k + 1`, or until `stop()`. The count shrinks as other processes
+    /// start scans and grows back as they finish, which a count read once at
+    /// the start cannot follow: every process of a burst would see the others
+    /// idle and take every CPU.
+    pub fn wait_turn(self, k: usize, stop: impl Fn() -> bool) {
+        if self == Threads::Auto {
+            while k >= auto_threads() && !stop() {
+                std::thread::sleep(TURN_POLL);
+            }
         }
     }
 }

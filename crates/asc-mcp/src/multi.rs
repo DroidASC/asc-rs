@@ -10,6 +10,7 @@
 //! budget and returns a cursor for the rest.
 
 use crate::{lock, OpenApk, ToolError};
+use asc_engine::Threads;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -105,12 +106,13 @@ pub type Plan<C, U> = Result<(C, Vec<(u64, U)>), String>;
 
 /// Run `run` over every unit of every APK. `plan` opens an APK and splits it
 /// into `(weight, unit)`s sharing a context `C`; all units of all APKs share
-/// one queue of `threads` workers, heaviest first. As soon as an APK's last
+/// one queue of `threads` workers, heaviest first (automatic: as many as
+/// [`Threads::wait_turn`] lets run at each moment). As soon as an APK's last
 /// unit finishes, its context is dropped (with whatever it maps) and `done`
 /// runs (to release what the APK caches). Units not started when `cancel` is
 /// raised are skipped and the APK reports an error.
 pub fn fan_out<C, U, R>(
-    threads: usize,
+    threads: Threads,
     apks: &[Arc<OpenApk>],
     cancel: &AtomicBool,
     plan: impl Fn(&OpenApk) -> Plan<C, U> + Sync,
@@ -122,12 +124,16 @@ where
     U: Send + Sync,
     R: Send,
 {
-    let workers = threads.max(1);
+    let workers = threads.most();
     let next = AtomicUsize::new(0);
     let plans: Vec<Mutex<Option<Plan<C, U>>>> = apks.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
-        for _ in 0..workers.min(apks.len()) {
-            s.spawn(|| loop {
+        for k in 0..workers.min(apks.len()) {
+            let next = &next;
+            let plans = &plans;
+            let plan = &plan;
+            s.spawn(move || loop {
+                threads.wait_turn(k, || next.load(Ordering::Relaxed) >= apks.len() || cancel.load(Ordering::Relaxed));
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some(apk) = apks.get(i) else { break };
                 let p = if cancel.load(Ordering::Relaxed) { Err("cancelled".to_string()) } else { plan(apk) };
@@ -173,8 +179,11 @@ where
     jobs.sort_by(|x, y| apk_weight[y.1].cmp(&apk_weight[x.1]).then(x.1.cmp(&y.1)).then(y.0.cmp(&x.0)).then(x.2.cmp(&y.2)));
     let next = AtomicUsize::new(0);
     std::thread::scope(|s| {
-        for _ in 0..workers.min(jobs.len()) {
-            s.spawn(|| loop {
+        for w in 0..workers.min(jobs.len()) {
+            let (next, jobs, contexts, units, slots, left) = (&next, &jobs, &contexts, &units, &slots, &left);
+            let (run, done) = (&run, &done);
+            s.spawn(move || loop {
+                threads.wait_turn(w, || next.load(Ordering::Relaxed) >= jobs.len() || cancel.load(Ordering::Relaxed));
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 let Some(&(_, a, j)) = jobs.get(k) else { break };
                 if !cancel.load(Ordering::Relaxed) {
