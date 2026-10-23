@@ -630,6 +630,56 @@ fn a_sweep_reuses_rendered_results_of_earlier_runs() {
 }
 
 #[test]
+fn rules_and_single_rule_sweeps_share_rendered_results() {
+    let cache = tempfile::tempdir().unwrap();
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let opts = || {
+        let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
+        asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..CacheConfig::default() })
+    };
+    let token = json!({"kind": "string", "value": "token"});
+    let object = json!({"kind": "extends", "value": "java.lang.Object"});
+    let alone = session_with(opts(), &[call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "token"}))]);
+    // r1 comes from the single-rule sweep: a, b and sub/c (bomb and broken fail).
+    let set = session_with(opts(), &[call(1, "findrefs", json!({"dir": d, "rules": [token, object]}))]);
+    let s = ok(&set[0]);
+    assert_eq!(s["rules_from_result_cache"], 3, "{s}");
+    assert_eq!(s["rules"][0]["total"], ok(&alone[0])["total"], "{s}");
+    let again = session_with(opts(), &[call(1, "findrefs", json!({"dir": d, "rules": [token, object]}))]);
+    assert_eq!(ok(&again[0])["rules_from_result_cache"], 6, "{}", again[0]);
+    let rows = |r: &Value| text(r).lines().skip(1).filter(|l| !l.starts_with("# ")).map(String::from).collect::<Vec<_>>();
+    assert_eq!(rows(&set[0]), rows(&again[0]));
+    // The set stored r2 for single-rule calls too.
+    let single = session_with(opts(), &[call(1, "findrefs", json!({"dir": d, "kind": "extends", "value": "java.lang.Object"}))]);
+    assert_eq!(ok(&single[0])["apks_from_result_cache"], 3, "{}", single[0]);
+    assert_eq!(ok(&single[0])["total"], s["rules"][1]["total"]);
+}
+
+#[test]
+fn rules_search_identical_dex_across_apks_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let dex = make_dex();
+    let other = make_class_only_dex(&["Lother/Only;"], 0, false);
+    std::fs::write(dir.path().join("x1.apk"), make_apk(&[("classes.dex", &dex)], true)).unwrap();
+    std::fs::write(dir.path().join("x2.apk"), make_apk(&[("classes.dex", &dex)], false)).unwrap();
+    std::fs::write(dir.path().join("x3.apk"), make_apk(&[("classes.dex", &other), ("classes2.dex", &dex)], true)).unwrap();
+    let d = dir.path().to_str().unwrap();
+    let rules = json!([{"kind": "string", "value": "token"}, {"kind": "extends", "value": "java.lang.Object"}]);
+    let r = session(&[call(1, "findrefs", json!({"dir": d, "rules": rules, "collapse_sdks": false}))]);
+    let s = ok(&r[0]);
+    assert_eq!(s["dex_shared"], 2, "{s}");
+    assert_eq!(s["rules"][0]["total"], 6, "{s}");
+    let body = text(&r[0]);
+    for apk in ["apk1", "apk2"] {
+        assert!(body.contains(&format!("{apk} | r1 | classes.dex | Lexample/Test;->first | matched=(token)\n")), "{body}");
+    }
+    // The follower's rows carry its own entry name.
+    assert!(body.contains("apk3 | r1 | classes2.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(!body.contains("apk3 | r1 | classes.dex |"), "{body}");
+}
+
+#[test]
 fn findrefs_combines_conditions_in_one_method() {
     let apk = temp_apk();
     let a = apk.path().to_str().unwrap();

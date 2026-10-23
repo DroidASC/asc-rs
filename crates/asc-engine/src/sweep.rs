@@ -12,6 +12,9 @@
 //! rows only when the SHA-256 of its inflated bytes equals the leader's, and
 //! searches by itself otherwise. That costs a read (an inflate for a deflated
 //! entry) but still saves the parse, the index build and the scan.
+//!
+//! A rule set claims with the rules it still has to search (the others came
+//! from L3), so only entries searched for the same rules share rows.
 
 use crate::{tiers, CompiledQuery, Engine, FindOptions, Job, Query, RefBatch, RefContext, SearchTarget, WriteJob};
 use asc_apk::Entry;
@@ -26,10 +29,14 @@ use std::time::{Duration, SystemTime};
 /// SHA-256 of an entry's inflated bytes.
 type Ident = [u8; 32];
 
+/// What claimants share rows by: CRC-32, inflated size, and the rules
+/// searched (empty for a single query).
+type GroupKey = (u32, u64, Vec<usize>);
+
 /// Content keys claimed by the entries of one sweep.
 #[derive(Default)]
 pub struct DexDedup {
-    groups: Mutex<HashMap<(u32, u64), Arc<Group>>>,
+    groups: Mutex<HashMap<GroupKey, Arc<Group>>>,
     shared: Arc<AtomicUsize>,
 }
 
@@ -52,7 +59,8 @@ struct Group {
 
 struct Shared {
     ident: Ident,
-    batch: RefBatch,
+    /// One batch per query searched.
+    batches: Vec<RefBatch>,
 }
 
 impl DexDedup {
@@ -63,8 +71,15 @@ impl DexDedup {
     /// Claim `entry`'s content. Claim every entry of the sweep before
     /// searching any of them, so a leader knows whether anyone follows.
     pub fn claim(&self, entry: &Entry) -> Claim {
+        self.claim_rules(entry, &[])
+    }
+
+    /// [`DexDedup::claim`] for an entry searched for the rules `rules` (indexes
+    /// into the sweep's rule set): it shares rows only with entries searched
+    /// for the same rules.
+    pub fn claim_rules(&self, entry: &Entry, rules: &[usize]) -> Claim {
         let mut groups = self.groups.lock().unwrap();
-        let group = groups.entry((entry.crc32, entry.uncomp_size)).or_default();
+        let group = groups.entry((entry.crc32, entry.uncomp_size, rules.to_vec())).or_default();
         let lead = group.members.fetch_add(1, Ordering::Relaxed) == 0;
         Claim { group: Arc::clone(group), lead, shared: Arc::clone(&self.shared) }
     }
@@ -150,20 +165,47 @@ impl Engine {
         cancel: &AtomicBool,
         claim: &Claim,
     ) -> RefBatch {
+        let search = || vec![self.search_target_entry(target, entry, query, aggregate, cancel)];
+        self.dedup_search(target, entry, cancel, claim, search).pop().expect("one batch per query")
+    }
+
+    /// [`Engine::search_target_entry_rules`] for an entry claimed with
+    /// [`DexDedup::claim_rules`] for these `rules`.
+    pub fn search_target_entry_rules_dedup(
+        &self,
+        target: &SearchTarget,
+        entry: &Entry,
+        rules: &[&CompiledQuery],
+        aggregate: bool,
+        cancel: &AtomicBool,
+        claim: &Claim,
+    ) -> Vec<RefBatch> {
+        let search = || self.search_target_entry_rules(target, entry, rules, aggregate, cancel);
+        self.dedup_search(target, entry, cancel, claim, search)
+    }
+
+    fn dedup_search(
+        &self,
+        target: &SearchTarget,
+        entry: &Entry,
+        cancel: &AtomicBool,
+        claim: &Claim,
+        search: impl FnOnce() -> Vec<RefBatch>,
+    ) -> Vec<RefBatch> {
         let group = &claim.group;
         if claim.lead {
             let publish = Publish(group);
-            let batch = self.search_target_entry(target, entry, query, aggregate, cancel);
+            let batches = search();
             if group.members.load(Ordering::Relaxed) > 1 {
                 // The search left the bytes in the memory cache, if there is one.
                 let ident = content_id(target, entry, || {
                     self.entry_bytes(&target.apk, target.key.as_ref(), entry).ok().map(|b| Sha256::digest(&**b).into())
                 });
-                publish.set(ident.map(|ident| Arc::new(Shared { ident, batch: batch.clone() })));
+                publish.set(ident.map(|ident| Arc::new(Shared { ident, batches: batches.clone() })));
             } else {
                 publish.set(None);
             }
-            return batch;
+            return batches;
         }
         if let Some(shared) = wait_shared(group, cancel) {
             // Hashed once per APK version: later queries of the sweep's
@@ -173,10 +215,10 @@ impl Engine {
             });
             if ident == Some(shared.ident) {
                 claim.shared.fetch_add(1, Ordering::Relaxed);
-                return renamed(shared.batch.clone(), &entry.name);
+                return shared.batches.iter().map(|b| renamed(b.clone(), &entry.name)).collect();
             }
         }
-        self.search_target_entry(target, entry, query, aggregate, cancel)
+        search()
     }
 }
 

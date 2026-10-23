@@ -6,10 +6,14 @@ use crate::{
     bool_arg, context_arg, describe_query, max_bytes, parse_query, ref_json, result_json, str_arg, usize_arg, Call, Found, OpenApk, Server,
     ToolError, ToolResult, PER_APK,
 };
-use asc_engine::{compile_rules, names, FindOptions, HierarchyQuery, Lineage, RefBatch, RefResult};
+use asc_engine::{
+    compile_rules, names, Claim, CompiledQuery, DexDedup, FindOptions, HierarchyQuery, Lineage, RefBatch, RefResult, SearchTarget,
+};
 use asc_findrefs::Query;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// Rows per rule of a single-APK rule set.
@@ -96,15 +100,24 @@ fn follow_up(rule: &Value, args: &Value, apk_id: &str, offset: usize, collapsed:
     Value::Object(next)
 }
 
-/// Batches of every unit (one `Vec` per unit, one batch per rule) regrouped per rule.
-fn per_rule(units: Vec<Vec<RefBatch>>, n: usize) -> Vec<Vec<RefBatch>> {
+/// Batches of every unit, tagged with their rule, regrouped per rule.
+fn per_rule(units: Vec<Vec<(usize, RefBatch)>>, n: usize) -> Vec<Vec<RefBatch>> {
     let mut out: Vec<Vec<RefBatch>> = (0..n).map(|_| Vec::new()).collect();
-    for unit in units {
-        for (i, b) in unit.into_iter().enumerate() {
-            out[i].push(b);
-        }
+    for (i, b) in units.into_iter().flatten() {
+        out[i].push(b);
     }
     out
+}
+
+/// One APK of a rule sweep: the rules L3 answered, and the claims of its
+/// entries for the rules still to search.
+struct RulesTarget {
+    target: SearchTarget,
+    /// Rules to search, as indexes into the rule set.
+    missing: Vec<usize>,
+    claims: Vec<Claim>,
+    /// Rows replayed from L3, tagged with their rule.
+    cached: Mutex<Vec<(usize, RefBatch)>>,
 }
 
 impl Server {
@@ -175,19 +188,55 @@ impl Server {
         let n = queries.len();
         let names: Vec<String> = (1..=n).map(|i| format!("r{i}")).collect();
         let mut rule_hits = vec![(0usize, 0usize); n]; // (hits, APKs with hits)
-        let tally = std::sync::Mutex::new(&mut rule_hits);
+        let tally = Mutex::new(&mut rule_hits);
+        // Identical DEX in several APKs is searched once (per set of rules).
+        let dedup = DexDedup::new();
+        let cached_rules = AtomicUsize::new(0);
         let (sections, empty, stats) = self.sweep(
             paths,
             call,
             bool_arg(args, "release")?,
             |apk| {
                 let target = apk.engine.search_target().map_err(|e| e.to_string())?;
-                let units = target.entries.iter().enumerate().map(|(i, e)| (e.uncomp_size.max(e.comp_size), i)).collect();
-                Ok((target, units))
+                // L3: each rule may have run on this APK version already, alone or in a set.
+                let mut cached = Vec::new();
+                let mut missing = Vec::new();
+                for (i, q) in queries.iter().enumerate() {
+                    match apk.engine.cached_refs(&target, q, true) {
+                        Some(batches) => cached.extend(batches.into_iter().map(|b| (i, b))),
+                        None => missing.push(i),
+                    }
+                }
+                cached_rules.fetch_add(n - missing.len(), Ordering::Relaxed);
+                let claims: Vec<Claim> =
+                    if missing.is_empty() { Vec::new() } else { target.entries.iter().map(|e| dedup.claim_rules(e, &missing)).collect() };
+                // The replayed rows, then the entries; a follower waits for its leader, so it runs last.
+                let units = std::iter::once((0, None))
+                    .chain(
+                        (claims.iter().zip(&target.entries).enumerate())
+                            .map(|(i, (c, e))| (if DexDedup::follows(c) { 1 } else { e.uncomp_size.max(e.comp_size) }, Some(i))),
+                    )
+                    .collect();
+                Ok((RulesTarget { target, missing, claims, cached: Mutex::new(cached) }, units))
             },
-            |apk, target, &i| apk.engine.search_target_entry_rules(target, &target.entries[i], &compiled, true, &call.cancel),
+            |apk, t, unit| match *unit {
+                None => std::mem::take(&mut *crate::lock(&t.cached)),
+                Some(i) => {
+                    let searched: Vec<&CompiledQuery> = t.missing.iter().map(|&r| &compiled[r]).collect();
+                    let (entry, claim) = (&t.target.entries[i], &t.claims[i]);
+                    let batches = apk.engine.search_target_entry_rules_dedup(&t.target, entry, &searched, true, &call.cancel, claim);
+                    t.missing.iter().copied().zip(batches).collect()
+                }
+            },
             |apk, units| {
-                let found: Vec<Found> = per_rule(units, n).into_iter().map(|b| Found::new(b, sdks.as_deref())).collect();
+                let per_rule = per_rule(units, n);
+                for (q, batches) in queries.iter().zip(&per_rule) {
+                    // Searched now, not replayed: keep it for the next run of the rule, alone or in a set.
+                    if !batches.is_empty() && batches.iter().all(|b| b.source != "result") {
+                        apk.engine.store_refs(q, true, batches);
+                    }
+                }
+                let found: Vec<Found> = per_rule.into_iter().map(|b| Found::new(b, sdks.as_deref())).collect();
                 {
                     let mut tally = tally.lock().unwrap();
                     for (i, f) in found.iter().enumerate() {
@@ -218,6 +267,9 @@ impl Server {
             "errors": stats.errors,
             "elapsed_ms": ms,
             "released": stats.released,
+            "memory_cache_bytes": self.cache.memory_bytes(),
+            "rules_from_result_cache": cached_rules.load(Ordering::Relaxed),
+            "dex_shared": dedup.shared(),
             "rules": rules.iter().zip(&names).zip(&rule_hits).map(|((q, r), (hits, apks))| {
                 json!({"rule": r, "query": q, "total": hits, "apks_with_hits": apks})
             }).collect::<Vec<_>>(),

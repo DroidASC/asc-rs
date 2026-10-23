@@ -6,14 +6,15 @@
 //! per kind, then splits the hits back per part.
 
 use crate::{
-    attach_context, matched_name, results_from_hits, rows_compiled, search_entry_with, Engine, FindOptions, RefBatch, RefContext,
-    RefResult, RefSite, RefSummary, Result, SearchTarget,
+    attach_context, matched_name, results_from_hits, rows_compiled, search_entry_with, tiers, Engine, FindOptions, Job, RefBatch,
+    RefContext, RefResult, RefSite, RefSummary, Result, SearchTarget, WriteJob,
 };
 use asc_apk::Entry;
+use asc_cache::Tier;
 use asc_findrefs::{CompiledQuery, Compound, FindRefs, Query};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 /// Rows of a compound query ([`Query::All`]) over one DEX: one per method
@@ -82,9 +83,9 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
 /// Rows of every rule over one DEX, one list per rule. Plain code queries
 /// share [`FindRefs::find_many`]'s scans; class relations and compound
 /// queries run on their own.
-pub(crate) fn rule_rows(fr: &FindRefs<'_, '_, '_>, rules: &[CompiledQuery], opts: FindOptions) -> Result<Vec<Vec<RefResult>>> {
+pub(crate) fn rule_rows(fr: &FindRefs<'_, '_, '_>, rules: &[&CompiledQuery], opts: FindOptions) -> Result<Vec<Vec<RefResult>>> {
     let plain: Vec<usize> = (0..rules.len()).filter(|&i| rules[i].relation().is_none() && rules[i].compound().is_none()).collect();
-    let hits = fr.find_many(&plain.iter().map(|&i| &rules[i]).collect::<Vec<_>>())?;
+    let hits = fr.find_many(&plain.iter().map(|&i| rules[i]).collect::<Vec<_>>())?;
     let mut out: Vec<Option<Vec<RefResult>>> = (0..rules.len()).map(|_| None).collect();
     for (&i, hits) in plain.iter().zip(hits) {
         let mut rows = results_from_hits(fr.dex(), rules[i].kind(), &hits, opts.aggregate)?;
@@ -95,7 +96,7 @@ pub(crate) fn rule_rows(fr: &FindRefs<'_, '_, '_>, rules: &[CompiledQuery], opts
     }
     for (i, slot) in out.iter_mut().enumerate() {
         if slot.is_none() {
-            *slot = Some(rows_compiled(fr, &rules[i], opts)?);
+            *slot = Some(rows_compiled(fr, rules[i], opts)?);
         }
     }
     Ok(out.into_iter().map(Option::unwrap_or_default).collect())
@@ -110,6 +111,10 @@ impl Engine {
     /// Several queries in one pass: each DEX is loaded once and scanned once
     /// per index kind for all of them. `sink` gets `(rule index, batch)`,
     /// one batch per rule and entry, entries in completion order.
+    ///
+    /// Each rule shares L3 with [`Engine::find_refs_opts`]: rules an earlier
+    /// run left there are replayed, only the others are searched, and each of
+    /// those is kept under its own key.
     pub fn find_refs_rules(
         &self,
         rules: &[Query],
@@ -129,11 +134,34 @@ impl Engine {
         if entries.is_empty() || compiled.is_empty() {
             return Ok(summary);
         }
+        let disk = self.cache.as_ref().and_then(|c| c.disk.as_deref()).filter(|d| d.uses(Tier::Rendered));
+        let rendered = disk.zip(key.as_ref());
+        let mut missing = Vec::new();
+        for (i, rule) in rules.iter().enumerate() {
+            let replay =
+                rendered.and_then(|(d, k)| d.get_rendered(k, &tiers::findrefs_key(rule, opts))).and_then(|b| tiers::decode_batches(&b));
+            match replay {
+                Some(batches) => {
+                    for batch in batches {
+                        summary.total_results += batch.results.len();
+                        sink(i, batch);
+                    }
+                }
+                None => missing.push(i),
+            }
+        }
+        if missing.is_empty() {
+            summary.total_us = t0.elapsed().as_micros();
+            self.log(format!("[APK] for_each_findrefs_rules total={} us rules={} source=result", summary.total_us, rules.len()));
+            return Ok(summary);
+        }
+        let mut recorders: Vec<_> = missing.iter().map(|_| rendered.map(|_| tiers::ResultRecorder::new())).collect();
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<Vec<RefBatch>>();
         let workers = self.threads.min(entries.len()).max(1);
-        let (cache, stats, compiled) = (self.cache.as_deref(), &self.stats, &compiled);
-        let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, compiled, opts);
+        let searched: Vec<&CompiledQuery> = missing.iter().map(|&i| &compiled[i]).collect();
+        let (cache, stats, searched) = (self.cache.as_deref(), &self.stats, &searched);
+        let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, searched, opts);
         std::thread::scope(|s| {
             for _ in 0..workers {
                 let tx = tx.clone();
@@ -144,7 +172,7 @@ impl Engine {
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
-                    let batches = search_entry_with(apk, key, entry, compiled.len(), run, cancel, cache, stats);
+                    let batches = search_entry_with(apk, key, entry, searched.len(), run, cancel, cache, stats);
                     if tx.send(batches).is_err() {
                         break;
                     }
@@ -152,18 +180,32 @@ impl Engine {
             }
             drop(tx);
             for batches in rx {
-                for (rule, batch) in batches.into_iter().enumerate() {
+                for (j, batch) in batches.into_iter().enumerate() {
                     summary.total_results += batch.results.len();
-                    sink(rule, batch);
+                    if let Some(r) = recorders[j].as_mut() {
+                        r.record(&batch);
+                    }
+                    sink(missing[j], batch);
                 }
             }
         });
+        // A cancelled run may be missing entries.
+        if let Some((_, k)) = rendered.filter(|_| !cancel.load(Ordering::Relaxed)) {
+            for (&i, recorder) in missing.iter().zip(recorders) {
+                if let Some(payload) = recorder.and_then(tiers::ResultRecorder::finish) {
+                    let query = tiers::findrefs_key(&rules[i], opts);
+                    let job = WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Rendered { query, payload } };
+                    self.cache.as_ref().expect("rendered implies a cache").put_async(job);
+                }
+            }
+        }
         summary.total_us = t0.elapsed().as_micros();
         self.log(format!(
-            "[APK] for_each_findrefs_rules total={} us count={} rules={} workers={workers}",
+            "[APK] for_each_findrefs_rules total={} us count={} rules={} searched={} workers={workers}",
             summary.total_us,
             entries.len(),
-            rules.len()
+            rules.len(),
+            missing.len()
         ));
         Ok(summary)
     }
@@ -173,7 +215,7 @@ impl Engine {
         &self,
         target: &SearchTarget,
         entry: &Entry,
-        rules: &[CompiledQuery],
+        rules: &[&CompiledQuery],
         aggregate: bool,
         cancel: &AtomicBool,
     ) -> Vec<RefBatch> {
