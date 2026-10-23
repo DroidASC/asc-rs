@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 pub const MAX_BYTES: usize = 32 << 10;
 /// Default budget of one APK's section.
 pub const MAX_APK_BYTES: usize = 4 << 10;
+/// Most apk_ids of empty APKs a page lists by name.
+const MAX_EMPTY_LISTED: usize = 32;
 /// Directory levels `dir` descends.
 const MAX_DEPTH: usize = 8;
 
@@ -96,18 +98,19 @@ pub fn glob_match(pat: &[u8], name: &[u8]) -> bool {
     pat[p..].iter().all(|&c| c == b'*')
 }
 
-/// What one APK of a fan-out produced: its plan context and its units'
-/// results in plan order, or why it could not be planned (or was cancelled).
-pub type Outcome<C, R> = Result<(C, Vec<R>), String>;
+/// What one APK of a fan-out produced: its units' results in plan order, or
+/// why it could not be planned (or was cancelled).
+pub type Outcome<R> = Result<Vec<R>, String>;
 
 /// An APK's plan: the context its units share, and the weighted units.
 pub type Plan<C, U> = Result<(C, Vec<(u64, U)>), String>;
 
 /// Run `run` over every unit of every APK. `plan` opens an APK and splits it
 /// into `(weight, unit)`s sharing a context `C`; all units of all APKs share
-/// one queue of `threads` workers, heaviest first. `done` runs once per APK
-/// as soon as its last unit finishes (to release what it holds). Units not
-/// started when `cancel` is raised are skipped and the APK reports an error.
+/// one queue of `threads` workers, heaviest first. As soon as an APK's last
+/// unit finishes, its context is dropped (with whatever it maps) and `done`
+/// runs (to release what the APK caches). Units not started when `cancel` is
+/// raised are skipped and the APK reports an error.
 pub fn fan_out<C, U, R>(
     threads: usize,
     apks: &[Arc<OpenApk>],
@@ -115,7 +118,7 @@ pub fn fan_out<C, U, R>(
     plan: impl Fn(&OpenApk) -> Plan<C, U> + Sync,
     run: impl Fn(&OpenApk, &C, &U) -> R + Sync,
     done: impl Fn(&OpenApk) + Sync,
-) -> Vec<Outcome<C, R>>
+) -> Vec<Outcome<R>>
 where
     C: Send + Sync,
     U: Send + Sync,
@@ -134,49 +137,70 @@ where
             });
         }
     });
-    let plans: Vec<Plan<C, U>> = plans.into_iter().map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("planned")).collect();
 
+    let mut contexts: Vec<Mutex<Option<Arc<C>>>> = Vec::with_capacity(apks.len());
+    let mut units: Vec<Vec<U>> = Vec::with_capacity(apks.len());
+    let mut failed: Vec<Option<String>> = Vec::with_capacity(apks.len());
     let mut jobs: Vec<(u64, usize, usize)> = Vec::new();
-    let mut slots: Vec<Mutex<Vec<Option<R>>>> = Vec::with_capacity(apks.len());
-    let mut left: Vec<AtomicUsize> = Vec::with_capacity(apks.len());
-    for (a, p) in plans.iter().enumerate() {
-        let units = p.as_ref().map(|(_, u)| u.len()).unwrap_or(0);
-        jobs.extend(p.iter().flat_map(|(_, u)| u.iter().enumerate().map(move |(j, (w, _))| (*w, a, j))));
-        slots.push(Mutex::new((0..units).map(|_| None).collect()));
-        left.push(AtomicUsize::new(units));
-        if units == 0 {
+    for (a, p) in plans.into_iter().enumerate() {
+        match p.into_inner().unwrap_or_else(|e| e.into_inner()).expect("planned") {
+            Ok((ctx, us)) => {
+                jobs.extend(us.iter().enumerate().map(|(j, (w, _))| (*w, a, j)));
+                failed.push(None);
+                contexts.push(Mutex::new(Some(Arc::new(ctx))));
+                units.push(us.into_iter().map(|(_, u)| u).collect());
+            }
+            Err(e) => {
+                failed.push(Some(e));
+                contexts.push(Mutex::new(None));
+                units.push(Vec::new());
+            }
+        }
+    }
+    let slots: Vec<Mutex<Vec<Option<R>>>> = units.iter().map(|u| Mutex::new(u.iter().map(|_| None).collect())).collect();
+    let left: Vec<AtomicUsize> = units.iter().map(|u| AtomicUsize::new(u.len())).collect();
+    for (a, u) in units.iter().enumerate() {
+        if u.is_empty() {
+            lock(&contexts[a]).take();
             done(&apks[a]);
         }
     }
-    // Heaviest first; ties keep APK order so small APKs finish (and release) in turn.
-    jobs.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+    // Heaviest APK first, its units together and heaviest first: the biggest
+    // work starts at once, and each APK finishes (and lets go of its mapping
+    // and cache) soon after it starts instead of at the end of the sweep.
+    let mut apk_weight = vec![0u64; apks.len()];
+    for &(w, a, _) in &jobs {
+        apk_weight[a] = apk_weight[a].saturating_add(w);
+    }
+    jobs.sort_by(|x, y| apk_weight[y.1].cmp(&apk_weight[x.1]).then(x.1.cmp(&y.1)).then(y.0.cmp(&x.0)).then(x.2.cmp(&y.2)));
     let next = AtomicUsize::new(0);
-    let skipped = AtomicBool::new(false);
     std::thread::scope(|s| {
         for _ in 0..workers.min(jobs.len()) {
             s.spawn(|| loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 let Some(&(_, a, j)) = jobs.get(k) else { break };
-                if cancel.load(Ordering::Relaxed) {
-                    skipped.store(true, Ordering::Relaxed);
-                } else {
-                    let Ok((ctx, units)) = &plans[a] else { unreachable!("only planned APKs have jobs") };
-                    let r = run(&apks[a], ctx, &units[j].1);
+                if !cancel.load(Ordering::Relaxed) {
+                    let ctx = lock(&contexts[a]).clone().expect("a context lives until its last unit");
+                    let r = run(&apks[a], &ctx, &units[a][j]);
                     lock(&slots[a])[j] = Some(r);
                 }
                 if left[a].fetch_sub(1, Ordering::AcqRel) == 1 {
+                    // Every other unit dropped its reference before counting down.
+                    lock(&contexts[a]).take();
                     done(&apks[a]);
                 }
             });
         }
     });
-    plans
+    failed
         .into_iter()
         .zip(slots)
-        .map(|(p, slot)| {
-            let (ctx, _) = p?;
+        .map(|(f, slot)| {
+            if let Some(e) = f {
+                return Err(e);
+            }
             let rs: Option<Vec<R>> = slot.into_inner().unwrap_or_else(|e| e.into_inner()).into_iter().collect();
-            Ok((ctx, rs.ok_or_else(|| "cancelled".to_string())?))
+            rs.ok_or_else(|| "cancelled".to_string())
         })
         .collect()
 }
@@ -238,17 +262,12 @@ impl Report {
             _ => None,
         };
         if from == 0 && !self.empty.is_empty() {
-            let mut line = format!("# nothing in {} APKs:", self.empty.len());
-            for id in &self.empty {
-                if line.len() > 1024 {
-                    line.push_str(" ...");
-                    break;
-                }
-                line.push(' ');
-                line.push_str(id);
+            // A long id list is noise next to the hits; the data has it all.
+            if self.empty.len() <= MAX_EMPTY_LISTED {
+                text.push_str(&format!("# nothing in {} APKs: {}\n", self.empty.len(), self.empty.join(" ")));
+            } else {
+                text.push_str(&format!("# nothing in the other {} APKs\n", self.empty.len()));
             }
-            text.push_str(&line);
-            text.push('\n');
         }
         match &cursor {
             Some(c) => text.push_str(&format!(

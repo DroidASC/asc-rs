@@ -280,6 +280,21 @@ once and then scan. Results are paged over a stable order (entries sorted as
 `classes.dex, classes2.dex, …`), because the engine streams entries as they finish. Tool
 failures are `isError` results, protocol errors JSON-RPC errors; neither ends the session.
 
+Cancellation: the reader keeps a cancel flag per running call (keyed by request id);
+`notifications/cancelled` raises it, the engine stops between entries and inflate chunks,
+and the call's reply is dropped. Engines are built with `asc_apk::Limits::guarded()`
+(per-entry size, expansion ratio, total declared DEX) so a zip bomb fails its APK only.
+
+Multi-APK calls (`multi.rs`): `targets` turns `apks` / `dir` into a sorted path list;
+`Server::sweep` opens each path as a session, `fan_out` plans every APK into weighted units
+(findrefs: one per DEX entry, via `Engine::search_target` / `search_target_entry`) and runs
+all units on one pool of `--threads` workers, ordered heaviest APK first with each APK's
+units together. An APK's plan context (its mapping) is dropped and, under `release`, its
+cache entries evicted as soon as its last unit finishes, so a sweep's resident set is about
+one LRU's worth. Each APK becomes a `Section` of pre-rendered lines; the `Report` is kept
+(last 16 per session) and paged by whole sections up to `max_bytes`, `cursor` naming
+report and section. New multi-APK tools add a `TOOLS` entry and call `sweep` + `report`.
+
 ### Scan strategy
 
 `CodeScanner::scan` picks a strategy from the query: ≤ 8 targets → `memmem` over each

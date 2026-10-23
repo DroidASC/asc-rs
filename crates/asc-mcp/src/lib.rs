@@ -255,6 +255,8 @@ pub struct SweepStats {
     pub with_hits: usize,
     pub hits: usize,
     pub errors: usize,
+    /// APKs were dropped from memory as they finished.
+    pub released: bool,
 }
 
 impl Server {
@@ -445,18 +447,21 @@ impl Server {
         let (sections, _, stats) = self.sweep(
             paths,
             call,
-            false,
+            Some(false),
             |apk| {
                 let entries = apk.engine.dex_entries().map_err(|e| e.to_string())?;
                 let bytes: u64 = entries.iter().map(|e| e.uncomp_size).sum();
-                Ok(((entries.len(), bytes), vec![(bytes, ())]))
+                Ok(((), vec![(bytes, (entries.len(), bytes))]))
             },
-            |apk, _, ()| if warm { warm_classes(apk).map(Some).map_err(|e| e.0) } else { Ok(None) },
-            |apk, &(dex, bytes), r| {
-                let classes = match r.into_iter().next() {
-                    Some(Err(e)) => return (0, Some(Section::error(&apk.id, &apk.path, &e))),
-                    Some(Ok(n)) => n,
-                    None => None,
+            |apk, (), &(dex, bytes)| {
+                let classes = if warm { warm_classes(apk).map(Some).map_err(|e| e.0) } else { Ok(None) };
+                (dex, bytes, classes)
+            },
+            |apk, r| {
+                let (dex, bytes, classes) = r.into_iter().next().expect("one unit");
+                let classes = match classes {
+                    Err(e) => return (0, Some(Section::error(&apk.id, &apk.path, &e))),
+                    Ok(n) => n,
                 };
                 let mut line = format!("{} | {dex} dex | {:.1} MiB | {}", apk.id, bytes as f64 / 1048576.0, apk.path.display());
                 if let Some(n) = classes {
@@ -490,16 +495,18 @@ impl Server {
     /// Run a multi-APK tool: open every path (one that fails becomes an error
     /// section), plan each APK into units and run them all on one queue
     /// ([`multi::fan_out`]), then turn each APK's results into
-    /// `(hits, section)`; no section counts the APK as empty. With `release`,
-    /// an APK's cached DEX leaves memory as soon as its last unit finishes.
+    /// `(hits, section)`; no section counts the APK as empty. With `release`
+    /// (`None`: when the APKs' DEX would not fit the memory budget anyway, so
+    /// a sweep does not evict what other calls still use), an APK's cached DEX
+    /// leaves memory as soon as its last unit finishes.
     pub fn sweep<C, U, R>(
         &self,
         paths: &[PathBuf],
         call: &Call,
-        release: bool,
+        release: Option<bool>,
         plan: impl Fn(&OpenApk) -> multi::Plan<C, U> + Sync,
         run: impl Fn(&OpenApk, &C, &U) -> R + Sync,
-        section: impl Fn(&OpenApk, &C, Vec<R>) -> (usize, Option<Section>),
+        section: impl Fn(&OpenApk, Vec<R>) -> (usize, Option<Section>),
     ) -> (Vec<Section>, Vec<String>, SweepStats)
     where
         C: Send + Sync,
@@ -508,13 +515,17 @@ impl Server {
     {
         let opened: Vec<Result<Arc<OpenApk>, String>> = paths.iter().map(|p| self.open_path(p).map_err(|e| e.0)).collect();
         let apks: Vec<Arc<OpenApk>> = opened.iter().filter_map(|o| o.as_ref().ok().cloned()).collect();
+        let release = release.unwrap_or_else(|| {
+            let dex_bytes: u64 = apks.iter().filter_map(|a| a.engine.dex_entries().ok()).flatten().map(|e| e.uncomp_size).sum();
+            dex_bytes > self.cache.memory_capacity() as u64
+        });
         let done = |apk: &OpenApk| {
             if release {
                 apk.engine.release_memory_cache();
             }
         };
         let mut outcomes = multi::fan_out(self.threads, &apks, &call.cancel, &plan, &run, done).into_iter();
-        let mut stats = SweepStats::default();
+        let mut stats = SweepStats { released: release, ..SweepStats::default() };
         let (mut sections, mut empty) = (Vec::new(), Vec::new());
         for (path, o) in paths.iter().zip(&opened) {
             let apk = match o {
@@ -530,8 +541,8 @@ impl Server {
                     stats.errors += 1;
                     sections.push(Section::error(&apk.id, &apk.path, &e));
                 }
-                Ok((ctx, results)) => {
-                    let (hits, s) = section(apk, &ctx, results);
+                Ok(results) => {
+                    let (hits, s) = section(apk, results);
                     stats.hits += hits;
                     match s {
                         Some(s) => {
@@ -548,17 +559,6 @@ impl Server {
             }
         }
         (sections, empty, stats)
-    }
-
-    /// Whether a sweep drops each APK's DEX from memory once done: as asked,
-    /// or when the APKs together would not fit the memory budget anyway (a
-    /// sweep larger than an LRU only evicts what other calls still use).
-    fn release_policy(&self, args: &Value, paths: &[PathBuf]) -> Result<bool, ToolError> {
-        if let Some(r) = bool_arg(args, "release")? {
-            return Ok(r);
-        }
-        let bytes: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
-        Ok(bytes > self.cache.memory_capacity() as u64)
     }
 
     /// Keep `report` for its cursor and return its first page.
@@ -676,7 +676,7 @@ impl Server {
             },
             collapsed: sdks.is_some(),
         };
-        let release = self.release_policy(args, paths)?;
+        let release = bool_arg(args, "release")?;
         let (sections, empty, stats) = self.sweep(
             paths,
             call,
@@ -687,7 +687,7 @@ impl Server {
                 Ok((target, units))
             },
             |apk, target, &i| apk.engine.search_target_entry(target, &target.entries[i], &compiled, true, &call.cancel),
-            |apk, _, batches| {
+            |apk, batches| {
                 let found = Found::new(batches, sdks.as_deref());
                 (found.rows.len() + found.sdk_hits, found.section(apk, &view))
             },
@@ -708,6 +708,8 @@ impl Server {
             "total": stats.hits,
             "errors": stats.errors,
             "elapsed_ms": ms,
+            "released": stats.released,
+            "memory_cache_bytes": self.cache.memory_bytes(),
         });
         self.report(Report { tool: "findrefs", header, summary, sections, empty, max_bytes: max_bytes(args)? })
     }
@@ -744,7 +746,7 @@ impl Server {
         let t = Instant::now();
         let prefix = str_arg(args, "prefix")?;
         let per_apk = usize_arg(args, "per_apk")?.unwrap_or(PER_APK);
-        let release = self.release_policy(args, paths)?;
+        let release = bool_arg(args, "release")?;
         let (sections, empty, stats) = self.sweep(
             paths,
             call,
@@ -754,7 +756,7 @@ impl Server {
                 Ok(((), vec![(bytes, ())]))
             },
             |apk, (), ()| apk.engine.list_classes(prefix).map_err(|e| e.to_string()),
-            |apk, (), r| {
+            |apk, r| {
                 let classes = match r.into_iter().next().expect("one unit") {
                     Ok(c) => c,
                     Err(e) => return (0, Some(Section::error(&apk.id, &apk.path, &e))),
@@ -1099,7 +1101,7 @@ pub mod defs {
                 whole APK sections that do not fit are left for `cursor`."},
             "cursor": {"type": "string", "description": "Continue a multi-APK reply: pass the `cursor` it returned (alone)."},
             "release": {"type": "boolean", "description": "Drop each APK's DEX from memory once searched (default: when \
-                the APKs would not fit the memory budget)."},
+                their DEX would not fit the memory budget together)."},
         })
     }
 
