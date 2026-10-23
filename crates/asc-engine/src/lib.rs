@@ -24,6 +24,7 @@ mod classes;
 mod manifest;
 pub mod names;
 mod resources;
+mod sweep;
 mod tiers;
 
 use asc_apk::{Apk, Entry, Limits};
@@ -49,6 +50,7 @@ pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
 pub use resources::{parse_id, ResourceField, ResourceRow};
+pub use sweep::{Claim, DexDedup};
 pub use tiers::auto_memory_share;
 
 #[derive(Debug, thiserror::Error)]

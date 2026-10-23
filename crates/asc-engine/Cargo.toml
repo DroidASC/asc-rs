@@ -18,6 +18,7 @@ asc-axml.workspace = true
 asc-arsc.workspace = true
 regex.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
