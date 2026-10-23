@@ -529,14 +529,15 @@ impl WriteJob {
         match &self.kind {
             Job::Dex { data, .. } => data.len(),
             Job::Derived(d) => d.held_bytes(),
+            Job::Graph { graph, .. } => graph.heap_bytes(),
             Job::Rendered { .. } | Job::Reinflate { .. } => 0,
         }
     }
 
     /// The job without the bytes it holds, for a full queue. An L1 entry is
     /// inflated again from the APK when its turn comes, so a cold sweep still
-    /// leaves L1 complete; L2 tables cannot be rebuilt by a writer and are
-    /// released (`None`) for a later query to queue again.
+    /// leaves L1 complete; L2 tables and the class graph cannot be rebuilt
+    /// by a writer and are released (`None`) for a later query to queue again.
     fn defer(self) -> Option<WriteJob> {
         let WriteJob { key, apk, kind } = self;
         let kind = match kind {
@@ -545,6 +546,7 @@ impl WriteJob {
                 d.abandon();
                 return None;
             }
+            Job::Graph { .. } => return None,
             kind @ (Job::Rendered { .. } | Job::Reinflate { .. }) => kind,
         };
         Some(WriteJob { key, apk, kind })
@@ -578,6 +580,9 @@ enum Job {
     Derived(tiers::DerivedJob),
     /// A query result for L3.
     Rendered { query: String, payload: Vec<u8> },
+    /// The class graph for L2, serialised by the writer; `cost` is what
+    /// building it took.
+    Graph { graph: Arc<hierarchy::ClassGraph>, cost: Duration },
 }
 
 struct Writer {
@@ -801,6 +806,9 @@ fn run_job(disk: &DiskCache, memory: Option<&SharedMemory>, job: WriteJob, state
         Job::Rendered { query, payload } => {
             let _ = disk.put_rendered(&key, &query, &payload);
         }
+        Job::Graph { graph, cost } => {
+            let _ = disk.put_derived(&key, hierarchy::GRAPH_NAME, hierarchy::GRAPH_KIND, hierarchy::GRAPH_FORMAT, cost, graph.bytes());
+        }
     }
 }
 
@@ -878,7 +886,8 @@ impl Drop for InflightGuard<'_> {
 pub struct CacheStats {
     pub memory_hits: u64,
     pub disk_hits: u64,
-    /// Logical DEX files whose locator tables were mapped from L2.
+    /// Derived indexes mapped from L2: the locator tables of a logical DEX,
+    /// and the class graph.
     pub derived_hits: u64,
     pub inflates: u64,
     /// Deflate entries a search left out: a streamed prefix showed it could

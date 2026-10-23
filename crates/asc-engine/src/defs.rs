@@ -8,12 +8,11 @@
 //! no code.
 
 use crate::hierarchy::ClassGraph;
-use crate::{names, DexView, Engine, EngineError, Lineage, Result};
+use crate::{names, Engine, EngineError, Lineage, Result};
 use asc_dex::annotations::AnnotationsDirectory;
 use asc_dex::{encoded, Dex};
 use asc_findrefs::{Defined, Query};
 use regex::bytes::Regex;
-use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 
 /// The method ids of `dex` whose declaration matches `d`, sorted. `d` must be
@@ -106,7 +105,7 @@ impl Engine {
         }
         let (views, mut errors) = self.load_views(None, cancel)?;
         let graph = self.class_graph(&views, &mut errors, cancel)?;
-        let resolved = queries.iter().map(|q| rewrite(q, &graph, &views)).collect::<Result<_>>()?;
+        let resolved = queries.iter().map(|q| rewrite(q, &graph)).collect::<Result<_>>()?;
         Ok(Some(resolved))
     }
 }
@@ -121,13 +120,13 @@ fn has_predicate(q: &Query) -> bool {
 }
 
 /// `q` with each `override:` / `in:{...}` resolved to its classes.
-fn rewrite(q: &Query, graph: &ClassGraph, views: &[DexView]) -> Result<Query> {
+fn rewrite(q: &Query, graph: &ClassGraph) -> Result<Query> {
     Ok(match q {
         Query::Defined(Defined::Override(target)) => Query::Defined(resolve_override(target, graph)?),
-        Query::Defined(Defined::In(inner)) => Query::Defined(resolve_in(inner, graph, views)?),
+        Query::Defined(Defined::In(inner)) => Query::Defined(resolve_in(inner, graph)?),
         Query::All { all, none } => Query::All {
-            all: all.iter().map(|p| rewrite(p, graph, views)).collect::<Result<_>>()?,
-            none: none.iter().map(|p| rewrite(p, graph, views)).collect::<Result<_>>()?,
+            all: all.iter().map(|p| rewrite(p, graph)).collect::<Result<_>>()?,
+            none: none.iter().map(|p| rewrite(p, graph)).collect::<Result<_>>()?,
         },
         q => q.clone(),
     })
@@ -175,7 +174,7 @@ fn descriptor_proto(sig: &asc_findrefs::MemberSignature) -> Option<String> {
 /// `in:{CLASS-RULE}` → the classes the rule names. `extends:` / `impl:` take
 /// the whole subtree; `type:` matches the defined class descriptors by
 /// regex; `annotation:` the classes carrying that class annotation.
-fn resolve_in(inner: &Query, graph: &ClassGraph, views: &[DexView]) -> Result<Defined> {
+fn resolve_in(inner: &Query, graph: &ClassGraph) -> Result<Defined> {
     let classes = match inner {
         Query::Extends(c) | Query::Implements(c) => {
             let mut set = vec![c.clone()];
@@ -186,31 +185,10 @@ fn resolve_in(inner: &Query, graph: &ClassGraph, views: &[DexView]) -> Result<De
             let re = Regex::new(pattern).map_err(|e| EngineError::Query(format!("in:{{type:...}}: bad regex: {e}")))?;
             graph.defined_classes_matching(&re)
         }
-        Query::Defined(Defined::Annotation(a)) => classes_with_annotation(views, a)?,
+        Query::Defined(Defined::Annotation(a)) => graph.classes_annotated(a),
         _ => return Err(EngineError::Query("in:{...} takes a class condition: extends:, impl:, type: or annotation:".into())),
     };
     Ok(Defined::Members { classes, name: None, proto: None })
-}
-
-/// Descriptors of the classes in `views` carrying the class annotation `a`.
-fn classes_with_annotation(views: &[DexView], a: &str) -> Result<Vec<String>> {
-    let want_bytes = asc_dex::mutf8::encode(a);
-    let mut out = BTreeSet::new();
-    for v in views {
-        let dex = Dex::with_name(&v.data, &v.name)?;
-        let Some(want) = dex.find_type_idx(&want_bytes)? else { continue };
-        for def in dex.class_defs() {
-            let def = def?;
-            if def.annotations_off == 0 {
-                continue;
-            }
-            let dir = AnnotationsDirectory::parse(dex.buf(), def.annotations_off as usize)?;
-            if annotation_set_has(&dex, dir.class_annotations_off, want)? {
-                out.insert(dex.type_descriptor(def.class_idx)?);
-            }
-        }
-    }
-    Ok(out.into_iter().collect())
 }
 
 /// Most classes an `override:` / `in:` predicate expands to; a wider subtree
