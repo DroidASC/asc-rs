@@ -369,10 +369,40 @@ impl ClassGraph {
         }
         Ok(out)
     }
-    /// `class` and the subclasses that inherit its `name` (`proto`, or any
-    /// overload): a subtree stops at a class defining the method itself.
-    /// Nearest first, at most `limit`.
-    pub(crate) fn inheritors(&self, views: &[DexView], class: &str, name: &str, proto: Option<&str>, limit: usize) -> Result<Vec<String>> {
+
+    /// Where the program first defines `class`: `(view index, class_def
+    /// index)`; `None` when it does not.
+    pub(crate) fn definition(&self, class: &str) -> Option<(usize, u32)> {
+        let (view, def_idx) = self.defined[self.id(class)? as usize];
+        (view != 0).then(|| (view as usize - 1, def_idx))
+    }
+
+    /// The classes of `class`'s subtree (itself included) `defines` says
+    /// define the method: those a call naming it on `class` may run. The
+    /// walk stops after `max_classes` classes.
+    pub(crate) fn defining(&self, class: &str, max_classes: usize, mut defines: impl FnMut(&str) -> Result<bool>) -> Result<Defining> {
+        let Some(root) = self.id(class) else { return Ok(Defining { count: 0, complete: true }) };
+        let mut seen = HashSet::from([root]);
+        let mut queue = VecDeque::from([root]);
+        let mut count = usize::from(defines(class)?);
+        while let Some(c) = queue.pop_front() {
+            for (n, _) in self.neighbours(c, Lineage::Subclasses) {
+                if seen.len() >= max_classes {
+                    return Ok(Defining { count, complete: false });
+                }
+                if seen.insert(n) {
+                    count += usize::from(defines(self.name(n))?);
+                    queue.push_back(n);
+                }
+            }
+        }
+        Ok(Defining { count, complete: true })
+    }
+
+    /// `class` and the subclasses that inherit the method from it: a subtree
+    /// stops at a class `defines` says defines it itself. Nearest first, at
+    /// most `limit`.
+    pub(crate) fn inheritors(&self, class: &str, limit: usize, mut defines: impl FnMut(&str) -> Result<bool>) -> Result<Vec<String>> {
         let Some(root) = self.id(class) else { return Ok(Vec::new()) };
         let mut seen = HashSet::from([root]);
         let mut queue = VecDeque::from([root]);
@@ -382,7 +412,7 @@ impl ClassGraph {
                 if out.len() >= limit {
                     return Ok(out);
                 }
-                if seen.insert(n) && self.defines(views, self.name(n), name, proto)?.is_empty() {
+                if seen.insert(n) && !defines(self.name(n))? {
                     out.push(self.name(n).to_string());
                     queue.push_back(n);
                 }
@@ -390,6 +420,15 @@ impl ClassGraph {
         }
         Ok(out)
     }
+}
+
+/// The classes defining a method in a subtree, as [`ClassGraph::defining`]
+/// counted them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Defining {
+    pub count: usize,
+    /// The whole subtree was walked: `count` is exact, not a lower bound.
+    pub complete: bool,
 }
 
 /// The cached graph and the APK file it was built from.

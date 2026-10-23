@@ -727,7 +727,7 @@ fn findrefs_rules(
             sink.line(&record.join("\n"));
         }
     };
-    engine
+    let summary = engine
         .find_refs_rules(&rules, opts, cancel, &mut |i, batch| {
             let name = batch.entry_name.clone();
             for item in order.push(&name, i, (i, batch)) {
@@ -741,6 +741,9 @@ fn findrefs_rules(
     }
     for (i, n) in totals.iter().enumerate() {
         sink.comment(&format!("# r{} {n} results", i + 1));
+    }
+    for n in &summary.notes {
+        sink.comment(&format!("# {n}"));
     }
     let io_result = sink.finish();
     errors.sort();
@@ -1032,7 +1035,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 // `method '{RULE}'` / `method @FILE` (`={...}` / `=@FILE` without
                 // dispatch) / `method 'X[arg0=1]'`, as in a condition.
                 Find::Method { output, name: Some(name), class_name: None, .. }
-                    if name.trim_start_matches('=').starts_with(['{', '@']) || asc_engine::condition::has_constraints(&name) =>
+                    if name.trim_start_matches(['=', '*']).starts_with(['{', '@']) || asc_engine::condition::has_constraints(&name) =>
                 {
                     (io.condition(&format!("method:{name}"))?, output)
                 }
@@ -1076,6 +1079,9 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 .map_err(|e| e.to_string())?;
             for b in order.finish() {
                 print(b, &mut sink);
+            }
+            for n in &summary.notes {
+                sink.comment(&format!("# {n}"));
             }
             let io_result = sink.finish();
             for e in &errors {

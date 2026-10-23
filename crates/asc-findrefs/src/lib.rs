@@ -169,6 +169,11 @@ pub enum Query {
     Virtual {
         target: Box<Query>,
         via: BTreeMap<String, String>,
+        /// Most classes of the program that may define a supertype's method
+        /// for the calls naming it to be followed (`None`: no limit). A
+        /// method every lambda or callback implements says nothing about
+        /// which one runs.
+        fan_out: Option<usize>,
     },
     Field(MemberQuery),
     /// The calls of a method query (`Method`, `MethodSet` or `Nested`) that

@@ -125,7 +125,8 @@ impl Engine {
     /// share results.
     pub fn cached_refs(&self, target: &SearchTarget, query: &Query, aggregate: bool) -> Option<Vec<RefBatch>> {
         let (disk, key) = self.rendered_tier(target)?;
-        tiers::decode_batches(&disk.get_rendered(key, &tiers::findrefs_key(query, sweep_opts(aggregate)))?)
+        // A sweep takes no condition resolved over the program, so no notes.
+        tiers::decode_batches(&disk.get_rendered(key, &tiers::findrefs_key(query, sweep_opts(aggregate)))?).map(|r| r.batches)
     }
 
     /// Keep the batches of a complete search of `query` on this APK in L3
@@ -140,7 +141,7 @@ impl Engine {
         for b in batches {
             recorder.record(b);
         }
-        if let Some(payload) = recorder.finish() {
+        if let Some(payload) = recorder.finish(&[]) {
             let query = tiers::findrefs_key(query, sweep_opts(aggregate));
             let job = WriteJob { key, apk: Arc::from(apk.path()), kind: Job::Rendered { query, payload } };
             self.cache.as_ref().expect("an L3 tier implies a cache").put_async(job);

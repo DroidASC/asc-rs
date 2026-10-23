@@ -684,7 +684,7 @@ impl Server {
         let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
         let context = context_arg(args)?;
         let mut batches = Vec::new();
-        apk.engine.find_refs_with(&query, true, &call.cancel, &mut |b| batches.push(b))?;
+        let summary = apk.engine.find_refs_with(&query, true, &call.cancel, &mut |b| batches.push(b))?;
         call.check()?;
         let entries = batches.len();
         let mut found = Found::new(batches, sdks.as_deref());
@@ -705,6 +705,9 @@ impl Server {
         for e in &found.errors {
             text.push_str(&format!("# Warning: {e}\n"));
         }
+        for n in &summary.notes {
+            text.push_str(&format!("# {n}\n"));
+        }
         let hints = if total == 0 && found.sdk_hits == 0 { apk.engine.no_results_hints(&query, entries) } else { Vec::new() };
         for h in &hints {
             text.push_str(&format!("# hint: {h}\n"));
@@ -719,6 +722,7 @@ impl Server {
             "results": page.iter().map(|r| ref_json(r, context)).collect::<Vec<_>>(),
             "sdk_hits": found.sdk_hits,
             "errors": found.errors,
+            "notes": summary.notes,
         });
         Ok((text, structured))
     }
@@ -794,6 +798,7 @@ impl Server {
             "reached": tree.reached,
             "rows": rows,
             "errors": tree.errors,
+            "notes": tree.notes,
         });
         Ok((text, structured))
     }
@@ -1574,7 +1579,7 @@ pub mod defs {
             }), crate::rules::defs::findrefs_props(), page_props(super::FINDREFS_LIMIT), many()])},
             "outputSchema": shape_many(&[
                 ("apk_id", "string"), ("total", "integer"), ("returned", "integer"), ("next_offset", "integer?"),
-                ("results", "array"), ("hints", "array"), ("rules", "array"),
+                ("results", "array"), ("hints", "array"), ("rules", "array"), ("notes", "array"),
             ]),
         })
     }
@@ -1599,7 +1604,7 @@ pub mod defs {
             })])},
             "outputSchema": shape(&[
                 ("apk_id", "string"), ("direction", "string"), ("depth", "integer"), ("methods", "integer"), ("truncated", "boolean"),
-                ("rows", "array"),
+                ("rows", "array"), ("notes", "array"),
             ]),
         })
     }

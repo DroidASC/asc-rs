@@ -34,9 +34,9 @@ pub(crate) const LOCATORS_KIND: &str = "locators";
 /// `find_refs` results larger than this (encoded) are not kept in L3.
 pub(crate) const L3_MAX_RESULT: usize = 4 << 20;
 /// Layout version of the encoded `find_refs` results.
-const RESULT_FORMAT: u32 = 3;
-/// Ends the encoded results (where an entry name's length would be), so a
-/// truncated file is told from a complete one.
+const RESULT_FORMAT: u32 = 4;
+/// Ends the encoded batches (where an entry name's length would be), so a
+/// truncated file is told from a complete one; the run's notes follow it.
 const RESULT_END: u32 = u32::MAX;
 
 /// L2 bookkeeping of one logical DEX, shared by the entries that replace
@@ -243,8 +243,13 @@ impl ResultRecorder {
         }
     }
 
-    pub(crate) fn finish(mut self) -> Option<Vec<u8>> {
+    /// The encoded run, its `notes` ([`crate::RefSummary::notes`]) last.
+    pub(crate) fn finish(mut self, notes: &[String]) -> Option<Vec<u8>> {
         put_u32(&mut self.out, RESULT_END);
+        put_u32(&mut self.out, notes.len() as u32);
+        for n in notes {
+            put_str(&mut self.out, n);
+        }
         self.keep.then_some(self.out)
     }
 }
@@ -268,8 +273,14 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-/// Batches recorded by [`ResultRecorder`]; `None` for anything malformed.
-pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Vec<RefBatch>> {
+/// A run [`ResultRecorder`] kept.
+pub(crate) struct Recorded {
+    pub batches: Vec<RefBatch>,
+    pub notes: Vec<String>,
+}
+
+/// The run recorded by [`ResultRecorder`]; `None` for anything malformed.
+pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Recorded> {
     let mut r = Cursor { bytes, at: 0 };
     if r.u32()? != RESULT_FORMAT {
         return None;
@@ -278,7 +289,8 @@ pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Vec<RefBatch>> {
     loop {
         let len = r.u32()?;
         if len == RESULT_END {
-            return (r.at == bytes.len()).then_some(out);
+            let notes = (0..r.u32()?).map(|_| r.str()).collect::<Option<Vec<_>>>()?;
+            return (r.at == bytes.len()).then_some(Recorded { batches: out, notes });
         }
         let entry_name = String::from_utf8(r.take(len as usize)?.to_vec()).ok()?;
         let n = r.u32()? as usize;
@@ -571,8 +583,9 @@ mod tests {
         let mut rec = ResultRecorder::new();
         rec.record(&batch("classes.dex", vec![row(None), row(Some(ClassRelation::Implements))], None));
         rec.record(&batch("classes2.dex", vec![], None));
-        let bytes = rec.finish().unwrap();
-        let back = decode_batches(&bytes).unwrap();
+        let bytes = rec.finish(&["a note".to_string()]).unwrap();
+        let Recorded { batches: back, notes } = decode_batches(&bytes).unwrap();
+        assert_eq!(notes, ["a note"]);
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].results, vec![row(None), row(Some(ClassRelation::Implements))]);
         assert_eq!((back[1].entry_name.as_str(), back[1].source), ("classes2.dex", "result"));
@@ -580,12 +593,12 @@ mod tests {
         // Cut at a batch boundary: the end marker is missing.
         let mut one = ResultRecorder::new();
         one.record(&batch("classes2.dex", vec![], None));
-        let one = one.finish().unwrap();
+        let one = one.finish(&[]).unwrap();
         assert!(decode_batches(&one[..one.len() - 4]).is_none());
-        assert_eq!(decode_batches(&one).unwrap().len(), 1);
+        assert_eq!(decode_batches(&one).unwrap().batches.len(), 1);
         assert!(decode_batches(b"").is_none());
         let mut failed = ResultRecorder::new();
         failed.record(&batch("classes.dex", vec![], Some("bad".into())));
-        assert!(failed.finish().is_none());
+        assert!(failed.finish(&[]).is_none());
     }
 }

@@ -80,12 +80,16 @@ in one method), `!` before a part to drop methods matching it. `rules`, `all`,
   output works as it is (the first `Lcls;->m(..)` on each line is taken), as do other spellings.
 - `method:{RULE}` and `method:@FILE` follow virtual dispatch by default: a call naming the same
   method on a supertype of the matched class (an interface it implements) or on a subclass that
-  inherits it is listed too, with a `(dispatch Lcls;)` note. This is what catches an interface
-  or base-class call to a framework method the program implements. It over-approximates (every
-  class with that signature on the line, not only the one that runs); write `method:={RULE}` /
-  `method:=@FILE` for exact matches on the set's own methods only. A matched method with a very
-  general supertype (`Runnable.run`, a Kotlin `FunctionN.invoke`, a lifecycle callback) pulls in
-  that supertype's calls everywhere — prefer `=`, or narrow RULE, when the set holds such methods.
+  inherits it is listed too, with a `(dispatch Lcls;)` note. This is what catches an AIDL or
+  base-class call to a method the program implements (`Build.getSerial` ->
+  `IDeviceIdentifiersPolicyService->getSerialForPackage (dispatch ...DeviceIdentifiersPolicy)`).
+  It over-approximates: the call may run another implementer.
+- A supertype's method is not followed when more than 16 classes of the program implement it,
+  or its type has over 1024 subclasses (`Runnable.run`, Kotlin `FunctionN.invoke`, OkHttp
+  `Interceptor.intercept`): its calls say nothing about which one runs. Each one left out is a
+  `# dispatch not followed via Lsup;->m(..) (N implementers)` line (MCP: `notes`); to include
+  one, add `method:Lsup;->m` as its own rule, or write `method:*{RULE}` to follow every
+  supertype. `method:={RULE}` / `method:=@FILE` match only the set's own methods.
 - `string:` regexes match each string on its own: `^abc$` is the whole string. Write `\&` for
   a literal `&` in a regex.
 

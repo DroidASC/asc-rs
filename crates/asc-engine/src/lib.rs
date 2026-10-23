@@ -62,6 +62,7 @@ pub use asc_smali::Options as SmaliOptions;
 pub use budget::{available_memory, total_memory, Device, MemoryPolicy};
 pub use callgraph::{CallQuery, CallRoots, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
+pub use compose::{MatchingMethods, DEFAULT_FAN_OUT};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
 pub use prebuild::PrebuildReport;
@@ -269,6 +270,9 @@ pub struct RefSummary {
     pub entries: usize,
     pub total_results: usize,
     pub total_us: u128,
+    /// What the search left out on purpose, e.g. a supertype method a
+    /// dispatch set did not follow; one line each, for `#` lines or hints.
+    pub notes: Vec<String>,
 }
 
 /// Cache configuration for an [`Engine`].
@@ -1576,11 +1580,12 @@ impl Engine {
         // L3: the rows of an earlier run of this query on this APK.
         let disk = self.cache.as_ref().and_then(|c| c.disk.as_ref()).filter(|d| d.uses(Tier::Rendered));
         let rendered = disk.zip(key.as_ref()).map(|(d, k)| (d, k, tiers::findrefs_key(query, opts)));
-        if let Some(batches) = rendered.as_ref().and_then(|(d, k, q)| d.get_rendered(k, q)).and_then(|b| tiers::decode_batches(&b)) {
-            for batch in batches {
+        if let Some(recorded) = rendered.as_ref().and_then(|(d, k, q)| d.get_rendered(k, q)).and_then(|b| tiers::decode_batches(&b)) {
+            for batch in recorded.batches {
                 summary.total_results += batch.results.len();
                 sink(batch);
             }
+            summary.notes = recorded.notes;
             summary.total_us = t0.elapsed().as_micros();
             self.log(format!("[APK] for_each_findrefs total={} us count={} source=result", summary.total_us, entries.len()));
             return Ok(summary);
@@ -1588,8 +1593,9 @@ impl Engine {
         // `method:{RULE}`: the methods RULE matches first, then the calls of
         // them. L3 keys on the query as given, so a replay skips this too.
         let resolved = self.resolve(std::slice::from_ref(query), cancel)?;
+        summary.notes = resolved.notes.into_iter().next().unwrap_or_default();
         let _query = self.prebuild.query();
-        let compiled = CompiledQuery::new(resolved.as_ref().map_or(query, |r| &r[0]))?;
+        let compiled = CompiledQuery::new(resolved.queries.as_ref().map_or(query, |r| &r[0]))?;
         let mut recorder = rendered.as_ref().map(|_| tiers::ResultRecorder::new());
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<RefBatch>();
@@ -1634,7 +1640,7 @@ impl Engine {
                 sink(batch);
             }
         });
-        if let (Some((_, k, q)), Some(payload)) = (rendered, recorder.and_then(tiers::ResultRecorder::finish)) {
+        if let (Some((_, k, q)), Some(payload)) = (rendered, recorder.and_then(|r| r.finish(&summary.notes))) {
             // A cancelled run may be missing entries.
             if !cancel.load(Ordering::Relaxed) {
                 let job = WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Rendered { query: q, payload } };

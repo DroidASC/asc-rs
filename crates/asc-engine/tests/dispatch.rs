@@ -78,19 +78,90 @@ fn lib_dex() -> Vec<u8> {
     ids.finish()
 }
 
-/// A directory of the two jars, read as one program.
+const MANY: &str = "Lp/Many;";
+const MANY_CALLER: &str = "Lp/ManyCaller;";
+/// An empty interface every `Lp/Mi;` also implements: no call can name
+/// `run` on it.
+const TAG: &str = "Lp/Tag;";
+/// One more implementer of `Lp/Many;->run()V` than the default fan-out.
+const IMPLEMENTERS: usize = asc_engine::DEFAULT_FAN_OUT + 1;
+
+/// many.jar: `Lp/Many;` declares `run()V` and has [`IMPLEMENTERS`]
+/// implementations `Lp/M0;`, `Lp/M1;`, ... (each also implementing [`TAG`]); only `Lp/M0;->run` loads
+/// "serial". `Lp/ManyCaller;->go(Lp/Many;)V` calls `Lp/Many;->run`.
+fn many_dex() -> Vec<u8> {
+    let impls: Vec<String> = (0..IMPLEMENTERS).map(|i| format!("Lp/M{i};")).collect();
+    let mut d = DexBuilder::new();
+    d.string("serial").type_(OBJ).type_(MANY).type_(TAG);
+    d.method(MANY, "run", "V", &[]).method(MANY_CALLER, "go", "V", &[MANY]);
+    for c in &impls {
+        d.type_(c).method(c, "run", "V", &[]);
+    }
+    let mut ids = d.resolve();
+    let run = ids.method(MANY, "run", "V", &[]);
+    ids.add_class(ClassSpec { descriptor: TAG.into(), access: 0x1 | 0x200 | 0x400, superclass: Some(OBJ.into()), ..Default::default() });
+    ids.add_class(ClassSpec {
+        descriptor: MANY.into(),
+        access: 0x1 | 0x200 | 0x400,
+        superclass: Some(OBJ.into()),
+        virtual_methods: vec![MethodSpec { idx: run, access: 0x1 | 0x400, code: None }],
+        ..Default::default()
+    });
+    for (i, c) in impls.iter().enumerate() {
+        let mut body = Vec::new();
+        if i == 0 {
+            body.extend_from_slice(&[0x1a, 0x00]); // const-string v0, "serial"
+            body.extend_from_slice(&le16(ids.string("serial")));
+        }
+        body.extend_from_slice(&[0x0e, 0x00]); // return-void
+        let code = CodeSpec { registers: 2, ins: 1, insns: body, ..Default::default() };
+        let idx = ids.method(c, "run", "V", &[]);
+        ids.add_class(ClassSpec {
+            descriptor: c.clone(),
+            access: 0x1,
+            superclass: Some(OBJ.into()),
+            interfaces: vec![MANY.into(), TAG.into()],
+            virtual_methods: vec![MethodSpec { idx, access: 0x1, code: Some(code) }],
+            ..Default::default()
+        });
+    }
+    // go(Lp/Many;)V: registers=1, ins=1 -> v0 = p0.
+    let mut go = vec![0x72, 0x10]; // invoke-interface {v0}, Lp/Many;->run
+    go.extend_from_slice(&le16(run));
+    go.extend_from_slice(&[0x00, 0x00, 0x0e, 0x00]); // regs C=v0; return-void
+    let go_idx = ids.method(MANY_CALLER, "go", "V", &[MANY]);
+    ids.add_class(ClassSpec {
+        descriptor: MANY_CALLER.into(),
+        access: 0x1,
+        superclass: Some(OBJ.into()),
+        direct_methods: vec![MethodSpec {
+            idx: go_idx,
+            access: 0x1 | 0x8,
+            code: Some(CodeSpec { registers: 1, ins: 1, outs: 1, insns: go, ..Default::default() }),
+        }],
+        ..Default::default()
+    });
+    ids.finish()
+}
+
+/// A directory of the jars, read as one program.
 fn program() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("app.jar"), make_apk(&[("classes.dex", &app_dex())], true)).unwrap();
     std::fs::write(dir.path().join("lib.jar"), make_apk(&[("classes.dex", &lib_dex())], true)).unwrap();
+    std::fs::write(dir.path().join("many.jar"), make_apk(&[("classes.dex", &many_dex())], true)).unwrap();
     dir
 }
 
 fn rows(engine: &Engine, q: &Query) -> Vec<String> {
+    rows_and_notes(engine, q).0
+}
+
+fn rows_and_notes(engine: &Engine, q: &Query) -> (Vec<String>, Vec<String>) {
     let mut out = Vec::new();
-    engine.find_refs(q, |b| out.extend(b.results.iter().map(|r| r.line()))).unwrap();
+    let summary = engine.find_refs(q, |b| out.extend(b.results.iter().map(|r| r.line()))).unwrap();
     out.sort();
-    out
+    (out, summary.notes)
 }
 
 #[test]
@@ -141,6 +212,58 @@ fn dispatch_nesting_constraints_and_defs_compose_across_jars() {
         assert!(t.lines().iter().any(|l| l.contains("Lp/Caller;->call")), "{:?}", t.lines());
         let t = engine.call_graph(&to(vec![names::parse_rule("method:Lp/I;->leak").unwrap()])).unwrap();
         assert!(!t.lines().iter().any(|l| l.contains("Lp/Caller;->call")), "pruned: {:?}", t.lines());
+        // An interface with a couple of implementers is followed: no note.
+        assert!(rows_and_notes(&engine, &names::parse_rule("method:{literal:android_id}").unwrap()).1.is_empty());
     }
     let _ = AtomicBool::new(false);
+}
+
+#[test]
+fn a_supertype_with_many_implementers_is_noted_not_followed() {
+    let dir = program();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cached = || {
+        let disk = asc_engine::asc_cache::DiskCache::open(cache_dir.path().join("c")).with_capacity(1 << 30).with_min_dex_bytes(0);
+        Engine::new(dir.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+    };
+    let want_note = format!(
+        "dispatch not followed via Lp/Many;->run()V ({} implementers): name it explicitly, or write method:*{{...}}, to include",
+        IMPLEMENTERS + 1
+    );
+    let call_row = "many.jar/classes.dex | Lp/ManyCaller;->go(Lp/Many;)V | Lp/Many;->run()V";
+    for engine in [Engine::new(dir.path()).with_threads(2), cached()] {
+        // Lp/Many;->run is declared by Lp/Many; and every implementer: over the
+        // fan-out, so its call is left out and noted. Lp/Tag; declares no
+        // run(), so no call can name it there: neither followed nor noted.
+        let (r, notes) = rows_and_notes(&engine, &names::parse_rule("method:{literal:serial}").unwrap());
+        assert!(r.is_empty(), "{r:?}");
+        assert_eq!(notes, std::slice::from_ref(&want_note));
+        // `*` follows it anyway, labelled.
+        let (r, notes) = rows_and_notes(&engine, &names::parse_rule("method:*{literal:serial}").unwrap());
+        assert_eq!(r, [format!("{call_row} (dispatch Lp/M0;)")]);
+        assert!(notes.is_empty(), "{notes:?}");
+        // Naming the supertype method finds the call too.
+        assert_eq!(rows(&engine, &names::parse_rule("method:Lp/Many;->run").unwrap()), [call_row]);
+        // A rule set and a callgraph carry the note as well.
+        let mut n = 0;
+        let summary = engine
+            .find_refs_rules(
+                &[names::parse_rule("method:{literal:serial}").unwrap()],
+                Default::default(),
+                &AtomicBool::new(false),
+                &mut |_, b| n += b.results.len(),
+            )
+            .unwrap();
+        assert_eq!((n, summary.notes), (0, vec![want_note.clone()]));
+        let rule = names::parse_rule("method:{method:{literal:serial}}").unwrap();
+        let t = engine.call_graph(&CallQuery { depth: 1, ..CallQuery::new(CallRoots::Matching(rule), Direction::Callers) });
+        // Nothing calls run() through Lp/M0; directly: no root left, an error.
+        assert!(t.is_err());
+        engine.flush_cache_writes();
+    }
+    // An L3 replay keeps the note.
+    let engine = cached();
+    let (r, notes) = rows_and_notes(&engine, &names::parse_rule("method:{literal:serial}").unwrap());
+    assert!(r.is_empty() && notes == [want_note], "{r:?} {notes:?}");
+    assert_eq!(engine.cache_stats().inflates, 0);
 }

@@ -127,6 +127,8 @@ pub struct CallTree {
     pub reached: Option<usize>,
     /// DEX entries that could not be loaded or searched.
     pub errors: Vec<String>,
+    /// What the conditions left out on purpose ([`crate::RefSummary::notes`]).
+    pub notes: Vec<String>,
 }
 
 impl CallTree {
@@ -184,6 +186,9 @@ impl CallTree {
         }
         if self.truncated {
             s.push_str("; truncated (raise max_nodes or lower depth)");
+        }
+        for n in &self.notes {
+            s.push_str(&format!("\n# {n}"));
         }
         s
     }
@@ -273,7 +278,9 @@ impl Engine {
         if let Some(engine) = self.transient(!conditions.is_empty())? {
             return engine.call_graph_cancellable(q, cancel);
         }
-        let mut sets = if conditions.is_empty() { Vec::new() } else { self.matching_methods(&conditions, cancel)? }.into_iter();
+        let matching = if conditions.is_empty() { None } else { Some(self.matching_methods(&conditions, cancel)?) };
+        let notes = matching.as_ref().map(|m| m.notes.clone()).unwrap_or_default();
+        let mut sets = matching.map(|m| m.sets).unwrap_or_default().into_iter();
         let matched_roots = matching_roots.and_then(|_| sets.next());
         let from = q.from.as_ref().and_then(|_| sets.next());
         let unless: HashSet<String> = sets.flatten().collect();
@@ -425,7 +432,7 @@ impl Engine {
         }
         errors.sort();
         errors.dedup();
-        Ok(CallTree { direction: q.direction, depth: q.depth, rows, methods, truncated, pruned: pruned.len(), reached, errors })
+        Ok(CallTree { direction: q.direction, depth: q.depth, rows, methods, truncated, pruned: pruned.len(), reached, errors, notes })
     }
 
     /// Every overload of `class`'s `method` (or that exact signature) some

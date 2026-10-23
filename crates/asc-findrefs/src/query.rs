@@ -129,7 +129,7 @@ impl CompiledQuery {
                 ))
             }
             Query::Call { target, constraints } => Parts::Call(CompiledCall::new(target, constraints)?),
-            Query::Virtual { target, via } => Parts::Virtual(Box::new(CompiledQuery::new(target)?), via.clone()),
+            Query::Virtual { target, via, .. } => Parts::Virtual(Box::new(CompiledQuery::new(target)?), via.clone()),
             Query::Defined(Defined::Override(_) | Defined::In(_)) => {
                 return Err(FindError::Invalid(
                     "override: / in:{...} need the class hierarchy (every DEX); the engine resolves them before a search".into(),
