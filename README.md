@@ -296,16 +296,17 @@ expand more than 100:1 is refused (`--max-entry-mb`, `--max-ratio`), and only th
 `findrefs`, `listclass` and `open_apk` also take `apks` (paths) or `dir` (with `glob`,
 default `*.apk`, and `recursive`, default true) instead of one APK. Every DEX of every APK
 goes on one work queue (heaviest APK first), and the reply has one section per APK, every
-line prefixed with its `apk_id`:
+line prefixed with its `apk_id` (excerpt of a real reply; a section can also end with
+`apkN | more | …` paging hints, `apkN | sdk | Landroidx/ 23, …` folded counts and warnings):
 
 ```
 # findrefs method addJavascriptInterface over 312 APKs: 20 with hits, 103 hits, 0 errors, 193 ms
 apk15 | 1 hits | /data/apks/com.android.carrierdefaultapp.apk
 apk15 | classes.dex | Lcom/android/carrierdefaultapp/SlicePurchaseActivity;->setupWebView | matched=(Landroid/webkit/WebView;->addJavascriptInterface)
-apk124 | 6 hits (+2 in SDKs) | /data/apks/com.android.vending.apk
+apk124 | 6 hits | /data/apks/com.android.vending.apk
 apk124 | classes3.dex | Lzlc;->c | matched=(Landroid/webkit/WebView;->addJavascriptInterface)
-apk124 | more | 5 more: findrefs apk_id=apk124 offset=1 collapse_sdks=true
-apk124 | sdk | Landroidx/ 2
+apk124 | classes3.dex | Lzln;-><init> | matched=(Lzlm;->addJavascriptInterface)
+...
 # nothing in the other 292 APKs
 # APKs 0..4 of 20 shown (output budget 32768 bytes); call findrefs with cursor="1:4" for the rest
 ```
