@@ -211,7 +211,7 @@ fn constraints_compose_with_rules_nesting_and_call_graphs() {
         ["branchy [arg1=\"android_id\"|\"other\"]"]
     );
     let q = names::parse_rule("method:{method:sys.Secure->getString[arg1==param]}").unwrap();
-    assert!(matches!(q, asc_findrefs::Query::Nested(_)));
+    assert!(matches!(q, asc_findrefs::Query::Virtual { target, .. } if matches!(*target, asc_findrefs::Query::Nested(_))));
     // Callgraph roots by a constrained call.
     let rule = names::parse_rule("method:sys.Secure->getString[arg1==\"android_id\"]").unwrap();
     let t = engine.call_graph(&CallQuery { depth: 1, ..CallQuery::new(CallRoots::Matching(rule), Direction::Callers) }).unwrap();

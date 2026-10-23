@@ -269,6 +269,10 @@ impl Engine {
             CallRoots::Method { .. } => None,
         };
         let conditions: Vec<Query> = matching_roots.into_iter().chain(&q.from).chain(&q.unless).cloned().collect();
+        // The conditions read every DEX, and the walk reads them again.
+        if let Some(engine) = self.transient(!conditions.is_empty())? {
+            return engine.call_graph_cancellable(q, cancel);
+        }
         let mut sets = if conditions.is_empty() { Vec::new() } else { self.matching_methods(&conditions, cancel)? }.into_iter();
         let matched_roots = matching_roots.and_then(|_| sets.next());
         let from = q.from.as_ref().and_then(|_| sets.next());

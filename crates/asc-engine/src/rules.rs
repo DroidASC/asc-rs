@@ -155,6 +155,9 @@ impl Engine {
         for rule in rules {
             crate::compose::check_patterns(rule)?;
         }
+        if let Some(engine) = self.transient(rules.iter().any(crate::compose::needs_program))? {
+            return engine.find_refs_rules(rules, opts, cancel, sink);
+        }
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
         // Largest first, as in `find_refs_opts`.

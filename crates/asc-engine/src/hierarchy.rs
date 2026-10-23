@@ -369,6 +369,27 @@ impl ClassGraph {
         }
         Ok(out)
     }
+    /// `class` and the subclasses that inherit its `name` (`proto`, or any
+    /// overload): a subtree stops at a class defining the method itself.
+    /// Nearest first, at most `limit`.
+    pub(crate) fn inheritors(&self, views: &[DexView], class: &str, name: &str, proto: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        let Some(root) = self.id(class) else { return Ok(Vec::new()) };
+        let mut seen = HashSet::from([root]);
+        let mut queue = VecDeque::from([root]);
+        let mut out = vec![class.to_string()];
+        while let Some(c) = queue.pop_front() {
+            for (n, _) in self.neighbours(c, Lineage::Subclasses) {
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+                if seen.insert(n) && self.defines(views, self.name(n), name, proto)?.is_empty() {
+                    out.push(self.name(n).to_string());
+                    queue.push_back(n);
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// The cached graph and the APK file it was built from.

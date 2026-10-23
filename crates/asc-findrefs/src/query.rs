@@ -8,6 +8,7 @@ use crate::calls::CompiledCall;
 use crate::{ClassQuery, ClassRelation, Defined, FindError, MemberQuery, MemberSignature, Query, RefKind, Result, TypeMatch};
 use memchr::memmem::Finder;
 use regex::bytes::Regex;
+use std::collections::BTreeMap;
 
 /// Class constraint of a member query, ready to run.
 pub(crate) enum CompiledClass {
@@ -87,6 +88,8 @@ pub(crate) enum Parts {
     Compound(Compound),
     /// A method query whose call sites are judged by their values.
     Call(CompiledCall),
+    /// A method set and the dispatch aliases among it ([`Query::Virtual`]).
+    Virtual(Box<CompiledQuery>, BTreeMap<String, String>),
 }
 
 /// The compiled parts of a [`Query::All`].
@@ -126,6 +129,7 @@ impl CompiledQuery {
                 ))
             }
             Query::Call { target, constraints } => Parts::Call(CompiledCall::new(target, constraints)?),
+            Query::Virtual { target, via } => Parts::Virtual(Box::new(CompiledQuery::new(target)?), via.clone()),
             Query::Defined(Defined::Override(_) | Defined::In(_)) => {
                 return Err(FindError::Invalid(
                     "override: / in:{...} need the class hierarchy (every DEX); the engine resolves them before a search".into(),

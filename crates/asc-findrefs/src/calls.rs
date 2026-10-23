@@ -109,7 +109,7 @@ pub(crate) struct CompiledCall {
 impl CompiledCall {
     pub(crate) fn new(target: &Query, constraints: &[CallConstraint]) -> Result<CompiledCall> {
         let target = match target {
-            Query::Method(_) | Query::MethodSet(_) => Box::new(CompiledQuery::new(target)?),
+            Query::Method(_) | Query::MethodSet(_) | Query::Virtual { .. } => Box::new(CompiledQuery::new(target)?),
             _ => return Err(crate::FindError::Invalid("call constraints ([argN=...], [ret=...]) need a method query".into())),
         };
         let constraints = constraints
@@ -203,6 +203,11 @@ impl FindRefs<'_, '_, '_> {
                 for hit in group {
                     let pc = (hit.offset - start) as usize;
                     if let Some(note) = judge(dex, call, &located, values.as_mut(), hit, pc)? {
+                        // Keep a dispatch label of the target after the values.
+                        let note = match &hit.note {
+                            Some(label) => format!("{note} {label}"),
+                            None => note,
+                        };
                         out.push(Hit { note: Some(note), ..hit.clone() });
                     }
                 }

@@ -1560,6 +1560,9 @@ impl Engine {
     ) -> Result<RefSummary> {
         let t0 = Instant::now();
         compose::check_patterns(query)?;
+        if let Some(engine) = self.transient(compose::needs_program(query))? {
+            return engine.find_refs_opts(query, opts, cancel, sink);
+        }
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
         // Every entry has to be searched, so run the largest first: the biggest

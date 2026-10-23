@@ -1029,9 +1029,10 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 // The class-def lookups need the precise Dalvik form.
                 Find::Extends { output, value } => (Query::Extends(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
                 Find::Impl { output, value } => (Query::Implements(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
-                // `method '{RULE}'` / `method @FILE` / `method 'X[arg0=1]'`, as in a condition.
+                // `method '{RULE}'` / `method @FILE` (`={...}` / `=@FILE` without
+                // dispatch) / `method 'X[arg0=1]'`, as in a condition.
                 Find::Method { output, name: Some(name), class_name: None, .. }
-                    if name.starts_with(['{', '@']) || asc_engine::condition::has_constraints(&name) =>
+                    if name.trim_start_matches('=').starts_with(['{', '@']) || asc_engine::condition::has_constraints(&name) =>
                 {
                     (io.condition(&format!("method:{name}"))?, output)
                 }
