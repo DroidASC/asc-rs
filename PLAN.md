@@ -156,12 +156,13 @@
 | S1 | dexsql 那 17 个目标，加上新增的调用链目标（例如"导出 Provider → 文件读写"、"deep link → WebView loadUrl"） | **每个目标的调用次数**、整轮耗时、每个目标的几何平均、内存峰值；和 dexsql 对比 |
 | S2 | 100 个 APK 的测试集（以后换成真实的几百个 APK）；模拟一个暴露面审计 goal：manifest 摘要 → 规则查询 → 对可疑点 getclass | 调用次数、返回的总字节数（上下文体积）、耗时、单进程和 N 个子 agent 进程同时运行时的内存 |
 | 资源 | 与 aapt2 逐项对比 | 差异数为 0，或每类差异都写明原因 |
-| 回归 | `cargo test --workspace`、clippy、fmt；与 Python 上游逐行对比（reference-workload 和 Douyin） | 全部通过，diff 为 0 |
+| 回归 | `cargo test --workspace`、clippy、fmt；与 Python 上游做语义对比（reference-workload 和 Douyin） | 全部通过，结果集合差异为 0 |
 
 ## 5. 待确认
 
 1. GUI 渲染改动（类索引）需要在真实显示器上确认一次。
 2. 已定：不追求兼容 rasc 和 rust_ASC 的输出格式。`classes`、`manifest`、`--thread` 只作为方便迁移的别名，输出按 asc-rs 自己的格式，以对 agent 好用为准。新增的输出（manifest 摘要、多 APK 汇总、调用图）都按这个原则设计：每行一条记录、可直接 grep，MCP 同时给 JSON。
+   也不追求与 Python 上游逐字节一致，不留 `--raw`。与上游只做**语义对比**：把双方输出解析成（dex，方法，命中值集合）再比较。待 B2 合入后统一 findrefs 等文本格式：方法带完整签名；字符串加引号并转义（`\n`、`\t`、`\\`、控制字符），保证每行一条记录；各工具统一用 `|` 分隔、固定列序；可选在行尾带命中位置。
 3. 已定：S2 真实数据集先用测试机（Pixel 6）上安装的全部系统 APK（`adb shell pm list packages -f -s`，约 320 个、3.8 GB），拉到 `target/device-apks/`（不入库）。C、D 线的 S2 评测以它为准，100 个 APK 的合成集只作对照。
 4. 暂定：资源对比以 aapt2 为准；aapt2 拒绝或丢弃而我们能恢复的条目（apktool 式），单独标记为“恢复”，不算差异。
 
@@ -190,4 +191,4 @@
 
 **回归**：310 个测试、clippy、fmt 全过；在 reference-workload 上与 Python 上游逐行对比，开不开缓存差异都是 0；在 40 个设备 APK 上用 9 条规则加 getclass，比较开缓存和不开缓存的输出，内容一致（CLI 按各 DEX 完成的先后输出，DEX 的顺序本来就不固定）。
 
-**还没处理的问题**：CLI 文本输出里，命中的字符串如果本身带换行，一条记录会跨多行。保留现状是为了和 Python 上游逐行一致；是否改成转义待定。
+**还没处理的问题**：CLI 文本输出里，命中的字符串如果本身带换行，一条记录会跨多行。已定：改成转义并统一文本格式，见第 5 节第 2 条。
