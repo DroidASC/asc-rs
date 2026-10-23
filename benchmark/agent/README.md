@@ -1,6 +1,6 @@
 # agent 评测（grok headless）
 
-> 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/` 和 ams `~/asc-eval/results/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
+> 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
 
 结论见 [../README.md](../README.md)。这里记录当时的做法，便于复现或查验。2026-10-23 起不再做新的 agent 评测。
 
@@ -18,7 +18,7 @@
 - **禁用其他能力**：`--disallowed-tools` 列出 shell、编辑、写文件、子 agent、调度、生图等全部内置工具，完整列表见 `s1/run.py` 的 `DIS`。「+ 读文件」的组额外放开 `read_file`、`grep`、`list_dir`，用来读工具写出的超长结果文件。
 - **防止读到答案**：grok 把历次会话的工具输出存在 `~/.grok/sessions/`，所以：
   - Linux：`--sandbox strict`，并 `--deny Read(~/.grok/**)`、`--deny Grep(~/.grok/**)`。
-  - macOS（ams）：strict 沙箱起不来（docker.sock 的符号链接问题），于是把工作区放在 `/Users` 之外的 `/private/tmp/asc-grok/`，并 `--deny Read/Grep(/Users/**)`、`--deny Read/Grep(/Volumes/**)`。
+  - macOS：strict 沙箱起不来（docker.sock 的符号链接问题），于是把工作区放在 `/Users` 之外的 `/private/tmp/asc-grok/`，并 `--deny Read/Grep(/Users/**)`、`--deny Read/Grep(/Volumes/**)`。
 - **限流**：14 路并发一分钟内就会被限流（`rate_limit_error`）。正式结果是 4 路并发跑的（两批 runner 各 2 路）。runner 遇到限流会退避重试，每次运行的 `attempts` 列记录了尝试次数。被限流污染的那批结果已全部丢弃。
 
 ## S1：Douyin 单 APK，17 个目标（[`s1/`](s1/)）
@@ -71,8 +71,8 @@ python3 extract.py s2 RUNS_DIR ROUND s2/ref-k80.json > round2-s2.csv
 | 文件 | 内容 |
 |---|---|
 | `round1-s1.csv` | 本地 Linux，Douyin 40.7.0；组 `droidasc`（`8b7a09e`）、`dexsql`，各 34 次 |
-| `round2-s1.csv` | ams，Douyin 40.8.0；4 组 × 第 1、2 次各 17 个目标，另有第 3 次的 18 次（汇总时不计入） |
-| `round2-s2.csv` | ams，S2，2 组 × 4 个目标 × 1 次 |
+| `round2-s1.csv` | Mac，Douyin 40.8.0；4 组 × 第 1、2 次各 17 个目标，另有第 3 次的 18 次（汇总时不计入） |
+| `round2-s2.csv` | Mac，S2，2 组 × 4 个目标 × 1 次 |
 
 列说明：
 - `calls`：全部工具调用数。
@@ -88,7 +88,7 @@ python3 extract.py s2 RUNS_DIR ROUND s2/ref-k80.json > round2-s2.csv
 
 **原始记录不提交**：其中有 Douyin 的反编译代码片段，总共约 80 MB。存放位置：
 - `round1`（本地 Linux，Douyin 40.7.0）：本地 `target/grok-eval/runs/round1/`。
-- `r2s1`（S1，ams）：ams `~/asc-eval/results/agent-raw/s1-runs/r2s1/`（评测结束后从 `/private/tmp/asc-grok/runs/` 移来，macOS 重启会清空 /private/tmp），本地也有一份 `target/grok-eval/runs/r2s1/`，只有第 1、2 次。
-- `r2s2`（S2，ams）：ams `~/asc-eval/results/agent-raw/s2-runs/r2s2/`（同样移自 `/private/tmp/asc-grok/s2/runs/`）。
+- `r2s1`（S1，Mac）：本地 `target/grok-eval/runs/r2s1/`（只有第 1、2 次），完整的保存在 Mac 测试机上。
+- `r2s2`（S2，Mac）：保存在 Mac 测试机上。
 
-`/private/tmp` 下的内容可能被系统清理。
+评测时 runner 写在 `/private/tmp` 下，macOS 重启会清空，结束后要及时移走。

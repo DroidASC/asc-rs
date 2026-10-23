@@ -1,8 +1,8 @@
 # 确定性评测
 
-> 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/` 和 ams `~/asc-eval/results/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
+> 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
 
-结论见 [../README.md](../README.md)。脚本都只用 Python 3.9 标准库（ams 上是 3.9），Linux 和 macOS 都能跑。
+结论见 [../README.md](../README.md)。脚本都只用 Python 3.9 标准库（macOS 自带的是 3.9），Linux 和 macOS 都能跑。
 
 - **内存**：峰值 RSS 用 `wait4` 取单个进程的值，或者每 50 ms 轮询一次 `ps -axo pid,ppid,rss` 汇总整棵进程树（`common.py` 的 `TreeSampler`）。注意 macOS 的 RSS 包含映射的文件页。
 - **daemon**：脚本默认设 `DROIDASC_DAEMON=off`。新版 droidasc 默认会把一次性命令转发给 daemon，要测 daemon 就显式设成 `auto`。
@@ -31,7 +31,7 @@
 | `aggregate.py` | 结果目录 → 每个配置的中位数表 | `aggregate.py RESULTS_DIR` |
 | `guard.sh` | 任意 droidasc 进程超过内存上限就终止整棵进程树（写盘队列 bug 曾让单进程涨到 40 GB 以上） | `guard.sh LIMIT_MB CMD…` |
 | `rsswrap.py` | 记录一个命令整棵进程树的峰值 RSS | `rsswrap.py OUT.txt CMD…` |
-| `s1_all.sh`、`s2_all.sh`、`s2_rules.sh`、`s2_rest.sh` | ams 上的完整矩阵（S1；S2 每条规则一次；S2 规则集；rust_ASC 与 dexsql） | 在 ams 布局下 `zsh s2_rules.sh` |
+| `s1_all.sh`、`s2_all.sh`、`s2_rules.sh`、`s2_rest.sh` | Mac 上的完整矩阵（S1；S2 每条规则一次；S2 规则集；rust_ASC 与 dexsql） | 在上面的 `ASC_EVAL` 布局下 `zsh s2_rules.sh` |
 | `bm.sh` | big-machine 验证：自动线程 N=1/4/8/16 冷热、N=16 固定线程、磁盘上限、S1 回归，新旧版交替 | 需要 `src-r2/`、`src-bm/` 两个编译好的版本 |
 | `prefix_skip.py` | prefix-skip：一次性冷查询的墙钟中位数和峰值 RSS | `prefix_skip.py APK N BIN… -- QUERY ; QUERY …` |
 | `cache/consistency.py` | 缓存一致性：40 个随机 APK × 9 条查询，冷缓存、热缓存与 `--no-cache` 逐块比较 | `consistency.py DROIDASC CORPUS_DIR CACHE_DIR` |
@@ -46,7 +46,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| `round2/` | ams 上的 S1 / S2 矩阵（`s1-*`、`s2-*` 每条规则一次、`s2r-*` 规则集、`s2-dexsql*`、`s2-rust-cli*`），`summary.md` 是汇总表，`*.log` 是运行日志（含每次冷跑后的缓存大小）；`pre-sha/` 是 sha2 asm 修复之前新版的数据 |
+| `round2/` | Mac 上的 S1 / S2 矩阵（`s1-*`、`s2-*` 每条规则一次、`s2r-*` 规则集、`s2-dexsql*`、`s2-rust-cli*`），`summary.md` 是汇总表，`*.log` 是运行日志（含每次冷跑后的缓存大小）；`pre-sha/` 是 sha2 asm 修复之前新版的数据 |
 | `round2-bm/` | big-machine 验证：`auto-*`、`fixed-*`、`cap-*`、`diag-*`（N=8 热跑的重测）、`s1-*`；`summary.md` 和 `bm.log`（含 load） |
 
-结果 JSON 去掉了 S1 的逐步输出（`outputs`，含 Douyin 的 smali）和 S2 的逐 APK 命中（`hits`），其余字段保留。完整版本在 ams 的 `~/asc-eval/results/round2/`、`round2-bm/`。
+结果 JSON 去掉了 S1 的逐步输出（`outputs`，含 Douyin 的 smali）和 S2 的逐 APK 命中（`hits`），其余字段保留。完整版本保存在 Mac 测试机上。

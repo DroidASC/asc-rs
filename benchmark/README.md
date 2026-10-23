@@ -9,7 +9,7 @@ asc-rs 的全部评测结论按问题组织，每个问题给出当前版本的�
 
 数字均取自结果文件或当时的运行日志，没有测的写「未测」。同一指标测过多个版本时，以最新版本为主，旧值作对照并注明版本。不同机器的数字不放在同一列里比较。
 
-**结果文件不入库**：所有 `results/` 目录、语料清单 `*.tsv` 和 `agent/s2/ref-k80.json` 都保存在仓库之外，目录结构与这里相同：本地 `target/benchmark-data/benchmark/`，ams `~/asc-eval/results/benchmark-data/benchmark/`。下文提到的这些路径都相对于那里，脚本也会把新结果写到同样的位置。
+**结果文件不入库**：所有 `results/` 目录、语料清单 `*.tsv` 和 `agent/s2/ref-k80.json` 都保存在仓库之外，目录结构与这里相同：本地 `target/benchmark-data/benchmark/`。下文提到的这些路径都相对于那里，脚本也会把新结果写到同样的位置。
 
 ## 总览
 
@@ -28,11 +28,11 @@ asc-rs 的全部评测结论按问题组织，每个问题给出当前版本的�
 | | 说明 |
 |---|---|
 | 本地 | AMD Ryzen 7 8745H（16 线程），12 GB 内存，Arch Linux，内核 7.2.11，ext4 / NVMe |
-| ams | Apple M3 Ultra（32 核），96 GB 内存，macOS 15.7.3（24G419）。**多人共用**，评测期间 load 在 4–30 之间波动，出现异常值的配置都交替重跑过 |
-| asc-rs（被测版本） | 各节表头注明 commit。「r1」= `8b7a09e`，作为旧版本对照（ams 上是 `bin/droidasc-r1`，sha256 `37c1c62f…4581`）。agent 评测用的是 `a23650e` |
+| Mac | Apple M3 Ultra（32 核），96 GB 内存，macOS 15.7.3（24G419）。**多人共用**，评测期间 load 在 4–30 之间波动，出现异常值的配置都交替重跑过 |
+| asc-rs（被测版本） | 各节表头注明 commit。「r1」= `8b7a09e`，作为旧版本对照（`bin/droidasc-r1`，sha256 `37c1c62f…4581`）。agent 评测用的是 `a23650e` |
 | Python ASC | `9216fe2`（MG1937/ASC） |
 | rust_ASC | dev `6db7135`，main `236dd09`（MG1937/rust_ASC，radguard 子模块 `290de20`） |
-| dexsql | 0.1.1（LSPosed/dexsql-release），ams 上 darwin-arm64 二进制 sha256 `d983de33007e11c56e681aaa238ae15637eff961623335f1131527f8d2c82a77` |
+| dexsql | 0.1.1（LSPosed/dexsql-release），darwin-arm64 二进制 sha256 `d983de33007e11c56e681aaa238ae15637eff961623335f1131527f8d2c82a77` |
 | dexsql-release harness | `3ac6fb1`，MIT 许可。S1 的 17 个目标（47 步）来自其中的 `benchmarks/agent-audit/harness/rasc_replay.py`（`SCENARIOS`）。脚本运行时通过 `HARNESS` 环境变量导入，不复制进本仓库 |
 | grok | grok CLI 1.0.67（`2fe064390d07`），模型 grok-4.7-build，headless 模式（`-p … --output-format streaming-json`） |
 | 语料 | 见 [corpus.md](corpus.md)：Douyin 40.7.0（本地）、Douyin 40.8.0（K80）、REDMI K80 的 416 个 APK、Xiaomi 17 的 420 个、Pixel 6 的 312 个系统 APK |
@@ -67,7 +67,7 @@ asc-rs 的全部评测结论按问题组织，每个问题给出当前版本的�
 
 dexsql-release 的 17 个目标，共 47 步。表中是 5 次的中位数，格式为耗时 / 峰值 RSS。
 
-**ams，Douyin 40.8.0：**
+**Mac，Douyin 40.8.0：**
 
 | 配置 | asc-rs `0e08806` | r1 `8b7a09e` | rust_ASC dev | dexsql 0.1.1 |
 |---|---:|---:|---:|---:|
@@ -98,7 +98,7 @@ dexsql-release 的 17 个目标，共 47 步。表中是 5 次的中位数，格
 | `string ttdownloaderClickId` | 71 ms / 319 MB | 47 ms / 186 MB |
 | `field SDK_INT`、`string http://`（覆盖面广） | 95 / 92 ms | 97 / 92 ms |
 
-MCP 会话有常驻缓存，不会触发 prefix-skip。不压缩存放的 APK（GMS），以及字符串数据放在后部的 DEX（Chrome），结果都持平。ams 上 Douyin 40.8.0 的 56 个 DEX 跳过了 22 个。
+MCP 会话有常驻缓存，不会触发 prefix-skip。不压缩存放的 APK（GMS），以及字符串数据放在后部的 DEX（Chrome），结果都持平。Mac 上 Douyin 40.8.0 的 56 个 DEX 跳过了 22 个。
 
 **daemon**：本地 Linux，Douyin 40.7.0，`b3320c2`。
 
@@ -114,7 +114,7 @@ macOS 上 `callgraph --virtual` 第一次调用：经 daemon 261 ms，本地 276
 
 **结论：规则集模式（一次扫描跑完全部规则）是多 APK 审计的正确用法，热缓存下比 dexsql 快约 5–10 倍，比 rust_ASC 快约 20 倍；只按「每条规则一次调用」测会大幅低估 asc-rs。**
 
-**ams，836 个 APK（K80 416 个 + Xiaomi 17 420 个）× 8 条规则，3 次中位数：**
+**Mac，836 个 APK（K80 416 个 + Xiaomi 17 420 个）× 8 条规则，3 次中位数：**
 
 | 配置 | asc-rs `a23650e` | r1 `8b7a09e` |
 |---|---:|---:|
@@ -141,13 +141,13 @@ macOS 上 `callgraph --virtual` 第一次调用：经 daemon 261 ms，本地 276
 
 **结论：冷扫的内存现在有上限，冷扫之后 L1 基本完整；macOS 上的进程注册表、去重的 SHA-256 和写盘同步这几个问题都已修好。剩下的问题是突发扫描时自动线程不收缩，以及多进程合计内存的来源还没查清。**
 
-| 改动 | 现象 | 做法 | 实测（ams，836 个 APK，除非另注） |
+| 改动 | 现象 | 做法 | 实测（Mac，836 个 APK，除非另注） |
 |---|---|---|---|
 | 写盘队列有界 | 旧版（r1 也一样）一个 MCP 进程冷扫 416 个 APK，4 s 内涨到 28–44 GB，缓存目录 8.6 GB，是预算的两倍 | `4d701d8`：排队写入超过 512 MiB 就丢弃新的写入；写入期间也做淘汰 | 每条规则调用一次的冷扫：从超过 30 GB 被强制终止，变为 6.5 s / 5.2 GB；规则集 1.4 s / 3.2 GB |
 | 超限时延后写入，不再丢弃 | 上面的丢弃让冷扫后 L1 很不完整，热跑只能靠 L3 | `db29fc6`：超限的 L1 写入只记下是哪个条目，由写盘线程之后从 APK 重新解压再写；写盘线程按 CPU 数 1–4 个 | 冷扫后 L1 从 86 个文件 / 1.2 GB 增至 866 个 / 7.4 GB；之后对 30 个最重的 APK 各跑一次 CLI，合计 1873 → 909 ms。代价：冷扫回答 1452 → 1541 ms，到进程退出 2489 → 3867 ms；峰值 RSS 3403 → 3090 MB |
 | 写盘与预建降优先级 | 上面多出来的重新解压会和查询抢 CPU | `7a6123d`：Linux nice 19，Apple 用 utility QoS | Linux 上确认写盘线程 nice 为 19。macOS 上对争用的实际影响**未测** |
 | aarch64 硬件 SHA-256 | 跨 APK 去重时的 SHA-256 是采样第一的热点，两台手机的系统 APK 大量重复 | `a23650e`：aarch64 上开启 sha2 的 `asm` | 规则集冷跑 2055 → 1713 ms（r1 1732 ms，交替 5 轮） |
-| 写缓存去掉 fsync | macOS 上 `sync_data` 实际是 `F_FULLFSYNC`：每个 8 MiB 文件 9.8 ms，普通 fsync 2.0 ms | 不再 fsync；文件带 CRC，重启之前写入的文件在读取时校验一次 | ams 上用临时去掉同步的构建测：每条规则一个进程冷跑 52.7 → 21.1 s，规则集冷跑 8.0 → 4.0 s；合入版本在 macOS 上**未正式测**。本地 Linux 见下表 |
+| 写缓存去掉 fsync | macOS 上 `sync_data` 实际是 `F_FULLFSYNC`：每个 8 MiB 文件 9.8 ms，普通 fsync 2.0 ms | 不再 fsync；文件带 CRC，重启之前写入的文件在读取时校验一次 | Mac 上用临时去掉同步的构建测：每条规则一个进程冷跑 52.7 → 21.1 s，规则集冷跑 8.0 → 4.0 s；合入版本在 macOS 上**未正式测**。本地 Linux 见下表 |
 | 进程注册表在 macOS 生效 | 注册表原来只在 Linux 上实现，macOS 上一直没有登记，内存预算和线程都没有按进程分摊 | `c1fc2da`（big-machine） | N=16 冷扫时，登记从 0 个变为 16 个；扫描期间一次性查询的 worker 从 32 个降到 7 个 |
 
 **no-fsync，本地 Linux（ext4 / NVMe，5 次中位数，交替跑）**，脚本 [`cache/nofsync_bench.py`](deterministic/cache/nofsync_bench.py)：
@@ -161,7 +161,7 @@ macOS 上 `callgraph --virtual` 第一次调用：经 daemon 261 ms，本地 276
 
 重启后第一次读取要多花 14–22 ms 算 CRC。Pixel 语料的 DEX 大多不写 L1，省不到 fsync，只多了 CRC 的开销。
 
-**big-machine，ams，规则集，旧 `36ab1e2` 对新 `c1fc2da`，交替 3 次中位数**，驱动 [`deterministic/bm.sh`](deterministic/bm.sh)：
+**big-machine，Mac，规则集，旧 `36ab1e2` 对新 `c1fc2da`，交替 3 次中位数**，驱动 [`deterministic/bm.sh`](deterministic/bm.sh)：
 
 | N 个 MCP 进程（自动线程） | 冷：旧 → 新 | 热：旧 → 新 |
 |---|---:|---:|
@@ -181,7 +181,7 @@ macOS 上 `callgraph --virtual` 第一次调用：经 daemon 261 ms，本地 276
 
 **结论：超长输出写到文件、由 agent 按需 grep，是最省 token 的设计。新版每个目标的 token 约为 dexsql 的 1/4、r1 的 1/3，证据持平。多 APK 问题上，droidasc 的 token 只有 dexsql 的约 1/46，两边答案都全对。**
 
-**S1：ams，Douyin 40.8.0，17 个目标 × 2 次，每组只接一个工具**
+**S1：Mac，Douyin 40.8.0，17 个目标 × 2 次，每组只接一个工具**
 
 | 组 | MCP 调用/目标 | 失败调用 | token/目标 | $/目标 | 耗时 | 证据 | 总费用 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -194,7 +194,7 @@ macOS 上 `callgraph --virtual` 第一次调用：经 daemon 261 ms，本地 276
 - 写文件组对比分页组：token 再少 45%，调用数减半。写文件组的 agent 确实用了 read_file 和 grep 去读写出来的文件。
 - 对照，本地 Linux、Douyin 40.7.0，同样 17 个目标 × 2 次，只接 MCP：r1 26.5 次调用、610k token、$0.167、112 s、证据 86/100，其中 78 次失败里有 58 次是 getclass 方法签名的写法不被接受，922 次返回里有 165 次超过 20 KB；dexsql 38 次调用、659k token、$0.173、105 s、92/100。r1 在两台机器、两个 Douyin 版本上的结果几乎一样，说明换机器、换版本没有带来明显偏差。
 
-**S2：ams，K80 的 416 个 APK，4 个「哪些 APK 调用了某 API」目标 × 1 次**
+**S2：Mac，K80 的 416 个 APK，4 个「哪些 APK 调用了某 API」目标 × 1 次**
 
 参考答案先由 droidasc 生成，再用 dexsql 独立交叉核对。四个目标里三个完全一致；剩下一个差异来自 com.android.bluetooth，它只调用了 `sendTextMessageWithoutPersisting`，droidasc 的方法名是模糊匹配所以命中了它，这里记为可选项。
 
@@ -224,10 +224,10 @@ dexsql 每个 dataset 最多 64 个输入，只能分批打开、逐批写 SQL�
   - S2 每个目标只跑 1 次。
   - S1 的第 3 次重复只跑完 18 次，没有计入。
   - 14 路并发会被限流，被限流的那批已全部丢弃，正式结果是 4 路并发、带退避重试跑的。
-  - S2 的 dexsql 组运行时，ams 上同时在跑基准，耗时略受影响。
+  - S2 的 dexsql 组运行时，Mac 上同时在跑基准，耗时略受影响。
 - **失败调用回放**：S1 第二组调用原本是在 40.8.0 上发出的，这里在 40.7.0 上重放，部分混淆类名对不上。所以这部分只能说明「找不到时的提示质量」，不代表在原版本上会成功。
 - **S1 回放**：回放脚本写死了 40.7.0 的混淆名，在 40.8.0 上每个工具都会缺证据；dexsql 写死的 method id 在 40.8.0 上会报错。
-- **ams 是共享机器**：有异常值的配置都交替重跑过，旧版热跑的个别慢值不可靠。
+- **Mac 是共享机器**：有异常值的配置都交替重跑过，旧版热跑的个别慢值不可靠。
 - **未测**：
   - 合入的 no-fsync 版本在 macOS 上的正式前后对比。
   - macOS 上降优先级对写盘与查询争用的影响。

@@ -1,5 +1,5 @@
 # Results, corpus manifests and reference answers stay out of the repo
-# (target/benchmark-data/ locally, ~/asc-eval/results/benchmark-data/ on the eval host).
+# (target/benchmark-data/ locally).
 results/
 corpus/*.tsv
 agent/s2/ref-k80.json
