@@ -18,9 +18,11 @@ gui = ["dep:asc-gui"]
 [dependencies]
 asc-engine.workspace = true
 asc-findrefs.workspace = true
+asc-mcp.workspace = true
 asc-gui = { path = "../asc-gui", optional = true }
 clap.workspace = true
 
 [dev-dependencies]
 asc-fixture.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true

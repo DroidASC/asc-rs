@@ -13,6 +13,7 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] <COMMAND>
   getmanifest  Decode AndroidManifest.xml from APK and print it as XML.
   findrefs     Find code references for string/type/method/field across all DEX entries in APK.
   gui          Launch the graphical browser.
+  mcp          Serve MCP tools over stdio, keeping opened APKs resident (--memory-mb MIB).
   cache        Inspect or clear the on-disk cache (path | stats | clear).
 
   --threads N      worker threads (default: number of logical CPUs)
@@ -33,6 +34,7 @@ examples:
   droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
+  droidasc mcp --memory-mb 4096
   droidasc cache stats
 ```
 
@@ -65,6 +67,7 @@ Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is he
 | `asc-cache` | Inflated-DEX caches: an on-disk cache shared across processes and a byte-bounded in-memory LRU for resident hosts. |
 | `asc-axml` | Android binary XML → text XML for `AndroidManifest.xml`. |
 | `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding. |
+| `asc-mcp` | MCP server over stdio (`droidasc mcp`): one resident session, several APKs sharing one memory budget, CLI-format text plus structured results, paging. |
 | `asc-cli` | `droidasc` binary (clap). |
 | `asc-gui` | egui browser: package tree with context menus, tabbed disassembly with find and jump-to-method, `X` for references to the member under the cursor and Ctrl+click to its declaration, streaming reference searches kept as a history panel, class-name suggestions, manifest view; panel sizes, theme and search preferences persist across runs. |
 | `asc-fixture` | Synthetic DEX/APK fixtures shared by the tests. |
@@ -206,6 +209,56 @@ The scan itself adapts to the query: up to eight target indexes are found with S
 `memmem` over the operand bytes (0.2 ms per 4 MB instead of 3 ms), string queries use
 `memchr2` over their two opcodes, and clustered index sets are prefiltered with `memchr`
 on the shared high operand byte before the linear sweep.
+
+## MCP server
+
+`droidasc mcp` is a resident session for agents: an MCP server on stdio (JSON-RPC 2.0, one
+message per line). It keeps every APK it opens in one process, so the inflated DEX files
+and locator tables stay in memory between calls instead of being rebuilt by a new process
+per question. All opened APKs share one in-memory budget (`--memory-mb`, default 2048); the
+on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`).
+
+```json
+{
+  "mcpServers": {
+    "droidasc": { "command": "/absolute/path/to/droidasc", "args": ["mcp"] }
+  }
+}
+```
+
+| tool | arguments | result |
+|---|---|---|
+| `open_apk` | `apk`, `warm` (default true: inflate every DEX now) | `apk_id`; the same path returns the same id |
+| `close_apk` | `apk_id` or `apk` | |
+| `getclass` | `class`, `debug_info` | smali, as `droidasc getclass` |
+| `findrefs` | `kind` (`string`/`type`/`method`/`field`), `value` or `name`, `class`, `fuzzy_class`, `exact`, `offset`, `limit` (500) | `findrefs` lines in DEX order, then a `# N results` line |
+| `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
+| `getmanifest` | | decoded XML |
+
+Every tool except `open_apk` takes `apk_id` or an `apk` path (opened on first use). Results
+carry the CLI text as `content` and the same data as `structuredContent` (`total` and
+`next_offset` for paged tools). Failures come back as `isError: true` results; the session
+keeps running.
+
+### Agent session benchmark
+
+The 17 analysis goals (47 steps) of the [dexsql-release agent audit](https://github.com/LSPosed/dexsql-release/tree/main/benchmarks/agent-audit),
+replayed by [`bench/agent-audit/replay_mcp.py`](bench/agent-audit/replay_mcp.py) on
+Douyin 40.7.0 (343 MiB, 56 DEX, 551,080 classes). Same machine (Linux, 16 threads, 12 GB),
+dexsql 0.1.1 linux-amd64 measured with its own `dexsql_replay.py` / `whole_suite.py`; asc-rs
+with `--no-cache` unless noted. Medians of 7.
+
+| | asc-rs `mcp` | asc-rs `mcp`, disk cache warm | dexsql 0.1.1 MCP | rasc (process per step) |
+|---|---:|---:|---:|---:|
+| open the APK | 77 ms | 18 ms | 589 ms | — |
+| whole session: start, open, 17 goals, exit | **218 ms** | 153 ms | 1,112 ms | 3,819 ms |
+| per goal once open, geometric mean | **5.3 ms** | 5.3 ms | 22.6 ms | — |
+| peak RSS | 646 MB | 522 MB | ~1.35 GB (two processes) | ~350 MB per step |
+
+Every goal finds its evidence; three of the expected tokens are Java spellings that read
+differently in smali (`new java.io.File` → `Ljava/io/File;-><init>`, `36865` → `0x9001`,
+`return true` → `const/4 v0, 0x1` / `return v0`). dexsql answers SQL, including multi-hop
+call-graph joins that `findrefs` cannot express; this compares only these goals.
 
 ## License
 

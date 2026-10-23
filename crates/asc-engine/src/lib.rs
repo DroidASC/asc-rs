@@ -223,6 +223,42 @@ fn cgroup_headroom_from(max: &str, current: &str) -> Option<u64> {
     Some(max.saturating_sub(current))
 }
 
+/// A cache several [`Engine`]s share, so a process serving many APKs keeps
+/// one memory budget (the LRU is keyed by APK) and one disk-writer thread.
+/// Engines attached with [`Engine::with_shared_cache`] leave queued disk
+/// writes alone when dropped; dropping the `SharedCache` flushes them and
+/// stops queueing (as dropping a private engine does).
+pub struct SharedCache(Option<Arc<EngineCache>>);
+
+impl SharedCache {
+    /// Build the cache [`Engine::with_cache`] would; warnings (an unusable
+    /// disk cache directory) go to `logger`.
+    pub fn new(config: CacheConfig, logger: impl Fn(&str) + Send + Sync + 'static) -> SharedCache {
+        let mut holder = Engine::new("").with_logger(logger).with_cache(config);
+        SharedCache(holder.cache.take())
+    }
+
+    /// Bytes currently held by the shared in-memory cache.
+    pub fn memory_bytes(&self) -> usize {
+        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
+    }
+
+    /// Block until every queued disk-cache write has landed.
+    pub fn flush_writes(&self) {
+        if let Some(c) = &self.0 {
+            c.flush(false);
+        }
+    }
+}
+
+impl Drop for SharedCache {
+    fn drop(&mut self) {
+        if let Some(c) = &self.0 {
+            c.flush(true);
+        }
+    }
+}
+
 /// One logical DEX of a cached entry with its lazily built locator tables.
 /// The tables are shared with the entry that replaces this one once its
 /// bytes are remapped from the disk cache (same bytes, so still valid).
@@ -548,6 +584,8 @@ pub struct Engine {
     debug: bool,
     logger: Logger,
     cache: Option<Arc<EngineCache>>,
+    /// `cache` belongs to a [`SharedCache`], which closes it instead of us.
+    shared_cache: bool,
     stats: Arc<Stats>,
     /// `(size, mtime, key)` of the APK the key was last computed for.
     key_cache: Mutex<Option<(u64, Option<SystemTime>, ApkKey)>>,
@@ -573,6 +611,7 @@ impl Engine {
             debug: false,
             logger: Arc::new(|m| println!("{m}")),
             cache: None,
+            shared_cache: false,
             stats: Arc::new(Stats::default()),
             key_cache: Mutex::new(None),
         }
@@ -617,6 +656,13 @@ impl Engine {
                 inflight_done: Condvar::new(),
             }));
         }
+        self
+    }
+
+    /// Use `cache` (shared with other engines) instead of a private one.
+    pub fn with_shared_cache(mut self, cache: &SharedCache) -> Engine {
+        self.cache = cache.0.clone();
+        self.shared_cache = true;
         self
     }
 
@@ -977,7 +1023,10 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.close_cache_writes();
+        // A shared cache outlives this engine; its `SharedCache` owner closes it.
+        if !self.shared_cache {
+            self.close_cache_writes();
+        }
     }
 }
 

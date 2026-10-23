@@ -25,6 +25,7 @@ const EXAMPLES: &str = "examples:
   droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
+  droidasc mcp --memory-mb 4096
   droidasc cache stats
 
 exit status:
@@ -37,7 +38,7 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
 
-const SUBCOMMANDS: [&str; 6] = ["getclass", "listclass", "getmanifest", "findrefs", "gui", "cache"];
+const SUBCOMMANDS: [&str; 7] = ["getclass", "listclass", "getmanifest", "findrefs", "gui", "mcp", "cache"];
 
 fn default_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
@@ -138,6 +139,13 @@ enum Command {
     Gui {
         /// Path to the input APK file.
         apk_path: PathBuf,
+    },
+    /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
+    /// opened APKs resident across calls.
+    Mcp {
+        /// In-memory cache budget shared by every opened APK, in MiB.
+        #[arg(long, value_name = "MIB", default_value_t = 2048)]
+        memory_mb: usize,
     },
     /// Inspect or clear the on-disk cache of inflated DEX files.
     Cache {
@@ -419,6 +427,15 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
         }
         Command::Gui { apk_path } => {
             launch_gui(apk_path, common.threads, common.debug, !common.no_cache)?;
+        }
+        Command::Mcp { memory_mb } => {
+            let disk = if common.no_cache { None } else { common.disk_cache() };
+            let opts = asc_mcp::Options {
+                threads: common.threads,
+                debug: common.debug,
+                cache: CacheConfig { memory_bytes: memory_mb.saturating_mul(1 << 20), disk },
+            };
+            asc_mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {
             let Some(cache) = common.disk_cache() else { return Err("no cache directory could be determined".into()) };

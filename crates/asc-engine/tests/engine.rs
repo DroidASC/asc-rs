@@ -197,6 +197,31 @@ fn dropping_the_engine_lands_cache_writes() {
 }
 
 #[test]
+fn engines_share_one_cache_budget() {
+    let (a, b) = (temp_apk(true), temp_apk_from(&make_apk(&[("classes.dex", &make_dex())], true)));
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+    let shared = asc_engine::SharedCache::new(cfg, |_| {});
+    let q = Query::String("token".into());
+    let ea = Engine::new(a.path()).with_threads(2).with_shared_cache(&shared);
+    ea.find_refs(&q, |_| {}).unwrap();
+    let after_a = shared.memory_bytes();
+    assert!(after_a > 0);
+    {
+        let eb = Engine::new(b.path()).with_threads(2).with_shared_cache(&shared);
+        eb.find_refs(&q, |_| {}).unwrap();
+        assert!(shared.memory_bytes() > after_a);
+    }
+    // Dropping an engine leaves the shared cache usable for the others.
+    let mut sources = Vec::new();
+    ea.find_refs(&q, |b| sources.push(b.source)).unwrap();
+    assert_eq!(sources, ["memory", "memory"]);
+    drop(shared);
+    // Dropping the shared cache lands the queued disk writes of both APKs.
+    assert_eq!(asc_engine::asc_cache::DiskCache::open(dir.path()).stats().0, 2);
+}
+
+#[test]
 fn getclass_keeps_looking_after_a_broken_entry() {
     // A malformed first entry must be reported per entry, not end the search
     // early: the class defined in the second entry is still found.
