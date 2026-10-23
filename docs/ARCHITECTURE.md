@@ -280,6 +280,30 @@ once and then scan. Results are paged over a stable order (entries sorted as
 `classes.dex, classes2.dex, …`), because the engine streams entries as they finish. Tool
 failures are `isError` results, protocol errors JSON-RPC errors; neither ends the session.
 
+### Call graph and findrefs context
+
+`asc_findrefs::CallGraph` is built per DEX on first use, next to the other locator
+tables in `SearchState` (so it is charged to the memory budget and cached with the
+entry): one walk over every method body the instruction table knows, keeping the
+operand of every `invoke-*` (not `invoke-custom`, whose operand is a call site). A DEX
+has at most 65 536 method ids, so the two CSR tables (callees by caller, callers by
+callee) store `u16` targets: about 4 bytes per distinct edge plus 8 per method id. On
+Douyin (55 DEX) all graphs together are 9.7 M edges, 73 MiB, built in 85 ms on 16
+threads; a walk only builds the graphs of DEX files that reference a frontier method.
+`to_bytes` / `from_bytes` give a flat, 4-byte-aligned form for an on-disk cache, and
+`SearchState::set_call_graph` installs one loaded from there.
+
+`Engine::call_graph` keys methods by signature, since method ids are local to a DEX: each
+level looks the frontier up in every DEX (binary search over the sorted `method_id`
+table), follows that DEX's edges and merges the neighbours. The tree is rendered depth
+first, expanding each method once at its breadth-first (shallowest) depth.
+
+`findrefs` keeps the instruction offset of every hit (`RefResult::sites`). With a
+`RefContext`, the referencing method is rendered alone (`asc_smali::disassemble_method`,
+which also maps each instruction's pc to its line) and the hit lines are marked. The CLI
+renders it in the search workers; MCP renders only the returned page afterwards
+(`Engine::fill_context`), from the DEX files the search left in the memory cache.
+
 ### Scan strategy
 
 `CodeScanner::scan` picks a strategy from the query: ≤ 8 targets → `memmem` over each

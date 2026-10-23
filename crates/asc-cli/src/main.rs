@@ -1,7 +1,7 @@
 //! `droidasc` command line entry.
 
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
-use asc_engine::{names, CacheConfig, Engine};
+use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, RefContext};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand};
 use std::fs::File;
@@ -35,13 +35,17 @@ examples:
   droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
+  droidasc findrefs app.apk string token --context 3
+  droidasc findrefs app.apk method loadUrl --context-method
+  droidasc callgraph app.apk com.poc.Main onCreate --depth 3
+  droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
   droidasc mcp --memory-mb 4096
   droidasc cache stats
 
 exit status:
   0  success
   1  error (bad arguments, unreadable APK, class not found, output not writable, ...)
-  2  findrefs finished, but one or more DEX entries could not be searched (details on stderr)
+  2  findrefs / callgraph finished, but one or more DEX entries could not be searched (details on stderr)
 
 Debug output (--debug) goes to stderr so stdout can be redirected.";
 
@@ -49,8 +53,8 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 const EXIT_PARTIAL: u8 = 2;
 
 /// Subcommand names and aliases (`classes` / `manifest` as in rasc).
-const SUBCOMMANDS: [&str; 10] =
-    ["getclass", "disassemble", "listclass", "classes", "getmanifest", "manifest", "findrefs", "gui", "mcp", "cache"];
+const SUBCOMMANDS: [&str; 11] =
+    ["getclass", "disassemble", "listclass", "classes", "getmanifest", "manifest", "findrefs", "callgraph", "gui", "mcp", "cache"];
 
 fn default_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
@@ -193,8 +197,41 @@ enum Command {
     Findrefs {
         /// Path to the input APK file.
         apk_path: PathBuf,
+        /// After each result, show the referencing instructions (marked `>`)
+        /// with N smali lines around them, and their pc / source line.
+        #[arg(long, global = true, value_name = "N", conflicts_with = "context_method")]
+        context: Option<usize>,
+        /// After each result, show the whole referencing method.
+        #[arg(long, global = true)]
+        context_method: bool,
         #[command(subcommand)]
         find: Find,
+    },
+    /// Callers (default) or callees of a method, as an indented tree, across all DEX entries.
+    ///
+    /// One line per call: depth, `<-` (caller) or `->` (callee), signature.
+    /// `[no body]` marks methods no DEX of the APK defines (framework / SDK),
+    /// `(repeated)` methods expanded elsewhere in the tree. References are
+    /// static: a call through a subclass is not a call of the base method.
+    Callgraph {
+        /// Write the tree to this file instead of stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Walk callees instead of callers.
+        #[arg(long)]
+        callees: bool,
+        /// Levels to expand.
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+        /// Stop after discovering this many methods.
+        #[arg(long, value_name = "N", default_value_t = 500)]
+        max_nodes: usize,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+        /// Declaring class (com.poc.Main or Lcom/poc/Main;).
+        class: String,
+        /// Method name (every overload) or exact signature, e.g. run(I)V.
+        method: String,
     },
     /// Launch the graphical browser.
     Gui {
@@ -471,7 +508,12 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
             }
         }
-        Command::Findrefs { apk_path, find } => {
+        Command::Findrefs { apk_path, context, context_method, find } => {
+            let context = match (context, context_method) {
+                (_, true) => RefContext::Method,
+                (Some(n), false) => RefContext::Lines(n),
+                (None, false) => RefContext::None,
+            };
             let (query, output) = match find {
                 Find::String { output, literal: false, value } => (Query::String(value), output),
                 Find::String { output, literal: true, value } => (Query::StringLiteral(value), output),
@@ -498,13 +540,14 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             let stdout = std::io::stdout();
             let mut sink = LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())?;
             let mut errors = Vec::new();
+            let opts = FindOptions { aggregate: true, context };
             engine
-                .find_refs(&query, |batch| {
+                .find_refs_opts(&query, opts, &std::sync::atomic::AtomicBool::new(false), &mut |batch| {
                     if let Some(e) = batch.error {
                         errors.push(format!("{}: {e}", batch.entry_name));
                     }
                     for r in &batch.results {
-                        sink.line(&r.line());
+                        sink.line(&r.text());
                     }
                     sink.flush_stdout();
                 })
@@ -521,6 +564,29 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             io_result?;
             if !errors.is_empty() {
                 eprintln!("Warning: {} DEX entr{} could not be searched", errors.len(), if errors.len() == 1 { "y" } else { "ies" });
+                return Ok(ExitCode::from(EXIT_PARTIAL));
+            }
+        }
+        Command::Callgraph { output, callees, depth, max_nodes, apk_path, class, method } => {
+            let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
+            let direction = if callees { Direction::Callees } else { Direction::Callers };
+            let engine = common.engine(&apk_path);
+            let tree = engine.call_graph(&CallQuery { class, method, direction, depth, max_nodes }).map_err(|e| e.to_string())?;
+            let mut text = tree.lines().join("\n");
+            text.push('\n');
+            text.push_str(&tree.footer());
+            text.push('\n');
+            match &output {
+                Some(p) => std::fs::write(p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?,
+                None => emit(&text)?,
+            }
+            for e in &tree.errors {
+                eprintln!("Warning: {e}");
+            }
+            if common.debug {
+                eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+            }
+            if !tree.errors.is_empty() {
                 return Ok(ExitCode::from(EXIT_PARTIAL));
             }
         }
