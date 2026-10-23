@@ -20,10 +20,9 @@
 //! fixed `name` such as `apk`.
 
 use crate::{
-    auto_memory_bytes_for, available_memory, CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, RefBatch, RefResult, RefSite,
-    SharedMemory, AUTO_MEMORY_MAX, AUTO_MEMORY_MIN,
+    available_memory, CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, MemoryPolicy, RefBatch, RefResult, RefSite, SharedMemory,
 };
-use asc_cache::{ApkKey, DiskCache, ProcessRegistry, ProcessUsage};
+use asc_cache::{ApkKey, DiskCache, ProcessRegistry};
 use asc_dex::Dex;
 use asc_findrefs::{ClassRelation, Query, SearchState};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -405,15 +404,15 @@ impl Drop for Busy {
 
 /// The memory budget of one memory cache: published to the user's process
 /// registry and, when automatic, resized to this process's share of one
-/// budget for all registered processes ([`auto_memory_share`]).
+/// budget for all registered processes ([`MemoryPolicy::share`]).
 pub(crate) struct MemoryBudget {
-    auto: bool,
+    auto: Option<MemoryPolicy>,
     last: Mutex<Option<Instant>>,
     published: AtomicU64,
 }
 
 impl MemoryBudget {
-    pub(crate) fn new(auto: bool) -> MemoryBudget {
+    pub(crate) fn new(auto: Option<MemoryPolicy>) -> MemoryBudget {
         let mut reg = REGISTRATION.lock().unwrap();
         reg.caches += 1;
         if reg.registry.is_none() {
@@ -444,8 +443,8 @@ impl MemoryBudget {
             let Some(registry) = &reg.registry else { return };
             (reg.held, registry.others())
         };
-        if self.auto {
-            let cap = auto_memory_share(available_memory(), held, &others);
+        if let Some(policy) = self.auto {
+            let cap = policy.share(available_memory(), held, &others);
             memory.lock().unwrap().set_capacity(cap);
         }
     }
@@ -463,18 +462,6 @@ impl Drop for MemoryBudget {
             reg.publish();
         }
     }
-}
-
-/// This process's share of one memory budget for every registered process
-/// of the user: a quarter of what they could hold together (the available
-/// memory plus what their caches hold already), split evenly, clamped to
-/// [`AUTO_MEMORY_MIN`]..=[`AUTO_MEMORY_MAX`]. Alone, the same as
-/// [`crate::auto_memory_bytes`] (with its own cache counted back in).
-pub fn auto_memory_share(available: Option<u64>, held_here: u64, others: &[ProcessUsage]) -> usize {
-    let Some(available) = available else { return auto_memory_bytes_for(None) };
-    let held: u64 = held_here + others.iter().map(|o| o.bytes).sum::<u64>();
-    let share = available.saturating_add(held) / 4 / (others.len() as u64 + 1);
-    usize::try_from(share).unwrap_or(usize::MAX).clamp(AUTO_MEMORY_MIN, AUTO_MEMORY_MAX)
 }
 
 /// Busy for [`auto_threads`], for an entry that does not say ([`Busy`]
@@ -538,22 +525,6 @@ pub fn auto_threads_for(cpus: usize, busy_others: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn share_splits_one_budget_between_processes() {
-        const GIB: u64 = 1 << 30;
-        let other = |bytes| ProcessUsage { pid: 1, bytes, idle: Duration::ZERO, busy: None };
-        // Alone: a quarter of what is available plus what we hold.
-        assert_eq!(auto_memory_share(Some(4 * GIB), 0, &[]), GIB as usize);
-        assert_eq!(auto_memory_share(Some(3 * GIB), GIB, &[]), GIB as usize);
-        assert_eq!(auto_memory_share(Some(64 * GIB), 0, &[]), AUTO_MEMORY_MAX);
-        // Eight processes on 8 GiB available, 1 GiB held among them.
-        let others = vec![other(GIB / 8); 7];
-        assert_eq!(auto_memory_share(Some(8 * GIB), GIB / 8, &others), (9 * GIB / 4 / 8) as usize);
-        // Never below the floor, unknown memory keeps the old default.
-        assert_eq!(auto_memory_share(Some(GIB), 0, &vec![other(0); 63]), AUTO_MEMORY_MIN);
-        assert_eq!(auto_memory_share(None, 0, &others), AUTO_MEMORY_MAX);
-    }
 
     #[test]
     fn threads_split_between_busy_processes() {

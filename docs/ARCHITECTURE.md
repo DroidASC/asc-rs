@@ -99,8 +99,8 @@ Caches are filled by queries themselves, so the "no preprocessing" property hold
   Writes are temp file + `rename`, never synced: the cache holds nothing that cannot be
   rebuilt, and `fsync` is very slow on macOS. Files older than the boot are CRC-checked once
   (a crash may have left torn pages), then touched; damaged files are deleted. The default
-  cap is min(20 % of the disk, 32 GiB) with a free-space reserve; eviction weighs age, size
-  and rebuild cost per tier.
+  cap (`AutoDisk`) is min(20 % of free space plus the cache, 32 GiB) with a free-space
+  reserve; eviction weighs age, size and rebuild cost per tier.
 * **Write queue.** Writer threads (one per 8 CPUs, at most 4, low CPU priority) do the
   disk work so queries never wait for it. Queued bytes are bounded by min(512 MiB, the
   memory budget); past it an L1 job keeps only the entry name and the writer re-inflates it
@@ -111,13 +111,30 @@ Caches are filled by queries themselves, so the "no preprocessing" property hold
 * **Background prebuild.** After `open_apk` with `warm`, idle low-priority threads map or
   build the locator tables of cached entries, pausing whenever a query runs.
 
+## Settings
+
+`asc_engine::config` declares every knob once (one macro row: key, type, default,
+environment variable, help) and resolves it from, first wins, a flag (`--set KEY=VALUE` or
+the older `--threads` / `--memory-mb` / `--cache-*` flags), `$DROIDASC_<KEY>`, the TOML file
+(`~/.config/droidasc/config.toml` or `$DROIDASC_CONFIG`) and the default. Each value records
+its source; `droidasc config [--json]` prints them with what `auto` comes to now.
+
+The CLI resolves once before anything else, so a bad value fails every command with the
+layer, the key and what is expected. `DiskCache::open` and `CacheConfig` read no environment
+themselves: the host hands them the resolved `Config` (`disk_cache`, `one_shot_cache`,
+`resident_cache`). `Device` (physical and available memory, CPUs: `/proc/meminfo` and
+cgroup v2 on Linux, `hw.memsize` and `host_statistics64` on macOS) feeds the automatic values.
+
 ## Several processes
 
 A `ProcessRegistry` (one file per process in `$XDG_RUNTIME_DIR/droidasc`; Linux and macOS)
 records each process's cache bytes and whether it is serving a request.
 
-* **Memory.** Without `--memory-mb`, a resident process sizes its LRU to (available memory +
-  bytes held by registered processes) / 4 / processes.
+* **Memory.** With `memory.max` automatic (or a percentage), a resident process sizes its LRU
+  (`MemoryPolicy::share`) to (available memory + bytes held by registered processes) ×
+  25 % / processes, within 64 MiB..`memory.ceiling`. The ceiling defaults to 1/16 of
+  physical memory within 2..8 GiB: one server on a large machine keeps a phone's worth of hot
+  DEX, while many still split a quarter of it.
 * **Threads.** Without `--threads`, workers = clamp(4 × CPUs / busy processes, 2, CPUs). A
   process marks itself busy when a request starts and ends, the registry is re-read every
   100 ms, and multi-APK sweeps re-check the count between work units, so a burst of
@@ -132,11 +149,13 @@ output is byte-identical with or without it (`crates/asc-cli/tests/daemon.rs`).
 
 * Every command writes through `output::Io`, locally or over the socket.
 * `--debug` and `--no-cache` runs stay local.
-* The socket name hashes the binary, the cache configuration and the umask, so a client
-  only meets a daemon that would print the same.
+* The socket name hashes the binary, the resolved settings (but `daemon.*`), the
+  `DROIDASC_*` variables and the umask, so a client only meets a daemon that would print the
+  same. A spawned daemon inherits the environment and gets the client's flag settings as
+  `--set`.
 * The socket directory must be private, and both ends check the peer uid.
-* A missing daemon is spawned on demand (wait `DROIDASC_DAEMON_WAIT_MS`, default 300 ms)
-  and exits after `DROIDASC_DAEMON_IDLE` seconds idle (default 900).
+* A missing daemon is spawned on demand (the client waits `daemon.wait`, 300 ms) and exits
+  after `daemon.idle` (15 min) without requests.
 * A client hang-up cancels the request.
 * Open engines' class graphs and resource tables count against the memory budget.
 * `DROIDASC_DAEMON=off` disables it.

@@ -19,8 +19,15 @@ fn temp_apk() -> tempfile::NamedTempFile {
 }
 
 /// Run the binary with `args`; `--no-cache` keeps the user's cache untouched.
+/// The binary, away from the user's config file.
+fn bin() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_droidasc"));
+    cmd.env("DROIDASC_CONFIG", "");
+    cmd
+}
+
 fn droidasc(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_droidasc")).arg("--no-cache").args(args).output().expect("run droidasc")
+    bin().arg("--no-cache").args(args).output().expect("run droidasc")
 }
 
 fn stdout(o: &Output) -> String {
@@ -209,7 +216,7 @@ fn foreign_cache_dir_is_reported_and_left_alone() {
     let f = temp_apk();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.txt"), b"keep").unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_droidasc"))
+    let out = bin()
         .env("DROIDASC_DAEMON", "off")
         // A fixed budget, so the test does not depend on the free space of the temp dir.
         .env("DROIDASC_CACHE_MAX_MB", "1024")
@@ -234,11 +241,11 @@ fn broken_dex_entry_gives_partial_exit_status() {
 }
 
 #[test]
-fn help_explains_thread_default() {
+fn help_points_to_the_settings() {
     let out = droidasc(&["--help"]);
     assert!(out.status.success());
     let text = stdout(&out);
-    assert!(text.contains("busy mcp / daemon processes"), "{text}");
+    assert!(text.contains("--set KEY=VALUE") && text.contains("`droidasc config` lists them"), "{text}");
     assert!(text.contains("exit status"), "{text}");
 }
 
@@ -519,7 +526,7 @@ fn listclass_rejects_an_empty_prefix_and_accepts_zero_threads() {
 fn mcp_serves_line_delimited_json_rpc_until_stdin_closes() {
     use std::process::Stdio;
     let apk = temp_apk();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_droidasc"))
+    let mut child = bin()
         .args(["--no-cache", "--threads", "2", "mcp", "--memory-mb", "64"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -552,7 +559,7 @@ fn cache_stats_reports_the_disk_budget() {
     let f = temp_apk();
     let dir = tempfile::tempdir().unwrap();
     let run = |env: Option<&str>, args: &[&str]| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_droidasc"));
+        let mut cmd = bin();
         cmd.env("DROIDASC_DAEMON", "off");
         match env {
             Some(v) => cmd.env("DROIDASC_CACHE_MAX_MB", v),
@@ -584,12 +591,7 @@ fn zero_disk_budget_evicts_after_the_query() {
     let f = temp_apk();
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_droidasc"))
-            .env("DROIDASC_DAEMON", "off")
-            .args(["--cache-dir", path(dir.path())])
-            .args(args)
-            .output()
-            .expect("run droidasc")
+        bin().env("DROIDASC_DAEMON", "off").args(["--cache-dir", path(dir.path())]).args(args).output().expect("run droidasc")
     };
     let out = run(&["--cache-max-mb", "0", "findrefs", path(f.path()), "string", "token"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -715,7 +717,7 @@ fn many_dex_apk(n: usize) -> tempfile::NamedTempFile {
 
 /// `droidasc --no-cache` with cut outputs spilled under `runtime`.
 fn droidasc_in(runtime: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_droidasc"))
+    bin()
         .env("XDG_RUNTIME_DIR", runtime)
         .env_remove("DROIDASC_LIMIT")
         .env_remove("DROIDASC_MAX_BYTES")
@@ -850,4 +852,72 @@ fn subcommand_help_leaves_out_the_global_options() {
     let apk = temp_apk();
     let out = droidasc(&["findrefs", path(apk.path()), "string", "token", "--threads", "1", "--cache-dir", "/nonexistent-x"]);
     assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn config_lists_settings_with_their_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(&file, "threads = 3\n[memory]\nmax = \"30%\"\n[cache]\nmax = \"8G\"\n").unwrap();
+    let run = |args: &[&str], vars: &[(&str, &str)]| {
+        let mut cmd = bin();
+        cmd.env("DROIDASC_CONFIG", &file).env_remove("DROIDASC_THREADS").env_remove("DROIDASC_CACHE_MAX_MB").env_remove("DROIDASC_MEMORY");
+        cmd.envs(vars.iter().copied()).args(args).output().expect("run droidasc")
+    };
+    let out = run(&["config", "--json", "--threads", "5"], &[("DROIDASC_CACHE_MAX_MB", "1024")]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["file_read"], true);
+    let setting = |key: &str| doc["settings"].as_array().unwrap().iter().find(|s| s["key"] == key).unwrap().clone();
+    assert_eq!((setting("threads")["value"].clone(), setting("threads")["source"].clone()), ("5".into(), "flag".into()));
+    assert_eq!((setting("cache.max")["value"].clone(), setting("cache.max")["source"].clone()), ("1G".into(), "env".into()));
+    assert_eq!((setting("memory.max")["value"].clone(), setting("memory.max")["source"].clone()), ("30%".into(), "file".into()));
+    assert_eq!(setting("cache.writers")["source"], "auto");
+    assert!(setting("memory.max")["now"].as_str().unwrap().contains("30% of"), "{doc}");
+    assert_eq!(setting("memory.split")["env"], "DROIDASC_MEMORY_SPLIT");
+    assert!(doc["device"]["cpus"].as_u64().unwrap() >= 1);
+    // The text form: one row per setting.
+    let out = run(&["config", "--set", "cache.tiers=dex"], &[]);
+    let text = stdout(&out);
+    assert!(text.contains("\ncache.tiers | dex | flag | -\n"), "{text}");
+    assert!(text.contains("\nthreads | 3 | file | -\n"), "{text}");
+    assert_eq!(stdout(&run(&["config", "path"], &[])).trim(), file.to_str().unwrap());
+}
+
+#[test]
+fn bad_settings_fail_every_command_and_say_what_is_expected() {
+    let out = bin().env("DROIDASC_MEMORY", "lots").args(["config"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("$DROIDASC_MEMORY: memory.max = \"lots\": expected auto, a size"), "{}", stderr(&out));
+    let out = bin().args(["--set", "cache.maxx=1G", "listclass", "x.apk"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("unknown setting \"cache.maxx\"; known: threads, memory.max"), "{}", stderr(&out));
+    let out = bin().args(["--set", "threads", "config"]).output().unwrap();
+    assert!(stderr(&out).contains("expected KEY=VALUE"), "{}", stderr(&out));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("c.toml");
+    std::fs::write(&file, "[cache\n").unwrap();
+    let out = bin().env("DROIDASC_CONFIG", &file).args(["config"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains(file.to_str().unwrap()), "{}", stderr(&out));
+}
+
+#[test]
+fn settings_from_the_environment_reach_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_dex())], true));
+    let out = bin()
+        .env("DROIDASC_DAEMON", "off")
+        .env("DROIDASC_CACHE_DIR", dir.path())
+        .env("DROIDASC_CACHE_MAX", "64M")
+        .env("DROIDASC_CACHE_MIN_DEX", "0")
+        .args(["findrefs", path(apk.path()), "string", "token"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stats = bin().env("DROIDASC_CACHE_DIR", dir.path()).env("DROIDASC_CACHE_MAX", "64M").args(["cache", "stats"]).output().unwrap();
+    let text = stdout(&stats);
+    assert!(text.starts_with(dir.path().to_str().unwrap()), "{text}");
+    assert!(text.contains("budget: 64.0 MiB (explicit)"), "{text}");
+    assert!(text.contains("L1 dex       1 APKs, 1 files"), "{text}");
 }

@@ -57,6 +57,18 @@ overload: `run(I)V`, `run(I)` (any return), `run(int, String)`; `f:I` a field of
 3. Read the relevant method: `droidasc getclass app.apk com.a.Entry --method onReceive`.
 4. Walk the path: `droidasc callgraph app.apk com.a.Helper writeFile --depth 3` (callers) or `--callees`.
 
+## Tuning
+
+`droidasc config --json` shows every setting (threads, memory, disk cache), its source and
+what `auto` comes to on this machine; change one with `--set KEY=VALUE` on a command, its
+`env` variable for a session, or `~/.config/droidasc/config.toml` for good.
+
+- Small machine, or memory pressure: `memory.max=1G` (or `10%`), `threads=4`.
+- Several agents at once: keep `auto` (processes split memory and threads); if they still
+  crowd the machine, lower `memory.max` to a percentage.
+- Little disk: `cache.max=2G`, or `cache.tiers=derived,rendered` to skip inflated DEX.
+- One-off sweep you will not repeat: `--no-cache`, or `DROIDASC_CACHE=off` for the session.
+
 ## Notes
 
 - Repeated commands are fast: a per-user daemon keeps APKs resident and gives the same

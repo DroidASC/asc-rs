@@ -17,6 +17,7 @@ asc-findrefs.workspace = true
 asc-mcp.workspace = true
 clap.workspace = true
 libc = "0.2"
+serde_json.workspace = true
 
 [dev-dependencies]
 asc-fixture.workspace = true

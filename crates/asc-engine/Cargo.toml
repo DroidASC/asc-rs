@@ -20,12 +20,17 @@ regex.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"] }
 
 # sha2 0.10 uses the ARMv8 SHA2 instructions only with `asm` (x86 picks
 # SHA-NI at run time either way). In software, hashing DEX entries for the
 # cross-APK dedup costs more than the scan it saves.
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 sha2 = { workspace = true, features = ["asm"] }
+
+# Memory statistics on Apple systems (`budget::apple`).
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 asc-fixture.workspace = true
