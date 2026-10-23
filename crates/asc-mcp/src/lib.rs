@@ -39,8 +39,8 @@ mod res;
 mod rules;
 
 use asc_engine::{
-    hints, names, Busy, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch,
-    RefContext, RefResult, SharedCache, SmaliOptions, Threads,
+    hints, names, Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched,
+    RefBatch, RefContext, RefResult, SharedCache, SmaliOptions, Threads,
 };
 use asc_findrefs::Query;
 use class_text::ClassText;
@@ -725,19 +725,48 @@ impl Server {
 
     fn callgraph(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
-        let class = str_arg(args, "class")?.ok_or_else(|| ToolError("callgraph needs `class`".into()))?;
-        let method = str_arg(args, "method")?.ok_or_else(|| ToolError("callgraph needs `method`".into()))?;
-        let direction = match choice_arg(args, "direction", "callers", CALL_DIRECTIONS)? {
+        let rule =
+            |key: &str| str_arg(args, key)?.map(|r| names::parse_rule(r).map_err(|e| ToolError(format!("`{key}`: {e}")))).transpose();
+        let target = match (str_arg(args, "class")?, str_arg(args, "method")?, rule("to")?) {
+            (None, None, None) => None,
+            (None, None, Some(to)) => Some(CallRoots::Matching(to)),
+            (Some(class), Some(method), None) => {
+                Some(CallRoots::Method { class: names::format_class_name(class)?, method: method.to_string() })
+            }
+            (_, _, Some(_)) => return Err(ToolError("give the target as `class` + `method` or as `to`, not both".into())),
+            _ => return Err(ToolError("callgraph needs `class` and `method` (or `to` / `from`)".into())),
+        };
+        let mut direction = match choice_arg(args, "direction", "callers", CALL_DIRECTIONS)? {
             "callers" => Direction::Callers,
             _ => Direction::Callees,
         };
+        let mut from = rule("from")?;
+        let roots = match target {
+            Some(roots) => roots,
+            None => {
+                direction = Direction::Callees;
+                CallRoots::Matching(from.take().ok_or_else(|| ToolError("callgraph needs `class` and `method`, `to` or `from`".into()))?)
+            }
+        };
+        let unless = match args.get("unless") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::String(r)) => vec![names::parse_rule(r).map_err(|e| ToolError(format!("`unless`: {e}")))?],
+            Some(Value::Array(list)) => list
+                .iter()
+                .map(|r| {
+                    let r = r.as_str().ok_or_else(|| ToolError("`unless` must be a rule or a list of rules".into()))?;
+                    names::parse_rule(r).map_err(|e| ToolError(format!("`unless`: {e}")))
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(ToolError("`unless` must be a rule or a list of rules".into())),
+        };
         let q = CallQuery {
-            class: names::format_class_name(class)?,
-            method: method.to_string(),
-            direction,
             depth: usize_arg(args, "depth")?.unwrap_or(CALLGRAPH_DEPTH),
             max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES),
             virtual_calls: bool_arg(args, "virtual")?.unwrap_or(false),
+            from,
+            unless,
+            ..CallQuery::new(roots, direction)
         };
         let tree = apk.engine.call_graph_cancellable(&q, &call.cancel)?;
         let mut text = String::new();
@@ -753,7 +782,7 @@ impl Server {
         let rows: Vec<Value> = tree
             .rows
             .iter()
-            .map(|r| json!({"depth": r.depth, "parent": r.parent, "method": r.method, "dex": r.dex, "repeated": r.repeated, "via": r.via}))
+            .map(|r| json!({"depth": r.depth, "parent": r.parent, "method": r.method, "dex": r.dex, "repeated": r.repeated, "via": r.via, "from": r.from}))
             .collect();
         let structured = json!({
             "apk_id": apk.id,
@@ -761,6 +790,8 @@ impl Server {
             "depth": tree.depth,
             "methods": tree.methods,
             "truncated": tree.truncated,
+            "pruned": tree.pruned,
+            "reached": tree.reached,
             "rows": rows,
             "errors": tree.errors,
         });
@@ -1150,8 +1181,15 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
     if let Some(q) = rules::compound(args)? {
         return Ok(q);
     }
-    let kind = str_arg(args, "kind")?
-        .ok_or_else(|| ToolError("findrefs needs `kind` (string, type, method, field, extends or impl), or `all` / `rules`".into()))?;
+    if let Some(rule) = str_arg(args, "rule")? {
+        if args.get("kind").is_some() {
+            return Err(ToolError("give either `rule` or `kind`, not both".into()));
+        }
+        return Ok(names::parse_rule(rule)?);
+    }
+    let kind = str_arg(args, "kind")?.ok_or_else(|| {
+        ToolError("findrefs needs `kind` (string, type, method, field, extends or impl), or `rule`, `all` / `rules`".into())
+    })?;
     let kind = names::parse_kind(kind)?;
     Ok(match kind {
         "string" | "literal" | "type" | "extends" | "impl" => {
@@ -1201,7 +1239,8 @@ const CALL_DIRECTIONS: &[(&str, &[&str])] =
 const GROUPS: &[(&str, &[&str])] = &[("none", &["no", "off", "false"]), ("package", &["pkg", "packages"])];
 
 /// The findrefs arguments that define the query (not the APKs, paging or view).
-const FINDREFS_QUERY_KEYS: &[&str] = &["kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "all", "none", "sdk_prefixes"];
+const FINDREFS_QUERY_KEYS: &[&str] =
+    &["rule", "kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "all", "none", "sdk_prefixes"];
 
 /// The `keys` present in `args`, for the arguments of a follow-up call.
 fn query_args(args: &Value, keys: &[&str]) -> Map<String, Value> {
@@ -1211,6 +1250,9 @@ fn query_args(args: &Value, keys: &[&str]) -> Map<String, Value> {
 /// `string "http://"`, `method Ljava/lang/Runtime;->exec`, ... for a report header.
 fn describe_query(args: &Value) -> String {
     let s = |k: &str| args.get(k).and_then(Value::as_str);
+    if let Some(rule) = s("rule") {
+        return rule.to_string();
+    }
     let kind = s("kind").unwrap_or("?");
     match (s("value"), s("class"), s("name")) {
         (Some(v), _, _) => format!("{kind} {v:?}"),
@@ -1508,15 +1550,21 @@ pub mod defs {
     pub fn callgraph() -> Value {
         json!({
             "description": "Callers (default) or callees of a method across every DEX, as an indented tree (`2 <- \
-                Lx;->m()V`). `[no body]`: not in the APK. Static calls only unless virtual=true.",
+                Lx;->m()V`). `[no body]`: not in the APK. Static calls only unless virtual=true. Instead of class + \
+                method, `to` targets every method whose code matches a findrefs rule; `from` keeps only the caller \
+                paths starting at a method matching it (`[from]`), or alone walks its callees; `unless` drops \
+                methods whose code matches a rule (e.g. a permission check) and what only they reach.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string"},
                 "method": {"type": "string", "description": "A name (every overload) or name(params)ret."},
+                "to": {"type": "string", "description": "Rule, e.g. method:android.telephony.TelephonyManager->getImei."},
+                "from": {"type": "string", "description": "Rule the code of the entry methods matches."},
+                "unless": {"type": ["string", "array"], "items": {"type": "string"}, "description": "Rule(s), e.g. method:enforceCallingPermission."},
                 "direction": {"type": "string", "description": "callers (default) or callees."},
                 "depth": {"type": "integer", "description": format!("Default {}.", super::CALLGRAPH_DEPTH)},
                 "max_nodes": {"type": "integer", "description": format!("Default {}.", super::CALLGRAPH_MAX_NODES)},
                 "virtual": {"type": "boolean", "description": "Also virtual / interface calls, default false."},
-            })]), "required": ["class", "method"]},
+            })])},
             "outputSchema": shape(&[
                 ("apk_id", "string"), ("direction", "string"), ("depth", "integer"), ("methods", "integer"), ("truncated", "boolean"),
                 ("rows", "array"),

@@ -75,6 +75,8 @@ pub(crate) enum Parts {
     /// Literal string query: the MUTF-8 encoded needle, `None` when empty.
     Literal(Option<Finder<'static>>),
     Member(CompiledMember),
+    /// Any of several method queries ([`Query::MethodSet`]).
+    MemberSet(Vec<CompiledMember>),
     /// Class-definition query: the MUTF-8 encoded target descriptor.
     Relation(ClassRelation, Vec<u8>),
     Compound(Compound),
@@ -110,6 +112,12 @@ impl CompiledQuery {
             // character (a surrogate pair there) is found too.
             Query::StringLiteral(p) => Parts::Literal((!p.is_empty()).then(|| Finder::new(&asc_dex::mutf8::encode(p)).into_owned())),
             Query::Method(m) => Parts::Member(compile_member(m, RefKind::Method)?),
+            Query::MethodSet(set) => Parts::MemberSet(set.iter().map(|m| compile_member(m, RefKind::Method)).collect::<Result<_>>()?),
+            Query::Nested(_) => {
+                return Err(FindError::Invalid(
+                    "method:{...} has to be resolved over every DEX first (by the engine), not compiled for one".into(),
+                ))
+            }
             Query::Field(m) => Parts::Member(compile_member(m, RefKind::Field)?),
             Query::Extends(d) => Parts::Relation(ClassRelation::Extends, asc_dex::mutf8::encode(d)),
             Query::Implements(d) => Parts::Relation(ClassRelation::Implements, asc_dex::mutf8::encode(d)),

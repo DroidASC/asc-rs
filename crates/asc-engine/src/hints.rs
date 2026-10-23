@@ -362,6 +362,12 @@ pub fn query_hint(query: &Query) -> Option<String> {
             "only direct subclasses / implementers are listed: hierarchy walks the whole tree".into()
         }
         Query::All { .. } => "every `all` condition must match inside the same method".into(),
+        Query::Nested(_) => {
+            "method:{RULE} lists calls naming exactly the methods whose code matches RULE: run RULE alone to see those methods".into()
+        }
+        Query::MethodSet(_) => {
+            "calls match the class the call site names: a call through a subclass or an interface names another one".into()
+        }
         Query::String(_) | Query::Type(_) | Query::Method(_) | Query::Field(_) => return None,
     })
 }

@@ -72,14 +72,37 @@ impl StringLocator {
     }
 
     /// All string indexes whose data matches `re`.
+    ///
+    /// One pass over the whole string-data region, except for a pattern with
+    /// anchors (`^`, `$`, `\A`, `\z`): those match each string on its own, so
+    /// `^abc$` means a string that is exactly `abc` rather than the start and
+    /// end of the region.
     pub fn locate(&self, buf: &[u8], re: &Regex) -> BTreeSet<u32> {
         let mut out = BTreeSet::new();
         if self.offsets.is_empty() {
             return out;
         }
+        if has_anchors(re) {
+            return self.locate_each(buf, re);
+        }
         let region = self.region(buf);
         for m in re.find_iter(region) {
             if let Some(idx) = self.idx_at(self.strdata_start + m.start()) {
+                out.insert(idx);
+            }
+        }
+        out
+    }
+
+    /// [`StringLocator::locate`] string by string: the data of each, without
+    /// its length prefix and terminator. An unreadable string never matches.
+    fn locate_each(&self, buf: &[u8], re: &Regex) -> BTreeSet<u32> {
+        let mut out = BTreeSet::new();
+        for &[off, idx] in self.offsets.iter() {
+            let off = off as usize;
+            let Some(data) = asc_dex::leb128::uleb128_len(buf, off).ok().and_then(|n| buf.get(off + n..)) else { continue };
+            let data = &data[..memchr::memchr(0, data).unwrap_or(data.len())];
+            if re.is_match(data) {
                 out.insert(idx);
             }
         }
@@ -128,6 +151,12 @@ impl StringLocator {
         }
         Ok(self.locate(buf, &Regex::new(pattern)?))
     }
+}
+
+/// Whether `re` has a start / end anchor (of the haystack or of a line).
+/// A pattern the parser rejects is searched over the whole region, as before.
+fn has_anchors(re: &Regex) -> bool {
+    regex_syntax::ParserBuilder::new().utf8(false).build().parse(re.as_str()).is_ok_and(|hir| hir.properties().look_set().contains_anchor())
 }
 
 /// Locates type indexes through their descriptor strings.
@@ -420,16 +449,23 @@ impl MethodLocator {
         query: &CompiledQuery,
     ) -> Result<BTreeSet<u32>> {
         match query.parts() {
-            Parts::Member(m) if query.kind() == crate::RefKind::Method => {
-                let ids = self.0.locate(dex, strings, types, m)?;
-                match &m.signature {
-                    Some(CompiledSignature::Method { params, ret }) => {
-                        retain_ok(ids, |id| method_has_signature(dex, id, params, ret.as_ref()))
-                    }
-                    _ => Ok(ids),
+            Parts::Member(m) if query.kind() == crate::RefKind::Method => self.locate_member(dex, strings, types, m),
+            Parts::MemberSet(set) => {
+                let mut out = BTreeSet::new();
+                for m in set {
+                    out.extend(self.locate_member(dex, strings, types, m)?);
                 }
+                Ok(out)
             }
             _ => Ok(BTreeSet::new()),
+        }
+    }
+
+    fn locate_member(&self, dex: &Dex<'_>, strings: &StringLocator, types: &TypeLocator, m: &CompiledMember) -> Result<BTreeSet<u32>> {
+        let ids = self.0.locate(dex, strings, types, m)?;
+        match &m.signature {
+            Some(CompiledSignature::Method { params, ret }) => retain_ok(ids, |id| method_has_signature(dex, id, params, ret.as_ref())),
+            _ => Ok(ids),
         }
     }
 }

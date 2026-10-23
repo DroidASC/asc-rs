@@ -148,6 +148,14 @@ pub enum Query {
     StringLiteral(String),
     Type(String),
     Method(MemberQuery),
+    /// References to any of these methods: a set read from a file, or the
+    /// methods a [`Query::Nested`] condition resolved to.
+    MethodSet(Vec<MemberQuery>),
+    /// References to the methods whose own code matches the inner query
+    /// (`method:{RULE}`). The inner query has to see every DEX, so whoever
+    /// holds them all (the engine) resolves this into a [`Query::MethodSet`]
+    /// first; compiling it as it is fails.
+    Nested(Box<Query>),
     Field(MemberQuery),
     /// Classes whose superclass is exactly this descriptor (`Lcom/poc/Base;`).
     /// Answered from `class_def_item`s, not by a code scan.
@@ -170,7 +178,7 @@ impl Query {
         match self {
             Query::String(_) | Query::StringLiteral(_) => RefKind::String,
             Query::Type(_) | Query::Extends(_) | Query::Implements(_) => RefKind::Type,
-            Query::Method(_) => RefKind::Method,
+            Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) => RefKind::Method,
             Query::Field(_) => RefKind::Field,
             // Rows of a compound query list constants of several kinds.
             Query::All { all, .. } => all.first().map_or(RefKind::String, Query::kind),
@@ -365,7 +373,7 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             (RefKind::String, Parts::Literal(Some(f))) => Ok(self.string_locator()?.locate_literal(buf, f)),
             (_, Parts::Relation(..)) => Ok(self.class_relation(query)?.unwrap_or_default().into_iter().collect()),
             (RefKind::Type, Parts::Pattern(Some(re))) => Ok(self.type_locator()?.locate(buf, self.string_locator()?, re)),
-            (RefKind::Method, Parts::Member(_)) => {
+            (RefKind::Method, Parts::Member(_) | Parts::MemberSet(_)) => {
                 self.method_locator()?.locate_compiled(self.dex, self.string_locator()?, self.type_locator()?, query)
             }
             (RefKind::Field, Parts::Member(_)) => {

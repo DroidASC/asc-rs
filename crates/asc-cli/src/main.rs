@@ -7,7 +7,7 @@ mod settings;
 
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::config::Config;
-use asc_engine::{names, CacheConfig, CallQuery, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
+use asc_engine::{names, CacheConfig, CallQuery, CallRoots, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use output::{Io, LocalEngines, SpillTarget, Window};
@@ -69,8 +69,12 @@ examples:
   droidasc findrefs app.apk string token --no-cache
   droidasc findrefs app.apk string token --context 3
   droidasc findrefs app.apk method loadUrl --context-method
+  droidasc findrefs app.apk method '{literal:device_id}'
+  droidasc findrefs app.apk rules 'method:{string:^https?://} & !type:Lcom/a/test/'
+  droidasc findrefs app.apk method @methods.txt
   droidasc callgraph app.apk com.poc.Main onCreate --depth 3
   droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
+  droidasc callgraph app.apk --to 'method:java.lang.Runtime->exec' --from 'method:Intent.getStringExtra' --depth 5
   droidasc mcp --memory-mb 4096
   droidasc cache stats
   droidasc daemon status
@@ -378,6 +382,11 @@ enum Command {
     /// `(repeated)` methods expanded elsewhere in the tree. References are
     /// static: a call through a subclass is not a call of the base method
     /// (unless --virtual).
+    ///
+    /// The target is CLASS METHOD, or every method whose code matches a
+    /// findrefs rule (--to; --from alone walks callees). --to with --from
+    /// keeps only the caller paths that start at a --from method (marked
+    /// `[from]`); --unless leaves out methods whose code matches a rule.
     Callgraph {
         /// Write the tree to this file instead of stdout.
         #[arg(short, long)]
@@ -396,12 +405,25 @@ enum Command {
         /// subclasses (`(override of Lbase;)`).
         #[arg(long = "virtual")]
         virtual_calls: bool,
+        /// Target: every method whose code matches this findrefs rule, e.g.
+        /// 'method:android.telephony.TelephonyManager->getImei'.
+        #[arg(long, value_name = "RULE")]
+        to: Option<String>,
+        /// Keep the caller paths that start at a method whose code matches
+        /// this rule; without a target, walk the callees of those methods.
+        #[arg(long, value_name = "RULE")]
+        from: Option<String>,
+        /// Leave out every method whose code matches this rule, and what is
+        /// reached only through it (repeatable).
+        #[arg(long, value_name = "RULE")]
+        unless: Vec<String>,
         /// Path to the input APK file.
         apk_path: PathBuf,
         /// Declaring class (com.poc.Main or Lcom/poc/Main;).
-        class: String,
+        class: Option<String>,
         /// Method name (every overload) or exact signature, e.g. run(I)V.
-        method: String,
+        #[arg(requires = "class")]
+        method: Option<String>,
     },
     /// Class hierarchy across all DEX entries: transitive subclasses and
     /// implementers (default) or supertypes, as an indented tree.
@@ -576,7 +598,9 @@ enum Find {
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Fuzzy method name, or the whole target: Lcom/a/B;->name,
-        /// com.a.B.name, com.a.B#name, B.name (any package).
+        /// com.a.B.name, com.a.B#name, B.name (any package); or '{RULE}'
+        /// (calls of the methods whose code matches RULE) or @FILE (of the
+        /// methods FILE lists).
         name: Option<String>,
         /// Dalvik class or fuzzy class pattern.
         #[arg(long = "class")]
@@ -595,8 +619,11 @@ enum Find {
     /// method:TARGET, field:TARGET. TARGET is [CLASS->]NAME, also written
     /// com.a.B.name or com.a.B#name (CLASS exact, `~CLASS` fuzzy, without
     /// package any package; NAME a regex / substring, `=NAME` or a name
-    /// with its signature exact). The last column lists what each condition
-    /// matched, in order.
+    /// with its signature exact). method:{RULE} is a call of any method whose
+    /// code matches RULE (a rule as for `rules`), method:@FILE of any method
+    /// FILE lists (one per line; findrefs output works). `!CONDITION` is
+    /// one more --none. The last column lists what each condition matched,
+    /// in order.
     All {
         /// Also write every result to this file.
         #[arg(short, long)]
@@ -612,7 +639,9 @@ enum Find {
     /// (`r1 | dex | ...`), after a `# r1 ...` header per rule.
     ///
     /// Each rule is a condition as for `all` (also extends:CLASS,
-    /// impl:CLASS), or several joined with `&` for a compound rule.
+    /// impl:CLASS), or several joined with `&` for a compound rule, `!`
+    /// before the ones a method must not match. `&` inside `{}` or `()`, or
+    /// written `\&`, belongs to its condition.
     Rules {
         /// Also write every result to this file.
         #[arg(short, long)]
@@ -662,7 +691,7 @@ fn findrefs_rules(
     if specs.is_empty() {
         return Err("findrefs rules needs at least one rule".into());
     }
-    let rules = specs.iter().map(|spec| names::parse_rule(spec)).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let rules = specs.iter().map(|spec| io.rule(spec)).collect::<Result<Vec<_>, _>>()?;
     let engine = io.engine(common, apk_path);
     let cancel = io.cancel;
     let mut order = DexOrder::new(&engine, rules.len())?;
@@ -960,9 +989,19 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let (query, output) = match find {
                 Find::Rules { .. } => unreachable!("handled above"),
                 Find::All { output, none, conditions } => {
-                    let parse = |c: &[String]| c.iter().map(|c| names::parse_condition(c)).collect::<Result<Vec<_>, _>>();
-                    let all = parse(&conditions).map_err(|e| e.to_string())?;
-                    (Query::All { all, none: parse(&none).map_err(|e| e.to_string())? }, output)
+                    // `!COND` among the conditions is one more --none.
+                    let (excluded, conditions): (Vec<String>, Vec<String>) = conditions.into_iter().partition(|c| c.starts_with('!'));
+                    let parse =
+                        |c: &[String]| c.iter().map(|c| io.condition(c.strip_prefix('!').unwrap_or(c))).collect::<Result<Vec<_>, _>>();
+                    let mut all = parse(&conditions)?;
+                    let mut none = parse(&none)?;
+                    none.extend(parse(&excluded)?);
+                    // One condition is that query itself (`all 'method:{...}'`).
+                    if all.len() == 1 && none.is_empty() {
+                        (all.pop().expect("one condition"), output)
+                    } else {
+                        (Query::All { all, none }, output)
+                    }
                 }
                 Find::String { output, literal: false, value } => (Query::String(value), output),
                 Find::String { output, literal: true, value } => (Query::StringLiteral(value), output),
@@ -970,6 +1009,10 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 // The class-def lookups need the precise Dalvik form.
                 Find::Extends { output, value } => (Query::Extends(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
                 Find::Impl { output, value } => (Query::Implements(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
+                // `method '{RULE}'` / `method @FILE`, as in a condition.
+                Find::Method { output, name: Some(name), class_name: None, .. } if name.starts_with(['{', '@']) => {
+                    (io.condition(&format!("method:{name}"))?, output)
+                }
                 Find::Method { output, name, class_name, fuzzy_class, exact } => (
                     Query::Method(
                         names::member_query("method", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
@@ -1035,11 +1078,25 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 return Ok(EXIT_PARTIAL);
             }
         }
-        Command::Callgraph { output, callees, depth, max_nodes, virtual_calls, apk_path, class, method } => {
-            let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
-            let direction = if callees { Direction::Callees } else { Direction::Callers };
+        Command::Callgraph { output, callees, depth, max_nodes, virtual_calls, to, from, unless, apk_path, class, method } => {
+            let target = match (class, method, to) {
+                (None, None, None) => None,
+                (None, None, Some(to)) => Some(CallRoots::Matching(io.rule(&to)?)),
+                (Some(class), Some(method), None) => {
+                    Some(CallRoots::Method { class: names::format_class_name(&class).map_err(|e| e.to_string())?, method })
+                }
+                (Some(_), None, None) | (None, Some(_), None) => return Err("callgraph needs the METHOD after the CLASS".into()),
+                (_, _, Some(_)) => return Err("give the target as CLASS METHOD or as --to RULE, not both".into()),
+            };
+            let from = from.map(|f| io.rule(&f)).transpose()?;
+            let (roots, direction, from) = match (target, from) {
+                (Some(roots), from) => (roots, if callees { Direction::Callees } else { Direction::Callers }, from),
+                (None, Some(from)) => (CallRoots::Matching(from), Direction::Callees, None),
+                (None, None) => return Err("callgraph needs a target: CLASS METHOD, --to RULE or --from RULE".into()),
+            };
+            let unless = unless.iter().map(|u| io.rule(u)).collect::<Result<Vec<_>, _>>()?;
             let engine = io.engine(common, &apk_path);
-            let q = CallQuery { class, method, direction, depth, max_nodes, virtual_calls };
+            let q = CallQuery { depth, max_nodes, virtual_calls, from, unless, ..CallQuery::new(roots, direction) };
             let tree = engine.call_graph_cancellable(&q, io.cancel).map_err(|e| e.to_string())?;
             io.emit_tree(output.as_ref(), &tree.lines(), &tree.footer())?;
             for e in &tree.errors {

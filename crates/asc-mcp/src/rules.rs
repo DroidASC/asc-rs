@@ -26,27 +26,9 @@ const HIERARCHY_MAX_NODES: usize = 500;
 fn condition(c: &Value, key: &str) -> Result<Query, ToolError> {
     match c {
         Value::Object(_) => parse_query(c),
-        Value::String(s) => parse_query(&condition_object(s)?),
+        Value::String(s) => Ok(names::parse_condition(s)?),
         _ => Err(ToolError(format!("`{key}` must be a list of condition objects (or KIND:VALUE strings)"))),
     }
-}
-
-/// `"method:Lc;->m"` → `{"kind": "method", "value": "Lc;->m"}`, the object
-/// [`parse_query`] reads the same way.
-fn condition_object(spec: &str) -> Result<Value, ToolError> {
-    let (kind, value) = spec.split_once(':').ok_or_else(|| {
-        ToolError(format!("bad condition {spec:?}: use KIND:VALUE, KIND one of string, literal, type, method, field, extends, impl"))
-    })?;
-    Ok(json!({"kind": names::parse_kind(kind)?, "value": value}))
-}
-
-/// A rule given as a string, as an object: one condition, or `a & b` as `all`.
-fn rule_object(spec: &str) -> Result<Value, ToolError> {
-    let parts: Vec<&str> = spec.split('&').map(str::trim).collect();
-    if let [one] = parts.as_slice() {
-        return condition_object(one);
-    }
-    Ok(json!({"all": parts.iter().map(|p| condition_object(p)).collect::<Result<Vec<_>, _>>()?}))
 }
 
 /// The conditions under `key` (`all` / `none`), parsed.
@@ -116,7 +98,8 @@ fn parse_rules(args: &Value) -> Result<(Vec<Value>, Vec<Query>), ToolError> {
         .iter()
         .enumerate()
         .map(|(i, r)| match r {
-            Value::String(s) => rule_object(s).map_err(|e| ToolError(format!("rule r{}: {}", i + 1, e.0))),
+            // Kept as written, so follow-up calls carry it the same way.
+            Value::String(s) => Ok(json!({ "rule": s })),
             Value::Object(_) => Ok(r.clone()),
             _ => Err(ToolError(format!("rule {} is not an object (or a KIND:VALUE string)", i + 1))),
         })
@@ -493,8 +476,11 @@ pub mod defs {
         json!({
             "all": {"type": "array", "items": condition, "description": "Instead of kind: methods matching every condition."},
             "none": {"type": "array", "items": condition, "description": "With all: minus methods matching any."},
-            "rules": {"type": "array", "items": condition, "description": "Several queries (or all / none) in one pass, \
-                output grouped `r1 | ...`."},
+            "rule": {"type": "string", "description": "Instead of kind: a rule as the CLI writes it, `KIND:VALUE` \
+                joined by `&`, `!` before a part to exclude; method:{RULE} = calls of the methods whose code matches \
+                RULE, method:@FILE = calls of the methods FILE lists."},
+            "rules": {"type": "array", "items": condition, "description": "Several queries (or all / none, or rule \
+                strings) in one pass, output grouped `r1 | ...`."},
         })
     }
 }

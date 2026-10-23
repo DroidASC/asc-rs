@@ -1,7 +1,7 @@
 //! Call graph walks and findrefs context over a two-DEX APK.
 
 use asc_dex::debug_info::{DebugInfo, DebugOp};
-use asc_engine::{CacheConfig, CallQuery, Direction, Engine, FindOptions, RefContext};
+use asc_engine::{names, CacheConfig, CallQuery, CallRoots, Direction, Engine, FindOptions, RefContext};
 use asc_findrefs::Query;
 use asc_fixture::{dbg_special, make_apk, ClassSpec, CodeSpec, DexBuilder, MethodSpec};
 use std::io::Write;
@@ -104,7 +104,7 @@ fn temp_apk() -> tempfile::NamedTempFile {
 }
 
 fn query(class: &str, method: &str, direction: Direction, depth: usize) -> CallQuery {
-    CallQuery { class: class.into(), method: method.into(), direction, depth, max_nodes: 100, virtual_calls: false }
+    CallQuery { depth, max_nodes: 100, ..CallQuery::method(class, method, direction) }
 }
 
 #[test]
@@ -212,4 +212,121 @@ fn findrefs_context_marks_the_referencing_instructions() {
     rows.sort_by_key(|r| r.line());
     cold.fill_context(&mut rows, RefContext::Lines(0)).unwrap();
     assert_eq!(rows, inline);
+}
+
+/// `dex | method | matched` of every row, sorted.
+fn find_lines(engine: &Engine, q: &Query) -> Vec<String> {
+    let mut rows = Vec::new();
+    engine.find_refs(q, |b| rows.extend(b.results.iter().map(|r| r.line()))).unwrap();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn nested_conditions_and_method_sets_resolve_across_dex_files() {
+    let apk = temp_apk();
+    let dir = tempfile::tempdir().unwrap();
+    let cached = || {
+        let disk = asc_engine::asc_cache::DiskCache::open(dir.path().join("cache")).with_capacity(1 << 30).with_min_dex_bytes(0);
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+    };
+    for engine in [Engine::new(apk.path()).with_threads(2), cached()] {
+        // Entry.start (classes.dex) loads "secret"; Lib.sink (classes2.dex) calls it.
+        let q = names::parse_rule("method:{literal:secret}").unwrap();
+        for _ in 0..2 {
+            assert_eq!(find_lines(&engine, &q), ["classes2.dex | Lb/Lib;->sink()V | La/Entry;->start()V"]);
+        }
+        // Callers of what calls sink (helper): Entry.start and Other.other; then narrowed.
+        let q = names::parse_rule("method:{method:Lb/Lib;->sink}").unwrap();
+        assert_eq!(
+            find_lines(&engine, &q),
+            ["classes.dex | La/Entry;->start()V | Lb/Lib;->helper(I)V", "classes.dex | La/Other;->other()V | Lb/Lib;->helper(I)V"]
+        );
+        let q = names::parse_rule("method:{method:Lb/Lib;->sink} & !string:secret").unwrap();
+        assert_eq!(find_lines(&engine, &q), ["classes.dex | La/Other;->other()V | Lb/Lib;->helper(I)V"]);
+        // Two levels of nesting, and an inner rule nobody matches.
+        let q = names::parse_rule("method:{method:{literal:secret}}").unwrap();
+        assert_eq!(find_lines(&engine, &q), ["classes2.dex | Lb/Lib;->helper(I)V | Lb/Lib;->sink()V"]);
+        assert!(find_lines(&engine, &names::parse_rule("method:{literal:absent}").unwrap()).is_empty());
+        let q = names::parse_rule("method:{extends:Ljava/lang/Object;}").unwrap();
+        let e = engine.find_refs(&q, |_| {}).unwrap_err().to_string();
+        assert!(e.contains("name classes, not code"), "{e}");
+
+        // A method set from a file: what findrefs printed before.
+        std::fs::write(dir.path().join("set.txt"), "classes2.dex | Lb/Lib;->sink()V | x\nLb/Lib;->helper(I)V\n").unwrap();
+        let q = asc_engine::condition::parse_rule_in("method:@set.txt", Some(dir.path())).unwrap();
+        assert_eq!(
+            find_lines(&engine, &q),
+            [
+                "classes.dex | La/Entry;->start()V | Lb/Lib;->helper(I)V",
+                "classes.dex | La/Other;->other()V | Lb/Lib;->helper(I)V",
+                "classes2.dex | Lb/Lib;->helper(I)V | Lb/Lib;->sink()V",
+            ]
+        );
+        // Rule sets resolve every nested rule of every rule.
+        let rules = [names::parse_rule("method:{literal:secret}").unwrap(), names::parse_rule("string:secret").unwrap()];
+        let mut per_rule = [0; 2];
+        engine
+            .find_refs_rules(&rules, FindOptions::default(), &AtomicBool::new(false), &mut |i, b| per_rule[i] += b.results.len())
+            .unwrap();
+        assert_eq!(per_rule, [1, 1]);
+        engine.flush_cache_writes();
+    }
+    // A replay from L3 skips the inner rule too.
+    let engine = cached();
+    let mut sources = Vec::new();
+    engine.find_refs(&names::parse_rule("method:{literal:secret}").unwrap(), |b| sources.push(b.source)).unwrap();
+    assert!(!sources.is_empty() && sources.iter().all(|s| *s == "result"), "{sources:?}");
+    assert_eq!(engine.cache_stats().inflates, 0);
+    // L3 keys on the set read from the file, not on its path.
+    std::fs::write(dir.path().join("set.txt"), "Lb/Lib;->sink()V\n").unwrap();
+    let q = asc_engine::condition::parse_rule_in("method:@set.txt", Some(dir.path())).unwrap();
+    assert_eq!(find_lines(&cached(), &q), ["classes2.dex | Lb/Lib;->helper(I)V | Lb/Lib;->sink()V"]);
+}
+
+#[test]
+fn conditions_pick_roots_paths_and_pruned_methods() {
+    let apk = temp_apk();
+    let engine = Engine::new(apk.path()).with_threads(2);
+    let rule = |s: &str| names::parse_rule(s).unwrap();
+    let to = |s: &str| CallQuery { depth: 3, ..CallQuery::new(CallRoots::Matching(rule(s)), Direction::Callers) };
+    // Every method calling Ext.call (just helper), and its callers.
+    let t = engine.call_graph(&to("method:Lext/Api;->call")).unwrap();
+    assert_eq!(
+        t.lines(),
+        [
+            "0 Lb/Lib;->helper(I)V",
+            "  1 <- La/Entry;->start()V",
+            "    2 <- Lb/Lib;->sink()V",
+            "      3 <- Lb/Lib;->helper(I)V (repeated)",
+            "  1 <- La/Other;->other()V",
+        ]
+    );
+    // Only the paths from a method loading "secret" (Entry.start), which ends them.
+    let t = engine.call_graph(&CallQuery { from: Some(rule("literal:secret")), ..to("method:Lext/Api;->call") }).unwrap();
+    assert_eq!(t.lines(), ["0 Lb/Lib;->helper(I)V", "  1 <- La/Entry;->start()V [from]"]);
+    assert_eq!((t.reached, t.methods), (Some(1), 2));
+    assert!(t.footer().contains("1 from methods reached"), "{}", t.footer());
+    // From methods out of reach: nothing left.
+    let t = engine.call_graph(&CallQuery { from: Some(rule("method:Lext/Api;->absent")), ..to("method:Lext/Api;->call") });
+    assert!(t.unwrap().rows.is_empty());
+    // Unless: Entry.start is left out, and sink with it (only reached through it).
+    let t = engine.call_graph(&CallQuery { unless: vec![rule("literal:secret")], ..to("method:Lext/Api;->call") }).unwrap();
+    assert_eq!(t.lines(), ["0 Lb/Lib;->helper(I)V", "  1 <- La/Other;->other()V"]);
+    assert_eq!(t.pruned, 1);
+    assert!(t.footer().contains("1 methods left out by unless"), "{}", t.footer());
+    // A root matching unless is left out too.
+    let t = engine.call_graph(&CallQuery { unless: vec![rule("method:Lext/Api;->call")], ..to("method:Lext/Api;->call") }).unwrap();
+    assert!(t.rows.is_empty() && t.pruned == 1);
+    // Callees of every method matching a rule.
+    let t = engine.call_graph(&CallQuery { depth: 1, ..CallQuery::new(CallRoots::Matching(rule("literal:secret")), Direction::Callees) });
+    assert_eq!(t.unwrap().lines(), ["0 La/Entry;->start()V", "  1 -> Lb/Lib;->helper(I)V"]);
+    for (q, want) in [
+        (CallQuery { from: Some(rule("literal:secret")), ..CallQuery::method(LIB, "helper", Direction::Callees) }, "callers walk"),
+        (to("literal:absent"), "no method's code matches"),
+        (to("extends:Ljava/lang/Object;"), "name classes, not code"),
+    ] {
+        let e = engine.call_graph(&q).unwrap_err().to_string();
+        assert!(e.contains(want), "{e}");
+    }
 }

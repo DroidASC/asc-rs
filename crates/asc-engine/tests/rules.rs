@@ -281,12 +281,10 @@ fn virtual_dispatch_links_calls_through_supertypes_and_overrides() {
     let apk = temp_apk();
     for engine in engines(apk.path()) {
         let q = |class: &str, method: &str, direction, virtual_calls| CallQuery {
-            class: class.into(),
-            method: method.into(),
-            direction,
             depth: 1,
             max_nodes: 100,
             virtual_calls,
+            ..CallQuery::method(class, method, direction)
         };
         let t = engine.call_graph(&q(SUB, "run", Direction::Callers, false)).unwrap();
         assert_eq!(t.lines(), ["0 La/Sub;->run()V"]);
@@ -311,14 +309,7 @@ fn cancelled_walks_stop_and_leave_nothing_half_built() {
     let cancelled = |r: asc_engine::Result<_>| matches!(r, Err(asc_engine::EngineError::Apk(asc_apk::ApkError::Cancelled)));
     for engine in engines(apk.path()) {
         let raised = AtomicBool::new(true);
-        let call = CallQuery {
-            class: CALLER.into(),
-            method: "go".into(),
-            direction: Direction::Callees,
-            depth: 1,
-            max_nodes: 100,
-            virtual_calls: true,
-        };
+        let call = CallQuery { depth: 1, max_nodes: 100, virtual_calls: true, ..CallQuery::method(CALLER, "go", Direction::Callees) };
         assert!(cancelled(engine.call_graph_cancellable(&call, &raised).map(drop)));
         assert!(cancelled(engine.hierarchy_cancellable(&hq(API, Lineage::Subclasses, None), &raised).map(drop)));
         assert!(cancelled(engine.get_class_method_cancellable(BASE, Default::default(), None, &raised).map(drop)));

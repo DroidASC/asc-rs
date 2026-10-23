@@ -175,6 +175,7 @@ dependencies = [
  "bytemuck",
  "memchr",
  "regex",
+ "regex-syntax",
  "thiserror",
 ]
 

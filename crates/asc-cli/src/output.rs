@@ -3,7 +3,8 @@
 //! Commands write through [`Io`] only, so both run the same code.
 
 use crate::Common;
-use asc_engine::Engine;
+use asc_engine::{condition, Engine};
+use asc_findrefs::Query;
 use asc_mcp::output::SpillDir;
 use std::borrow::Cow;
 use std::fmt::Display;
@@ -86,6 +87,16 @@ impl<'a> Io<'a> {
             Some(cwd) if path.is_relative() => Cow::Owned(cwd.join(path)),
             _ => Cow::Borrowed(path),
         }
+    }
+
+    /// A findrefs rule, its `method:@FILE` sets read as [`Io::path`] opens files.
+    pub(crate) fn rule(&self, spec: &str) -> Result<Query, String> {
+        condition::parse_rule_in(spec, self.cwd).map_err(|e| e.to_string())
+    }
+
+    /// One findrefs condition, read as [`Io::rule`] does.
+    pub(crate) fn condition(&self, spec: &str) -> Result<Query, String> {
+        condition::parse_condition_in(spec, self.cwd).map_err(|e| e.to_string())
     }
 
     pub(crate) fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine> {

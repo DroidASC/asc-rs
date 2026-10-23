@@ -114,15 +114,16 @@ impl Engine {
         sink: &mut dyn FnMut(usize, RefBatch),
     ) -> Result<RefSummary> {
         let t0 = Instant::now();
-        let _query = self.prebuild.query();
-        let compiled = compile_rules(rules)?;
+        for rule in rules {
+            crate::compose::check_patterns(rule)?;
+        }
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
         // Largest first, as in `find_refs_opts`.
         entries.reverse();
         let key = self.apk_key(&apk);
         let mut summary = RefSummary { entries: entries.len(), ..Default::default() };
-        if entries.is_empty() || compiled.is_empty() {
+        if entries.is_empty() || rules.is_empty() {
             return Ok(summary);
         }
         let disk = self.cache.as_ref().and_then(|c| c.disk.as_deref()).filter(|d| d.uses(Tier::Rendered));
@@ -146,11 +147,17 @@ impl Engine {
             self.log(format!("[APK] for_each_findrefs_rules total={} us rules={} source=result", summary.total_us, rules.len()));
             return Ok(summary);
         }
+        // The `method:{RULE}` conditions of the rules to search, all in one
+        // pass first. L3 keys on the rules as given, so replays skip this.
+        let todo: Vec<Query> = missing.iter().map(|&i| rules[i].clone()).collect();
+        let resolved = self.resolve_nested(&todo, cancel)?;
+        let _query = self.prebuild.query();
+        let compiled = compile_rules(resolved.as_deref().unwrap_or(&todo))?;
         let mut recorders: Vec<_> = missing.iter().map(|_| rendered.map(|_| tiers::ResultRecorder::new())).collect();
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<Vec<RefBatch>>();
         let workers = self.threads().min(entries.len()).max(1);
-        let searched: Vec<&CompiledQuery> = missing.iter().map(|&i| &compiled[i]).collect();
+        let searched: Vec<&CompiledQuery> = compiled.iter().collect();
         let (cache, stats, searched) = (self.cache.as_deref(), &self.stats, &searched);
         let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, searched, opts);
         // An entry is left out only when no rule can match it.
