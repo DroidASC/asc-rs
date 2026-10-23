@@ -425,6 +425,43 @@ impl<T> MemoryCache<T> {
             self.used -= old.size;
         }
         self.used += size;
+        self.evict_over_cap();
+    }
+
+    /// Re-charge `value` (still the entry cached under `entry_name`) at
+    /// `size` bytes, e.g. once per-entry state built after insertion has
+    /// grown it, and evict least recently used entries if that exceeds the
+    /// capacity. Does nothing when the slot holds something else by now.
+    pub fn resize(&mut self, key: &ApkKey, entry_name: &str, value: &Arc<T>, size: usize) {
+        let Some(slot) = self.map.get_mut(key).and_then(|m| m.get_mut(entry_name)) else { return };
+        if !Arc::ptr_eq(&slot.value, value) {
+            return;
+        }
+        let old = std::mem::replace(&mut slot.size, size);
+        self.used = self.used - old + size;
+        self.evict_over_cap();
+    }
+
+    /// Swap the entry cached under `entry_name` for `new` when it is still
+    /// `current`, keeping its size and recency. Returns whether it swapped.
+    pub fn replace(&mut self, key: &ApkKey, entry_name: &str, current: &Arc<T>, new: Arc<T>) -> bool {
+        match self.map.get_mut(key).and_then(|m| m.get_mut(entry_name)) {
+            Some(slot) if Arc::ptr_eq(&slot.value, current) => {
+                slot.value = new;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Size the entry cached under `entry_name` is charged at.
+    pub fn charged_bytes(&self, key: &ApkKey, entry_name: &str) -> Option<usize> {
+        self.map.get(key)?.get(entry_name).map(|s| s.size)
+    }
+
+    /// Evict least recently used entries until under capacity (always
+    /// keeping the last one: a single entry larger than the cap stays usable).
+    fn evict_over_cap(&mut self) {
         while self.used > self.cap_bytes && self.len() > 1 {
             let Some((k, name)) = self.lru() else { break };
             if let Some(per_apk) = self.map.get_mut(&k) {
@@ -448,6 +485,11 @@ impl<T> MemoryCache<T> {
 
     pub fn used_bytes(&self) -> usize {
         self.used
+    }
+
+    /// Every cached value, in no particular order (recency is not touched).
+    pub fn values(&self) -> impl Iterator<Item = &Arc<T>> {
+        self.map.values().flat_map(|per| per.values().map(|s| &s.value))
     }
 
     pub fn len(&self) -> usize {
@@ -630,6 +672,47 @@ mod tests {
         assert_eq!(m.used_bytes(), 6);
         m.clear();
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn memory_lru_resize_charges_and_evicts() {
+        let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
+        let k = ApkKey("k".into());
+        let a = Arc::new(vec![0; 4]);
+        m.insert(&k, "a", Arc::clone(&a), 4);
+        let b = Arc::new(vec![0; 4]);
+        m.insert(&k, "b", Arc::clone(&b), 4);
+        // Growing b past the cap evicts a (least recently used).
+        m.resize(&k, "b", &b, 7);
+        assert_eq!(m.used_bytes(), 7);
+        assert!(m.get(&k, "a").is_none());
+        assert_eq!(m.charged_bytes(&k, "b"), Some(7));
+        // A stale handle does not re-charge whatever replaced it.
+        let b2 = Arc::new(vec![1; 4]);
+        m.insert(&k, "b", Arc::clone(&b2), 4);
+        m.resize(&k, "b", &b, 9);
+        assert_eq!(m.charged_bytes(&k, "b"), Some(4));
+        // The last entry is kept even when it alone exceeds the cap.
+        m.resize(&k, "b", &b2, 50);
+        assert_eq!((m.len(), m.used_bytes()), (1, 50));
+    }
+
+    #[test]
+    fn memory_lru_replace_keeps_size_and_recency() {
+        let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
+        let k = ApkKey("k".into());
+        let a = Arc::new(vec![0; 4]);
+        m.insert(&k, "a", Arc::clone(&a), 4);
+        m.insert(&k, "b", Arc::new(vec![0; 4]), 4);
+        assert!(m.get(&k, "a").is_some()); // a most recent
+        let a2 = Arc::new(vec![9; 4]);
+        assert!(m.replace(&k, "a", &a, Arc::clone(&a2)));
+        assert!(!m.replace(&k, "a", &a, Arc::new(vec![])), "stale handle");
+        assert!(!m.replace(&k, "missing", &a, Arc::new(vec![])));
+        assert_eq!(m.used_bytes(), 8);
+        m.insert(&k, "c", Arc::new(vec![0; 4]), 4); // evicts b, not the replaced a
+        assert!(Arc::ptr_eq(&m.get(&k, "a").unwrap(), &a2));
+        assert!(m.get(&k, "b").is_none());
     }
 
     #[test]

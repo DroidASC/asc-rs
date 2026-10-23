@@ -29,7 +29,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Instant, SystemTime};
 
 pub use asc_cache;
@@ -158,13 +158,78 @@ impl CacheConfig {
     pub fn resident(memory_bytes: usize) -> CacheConfig {
         CacheConfig { memory_bytes, disk: DiskCache::open_default() }
     }
+
+    /// [`CacheConfig::resident`] sized by [`auto_memory_bytes`], so several
+    /// resident hosts on one machine do not each claim 2 GiB.
+    pub fn resident_auto() -> CacheConfig {
+        CacheConfig::resident(auto_memory_bytes())
+    }
+}
+
+/// Upper bound of [`auto_memory_bytes`].
+pub const AUTO_MEMORY_MAX: usize = 2 << 30;
+/// Lower bound of [`auto_memory_bytes`]: below this the LRU would thrash on
+/// every query (it always keeps at least one entry anyway).
+pub const AUTO_MEMORY_MIN: usize = 64 << 20;
+
+/// In-memory cache budget for this machine: a quarter of the memory
+/// currently available, clamped to [`AUTO_MEMORY_MIN`]..=[`AUTO_MEMORY_MAX`];
+/// [`AUTO_MEMORY_MAX`] when the available memory cannot be determined.
+pub fn auto_memory_bytes() -> usize {
+    auto_memory_bytes_for(available_memory())
+}
+
+/// [`auto_memory_bytes`] for a given amount of available memory.
+pub fn auto_memory_bytes_for(available: Option<u64>) -> usize {
+    match available {
+        Some(a) => usize::try_from(a / 4).unwrap_or(usize::MAX).clamp(AUTO_MEMORY_MIN, AUTO_MEMORY_MAX),
+        None => AUTO_MEMORY_MAX,
+    }
+}
+
+/// Bytes of memory available to this process: `MemAvailable`, lowered to
+/// the headroom left under a cgroup v2 `memory.max` when one applies.
+/// `None` where neither can be read (non-Linux systems).
+pub fn available_memory() -> Option<u64> {
+    let system = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| meminfo_available(&t));
+    let cgroup = cgroup_headroom();
+    match (system, cgroup) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// `MemAvailable` from `/proc/meminfo` text, in bytes.
+fn meminfo_available(meminfo: &str) -> Option<u64> {
+    let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kb.checked_mul(1024)
+}
+
+/// `memory.max - memory.current` of this process's cgroup v2, if limited.
+fn cgroup_headroom() -> Option<u64> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let rel = cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let dir = Path::new("/sys/fs/cgroup").join(rel.trim_start_matches('/'));
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
+    cgroup_headroom_from(&read("memory.max")?, &read("memory.current")?)
+}
+
+/// Headroom from the text of `memory.max` (`max` when unlimited) and
+/// `memory.current`.
+fn cgroup_headroom_from(max: &str, current: &str) -> Option<u64> {
+    let max: u64 = max.trim().parse().ok()?;
+    let current: u64 = current.trim().parse().ok()?;
+    Some(max.saturating_sub(current))
 }
 
 /// One logical DEX of a cached entry with its lazily built locator tables.
+/// The tables are shared with the entry that replaces this one once its
+/// bytes are remapped from the disk cache (same bytes, so still valid).
 pub struct LogicalDex {
     pub name: String,
     pub data: DexBytes,
-    pub state: SearchState,
+    pub state: Arc<SearchState>,
 }
 
 /// A cached inflated entry.
@@ -189,7 +254,7 @@ impl CachedEntry {
                         Cow::Borrowed(_) => Arc::clone(&self.data),
                         Cow::Owned(v) => Arc::new(DexData::Owned(v)),
                     };
-                    LogicalDex { name, data, state: SearchState::new() }
+                    LogicalDex { name, data, state: Arc::new(SearchState::new()) }
                 })
                 .collect()
         })
@@ -202,6 +267,42 @@ impl CachedEntry {
     pub fn resident_bytes(&self) -> usize {
         self.data.len() * dex041_logical_offsets(&self.data).len()
     }
+
+    /// Heap bytes of the locator tables built so far for this entry's
+    /// logical DEX files (0 before the first search).
+    pub fn state_bytes(&self) -> usize {
+        self.logical.get().map_or(0, |l| l.iter().map(|d| d.state.heap_bytes()).sum())
+    }
+
+    /// What the in-memory cache charges for this entry: its bytes plus the
+    /// locator tables built for it.
+    pub fn charged_bytes(&self) -> usize {
+        self.resident_bytes() + self.state_bytes()
+    }
+
+    /// The same entry over `data` (identical bytes from another source, e.g.
+    /// the disk cache mapping), keeping the locator tables already built.
+    /// A container's normalised logical copies are owned and are kept as is.
+    fn with_data(&self, data: DexBytes) -> CachedEntry {
+        let logical = OnceLock::new();
+        if let Some(old) = self.logical.get() {
+            let moved = old
+                .iter()
+                .map(|l| LogicalDex {
+                    name: l.name.clone(),
+                    data: if Arc::ptr_eq(&l.data, &self.data) { Arc::clone(&data) } else { Arc::clone(&l.data) },
+                    state: Arc::clone(&l.state),
+                })
+                .collect();
+            let _ = logical.set(moved);
+        }
+        CachedEntry { name: self.name.clone(), data, logical }
+    }
+
+    /// Whether the entry's bytes are mapped from the disk cache.
+    pub fn is_mapped(&self) -> bool {
+        matches!(*self.data, DexData::Mapped(_))
+    }
 }
 
 /// A queued disk write: the bytes are shared with the query that produced
@@ -210,6 +311,9 @@ struct WriteJob {
     key: ApkKey,
     name: String,
     data: DexBytes,
+    /// The in-memory cache entry holding `data`, if any: once the file is in
+    /// place its heap bytes are swapped for a mapping of that file.
+    remap: Option<Weak<CachedEntry>>,
 }
 
 struct Writer {
@@ -217,8 +321,10 @@ struct Writer {
     handle: std::thread::JoinHandle<()>,
 }
 
+type SharedMemory = Arc<Mutex<MemoryCache<CachedEntry>>>;
+
 struct EngineCache {
-    memory: Option<Mutex<MemoryCache<CachedEntry>>>,
+    memory: Option<SharedMemory>,
     disk: Option<Arc<DiskCache>>,
     writer: Mutex<Option<Writer>>,
     /// Set by `flush`: later writes are dropped rather than handed to a new
@@ -233,9 +339,9 @@ struct EngineCache {
 impl EngineCache {
     /// Queue a disk write; falls back to a synchronous write only when the
     /// writer thread cannot be started.
-    fn put_async(&self, key: &ApkKey, name: &str, data: &DexBytes) {
+    fn put_async(&self, key: &ApkKey, name: &str, data: &DexBytes, remap: Option<Weak<CachedEntry>>) {
         let Some(disk) = &self.disk else { return };
-        let job = WriteJob { key: key.clone(), name: name.to_string(), data: Arc::clone(data) };
+        let job = WriteJob { key: key.clone(), name: name.to_string(), data: Arc::clone(data), remap };
         let mut writer = self.writer.lock().unwrap();
         if self.closed.load(Ordering::Relaxed) {
             return;
@@ -243,6 +349,7 @@ impl EngineCache {
         if writer.is_none() {
             let (tx, rx) = mpsc::channel::<WriteJob>();
             let thread_disk = Arc::clone(disk);
+            let thread_memory = self.memory.clone();
             let spawned = std::thread::Builder::new().name("droidasc-cache-writer".into()).spawn(move || {
                 let mut pending: Option<WriteJob> = None;
                 loop {
@@ -253,7 +360,9 @@ impl EngineCache {
                             Err(_) => break,
                         },
                     };
-                    let _ = thread_disk.put(&job.key, &job.name, &job.data);
+                    if thread_disk.put(&job.key, &job.name, &job.data).is_ok() {
+                        remap_entry(&thread_disk, thread_memory.as_ref(), job);
+                    }
                     // Walk the cache directory once per burst, not once per entry.
                     match rx.try_recv() {
                         Ok(next) => pending = Some(next),
@@ -264,7 +373,9 @@ impl EngineCache {
             match spawned {
                 Ok(handle) => *writer = Some(Writer { tx, handle }),
                 Err(_) => {
-                    let _ = disk.put(&job.key, &job.name, &job.data);
+                    if disk.put(&job.key, &job.name, &job.data).is_ok() {
+                        remap_entry(disk, self.memory.as_ref(), job);
+                    }
                     disk.evict();
                     return;
                 }
@@ -302,6 +413,52 @@ impl EngineCache {
         }
         set.insert(id.clone());
         InflightGuard { cache: self, id }
+    }
+}
+
+/// Swap a freshly written entry's heap bytes for a mapping of its cache file:
+/// the pages become file-backed (reclaimable by the OS and shared with other
+/// processes) and the heap copy is freed once the queries still holding the
+/// old entry drop it. The mapping is compared byte for byte first, so a file
+/// changed underneath (another writer, a cleared cache) is never served.
+fn remap_entry(disk: &DiskCache, memory: Option<&SharedMemory>, job: WriteJob) {
+    // The job's own handle on the bytes goes first, so the heap copy is freed
+    // as soon as the superseded entry is.
+    let WriteJob { key, name, data, remap } = job;
+    drop(data);
+    let (Some(memory), Some(entry)) = (memory, remap.and_then(|w| w.upgrade())) else { return };
+    if entry.is_mapped() {
+        return;
+    }
+    let Some(mapped) = disk.get(&key, &name, entry.data.len() as u64) else { return };
+    if *mapped != **entry.data {
+        return;
+    }
+    let new = Arc::new(entry.with_data(Arc::new(mapped)));
+    memory.lock().unwrap().replace(&key, &name, &entry, new);
+}
+
+/// Make freed DEX-sized blocks go straight back to the OS. glibc serves
+/// blocks above its mmap threshold with `mmap`, but raises that threshold to
+/// the size of every such block freed (up to 32 MiB), after which inflated
+/// DEX copies come from the heap arenas and stay resident after an eviction
+/// or a remap, fragmented between longer-lived locator tables. Fixing the
+/// threshold disables that adjustment. Process-wide; done once, by the first
+/// engine that keeps entries in memory.
+fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            extern "C" {
+                fn mallopt(param: std::os::raw::c_int, value: std::os::raw::c_int) -> std::os::raw::c_int;
+            }
+            const M_MMAP_THRESHOLD: std::os::raw::c_int = -3;
+            // SAFETY: mallopt only adjusts glibc allocator parameters.
+            unsafe {
+                mallopt(M_MMAP_THRESHOLD, 1 << 20);
+            }
+        });
     }
 }
 
@@ -445,11 +602,14 @@ impl Engine {
             (self.logger)(&format!("Warning: {e}; disk cache disabled"));
             config.disk = None;
         }
+        if config.memory_bytes > 0 {
+            tune_allocator();
+        }
         if config.memory_bytes == 0 && config.disk.is_none() {
             self.cache = None;
         } else {
             self.cache = Some(Arc::new(EngineCache {
-                memory: (config.memory_bytes > 0).then(|| Mutex::new(MemoryCache::new(config.memory_bytes))),
+                memory: (config.memory_bytes > 0).then(|| Arc::new(Mutex::new(MemoryCache::new(config.memory_bytes)))),
                 disk: config.disk.map(Arc::new),
                 writer: Mutex::new(None),
                 closed: AtomicBool::new(false),
@@ -476,9 +636,17 @@ impl Engine {
         }
     }
 
-    /// Bytes currently held by the in-memory cache.
+    /// Bytes currently charged to the in-memory cache: entry bytes plus the
+    /// locator tables built for them.
     pub fn memory_cache_bytes(&self) -> usize {
         self.cache.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
+    }
+
+    /// Entry bytes of the in-memory cache that are mapped from the disk cache
+    /// (file-backed pages the OS can reclaim) rather than held on the heap.
+    pub fn memory_cache_mapped_bytes(&self) -> usize {
+        let Some(m) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
+        m.lock().unwrap().values().filter(|e| e.is_mapped()).map(|e| e.data.len()).sum()
     }
 
     /// Block until every queued disk-cache write has been renamed into place.
@@ -874,15 +1042,17 @@ fn load_entry<'a>(
             }
         };
         let e = Arc::new(CachedEntry::new(&entry.name, Arc::new(DexData::Owned(data))));
-        if source == Source::Inflate {
-            c.put_async(k, &entry.name, &e.data);
-        }
+        let mut remap = None;
         if keep_in_memory {
             if let Some(mem) = &c.memory {
                 // Account for the container copies too, so the LRU cap holds.
                 let size = e.resident_bytes();
                 mem.lock().unwrap().insert(k, &entry.name, Arc::clone(&e), size);
+                remap = Some(Arc::downgrade(&e));
             }
+        }
+        if source == Source::Inflate {
+            c.put_async(k, &entry.name, &e.data, remap);
         }
         return Ok((Loaded::Cached(e), source));
     }
@@ -965,6 +1135,7 @@ fn search_entry(
                     Err(e) => batch.note_error(&l.name, e),
                 }
             }
+            recharge(cache, key, e);
         }
         Loaded::Borrowed(_) => {
             for (name, buf) in logical_dex_iter(&entry.name, loaded.bytes()) {
@@ -977,6 +1148,17 @@ fn search_entry(
     }
     batch.search_us = t1.elapsed().as_micros();
     batch
+}
+
+/// Charge the in-memory cache for the locator tables a search just built for
+/// `e`, evicting other entries if that exceeds the capacity.
+fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEntry>) {
+    let (Some(mem), Some(key)) = (cache.and_then(|c| c.memory.as_ref()), key) else { return };
+    let size = e.charged_bytes();
+    let mut mem = mem.lock().unwrap();
+    if mem.charged_bytes(key, &e.name).is_some_and(|old| old != size) {
+        mem.resize(key, &e.name, e, size);
+    }
 }
 
 fn matched_name(dex: &Dex<'_>, kind: RefKind, idx: u32) -> Result<String> {
@@ -1046,4 +1228,34 @@ pub fn decompile_dex_class(buf: &[u8], descriptor: &str, opts: SmaliOptions) -> 
     let new_dex = Dex::parse(&rebuilt.bytes)?;
     let source = asc_smali::disassemble_class(&new_dex, descriptor, opts)?;
     Ok((rebuilt, source))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_budget_is_a_clamped_quarter_of_available_memory() {
+        assert_eq!(auto_memory_bytes_for(None), AUTO_MEMORY_MAX);
+        assert_eq!(auto_memory_bytes_for(Some(4 << 30)), 1 << 30);
+        assert_eq!(auto_memory_bytes_for(Some(8 << 30)), AUTO_MEMORY_MAX);
+        assert_eq!(auto_memory_bytes_for(Some(64 << 30)), AUTO_MEMORY_MAX);
+        assert_eq!(auto_memory_bytes_for(Some((8 << 30) - 4)), (2 << 30) - 1);
+        assert_eq!(auto_memory_bytes_for(Some(100 << 20)), AUTO_MEMORY_MIN);
+        assert_eq!(auto_memory_bytes_for(Some(0)), AUTO_MEMORY_MIN);
+        assert_eq!(auto_memory_bytes_for(Some(u64::MAX)), AUTO_MEMORY_MAX);
+        let auto = auto_memory_bytes();
+        assert!((AUTO_MEMORY_MIN..=AUTO_MEMORY_MAX).contains(&auto));
+    }
+
+    #[test]
+    fn meminfo_and_cgroup_parsing() {
+        let meminfo = "MemTotal:       12000000 kB\nMemFree:          500000 kB\nMemAvailable:    8000000 kB\n";
+        assert_eq!(meminfo_available(meminfo), Some(8_000_000 * 1024));
+        assert_eq!(meminfo_available("MemTotal: 1 kB\n"), None);
+        assert_eq!(meminfo_available("MemAvailable: lots kB\n"), None);
+        assert_eq!(cgroup_headroom_from("max\n", "123\n"), None);
+        assert_eq!(cgroup_headroom_from("1000\n", "300\n"), Some(700));
+        assert_eq!(cgroup_headroom_from("1000\n", "3000\n"), Some(0));
+    }
 }

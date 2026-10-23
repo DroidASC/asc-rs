@@ -118,6 +118,16 @@ impl SearchState {
     pub fn is_warm(&self) -> bool {
         self.insns.get().is_some()
     }
+
+    /// Heap bytes of the tables built so far (0 for a fresh state). Grows as
+    /// queries of new kinds build their locators.
+    pub fn heap_bytes(&self) -> usize {
+        self.strings.get().map_or(0, StringLocator::heap_bytes)
+            + self.types.get().map_or(0, TypeLocator::heap_bytes)
+            + self.methods.get().map_or(0, MethodLocator::heap_bytes)
+            + self.fields.get().map_or(0, FieldLocator::heap_bytes)
+            + self.insns.get().map_or(0, InsnLocator::heap_bytes)
+    }
 }
 
 enum StateRef<'s> {

@@ -161,9 +161,30 @@ the normal cost and fills the cache as a side effect.
   disk cache is disabled (nothing is written, tagged, evicted or cleared there), and eviction and `cache clear` only ever touch entry directories of the
   cache's own naming shape. `--no-cache` bypasses it,
   `--cache-dir` moves it, `droidasc cache path|stats|clear` manages it.
-* **In-memory LRU** (GUI and embedders, `CacheConfig::resident`) that also keeps the
-  locator tables built for each DEX, so a second query only runs the regex, the scan and
-  the offset→method resolution.
+* **In-memory LRU** (GUI and embedders, `CacheConfig::resident` / `resident_auto`) that
+  also keeps the locator tables built for each DEX, so a second query only runs the
+  regex, the scan and the offset→method resolution. Its budget counts those tables too
+  (102 MB on top of Douyin's 437 MB of DEX after string and type queries), and the GUI sizes it
+  from the machine: a quarter of the available memory (`MemAvailable`, or the cgroup v2
+  headroom when lower), clamped to 64 MiB–2 GiB, so several open browsers do not each
+  claim 2 GiB. With the disk cache on, an entry inflated on the heap is swapped for a
+  mapping of its cache file as soon as that file is written (after a byte-for-byte
+  check), so resident entries are file-backed pages the OS can reclaim and share between
+  processes rather than anonymous memory.
+
+Resident memory of one process holding the GUI's engine state (16 threads, Douyin
+40.7.0 = 437 MB of DEX, then Kuaishou and Xiaohongshu opened in the same process; class
+scan plus three queries each):
+
+| | anonymous before | anonymous after | file-backed after |
+|---|---:|---:|---:|
+| Douyin, first open (disk cache cold) | 549 MB | 111 MB | 439 MB |
+| three APKs, first open | 1150 MB | 224 MB | 910 MB |
+| three APKs, disk cache warm | 227 MB | 225 MB | 923 MB |
+| three APKs, `--no-cache` | 1148 MB | 1146 MB | 2 MB |
+
+What stays anonymous is the locator tables. Without a disk cache the bytes have nowhere
+to be mapped from, so `--no-cache` keeps them on the heap as before.
 
 Same 14-DEX / 95 MB APK, 8 threads, median of 5 fresh processes:
 

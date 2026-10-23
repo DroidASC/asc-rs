@@ -74,6 +74,79 @@ fn caches_serve_repeated_queries() {
 }
 
 #[test]
+fn written_entries_are_remapped_from_the_disk_cache() {
+    let apk = temp_apk(true);
+    let dex = make_dex();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(asc_engine::asc_cache::DiskCache::open(dir.path())) };
+    let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
+    let q = Query::String("token".into());
+    let lines = |engine: &Engine| {
+        let mut out = Vec::new();
+        engine.find_refs(&q, |b| out.extend(b.results.iter().map(|r| r.line()))).unwrap();
+        out.sort();
+        out
+    };
+    let before = lines(&engine);
+    assert_eq!(before.len(), 4);
+    let charged = engine.memory_cache_bytes();
+    // The writer swaps each heap copy for a mapping of the file it wrote.
+    engine.flush_cache_writes();
+    assert_eq!(engine.memory_cache_mapped_bytes(), 2 * dex.len());
+    // Same bytes, same charge, and the tables built before the swap are kept.
+    assert_eq!(engine.memory_cache_bytes(), charged);
+    assert!(charged > 2 * dex.len());
+    let apk_handle = engine.open().unwrap();
+    let key = engine.apk_key(&apk_handle);
+    for entry in apk_handle.dex_entries().unwrap() {
+        assert_eq!(&**engine.entry_bytes(&apk_handle, key.as_ref(), &entry).unwrap(), &dex[..]);
+    }
+    let mut sources = Vec::new();
+    engine.find_refs(&q, |b| sources.push(b.source)).unwrap();
+    assert_eq!(sources, ["memory", "memory"]);
+    assert_eq!(lines(&engine), before);
+    // Clearing the cache directory under a live mapping is harmless: the
+    // mapped inode outlives its directory entry.
+    asc_engine::asc_cache::DiskCache::open(dir.path()).clear().unwrap();
+    assert_eq!(lines(&engine), before);
+}
+
+#[test]
+fn memory_only_cache_keeps_heap_entries() {
+    let apk = temp_apk(true);
+    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: None };
+    let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
+    engine.find_refs(&Query::String("token".into()), |_| {}).unwrap();
+    engine.flush_cache_writes();
+    assert_eq!(engine.memory_cache_mapped_bytes(), 0);
+    assert!(engine.memory_cache_bytes() > 0);
+}
+
+#[test]
+fn locator_tables_count_against_the_memory_budget() {
+    let apk = temp_apk(true);
+    let dex_len = make_dex().len();
+    // Room for both inflated entries, but not for their locator tables too.
+    let cap = 2 * dex_len + 1;
+    let cfg = asc_engine::CacheConfig { memory_bytes: cap, disk: None };
+    let engine = Engine::new(apk.path()).with_threads(1).with_cache(cfg);
+    let q = Query::String("token".into());
+    let mut sources = Vec::new();
+    engine.find_refs(&q, |b| sources.push(b.source)).unwrap();
+    assert_eq!(sources, ["inflate", "inflate"]);
+    // Charging the first entry's tables pushed it over the cap; one entry is left.
+    let used = engine.memory_cache_bytes();
+    assert!(used > dex_len && used < 2 * dex_len, "used {used}, dex {dex_len}");
+    // Without the tables in the charge both entries would have stayed.
+    let roomy = Engine::new(apk.path()).with_threads(1).with_cache(asc_engine::CacheConfig { memory_bytes: 2 * cap, disk: None });
+    roomy.find_refs(&q, |_| {}).unwrap();
+    assert!(roomy.memory_cache_bytes() > cap);
+    let mut sources = Vec::new();
+    roomy.find_refs(&q, |b| sources.push(b.source)).unwrap();
+    assert_eq!(sources, ["memory", "memory"]);
+}
+
+#[test]
 fn invalid_pattern_is_reported_once_up_front() {
     let apk = temp_apk(false);
     let engine = Engine::new(apk.path()).with_threads(2);

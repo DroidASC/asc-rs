@@ -137,11 +137,13 @@ impl AscApp {
     fn with_context(ctx: egui::Context, prefs: Prefs, apk: PathBuf, threads: usize, debug: bool, cache: bool) -> AscApp {
         let mut engine = Engine::new(&apk).with_threads(threads).with_debug(debug).with_logger(|m| eprintln!("{m}"));
         // Keep inflated DEX files and their locator tables resident: the
-        // browser fires many queries against the same archive.
+        // browser fires many queries against the same archive. The budget
+        // follows the free memory, so several open browsers do not each
+        // claim 2 GiB.
         engine = engine.with_cache(if cache {
-            asc_engine::CacheConfig::resident(2 << 30)
+            asc_engine::CacheConfig::resident_auto()
         } else {
-            asc_engine::CacheConfig { memory_bytes: 2 << 30, disk: None }
+            asc_engine::CacheConfig { memory_bytes: asc_engine::auto_memory_bytes(), disk: None }
         });
         let engine = Arc::new(engine);
         let (tx, rx) = channel();

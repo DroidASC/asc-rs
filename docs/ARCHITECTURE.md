@@ -180,9 +180,32 @@ lazily by the queries themselves):
   the same entry share a single inflate, so a burst of GUI requests cannot replace each
   other's locator tables.
 * `MemoryCache<T>`: byte-bounded LRU keyed by `(apk key, entry name)`; the engine stores a
-  `CachedEntry` per entry, which owns the bytes and, per logical DEX, a `SearchState`
-  (`OnceLock`s for the string/type/member/instruction locators). `FindRefs::with_state`
-  reuses those tables; `FindRefs::new` builds throw-away ones.
+  `CachedEntry` per entry, which owns the bytes and, per logical DEX, an
+  `Arc<SearchState>` (`OnceLock`s for the string/type/member/instruction locators).
+  `FindRefs::with_state` reuses those tables; `FindRefs::new` builds throw-away ones.
+  An entry is charged `resident_bytes` on insertion; after each search `recharge` adds
+  `SearchState::heap_bytes` (vector capacities of the built locators) through
+  `MemoryCache::resize`, which evicts least recently used entries when that crosses the
+  cap. `CacheConfig::resident_auto` sizes the cap with `auto_memory_bytes` (a quarter of
+  `available_memory()`, clamped to 64 MiB–2 GiB; 2 GiB where it cannot be read).
+* Remapping: a freshly inflated entry that goes into the memory cache is queued for the
+  disk writer together with a `Weak` handle to it. Once the file is renamed into place
+  the writer maps it, compares it with the heap bytes, and swaps the LRU slot for a
+  `CachedEntry` over the mapping that shares the old `SearchState`s
+  (`MemoryCache::replace`, only if the slot still holds that entry). Queries that hold
+  the old entry keep using the heap copy until they drop it. Container entries keep
+  their normalised logical copies (owned) and only remap the container itself.
+* Allocator: the first engine with a memory cache fixes glibc's mmap threshold at 1 MiB
+  (`mallopt(M_MMAP_THRESHOLD)`, Linux/glibc only, process-wide). glibc otherwise raises
+  the threshold to every large block freed (up to 32 MiB), after which DEX-sized buffers
+  are carved from the heap arenas, interleaved with long-lived locator tables, and a
+  remapped or evicted entry's bytes stay resident (`malloc_trim` cannot return them).
+
+Mapped files and cache maintenance: entries are only ever replaced by `rename`, never
+rewritten in place, and `evict` / `cache clear` unlink whole directories, so a live
+mapping keeps its inode (POSIX) and stays valid. A third party truncating a cache file in
+place would fault the mapping (SIGBUS), exactly as for disk hits; on Windows a mapped file
+cannot be deleted, so eviction skips it and `cache clear` reports the error.
 
 Stored (uncompressed) entries are borrowed straight from the APK mapping and never copied
 unless an in-memory cache wants to keep their tables.
