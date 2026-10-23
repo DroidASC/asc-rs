@@ -37,6 +37,9 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
 | `.../type_locator.py`, `method_locator.py`, `field_locator.py` | `asc_findrefs::{TypeLocator, MethodLocator, FieldLocator}` |
 | `.../insn_locator.py` (16-byte bucket table in a dict, `INSN_VERIFY` regex) | `asc_findrefs::InsnLocator` (same buckets in a dense `Vec<u32>` over the code region, filled by ranges; verification is a linear opcode-length walk, `asc_dalvik::verify_range`) |
 | `.../scan/code_item_scan.py` (regex / translate prefilter over the code region) | `asc_findrefs::CodeScanner` (single pass with a 256-entry opcode table and a bitset of target indexes) |
+| `.../scan/class_def_item_scan.py` (`findrefs extends` / `impl`) | `asc_findrefs::FindRefs::class_relation` (`classdefs` module) |
+| `asc_client/apk/dex_reader.py::class_defines_prefix_len` + `loader.py::_inflate_dex_prefix` (prefix-only inflate for `getclass`) | `asc_dex::quick::probe_needed_len` + `asc_apk::Apk::inflate_until` (already there before upstream added it) |
+| `dadguard/disassembler.py` (`disassemble`, `--method`, `--debuginfo`) | `asc_smali::disassemble_class_method` behind `getclass` / `disassemble` |
 | `asc_core/core/dex/dex_constructor.py` (DexHollower) | `asc_rebuild::hollow` |
 | `asc_core/core/dex/dex_remapper.py` (DexIndexMapper) | `asc_rebuild::{collect, tables}` |
 | `asc_core/core/dex/dex_builder.py` (DexBuilder) | `asc_rebuild::writer` |
@@ -84,6 +87,17 @@ static initialisers, `.registers`, `.param` names and `.line` directives from de
 labels for branches, switch payloads, `fill-array-data` and try/catch blocks. The engine's
 `Rebuilt::bytes` is exposed (and `--dump-dex` on the CLI) for external decompilers.
 
+Upstream later added its own smali renderer as a separate `disassemble` command (the Java
+`getclass` stays). Here both commands share one path (`Engine::get_class_method`) and
+differ only as Python's do: `disassemble` leaves out debug directives unless
+`--debuginfo` is given and `-o` writes only the file, while `getclass` keeps `.line` /
+`.param` (`--no-debug-info`) and also prints to stdout. The output stays baksmali-style
+rather than copying dadguard's format (`# CLASS:` / `## METHOD:` comments, `.locals`), and
+`--debug` does not add per-instruction offset comments. `--method 'name(params)ret'`
+(both commands) is normalised as in Python (whitespace dropped from the descriptors, a
+bare name rejected) and keeps the class header, interfaces and class annotations, no
+fields, and only that method; the rebuilt DEX (`--dump-dex`) still holds the whole class.
+
 ### Search semantics kept from Python
 
 * String and type queries are **regular expressions** matched against raw MUTF-8 string
@@ -98,6 +112,22 @@ labels for branches, switch payloads, `fill-array-data` and try/catch blocks. Th
   cannot) but not either half of a surrogate pair (Python's can, byte by byte). Spell a
   supplementary character as its surrogate bytes (`\xED\xA0\xBD\xED\xB8\x80`, with
   `(?-u)`) to find it.
+* `Query::StringLiteral` (`findrefs string --literal`, an extension compatible with the
+  literal string queries of rasc / rust_ASC) skips the regex: the value is MUTF-8 encoded
+  (so a supplementary character does match) and found with `memchr::memmem` over the same
+  region, attributed to the string where it starts. After a hit the rest of that string is
+  skipped, which is exact because a needle without NUL never crosses a terminator. It
+  returns the same rows as the regex `regex::escape(value)`.
+* `Query::Extends` / `Query::Implements` (`findrefs extends` / `impl`) do no code scan:
+  the target descriptor is resolved with the same binary search as a precise class, then
+  every `class_def_item`'s `superclass_idx` / interface list is compared with it (direct
+  relations only, in `class_defs` order). Rows carry `RefResult::relation` and print as
+  `classes.dex | Lsub; extends Lbase;`. Python finds the superclass with a regex over the
+  packed table and keeps 32-byte-aligned matches; because `finditer` does not overlap, a
+  match straddling the preceding `access_flags` could in principle hide an aligned one.
+  The direct comparison has no such blind spot (no row differed on the fixtures).
+  Upstream's "grouped" `find_ref(group=True)` (one result list per key of a multi-key
+  query) is not ported: no CLI path builds a multi-key query.
 * Member queries: with a precise class, the member name is a **substring** match; with a
   fuzzy or absent class the member name is a regex against the string table.
   `MemberQuery::exact_name` (`--exact`, and the GUI's "references to this member") makes
