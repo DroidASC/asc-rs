@@ -122,7 +122,7 @@ impl Engine {
         let next = AtomicUsize::new(0);
         let tally = Mutex::new(&mut report);
         std::thread::scope(|s| {
-            for _ in 0..self.threads.min(entries.len()) {
+            for _ in 0..self.threads().min(entries.len()) {
                 s.spawn(|| {
                     lower_priority();
                     while self.prebuild.give_way() {

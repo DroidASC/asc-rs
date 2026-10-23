@@ -349,7 +349,7 @@ impl Engine {
         let next_view = AtomicUsize::new(0);
         let merged: Mutex<HashMap<String, Found>> = Mutex::new(HashMap::new());
         let errs = Mutex::new(Vec::new());
-        let workers = self.threads.min(views.len()).max(1);
+        let workers = self.threads().min(views.len()).max(1);
         std::thread::scope(|s| {
             for _ in 0..workers {
                 s.spawn(|| loop {

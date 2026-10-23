@@ -1,15 +1,18 @@
 //! Registry of the resident hosts (MCP servers, GUIs) one user runs, so each
 //! can size its memory budget as a share of one machine-wide budget instead
-//! of every process claiming a quarter of the free memory for itself.
+//! of every process claiming a quarter of the free memory for itself, and
+//! split the CPUs with the others that are busy.
 //!
 //! Each process keeps a small file `<dir>/<pid>` holding its start time and
-//! the bytes its memory cache holds. Entries of processes that are gone
+//! the bytes its memory cache holds, rewritten while it works (the file's
+//! age tells a busy process from an idle one). Entries of processes that are gone
 //! (killed without unregistering, or whose pid was reused) are recognised by
 //! the start time and removed by whoever reads them.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Environment variable overriding [`ProcessRegistry::default_dir`].
 pub const RUNTIME_DIR_ENV: &str = "DROIDASC_RUNTIME_DIR";
@@ -20,6 +23,8 @@ pub struct ProcessUsage {
     pub pid: u32,
     /// Bytes its memory cache held at its last update.
     pub bytes: u64,
+    /// Time since that update.
+    pub idle: Duration,
 }
 
 /// This process's entry in a registry directory; removed on drop.
@@ -43,7 +48,7 @@ impl ProcessRegistry {
     }
 
     /// Register this process in `dir` (created private to the user). `None`
-    /// where processes cannot be told apart reliably (not Linux) or the
+    /// where processes cannot be told apart reliably (not Linux or macOS) or the
     /// directory is unusable, e.g. owned by someone else.
     pub fn open(dir: impl Into<PathBuf>) -> Option<ProcessRegistry> {
         let dir = dir.into();
@@ -69,18 +74,26 @@ impl ProcessRegistry {
 
     /// Every other live registered process; entries of dead ones are removed.
     pub fn others(&self) -> Vec<ProcessUsage> {
+        Self::others_in(&self.dir)
+    }
+
+    /// [`ProcessRegistry::others`] of `dir` for a process that does not
+    /// register itself (a one-shot command).
+    pub fn others_in(dir: &Path) -> Vec<ProcessUsage> {
         let mut out = Vec::new();
-        let Ok(rd) = fs::read_dir(&self.dir) else { return out };
+        let Ok(rd) = fs::read_dir(dir) else { return out };
+        let me = std::process::id();
         for f in rd.flatten() {
             let Some(pid) = f.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
-            if pid == self.pid {
+            if pid == me {
                 continue;
             }
             let Ok(text) = fs::read_to_string(f.path()) else { continue };
             let mut fields = text.split_whitespace().map(|v| v.parse::<u64>().ok());
             let (Some(Some(start)), Some(Some(bytes))) = (fields.next(), fields.next()) else { continue };
             if start_time(pid) == Some(start) {
-                out.push(ProcessUsage { pid, bytes });
+                let idle = f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
+                out.push(ProcessUsage { pid, bytes, idle });
             } else {
                 let _ = fs::remove_file(f.path());
             }
@@ -105,7 +118,25 @@ fn start_time(pid: u32) -> Option<u64> {
     stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Start time of `pid` in microseconds since the epoch.
+#[cfg(target_os = "macos")]
+fn start_time(pid: u32) -> Option<u64> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: `info` is a writable buffer of `size` bytes; proc_pidinfo
+    // writes at most that many and returns how many it wrote.
+    let written = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size) };
+    if written != size {
+        return None;
+    }
+    // SAFETY: proc_pidinfo filled the whole struct (checked above), and it
+    // is plain integers, valid for any bytes.
+    let info = unsafe { info.assume_init() };
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn start_time(_pid: u32) -> Option<u64> {
     None
 }
@@ -136,10 +167,12 @@ fn create_private_dir(dir: &Path) -> Option<()> {
     fs::create_dir_all(dir).ok()
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 
+    // pid 1 (init) is not readable by every user elsewhere.
+    #[cfg(target_os = "linux")]
     #[test]
     fn processes_see_each_other_and_stale_entries_go() {
         let dir = tempfile::tempdir().unwrap();
@@ -152,8 +185,10 @@ mod tests {
         fs::write(dir.path().join("2"), "1 789\n").unwrap();
         fs::write(dir.path().join("notes"), "x").unwrap();
         // Another registry for the same pid stands in for a second process.
-        let others = me.others();
-        assert_eq!(others, vec![ProcessUsage { pid: 1, bytes: 456 }]);
+        let others: Vec<_> = me.others().iter().map(|o| (o.pid, o.bytes)).collect();
+        assert_eq!(others, vec![(1, 456)]);
+        assert_eq!(ProcessRegistry::others_in(dir.path()).len(), 1, "readable without registering");
+        assert!(me.others()[0].idle < Duration::from_secs(60), "just written");
         assert!(!dir.path().join("2").exists(), "dead entry removed");
         assert!(dir.path().join(std::process::id().to_string()).exists());
         drop(me);

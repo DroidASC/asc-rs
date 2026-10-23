@@ -244,12 +244,11 @@ fn legacy_gui_rewrite_does_not_touch_normal_invocations() {
 }
 
 #[test]
-fn help_shows_computed_thread_default() {
+fn help_explains_thread_default() {
     let out = droidasc(&["--help"]);
     assert!(out.status.success());
-    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
     let text = stdout(&out);
-    assert!(text.contains(&format!("[default: {n}]")), "{text}");
+    assert!(text.contains("other busy `mcp` / `gui` processes"), "{text}");
     assert!(text.contains("exit status"), "{text}");
 }
 

@@ -130,11 +130,24 @@ pub struct AscApp {
 }
 
 impl AscApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, apk: PathBuf, threads: usize, debug: bool, cache: asc_engine::CacheConfig) -> AscApp {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        apk: PathBuf,
+        threads: asc_engine::Threads,
+        debug: bool,
+        cache: asc_engine::CacheConfig,
+    ) -> AscApp {
         Self::with_context(cc.egui_ctx.clone(), Prefs::load(cc.storage), apk, threads, debug, cache)
     }
 
-    fn with_context(ctx: egui::Context, prefs: Prefs, apk: PathBuf, threads: usize, debug: bool, cache: asc_engine::CacheConfig) -> AscApp {
+    fn with_context(
+        ctx: egui::Context,
+        prefs: Prefs,
+        apk: PathBuf,
+        threads: asc_engine::Threads,
+        debug: bool,
+        cache: asc_engine::CacheConfig,
+    ) -> AscApp {
         let mut engine = Engine::new(&apk).with_threads(threads).with_debug(debug).with_logger(|m| eprintln!("{m}"));
         // Inflated DEX files and their locator tables stay resident within
         // the caller's budget (by default it follows the free memory, so
@@ -1315,7 +1328,7 @@ mod tests {
     fn app() -> AscApp {
         let apk = PathBuf::from("/nonexistent/asc-gui-test.apk");
         let cache = asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() };
-        AscApp::with_context(egui::Context::default(), Prefs::default(), apk, 1, false, cache)
+        AscApp::with_context(egui::Context::default(), Prefs::default(), apk, asc_engine::Threads::Fixed(1), false, cache)
     }
 
     fn with_class_tab(text: &str) -> AscApp {

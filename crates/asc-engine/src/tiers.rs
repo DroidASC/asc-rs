@@ -436,6 +436,51 @@ pub fn auto_memory_share(available: Option<u64>, held_here: u64, others: &[Proce
     usize::try_from(share).unwrap_or(usize::MAX).clamp(AUTO_MEMORY_MIN, AUTO_MEMORY_MAX)
 }
 
+/// A registered process that updated its entry this recently is busy for
+/// [`auto_threads`]: memory caches republish at most every
+/// [`REBALANCE_EVERY`] while they load entries, and not at all when idle
+/// (an MCP server waiting for an agent's next call).
+const BUSY_WINDOW: Duration = Duration::from_secs(5);
+
+/// Worker threads of a search whose caller fixed none: this machine's CPUs
+/// split between this process and the user's other busy registered ones
+/// ([`auto_threads_for`]). Re-read at most once per [`REBALANCE_EVERY`], so
+/// a server follows the others starting and finishing their scans.
+pub fn auto_threads() -> usize {
+    static LAST: Mutex<Option<(Instant, usize)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if let Some((at, threads)) = *last {
+        if at.elapsed() < REBALANCE_EVERY {
+            return threads;
+        }
+    }
+    let others = match &REGISTRATION.lock().unwrap().registry {
+        Some(registry) => registry.others(),
+        // One-shot commands keep no memory cache and do not register; they
+        // still give way to the resident hosts.
+        None => ProcessRegistry::default_dir().map(|d| ProcessRegistry::others_in(&d)).unwrap_or_default(),
+    };
+    let busy = others.iter().filter(|o| o.idle < BUSY_WINDOW).count();
+    let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
+    let threads = auto_threads_for(cpus, busy);
+    *last = Some((Instant::now(), threads));
+    threads
+}
+
+/// Workers the busy processes may start together, per CPU. An exact split
+/// (1) leaves CPUs idle while the processes holding the largest APKs finish
+/// alone: 8 servers scanning 312 APKs on 16 CPUs took 223 ms with 2 workers
+/// each, 180 ms with 8 and 176 ms with 16, for 13 % more memory at 8.
+const OVERSUBSCRIBE: usize = 4;
+
+/// [`OVERSUBSCRIBE`] x `cpus` workers split evenly between this process and
+/// `busy_others`, at most `cpus` and at least 2 (where there are 2): a scan
+/// on one thread gives up its overlap of inflating one entry while searching
+/// another. Up to 4 busy processes each keep every CPU.
+pub fn auto_threads_for(cpus: usize, busy_others: usize) -> usize {
+    (cpus * OVERSUBSCRIBE / (busy_others + 1)).clamp(cpus.min(2), cpus)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,7 +488,7 @@ mod tests {
     #[test]
     fn share_splits_one_budget_between_processes() {
         const GIB: u64 = 1 << 30;
-        let other = |bytes| ProcessUsage { pid: 1, bytes };
+        let other = |bytes| ProcessUsage { pid: 1, bytes, idle: Duration::ZERO };
         // Alone: a quarter of what is available plus what we hold.
         assert_eq!(auto_memory_share(Some(4 * GIB), 0, &[]), GIB as usize);
         assert_eq!(auto_memory_share(Some(3 * GIB), GIB, &[]), GIB as usize);
@@ -454,6 +499,17 @@ mod tests {
         // Never below the floor, unknown memory keeps the old default.
         assert_eq!(auto_memory_share(Some(GIB), 0, &vec![other(0); 63]), AUTO_MEMORY_MIN);
         assert_eq!(auto_memory_share(None, 0, &others), AUTO_MEMORY_MAX);
+    }
+
+    #[test]
+    fn threads_split_between_busy_processes() {
+        assert_eq!(auto_threads_for(32, 0), 32);
+        assert_eq!(auto_threads_for(32, 3), 32, "4 busy processes keep every CPU");
+        assert_eq!(auto_threads_for(32, 7), 16);
+        assert_eq!(auto_threads_for(32, 15), 8);
+        assert_eq!(auto_threads_for(32, 255), 2, "never below 2");
+        assert_eq!(auto_threads_for(1, 3), 1, "nor above the CPUs");
+        assert!(auto_threads() >= 1);
     }
 
     #[test]

@@ -364,7 +364,7 @@ impl Engine {
                 return Ok(g.clone());
             }
         }
-        let g = Arc::new(ClassGraph::build(views, self.threads, errors));
+        let g = Arc::new(ClassGraph::build(views, self.threads(), errors));
         *slot = Some((ident, g.clone()));
         Ok(g)
     }
