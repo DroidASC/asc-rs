@@ -673,7 +673,7 @@ impl Server {
     /// A class's smali, or the methods `method` names. A class over the output
     /// budget comes as an outline (unless `full`), the whole class handed on
     /// for a spill file.
-    fn getclass(&self, args: &Value, _: &Call) -> ToolResult {
+    fn getclass(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("getclass needs `class`".into()))?;
         // Off by default: obfuscated APKs carry meaningless `.line`s, and agents
@@ -681,7 +681,7 @@ impl Server {
         let debug_info = bool_arg(args, "debug_info")?.unwrap_or(false);
         let descriptor = names::format_class_name(class)?;
         let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
-        let mut src = apk.engine.get_class_method(&descriptor, opts, None)?;
+        let mut src = apk.engine.get_class_method_cancellable(&descriptor, opts, None, &call.cancel)?;
         if bool_arg(args, "resource_names")?.unwrap_or(true) {
             src.source = apk.engine.annotate_resource_ids(&src.source);
         }
@@ -771,7 +771,7 @@ impl Server {
         Ok((text, structured))
     }
 
-    fn callgraph(&self, args: &Value, _call: &Call) -> ToolResult {
+    fn callgraph(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("callgraph needs `class`".into()))?;
         let method = str_arg(args, "method")?.ok_or_else(|| ToolError("callgraph needs `method`".into()))?;
@@ -787,7 +787,7 @@ impl Server {
             max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES),
             virtual_calls: bool_arg(args, "virtual")?.unwrap_or(false),
         };
-        let tree = apk.engine.call_graph(&q)?;
+        let tree = apk.engine.call_graph_cancellable(&q, &call.cancel)?;
         let mut text = String::new();
         for line in tree.lines() {
             text.push_str(&line);

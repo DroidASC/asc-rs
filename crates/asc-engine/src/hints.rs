@@ -250,7 +250,7 @@ impl Engine {
 
     /// Every member of `class` any DEX references or defines, sorted.
     fn class_member_list(&self, class: &str, methods: bool) -> Vec<String> {
-        let Ok((views, _)) = self.load_views(None) else { return Vec::new() };
+        let Ok((views, _)) = self.load_views(None, &crate::NOT_CANCELLED) else { return Vec::new() };
         let mut members = Vec::new();
         for v in &views {
             if let Ok(dex) = Dex::with_name(&v.data, &v.name) {

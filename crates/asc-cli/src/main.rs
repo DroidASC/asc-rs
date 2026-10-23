@@ -764,15 +764,16 @@ fn class_methods(
     descriptor: &str,
     opts: asc_engine::SmaliOptions,
     method: Option<&str>,
+    cancel: &AtomicBool,
 ) -> Result<asc_engine::ClassSource, String> {
     // `name(params)ret`: what the engine renders on its own.
     let full_signature = |m: &&str| m.split_once(')').is_some_and(|(head, ret)| head.contains('(') && !ret.trim().is_empty());
     if let Some(m) = method.filter(full_signature) {
-        if let Ok(src) = engine.get_class_method(descriptor, opts, Some(m)) {
+        if let Ok(src) = engine.get_class_method_cancellable(descriptor, opts, Some(m), cancel) {
             return Ok(src);
         }
     }
-    let mut src = engine.get_class_method(descriptor, opts, None).map_err(|e| e.to_string())?;
+    let mut src = engine.get_class_method_cancellable(descriptor, opts, None, cancel).map_err(|e| e.to_string())?;
     if let Some(m) = method {
         let parsed = asc_mcp::class_text::ClassText::parse(&src.source);
         let picked = parsed.select(m);
@@ -789,7 +790,7 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant)
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = io.engine(common, &args.apk_path);
     let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
-    let mut src = class_methods(&engine, &descriptor, opts, args.method_signature.as_deref())?;
+    let mut src = class_methods(&engine, &descriptor, opts, args.method_signature.as_deref(), io.cancel)?;
     if args.res_names {
         src.source = engine.annotate_resource_ids(&src.source);
     }
@@ -1000,7 +1001,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let direction = if callees { Direction::Callees } else { Direction::Callers };
             let engine = io.engine(common, &apk_path);
             let q = CallQuery { class, method, direction, depth, max_nodes, virtual_calls };
-            let tree = engine.call_graph(&q).map_err(|e| e.to_string())?;
+            let tree = engine.call_graph_cancellable(&q, io.cancel).map_err(|e| e.to_string())?;
             io.emit_tree(output.as_ref(), &tree.lines(), &tree.footer())?;
             for e in &tree.errors {
                 io.note(format_args!("Warning: {e}"));
@@ -1015,10 +1016,8 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
         Command::Hierarchy { output, supers, depth, max_nodes, method, apk_path, class } => {
             let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
             let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
-            let tree = io
-                .engine(common, &apk_path)
-                .hierarchy(&HierarchyQuery { class, direction, depth, max_nodes, method })
-                .map_err(|e| e.to_string())?;
+            let q = HierarchyQuery { class, direction, depth, max_nodes, method };
+            let tree = io.engine(common, &apk_path).hierarchy_cancellable(&q, io.cancel).map_err(|e| e.to_string())?;
             let rows: Vec<String> = tree.lines().into_iter().chain(tree.definition_lines()).collect();
             io.emit_tree(output.as_ref(), &rows, &tree.footer())?;
             for e in &tree.errors {

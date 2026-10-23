@@ -447,6 +447,30 @@ impl ResTable {
         &self.packages
     }
 
+    /// Heap held by the index, roughly (the table bytes it indexes aside).
+    pub fn index_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let package = |p: &Package| {
+            size_of::<Package>()
+                + p.name.capacity()
+                + p.groups.iter().map(|g| size_of::<TypeGroup>() + g.chunks.capacity() * size_of::<TypeChunk>()).sum::<usize>()
+                + p.libraries.iter().map(|l| size_of::<Library>() + l.name.capacity()).sum::<usize>()
+                + p.overlayables
+                    .iter()
+                    .map(|o| {
+                        size_of::<Overlayable>()
+                            + o.name.capacity()
+                            + o.actor.capacity()
+                            + o.policies.iter().map(|p| p.ids.capacity() * 4).sum::<usize>()
+                    })
+                    .sum::<usize>()
+                + p.staged_aliases.capacity() * size_of::<StagedAlias>()
+        };
+        self.packages.iter().map(package).sum::<usize>()
+            + self.warnings.iter().map(String::capacity).sum::<usize>()
+            + self.names.get().map_or(0, |n| n.capacity() * size_of::<(u64, u32)>())
+    }
+
     /// Problems found while indexing (skipped chunks, clamped counts, ...).
     pub fn warnings(&self) -> &[String] {
         &self.warnings

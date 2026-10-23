@@ -419,12 +419,19 @@ opened resident, so a shell or an agent calling the CLI step by step gets MCP-li
 without an MCP client. Nothing changes in how commands are written or what they print:
 stdout, stderr and the exit status are byte for byte those of a run without the daemon.
 
-* The first command starts the daemon (`droidasc daemon serve`, detached) and hands itself
-  over once it is up; the daemon exits after 15 idle minutes.
+* The first command starts the daemon (`droidasc daemon serve`, detached), waits up to
+  300 ms for it (`DROIDASC_DAEMON_WAIT_MS`) and hands itself over once it is up, or runs
+  itself; the daemon exits after 15 idle minutes (`DROIDASC_DAEMON_IDLE`, in seconds, from
+  the environment of the command that started it).
+* A client that disconnects (Ctrl-C) cancels its command: `findrefs`, `getclass`,
+  `callgraph` and `hierarchy` stop between DEX files.
+* The class graphs and resource tables of the APKs it keeps open count against the
+  daemon's memory budget, up to half of it; beyond that the least recently used APKs close.
+  The rest of the budget holds inflated DEX.
 * `--debug` and `--no-cache` always run in the calling process, as do `mcp`,
   `cache` and `daemon`. `DROIDASC_DAEMON=off` turns the daemon off.
 * One daemon per build and cache configuration (`--cache-dir`, `--cache-max-mb`,
-  `DROIDASC_*`, umask): a rebuilt binary starts a fresh daemon, which retires the old one.
+  `DROIDASC_*` but `DROIDASC_DAEMON*`, umask): a rebuilt binary starts a fresh daemon, which retires the old one.
 * `droidasc daemon status` lists the running daemons, `daemon stop` stops them,
   `daemon start` starts one ahead of time.
 * The socket is in a directory only the user can enter (`$DROIDASC_RUNTIME_DIR/daemon`,

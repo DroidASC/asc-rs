@@ -304,3 +304,29 @@ fn virtual_dispatch_links_calls_through_supertypes_and_overrides() {
         assert_eq!(t.lines(), ["0 La/Caller;->go()V", "  1 -> La/Base;->run()V"]);
     }
 }
+
+#[test]
+fn cancelled_walks_stop_and_leave_nothing_half_built() {
+    let apk = temp_apk();
+    let cancelled = |r: asc_engine::Result<_>| matches!(r, Err(asc_engine::EngineError::Apk(asc_apk::ApkError::Cancelled)));
+    for engine in engines(apk.path()) {
+        let raised = AtomicBool::new(true);
+        let call = CallQuery {
+            class: CALLER.into(),
+            method: "go".into(),
+            direction: Direction::Callees,
+            depth: 1,
+            max_nodes: 100,
+            virtual_calls: true,
+        };
+        assert!(cancelled(engine.call_graph_cancellable(&call, &raised).map(drop)));
+        assert!(cancelled(engine.hierarchy_cancellable(&hq(API, Lineage::Subclasses, None), &raised).map(drop)));
+        assert!(cancelled(engine.get_class_method_cancellable(BASE, Default::default(), None, &raised).map(drop)));
+        // No class graph was kept from the cancelled walks.
+        assert_eq!(engine.resident_bytes(), 0);
+        let t = engine.hierarchy_cancellable(&hq(API, Lineage::Subclasses, None), &AtomicBool::new(false)).unwrap();
+        assert_eq!(t.classes, 5);
+        assert!(engine.resident_bytes() > 0, "the class graph is kept and sized");
+        assert_eq!(engine.call_graph(&call).unwrap().lines().len(), 3);
+    }
+}

@@ -372,11 +372,16 @@ cache 和线程选项由 `droidasc --help` 统一列出一次。[`skills/droidas
 agent 无需 MCP 客户端也能获得接近 MCP 的延迟。命令的写法和输出都没有任何变化：stdout、stderr 和退出码
 与不使用 daemon 运行时逐字节一致。
 
-* 第一个命令会启动 daemon（`droidasc daemon serve`，分离运行），并在其就绪后把自己交给它处理；daemon
-  空闲 15 分钟后退出。
+* 第一个命令会启动 daemon（`droidasc daemon serve`，分离运行），最多等它 300 ms
+  （`DROIDASC_DAEMON_WAIT_MS`），就绪后把自己交给它处理，否则自己运行；daemon 空闲 15 分钟后退出
+  （`DROIDASC_DAEMON_IDLE`，单位秒，取启动它的那个命令的环境）。
+* 客户端断开（Ctrl-C）会取消正在执行的命令：`findrefs`、`getclass`、`callgraph`、`hierarchy`
+  都会在 DEX 之间停下。
+* 打开的 APK 的类图和资源表计入 daemon 的内存预算，最多占一半，超出时关闭最久未用的 APK，其余预算留给
+  解压后的 DEX。
 * `--debug` 和 `--no-cache` 总是在调用进程中运行，`mcp`、`cache` 和 `daemon` 也是如此。
   `DROIDASC_DAEMON=off` 关闭 daemon。
-* 每种构建和 cache 配置（`--cache-dir`、`--cache-max-mb`、`DROIDASC_*`、umask）对应一个 daemon：重新
+* 每种构建和 cache 配置（`--cache-dir`、`--cache-max-mb`、`DROIDASC_*`（`DROIDASC_DAEMON*` 除外）、umask）对应一个 daemon：重新
   构建的二进制会启动新的 daemon，并让旧的退役。
 * `droidasc daemon status` 列出正在运行的 daemon，`daemon stop` 停止它们，`daemon start` 提前启动一个。
 * socket 位于只有该用户能进入的目录（`$DROIDASC_RUNTIME_DIR/daemon`、`$XDG_RUNTIME_DIR/droidasc/daemon`，

@@ -288,7 +288,9 @@ lazily by the queries themselves):
   to background writer threads (one per 8 CPUs, at most 4; writing a 30 MiB entry
   costs as much as the whole query it came from) and evicts once per burst rather than
   after every entry; `Engine::flush_cache_writes` / `Drop` wait for the queue. Queued
-  jobs keep their DEX bytes or tables alive, so past 512 MiB of them a new L1 write is
+  jobs keep their DEX bytes or tables alive, so past 512 MiB of them (or the memory
+  cache's budget when smaller: `--memory-mb`, or this process's share of the auto budget,
+  so sixteen servers sweeping at once do not queue 8 GiB between them) a new L1 write is
   queued without its bytes and the writer inflates the entry again from the APK (if the
   APK key still matches and the file is still missing): a cold multi-APK sweep never
   waits for the disk, its heap stays bounded, and L1 still ends up complete. A new L2
@@ -400,12 +402,13 @@ only an accelerator: it holds no session state, and the only observable differen
   closes without an exit status after output is reported as an error; before output, the
   client runs the command itself.
 * **Identity.** The socket name hashes the executable (canonical path, size, mtime, version),
-  the cache configuration (`--cache-dir`, `--cache-max-mb`, `DROIDASC_*`, `XDG_CACHE_HOME`,
+  the cache configuration (`--cache-dir`, `--cache-max-mb`, `DROIDASC_*` but the
+  `DROIDASC_DAEMON*` switches, `XDG_CACHE_HOME`,
   `HOME`) and the umask, so a client only ever meets a daemon that would print what it
   prints. A daemon starting up asks the daemons of other builds of the same executable path
   and configuration to exit. An `flock` on `<tag>.lock` keeps one daemon per identity.
 * **Start.** A command that finds no daemon spawns `daemon serve` (setsid, stdio to
-  /dev/null) and waits up to 300 ms for its socket, stopping early if the child exits (lost
+  /dev/null) and waits up to 300 ms (`DROIDASC_DAEMON_WAIT_MS`) for its socket, stopping early if the child exits (lost
   the lock race, cannot bind), then runs locally. Handing the first command to the daemon
   is faster than running it here (81 vs 256 ms cold on Douyin): the daemon answers before
   its cache writes land, while a process must land them before it exits.
@@ -413,9 +416,18 @@ only an accelerator: it holds no session state, and the only observable differen
   bits (as must its parent); both ends check the peer uid (`SO_PEERCRED`, `getpeereid`).
   Socket paths that would not fit `sockaddr_un` disable the daemon.
 * **Cancel and exit.** A thread per request blocks on reading the connection; end of
-  stream sets the request's cancel flag, which `findrefs` checks between DEX entries. After
-  15 minutes without requests, or on `daemon stop`, the daemon removes its socket, waits for
-  running requests, lands queued cache writes and exits.
+  stream sets the request's cancel flag. `findrefs` checks it between DEX entries; `getclass`
+  (`get_class_method_cancellable`), `callgraph` and `hierarchy` (`*_cancellable`) while
+  loading entries, building the class graph and between walk levels, and return
+  `ApkError::Cancelled` (a cancelled class graph is not kept). MCP passes its
+  `notifications/cancelled` flag to the same calls. After 15 minutes without requests
+  (`DROIDASC_DAEMON_IDLE` seconds, read when the daemon starts), or on `daemon stop`, the
+  daemon removes its socket, waits for running requests, lands queued cache writes and exits.
+* **Pool budget.** Open engines keep their class graph and resource table off the memory
+  cache (`Engine::resident_bytes`). After each request the daemon sizes them, most recently
+  used first, closes those beyond half the cache's budget (the latest one always stays), and
+  reserves the rest in the cache (`SharedCache::set_reserved`), which evicts DEX entries to
+  make room and publishes the reserved bytes to the process registry with its own.
 
 ### MCP session
 

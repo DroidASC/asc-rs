@@ -336,7 +336,7 @@ impl Server {
         self.report(Report { tool: "findrefs", header, summary, sections, empty, max_bytes: max_bytes(args)? })
     }
 
-    pub(crate) fn hierarchy(&self, args: &Value, _: &Call) -> ToolResult {
+    pub(crate) fn hierarchy(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("hierarchy needs `class`".into()))?;
         const CHOICES: &[(&str, &[&str])] = &[
@@ -354,7 +354,7 @@ impl Server {
             max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(HIERARCHY_MAX_NODES),
             method: str_arg(args, "method")?.map(String::from),
         };
-        let tree = apk.engine.hierarchy(&q)?;
+        let tree = apk.engine.hierarchy_cancellable(&q, &call.cancel)?;
         let mut text = String::new();
         for line in tree.lines().into_iter().chain(tree.definition_lines()) {
             text.push_str(&line);

@@ -45,7 +45,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 pub use asc_apk::Limits as InflateLimits;
 pub use asc_arsc;
@@ -370,6 +370,21 @@ impl SharedCache {
         self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().capacity_bytes()).unwrap_or(0)
     }
 
+    /// Bytes counted against the memory budget besides the cache's entries
+    /// ([`SharedCache::set_reserved`]).
+    pub fn memory_reserved(&self) -> usize {
+        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().reserved_bytes()).unwrap_or(0)
+    }
+
+    /// Count `bytes` the host holds outside the cache (the class graphs and
+    /// resource tables of its engines, [`Engine::resident_bytes`]) against
+    /// the memory budget: the cache evicts entries to make room for them.
+    pub fn set_reserved(&self, bytes: usize) {
+        if let Some(m) = self.0.as_ref().and_then(|c| c.memory.as_ref()) {
+            m.lock().unwrap().set_reserved(bytes);
+        }
+    }
+
     /// Block until every queued disk-cache write has landed.
     pub fn flush_writes(&self) {
         if let Some(c) = &self.0 {
@@ -525,12 +540,24 @@ struct WriteJob {
 /// bytes ([`WriteJob::defer`]). A cold multi-APK sweep inflates far faster
 /// than the writers persist, and each queued job keeps its DEX bytes or
 /// tables alive until written; without a bound the heap grows with the
-/// backlog (tens of GB over a phone's APKs).
+/// backlog (tens of GB over a phone's APKs). A memory cache's budget lowers
+/// it further ([`EngineCache::queue_cap`]).
 const MAX_PENDING_WRITE_BYTES: usize = 512 << 20;
 
 /// Most writer threads per process: writing is I/O, but a deferred L1 write
 /// inflates its entry again first.
 const MAX_WRITERS: usize = 4;
+
+/// How often a call waiting on its workers checks for cancellation.
+const CANCEL_POLL: Duration = Duration::from_millis(20);
+
+/// The flag of a call nobody cancels.
+pub(crate) static NOT_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// What a cancelled call returns.
+pub(crate) fn cancelled() -> EngineError {
+    asc_apk::ApkError::Cancelled.into()
+}
 
 impl WriteJob {
     /// Heap the job keeps alive until written. L3 payloads are small and
@@ -614,26 +641,38 @@ struct EngineCache {
     /// L2 writes queued and not yet written: their tables stay on the heap
     /// until written and mapped, so a prebuild waits while this is high.
     derived_pending: Arc<AtomicUsize>,
-    /// Heap held by queued writes, bounded by `queue_cap`.
+    /// Heap held by queued writes, bounded by [`EngineCache::queue_cap`].
     pending_bytes: Arc<AtomicUsize>,
     /// [`MAX_PENDING_WRITE_BYTES`]; lowered by tests.
     queue_cap: usize,
 }
 
 impl EngineCache {
+    /// Heap the queued writes may hold: [`MAX_PENDING_WRITE_BYTES`], or the
+    /// memory cache's budget when smaller. The budget is this process's share
+    /// of the user's (`--memory-mb`, or split over the registered processes):
+    /// sixteen servers sweeping at once would otherwise each queue 512 MiB
+    /// whatever their caches may hold.
+    fn queue_cap(&self) -> usize {
+        let budget = self.memory.as_ref().map_or(usize::MAX, |m| m.lock().unwrap().capacity_bytes());
+        self.queue_cap.min(budget)
+    }
+
     /// Queue a disk write; falls back to a synchronous write only when no
     /// writer thread can be started. A write that would take the queued heap
-    /// past [`MAX_PENDING_WRITE_BYTES`] is queued without its bytes instead
+    /// past [`EngineCache::queue_cap`] is queued without its bytes instead
     /// ([`WriteJob::defer`]): the query never waits for the disk, the heap
     /// stays bounded, and L1 still ends up complete.
     fn put_async(&self, job: WriteJob) {
         let Some(disk) = &self.disk else { return };
+        // Before the writer lock: never hold it while waiting for the memory cache's.
+        let cap = self.queue_cap();
         let mut writer = self.writer.lock().unwrap();
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
         let pending = self.pending_bytes.load(Ordering::Relaxed);
-        let job = if pending > 0 && pending + job.held_bytes() > self.queue_cap {
+        let job = if pending > 0 && pending + job.held_bytes() > cap {
             match job.defer() {
                 Some(job) => job,
                 None => return,
@@ -1115,6 +1154,16 @@ impl Engine {
         }
     }
 
+    /// Heap this engine holds outside the memory cache, roughly: the class
+    /// graph and the parsed resource table it keeps for later calls. A host
+    /// keeping many engines counts it against its memory budget
+    /// ([`SharedCache::set_reserved`]).
+    pub fn resident_bytes(&self) -> usize {
+        let graph = self.class_graph.lock().unwrap().as_ref().map_or(0, |(_, g)| g.heap_bytes());
+        let table = self.resources.lock().unwrap().as_ref().map_or(0, resources::CachedTable::heap_bytes);
+        graph + table
+    }
+
     /// Bytes currently charged to the in-memory cache: entry bytes plus the
     /// locator tables built for them.
     pub fn memory_cache_bytes(&self) -> usize {
@@ -1245,6 +1294,15 @@ impl Engine {
     /// returns as soon as one worker finds the class; workers still inflating
     /// another entry at that moment finish on their own in the background.
     pub fn get_class_dex(&self, descriptor: &str) -> Result<Option<ClassHit>> {
+        self.get_class_dex_cancellable(descriptor, &NOT_CANCELLED)
+    }
+
+    /// [`Engine::get_class_dex`] that stops, with `ApkError::Cancelled`, once
+    /// `cancel` is raised.
+    pub fn get_class_dex_cancellable(&self, descriptor: &str, cancel: &AtomicBool) -> Result<Option<ClassHit>> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
         let t0 = Instant::now();
         let apk = Arc::new(self.open()?);
         let entries = Arc::new(apk.dex_entries()?);
@@ -1357,7 +1415,16 @@ impl Engine {
         let mut hit = None;
         let mut last_err = None;
         let mut seen = 0usize;
-        for msg in rx {
+        loop {
+            let msg = match rx.recv_timeout(CANCEL_POLL) {
+                Ok(msg) => msg,
+                Err(mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::Relaxed) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(cancelled());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             match msg {
                 Ok(Some(h)) => {
                     hit = Some(h);
@@ -1401,12 +1468,24 @@ impl Engine {
     /// signature is rejected before the APK is read; a class without such a
     /// method is an error. The rebuilt DEX still holds the whole class.
     pub fn get_class_method(&self, descriptor: &str, opts: SmaliOptions, method: Option<&str>) -> Result<ClassSource> {
+        self.get_class_method_cancellable(descriptor, opts, method, &NOT_CANCELLED)
+    }
+
+    /// [`Engine::get_class_method`] that stops looking for the class, with
+    /// `ApkError::Cancelled`, once `cancel` is raised.
+    pub fn get_class_method_cancellable(
+        &self,
+        descriptor: &str,
+        opts: SmaliOptions,
+        method: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Result<ClassSource> {
         if let Some(m) = method {
             asc_smali::normalize_method_signature(m)?;
         }
         let t0 = Instant::now();
         let hit = self
-            .get_class_dex(descriptor)?
+            .get_class_dex_cancellable(descriptor, cancel)?
             .ok_or_else(|| EngineError::ClassNotFound { class: descriptor.to_string(), hint: self.class_not_found_hint(descriptor) })?;
         let scan_us = t0.elapsed().as_micros();
         let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, descriptor, opts, method) {
@@ -1556,7 +1635,7 @@ impl Engine {
         }
         let _query = self.prebuild.query();
         let wanted: HashSet<String> = rows.iter().map(|r| entry_of(&r.dex_name).to_string()).collect();
-        let (views, errors) = self.load_views(Some(&wanted))?;
+        let (views, errors) = self.load_views(Some(&wanted), &NOT_CANCELLED)?;
         let mut errors = errors;
         for v in &views {
             let r = Dex::with_name(&v.data, &v.name).map_err(EngineError::from).and_then(|dex| {
@@ -1574,7 +1653,8 @@ impl Engine {
     /// as logical DEX files in entry order with their locator tables (the
     /// cached ones when the memory cache holds the entry). Entries that fail
     /// to load are reported as `name: error` strings.
-    fn load_views(&self, only: Option<&HashSet<String>>) -> Result<(Vec<DexView>, Vec<String>)> {
+    /// Stops with `ApkError::Cancelled` once `cancel` is raised.
+    fn load_views(&self, only: Option<&HashSet<String>>, cancel: &AtomicBool) -> Result<(Vec<DexView>, Vec<String>)> {
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
         if let Some(only) = only {
@@ -1590,9 +1670,12 @@ impl Engine {
         std::thread::scope(|s| {
             for _ in 0..workers {
                 s.spawn(|| loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
-                    let r = load_entry(&apk, key.as_ref(), entry, cache, &self.stats, None)
+                    let r = load_entry(&apk, key.as_ref(), entry, cache, &self.stats, Some(cancel))
                         .map(|(loaded, _)| match loaded {
                             Loaded::Cached(e) => e
                                 .logical()
@@ -1633,6 +1716,9 @@ impl Engine {
                 });
             }
         });
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
         let mut views = Vec::new();
         let mut errors = Vec::new();
         for slot in slots.into_iter().flatten() {
@@ -2211,6 +2297,18 @@ mod tests {
         for name in &names {
             assert!(cache.disk.as_ref().unwrap().get(&key, name, len).is_some(), "{name} missing from L1");
         }
+    }
+
+    #[test]
+    fn the_write_queue_stays_within_the_memory_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = || Some(DiskCache::open(dir.path().join("cache")));
+        let cap = |engine: &Engine| engine.cache.as_deref().unwrap().queue_cap();
+        assert_eq!(cap(&Engine::new("x.apk").with_cache(CacheConfig { disk: disk(), ..CacheConfig::default() })), MAX_PENDING_WRITE_BYTES);
+        let small = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 64 << 20, disk: disk(), memory_auto: false });
+        assert_eq!(cap(&small), 64 << 20);
+        let large = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 4 << 30, disk: disk(), memory_auto: false });
+        assert_eq!(cap(&large), MAX_PENDING_WRITE_BYTES);
     }
 
     #[test]

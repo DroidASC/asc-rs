@@ -21,7 +21,13 @@
 //!
 //! The socket lives in a directory only the user can enter, and both ends
 //! check the other's uid. A client that disconnects (Ctrl-C) cancels its
-//! search. The daemon exits after [`IDLE_EXIT`] without requests.
+//! command. The daemon exits after [`IDLE_EXIT`] without requests
+//! (`$DROIDASC_DAEMON_IDLE` seconds, as set for the command that started it).
+//!
+//! The class graphs and resource tables of the APKs it keeps open count
+//! against the memory budget of its cache: they take at most
+//! 1/[`POOL_SHARE`] of it, the least recently used APKs closing beyond that,
+//! and the cache keeps the rest for inflated DEX.
 
 use crate::output::{Engines, Io};
 use crate::{run_query, Cli, Common};
@@ -51,6 +57,8 @@ pub(crate) const SWITCH_ENV: &str = "DROIDASC_DAEMON";
 const RUNTIME_DIR_ENV: &str = "DROIDASC_RUNTIME_DIR";
 /// The daemon exits after this long without a request.
 const IDLE_EXIT: Duration = Duration::from_secs(15 * 60);
+/// Seconds overriding [`IDLE_EXIT`].
+const IDLE_ENV: &str = "DROIDASC_DAEMON_IDLE";
 /// How often the daemon checks for idleness.
 const IDLE_POLL: Duration = Duration::from_secs(10);
 /// APKs kept open; the least recently used beyond this is closed. Their
@@ -59,6 +67,11 @@ const MAX_ENGINES: usize = 64;
 /// How long the first command waits for the daemon it starts; then it runs
 /// itself. A daemon binds in a few milliseconds.
 const FIRST_WAIT: Duration = Duration::from_millis(300);
+/// Milliseconds overriding [`FIRST_WAIT`].
+const WAIT_ENV: &str = "DROIDASC_DAEMON_WAIT_MS";
+/// The open APKs' class graphs and resource tables take at most this
+/// fraction (1/n) of the memory budget.
+const POOL_SHARE: usize = 2;
 /// How long `daemon start` waits for a new daemon's socket.
 const START_WAIT: Duration = Duration::from_secs(5);
 /// The smallest `sockaddr_un` path room of the supported systems (macOS).
@@ -82,6 +95,15 @@ const EXIT: u8 = b'X';
 const DECLINE: u8 = b'D';
 /// Daemon to client: status text.
 const STATUS: u8 = b'T';
+
+/// `name` as a whole number of `unit`s, or `default` when unset or not one.
+fn env_duration(name: &str, unit: fn(u64) -> Duration, default: Duration) -> Duration {
+    std::env::var(name).ok().and_then(|v| parse_duration(&v, unit)).unwrap_or(default)
+}
+
+fn parse_duration(text: &str, unit: fn(u64) -> Duration) -> Option<Duration> {
+    text.trim().parse().ok().map(unit)
+}
 
 /// Commands a daemon may run for a client.
 pub(crate) fn forwardable(cli: &Cli) -> bool {
@@ -115,6 +137,7 @@ pub(crate) fn forward(cli: &Cli) -> Option<u8> {
 /// without (another daemon holds the lock, the socket cannot be bound) or
 /// after [`FIRST_WAIT`].
 fn wait_for(sock: &Path, mut child: std::process::Child) -> Option<UnixStream> {
+    let wait = env_duration(WAIT_ENV, Duration::from_millis, FIRST_WAIT);
     let t0 = Instant::now();
     loop {
         if let Some(stream) = connect(sock) {
@@ -123,7 +146,7 @@ fn wait_for(sock: &Path, mut child: std::process::Child) -> Option<UnixStream> {
         if !matches!(child.try_wait(), Ok(None)) {
             return connect(sock);
         }
-        if t0.elapsed() > FIRST_WAIT {
+        if t0.elapsed() > wait {
             return None;
         }
         std::thread::sleep(Duration::from_millis(1));
@@ -521,10 +544,12 @@ fn serve(common: &Common, cwd: &Path, dir: &Path) -> Result<u8, String> {
     });
     {
         let daemon = Arc::clone(&daemon);
+        let idle_exit = env_duration(IDLE_ENV, Duration::from_secs, IDLE_EXIT);
+        let poll = idle_exit.clamp(Duration::from_millis(100), IDLE_POLL);
         std::thread::spawn(move || loop {
-            std::thread::sleep(IDLE_POLL);
+            std::thread::sleep(poll);
             let idle = daemon.last.lock().expect("idle clock mutex poisoned").elapsed();
-            if daemon.active.load(Ordering::SeqCst) == 0 && idle > IDLE_EXIT {
+            if daemon.active.load(Ordering::SeqCst) == 0 && idle >= idle_exit {
                 daemon.shutdown(0);
             }
         });
@@ -570,6 +595,7 @@ impl Daemon {
                 if self.run(stream, &body) {
                     self.served.fetch_add(1, Ordering::Relaxed);
                 }
+                self.trim_pool();
                 *self.last.lock().expect("idle clock mutex poisoned") = Instant::now();
                 self.active.fetch_sub(1, Ordering::SeqCst);
             }
@@ -584,16 +610,39 @@ impl Daemon {
         }
     }
 
+    /// Close the least recently used APKs while the class graphs and resource
+    /// tables of the open ones exceed their share of the memory budget, and
+    /// reserve what stays in the cache's budget.
+    fn trim_pool(&self) {
+        // Sized outside the pool lock: an engine building its class graph
+        // holds the graph's lock until done.
+        let mut open: Vec<_> = {
+            let pool = self.engines.lock().expect("engine pool mutex poisoned");
+            pool.engines.iter().map(|(k, (e, used))| (*used, k.clone(), Arc::clone(e))).collect()
+        };
+        open.sort_unstable_by_key(|(used, ..)| std::cmp::Reverse(*used));
+        let sizes: Vec<usize> = open.iter().map(|(_, _, e)| e.resident_bytes()).collect();
+        let (held, closing) = within_share(&sizes, self.cache.memory_capacity() / POOL_SHARE);
+        if !closing.is_empty() {
+            let mut pool = self.engines.lock().expect("engine pool mutex poisoned");
+            for i in closing {
+                pool.engines.remove(&open[i].1);
+            }
+        }
+        self.cache.set_reserved(held);
+    }
+
     fn status(&self) -> String {
         let open = self.engines.lock().expect("engine pool mutex poisoned").engines.len();
         format!(
-            "pid {}, up {} s, {} requests ({} running), {open} APKs open, memory cache {} of {} MiB, {} ({})\n",
+            "pid {}, up {} s, {} requests ({} running), {open} APKs open, memory cache {} of {} MiB ({} MiB reserved for open APKs), {} ({})\n",
             std::process::id(),
             self.started.elapsed().as_secs(),
             self.served.load(Ordering::Relaxed),
             self.active.load(Ordering::SeqCst),
             self.cache.memory_bytes() >> 20,
             self.cache.memory_capacity() >> 20,
+            self.cache.memory_reserved() >> 20,
             self.id.exe.display(),
             self.id.tag,
         )
@@ -660,6 +709,22 @@ impl Daemon {
         let _ = frames.stream.shutdown(std::net::Shutdown::Both);
         true
     }
+}
+
+/// Of the resident sizes of the open APKs, most recently used first: the
+/// bytes of those that fit in `share` together, and the indexes of the rest
+/// (to close). The most recent one stays whatever its size.
+fn within_share(sizes: &[usize], share: usize) -> (usize, Vec<usize>) {
+    let mut held = 0;
+    let mut closing = Vec::new();
+    for (i, &bytes) in sizes.iter().enumerate() {
+        if i > 0 && bytes > 0 && held + bytes > share {
+            closing.push(i);
+        } else {
+            held += bytes;
+        }
+    }
+    (held, closing)
 }
 
 /// Set `cancel` once the client hangs up (it sends nothing after the request).
@@ -776,6 +841,23 @@ mod tests {
         while !cancel.load(Ordering::Relaxed) {
             assert!(t0.elapsed() < Duration::from_secs(5), "cancel not set after the client hung up");
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn open_apks_beyond_their_share_close_least_recent_first() {
+        assert_eq!(within_share(&[], 10), (0, vec![]));
+        assert_eq!(within_share(&[50], 10), (50, vec![]), "the APK in use stays");
+        assert_eq!(within_share(&[4, 5, 3, 1], 10), (10, vec![2]), "smaller older ones still fit");
+        assert_eq!(within_share(&[4, 0, 0], 0), (4, vec![]), "nothing resident, nothing closed");
+    }
+
+    #[test]
+    fn durations_come_in_whole_units() {
+        assert_eq!(parse_duration(" 90 ", Duration::from_secs), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("0", Duration::from_millis), Some(Duration::ZERO));
+        for bad in ["", "-1", "1.5", "15m"] {
+            assert_eq!(parse_duration(bad, Duration::from_secs), None, "{bad:?}");
         }
     }
 
