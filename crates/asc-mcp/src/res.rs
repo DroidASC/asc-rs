@@ -165,7 +165,12 @@ impl Server {
                 let bytes = std::fs::metadata(&apk.path).map(|m| m.len()).unwrap_or(0);
                 Ok(((), vec![(bytes, ())]))
             },
-            |apk, (), ()| apk.engine.manifest_summary().map_err(|e| e.to_string()),
+            // A sweep reads each table once: let it go rather than keep hundreds resident.
+            |apk, (), ()| {
+                let s = apk.engine.manifest_summary().map_err(|e| e.to_string());
+                apk.engine.release_resources();
+                s
+            },
             |apk, r| {
                 let s = match r.into_iter().next().expect("one unit") {
                     Ok(s) => s,
@@ -263,7 +268,11 @@ impl Server {
                 let bytes = std::fs::metadata(&apk.path).map(|m| m.len()).unwrap_or(0);
                 Ok(((), vec![(bytes, ())]))
             },
-            |apk, (), ()| resource_rows(apk, args, per_apk).map_err(|e| e.0),
+            |apk, (), ()| {
+                let r = resource_rows(apk, args, per_apk).map_err(|e| e.0);
+                apk.engine.release_resources();
+                r
+            },
             |apk, r| {
                 let (rows, total, chain) = match r.into_iter().next().expect("one unit") {
                     Ok(r) => r,

@@ -110,6 +110,12 @@ impl Engine {
         Ok(table)
     }
 
+    /// Forget the parsed resource table (and its name index); the next
+    /// resource query parses it again (about a millisecond even for Douyin).
+    pub fn release_resources(&self) {
+        self.resources.lock().unwrap().take();
+    }
+
     /// Decode a binary XML file of the APK (`res/xml/...`, a layout, the
     /// manifest), naming references and app attributes from the resource table.
     pub fn xml(&self, path: &str) -> Result<String> {
@@ -214,6 +220,52 @@ impl Engine {
         }
         Ok((rows, total))
     }
+}
+
+impl Engine {
+    /// Name the resource ids of `smali`: a `const` (or `.array-data` element)
+    /// whose literal is a resource of this APK gets `# @type/name` appended,
+    /// e.g. `const v0, 0x7f0b001c  # @layout/activity_main`. Unchanged when
+    /// the APK has no (readable) resource table: names are a convenience,
+    /// never a reason for the class itself to fail.
+    pub fn annotate_resource_ids(&self, smali: &str) -> String {
+        match self.resources() {
+            Ok(Some(table)) => annotate(&table, smali),
+            Ok(None) => smali.to_string(),
+            Err(e) => {
+                if self.debug {
+                    self.log(format!("[APK] resources.arsc unreadable, constants left unnamed: {e}"));
+                }
+                smali.to_string()
+            }
+        }
+    }
+}
+
+fn annotate(table: &ResTable, smali: &str) -> String {
+    let mut out = String::with_capacity(smali.len() + smali.len() / 16);
+    for line in smali.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        let t = body.trim_start();
+        let literal = if t.starts_with("const ") || t.starts_with("const/high16 ") {
+            t.rsplit(", ").next()
+        } else if t.starts_with("0x") && !t.contains(' ') {
+            Some(t)
+        } else {
+            None
+        };
+        let id = literal.and_then(|l| l.strip_prefix("0x")).filter(|h| h.len() == 8).and_then(|h| u32::from_str_radix(h, 16).ok());
+        match id.filter(|&id| id >> 24 != 0 && table.contains(id)) {
+            Some(id) => {
+                out.push_str(body);
+                out.push_str("  # @");
+                out.push_str(&table.ref_name(id));
+                out.push_str(&line[body.len()..]);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
 }
 
 /// `0x7f0d0001` / `7f0d0001` / `@0x7f0d0001`.

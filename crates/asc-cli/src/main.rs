@@ -22,6 +22,7 @@ examples:
   droidasc getclass app.apk com.poc.Main --dump-dex Main.dex
   droidasc disassemble app.apk com.poc.Main --debuginfo
   droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
+  droidasc getclass app.apk com.poc.Main --res-names
   droidasc listclass app.apk -o classes.txt
   droidasc listclass app.apk --prefix com.poc
   droidasc getmanifest app.apk -o AndroidManifest.xml
@@ -167,6 +168,9 @@ enum Command {
         /// Render one exact method signature, e.g. run(I)V (no fields).
         #[arg(long = "method", value_name = "SIGNATURE")]
         method_signature: Option<String>,
+        /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
+        #[arg(long)]
+        res_names: bool,
         /// Path to the input APK file.
         apk_path: PathBuf,
         /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
@@ -183,6 +187,9 @@ enum Command {
         /// Render one exact method signature, e.g. run(I)V (no fields).
         #[arg(long = "method", value_name = "SIGNATURE")]
         method_signature: Option<String>,
+        /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
+        #[arg(long)]
+        res_names: bool,
         /// Write the rebuilt single-class DEX to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
@@ -525,6 +532,7 @@ struct ClassArgs {
     debug_info: bool,
     dump_dex: Option<PathBuf>,
     method_signature: Option<String>,
+    res_names: bool,
     apk_path: PathBuf,
     dalvik_class: String,
 }
@@ -533,7 +541,10 @@ fn getclass(common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), St
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = common.engine(&args.apk_path);
     let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
-    let src = engine.get_class_method(&descriptor, opts, args.method_signature.as_deref()).map_err(|e| e.to_string())?;
+    let mut src = engine.get_class_method(&descriptor, opts, args.method_signature.as_deref()).map_err(|e| e.to_string())?;
+    if args.res_names {
+        src.source = engine.annotate_resource_ids(&src.source);
+    }
     if let Some(w) = &src.warning {
         eprintln!("Warning: {w}");
     }
@@ -563,12 +574,14 @@ fn getclass(common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), St
 fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
     let common = cli.common.clone();
     match cli.command {
-        Command::Getclass { output, no_debug_info, dump_dex, method_signature, apk_path, dalvik_class } => {
-            let args = ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, apk_path, dalvik_class };
+        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
+            let args =
+                ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class };
             getclass(&common, args, t_start)?;
         }
-        Command::Disassemble { output, debuginfo, method_signature, dump_dex, apk_path, dalvik_class } => {
-            let args = ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, apk_path, dalvik_class };
+        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, apk_path, dalvik_class } => {
+            let args =
+                ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, res_names, apk_path, dalvik_class };
             getclass(&common, args, t_start)?;
         }
         Command::Listclass { prefix, output, apk_path } => {

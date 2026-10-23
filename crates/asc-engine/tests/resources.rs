@@ -86,6 +86,19 @@ fn resources_query_resolve_search_and_xml() {
 }
 
 #[test]
+fn smali_constants_get_resource_names() {
+    let apk = audit_apk(30, true);
+    let e = Engine::new(apk.path());
+    let smali = "    const v0, 0x7f010000\n    const/high16 v1, 0x7f020000\n    const v2, 0x7f099999\n    const-string v3, \"0x7f010000\"\n    .array-data 4\n        0x7f010000\n    .end array-data\n";
+    let want = "    const v0, 0x7f010000  # @string/app_name\n    const/high16 v1, 0x7f020000  # @bool/exported_flag\n    const v2, 0x7f099999\n    const-string v3, \"0x7f010000\"\n    .array-data 4\n        0x7f010000  # @string/app_name\n    .end array-data\n";
+    assert_eq!(e.annotate_resource_ids(smali), want);
+    // Without a resource table the text is returned as is.
+    let plain = tempfile::Builder::new().suffix(".apk").tempfile().unwrap();
+    std::fs::write(plain.path(), make_apk(&[("classes.dex", &make_dex())], true)).unwrap();
+    assert_eq!(Engine::new(plain.path()).annotate_resource_ids(smali), smali);
+}
+
+#[test]
 fn apk_without_resources_still_summarizes() {
     let (manifest, _) = audit_manifest(30);
     let mut f = tempfile::Builder::new().suffix(".apk").tempfile().unwrap();

@@ -15,7 +15,7 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
           +--------------+               +--------------+            +-----------+
                  │                               │                          │
                  └──────────────► asc-engine ◄───┴──────────────────────────┘
-                                     │              (+ asc-axml for the manifest)
+                                     │     (+ asc-axml, asc-arsc for manifest / resources)
                           ┌──────────┼──────────┐
                        asc-cli ── asc-mcp    asc-gui
 ```
@@ -27,7 +27,7 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
 | `asc_client/apk_handler.py` (EOCD / central directory scan, chunked inflate with stop event, thread pool with early exit, process pool for findrefs, `list_classes`) | `asc-apk` (zip + inflate) and `asc-engine` (`get_class_dex`, `find_refs`, `list_classes` / `scan_classes`) |
 | `asc_client/dex_container.py` (DEX 041 logical DEX split) | `asc_dex::container` |
 | `asc_client/asc_handler.py` (`getclass`, `findrefs` line formatting) | `asc_engine::{decompile_dex_class, find_refs_in_dex, RefResult::line}` |
-| `asc_client/manifest_handler.py` (androguard AXMLPrinter) | `asc-axml` |
+| `asc_client/manifest_handler.py` (androguard AXMLPrinter) | `asc-axml` (plus `asc-arsc` and `asc_engine::manifest_summary`, which have no Python counterpart) |
 | `asc_core/utils/tinydex.py` (lazy DEX model) | `asc_dex::Dex` (every accessor computes from header offsets; nothing is cached) |
 | `asc_core/utils/leb128.py`, `dex_parser.py` (encoded values, debug info, annotations) | `asc_dex::{leb128, encoded, debug_info, annotations}` |
 | `asc_core/models/dvm_opcode.py`, `resource/gen_dvmopcode.py` | `asc_dalvik::table` (generated from the same table) |
@@ -327,6 +327,42 @@ queries → `memchr2` over `const-string` / `const-string/jumbo`; other kinds wh
 share at most three distinct high operand bytes → `memchr{,2,3}` on that byte at
 `opcode + 3`; otherwise a linear sweep with a 256-entry opcode table. All paths produce
 the same unverified candidates, which the instruction locator then confirms.
+
+### Resources and the manifest summary (not in Python)
+
+`asc-arsc` follows AOSP `libs/androidfw` (`ResourceTypes.h`, `LoadedArsc.cpp`) rather than
+a crate: the existing ones parse the whole table into owned structures or only handle the
+default configuration. Parsing walks the chunk headers and records, per package and type,
+where each `ResTable_type` chunk's offset table and entries are; nothing else is decoded
+(Douyin's 12 MB table indexes in under a millisecond, straight from the APK mapping when the
+entry is stored). Names, values and the name index (hashes only, 16 bytes a resource) are
+computed on demand. Details that the format leaves implicit:
+
+* several package chunks can share an id (framework-res keeps flagged resources in extra
+  chunks with their own type and key pools); lookups consult all of them;
+* aapt2 keys array items `ATTR_MIN + i`, aapt `0x02000000 | i`, so bag keys are named by the
+  resource's type (array `[i]`, plurals `one`, attr `^type`, style attrs by name);
+* some obfuscators write CESU-8 (surrogate pairs as two 3-byte sequences); the pool decoder
+  falls back to it before replacing bytes;
+* resolution (`resolve`) picks values as AOSP's `match` / `isBetterThan` would for a request
+  config ([`Config::any_device`]: newest SDK, no locale), follows references with a depth
+  limit and cycle detection, and falls back to the first configuration when none matches.
+
+`bench/arsc-compare/compare.py` diffs `droidasc resources` against `aapt2 dump resources`
+per id: name, configuration set, and every value after normalizing the notations. On the
+312 system APKs of a Pixel 6, Douyin, Kuaishou, Meituan, Pinduoduo, Taobao, Xiaohongshu and
+the 100-APK corpus (1.6 M ids, 10.9 M values) the only differences are aapt2's: it prints a
+negative dimension's mantissa unsigned (`-3dp` as `16777213dp`), a fraction unscaled
+(`0.8%` for 80%), styled-string spans after the text, and folds staged ids into their
+finalized resource; four styled strings that contain `"` before a newline cannot be split
+back out of aapt2's text.
+
+The manifest summary is built from `asc_axml::parse_tree` with references resolved through
+the table. Exported: explicit `android:exported`, else implicit through an intent filter
+below targetSdk 31 (from 31 such a component fails to install, reported as such), else
+providers below targetSdk 17, else not; a referenced boolean that differs between
+configurations lists every variant. The effective cleartext policy comes from the network
+security config's base config, then `usesCleartextTraffic`, then the targetSdk default (28).
 
 ## Testing
 

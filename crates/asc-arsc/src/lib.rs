@@ -21,8 +21,8 @@ pub use format::{bag_key_name, complex_to_float, quote};
 
 use asc_axml::PoolLayout;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 const RES_STRING_POOL_TYPE: u16 = 0x0001;
@@ -380,7 +380,8 @@ pub struct ResTable {
     /// Package index + 1 by package id (0 = none).
     by_id: [u8; 256],
     warnings: Vec<String>,
-    names: OnceLock<HashMap<String, u32>>,
+    /// `(hash of "type/name", id)` sorted by hash, built on the first lookup.
+    names: OnceLock<Vec<(u64, u32)>>,
 }
 
 impl fmt::Debug for ResTable {
@@ -591,10 +592,13 @@ impl ResTable {
         self.resolve(id, &Config::any_device())
     }
 
-    fn name_index(&self) -> &HashMap<String, u32> {
+    /// Name hashes of every resource. Only hashes are kept (16 bytes a
+    /// resource instead of an owned name); a lookup confirms its candidates
+    /// by decoding their names.
+    fn name_index(&self) -> &[(u64, u32)] {
         self.names.get_or_init(|| {
             let data = self.bytes();
-            let mut map = HashMap::new();
+            let mut index = Vec::new();
             for pkg in &self.packages {
                 for t in pkg.type_ids() {
                     let Some(type_name) = self.type_name(pkg, t) else { continue };
@@ -603,13 +607,17 @@ impl ResTable {
                         c.present(data, |i| {
                             if let Some(Ok(raw)) = c.read(data, i) {
                                 let key = pkg.keys.get(data, raw.key).unwrap_or_default();
-                                map.entry(format!("{}:{type_name}/{key}", pkg.name)).or_insert(base | i as u32);
+                                index.push((name_hash(&type_name, &key), base | i as u32));
                             }
                         });
                     }
                 }
             }
-            map
+            // Stable, so equal names keep table order; then one row per id.
+            index.sort_by_key(|&(h, _)| h);
+            index.dedup();
+            index.shrink_to_fit();
+            index
         })
     }
 
@@ -618,11 +626,26 @@ impl ResTable {
     /// table order.
     pub fn lookup(&self, name: &str) -> Option<u32> {
         let name = name.trim_start_matches(['@', '?']);
+        let (package, rest) = match name.split_once(':') {
+            Some((p, r)) => (Some(p), r),
+            None => (None, name),
+        };
+        let (type_name, entry) = rest.split_once('/')?;
         let index = self.name_index();
-        if name.contains(':') {
-            return index.get(name).copied();
-        }
-        self.packages.iter().find_map(|p| index.get(&format!("{}:{name}", p.name)).copied())
+        let h = name_hash(type_name, entry);
+        let start = index.partition_point(|&(x, _)| x < h);
+        let mut found: Vec<u32> = index[start..]
+            .iter()
+            .take_while(|&&(x, _)| x == h)
+            .map(|&(_, id)| id)
+            .filter(|&id| {
+                self.name(id).is_some_and(|n| n.type_name == type_name && n.entry == entry && package.is_none_or(|p| p == n.package))
+            })
+            .collect();
+        // Table order: the first package that defines the name wins.
+        let order = |id: u32| self.packages.iter().position(|p| p.id == (id >> 24) as u8).unwrap_or(usize::MAX);
+        found.sort_by_key(|&id| (order(id), id));
+        found.first().copied()
     }
 
     /// Call `f(id, config, text)` for every string value in the table:
@@ -652,6 +675,14 @@ impl ResTable {
             }
         }
     }
+}
+
+/// Hash of `type/entry` for the name index (stable within a process).
+fn name_hash(type_name: &str, entry: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    type_name.hash(&mut h);
+    entry.hash(&mut h);
+    h.finish()
 }
 
 fn parse_package(data: &[u8], c: Chunk, warnings: &mut Vec<String>) -> Option<Package> {

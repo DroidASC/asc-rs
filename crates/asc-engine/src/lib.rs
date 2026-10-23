@@ -787,9 +787,11 @@ impl Engine {
         self.cache.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
     }
 
-    /// Drop this APK's entries from the in-memory cache (shared or not) and
-    /// return the bytes released; queries still holding them keep them alive.
+    /// Drop this APK's entries from the in-memory cache (shared or not), and
+    /// its parsed resource table, and return the DEX bytes released; queries
+    /// still holding them keep them alive.
     pub fn release_memory_cache(&self) -> usize {
+        self.release_resources();
         let Some(memory) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
         let key = self.key_cache.lock().unwrap().as_ref().map(|(_, _, key)| key.clone());
         let Some(key) = key.or_else(|| self.open().ok().and_then(|apk| self.apk_key(&apk))) else { return 0 };

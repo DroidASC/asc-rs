@@ -615,7 +615,10 @@ impl Server {
         let descriptor = names::format_class_name(class)?;
         let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
         let method = str_arg(args, "method")?;
-        let src = apk.engine.get_class_method(&descriptor, opts, method)?;
+        let mut src = apk.engine.get_class_method(&descriptor, opts, method)?;
+        if bool_arg(args, "resource_names")?.unwrap_or(true) {
+            src.source = apk.engine.annotate_resource_ids(&src.source);
+        }
         let mut text = String::new();
         if let Some(w) = &src.warning {
             // A smali comment, so the text still assembles.
@@ -1230,6 +1233,7 @@ pub mod defs {
                 "class": {"type": "string", "description": "Lcom/poc/Main; or com.poc.Main."},
                 "debug_info": {"type": "boolean", "description": "Emit .line / .param directives (default true)."},
                 "method": {"type": "string", "description": "Only this method, by exact signature: name(params)ret, e.g. onCreate(Landroid/os/Bundle;)V."},
+                "resource_names": {"type": "boolean", "description": "Append `# @type/name` to constants that are resource ids (default true)."},
             })]), "required": ["class"]},
         })
     }
