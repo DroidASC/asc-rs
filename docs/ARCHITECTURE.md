@@ -287,9 +287,15 @@ lazily by the queries themselves):
   reserve free, at the cost of one `statvfs` per entry. `disk_space` returns `None`
   off Unix, where `Auto` means the old 4 GiB. `budget()` reports cap, usage and free
   space for `cache stats`, `tier_stats()` the usage per tier. The engine queues writes
-  to one background thread (writing a 30 MiB entry costs as much as the whole
-  query it came from) and evicts once per burst rather than after every entry;
-  `Engine::flush_cache_writes` / `Drop` wait for the queue. Concurrent queries that need
+  to background writer threads (one per 8 CPUs, at most 4; writing a 30 MiB entry
+  costs as much as the whole query it came from) and evicts once per burst rather than
+  after every entry; `Engine::flush_cache_writes` / `Drop` wait for the queue. Queued
+  jobs keep their DEX bytes or tables alive, so past 512 MiB of them a new L1 write is
+  queued without its bytes and the writer inflates the entry again from the APK (if the
+  APK key still matches and the file is still missing): a cold multi-APK sweep never
+  waits for the disk, its heap stays bounded, and L1 still ends up complete. A new L2
+  job past the bound is released instead (the next query that builds the tables queues
+  them again). Concurrent queries that need
   the same entry share a single inflate, so a burst of GUI requests cannot replace each
   other's locator tables.
 * `MemoryCache<T>`: byte-bounded LRU keyed by `(apk key, entry name)`; the engine stores a

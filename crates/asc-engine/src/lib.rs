@@ -529,11 +529,16 @@ struct WriteJob {
     kind: Job,
 }
 
-/// Heap of queued L1 / L2 writes past which new ones are dropped. A cold
-/// multi-APK sweep inflates far faster than one writer persists, and each
-/// queued job keeps its DEX bytes or tables alive until written; without a
-/// bound the heap grows with the backlog (tens of GB over a phone's APKs).
+/// Heap of queued L1 / L2 writes past which new ones stop holding their
+/// bytes ([`WriteJob::defer`]). A cold multi-APK sweep inflates far faster
+/// than the writers persist, and each queued job keeps its DEX bytes or
+/// tables alive until written; without a bound the heap grows with the
+/// backlog (tens of GB over a phone's APKs).
 const MAX_PENDING_WRITE_BYTES: usize = 512 << 20;
+
+/// Most writer threads per process: writing is I/O, but a deferred L1 write
+/// inflates its entry again first.
+const MAX_WRITERS: usize = 4;
 
 impl WriteJob {
     /// Heap the job keeps alive until written. L3 payloads are small and
@@ -542,8 +547,25 @@ impl WriteJob {
         match &self.kind {
             Job::Dex { data, .. } => data.len(),
             Job::Derived(d) => d.held_bytes(),
-            Job::Rendered { .. } => 0,
+            Job::Rendered { .. } | Job::Reinflate { .. } => 0,
         }
+    }
+
+    /// The job without the bytes it holds, for a full queue. An L1 entry is
+    /// inflated again from the APK when its turn comes, so a cold sweep still
+    /// leaves L1 complete; L2 tables cannot be rebuilt by a writer and are
+    /// released (`None`) for a later query to queue again.
+    fn defer(self) -> Option<WriteJob> {
+        let WriteJob { key, apk, kind } = self;
+        let kind = match kind {
+            Job::Dex { entry, limits, remap, .. } => Job::Reinflate { entry, limits, remap },
+            Job::Derived(d) => {
+                d.abandon();
+                return None;
+            }
+            kind @ (Job::Rendered { .. } | Job::Reinflate { .. }) => kind,
+        };
+        Some(WriteJob { key, apk, kind })
     }
 
     /// Dropped unwritten: an L1 entry is simply written by a later query;
@@ -559,12 +581,17 @@ enum Job {
     /// An inflated entry for L1: the bytes are shared with the query that
     /// produced them, so queueing costs nothing.
     Dex {
-        name: String,
+        entry: Entry,
+        /// The APK's read limits, should the write be deferred.
+        limits: Limits,
         data: DexBytes,
         /// The in-memory cache entry holding `data`, if any: once the file is
         /// in place its heap bytes are swapped for a mapping of that file.
         remap: Option<Weak<CachedEntry>>,
     },
+    /// An L1 write deferred by a full queue: the writer inflates `entry`
+    /// again (if the APK is unchanged and the file still missing).
+    Reinflate { entry: Entry, limits: Limits, remap: Option<Weak<CachedEntry>> },
     /// Locator tables for L2.
     Derived(tiers::DerivedJob),
     /// A query result for L3.
@@ -574,7 +601,7 @@ enum Job {
 struct Writer {
     /// Each job with its [`WriteJob::held_bytes`] when queued.
     tx: mpsc::Sender<(WriteJob, usize)>,
-    handle: std::thread::JoinHandle<()>,
+    handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 type SharedMemory = Arc<Mutex<MemoryCache<CachedEntry>>>;
@@ -595,51 +622,39 @@ struct EngineCache {
     /// L2 writes queued and not yet written: their tables stay on the heap
     /// until written and mapped, so a prebuild waits while this is high.
     derived_pending: Arc<AtomicUsize>,
-    /// Heap held by queued writes, bounded by [`MAX_PENDING_WRITE_BYTES`].
+    /// Heap held by queued writes, bounded by `queue_cap`.
     pending_bytes: Arc<AtomicUsize>,
+    /// [`MAX_PENDING_WRITE_BYTES`]; lowered by tests.
+    queue_cap: usize,
 }
 
 impl EngineCache {
-    /// Queue a disk write; falls back to a synchronous write only when the
-    /// writer thread cannot be started. A write that would take the queued
-    /// heap past [`MAX_PENDING_WRITE_BYTES`] is dropped instead: the cache
-    /// is an optimisation, a later query offers it again.
+    /// Queue a disk write; falls back to a synchronous write only when no
+    /// writer thread can be started. A write that would take the queued heap
+    /// past [`MAX_PENDING_WRITE_BYTES`] is queued without its bytes instead
+    /// ([`WriteJob::defer`]): the query never waits for the disk, the heap
+    /// stays bounded, and L1 still ends up complete.
     fn put_async(&self, job: WriteJob) {
         let Some(disk) = &self.disk else { return };
         let mut writer = self.writer.lock().unwrap();
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
-        let held = job.held_bytes();
         let pending = self.pending_bytes.load(Ordering::Relaxed);
-        if pending > 0 && pending + held > MAX_PENDING_WRITE_BYTES {
-            job.abandon();
-            return;
-        }
+        let job = if pending > 0 && pending + job.held_bytes() > self.queue_cap {
+            match job.defer() {
+                Some(job) => job,
+                None => return,
+            }
+        } else {
+            job
+        };
+        let held = job.held_bytes();
         if writer.is_none() {
-            let (tx, rx) = mpsc::channel::<(WriteJob, usize)>();
-            let thread_disk = Arc::clone(disk);
-            let thread_memory = self.memory.clone();
-            let thread_pending = Arc::clone(&self.derived_pending);
-            let thread_bytes = Arc::clone(&self.pending_bytes);
-            let spawned = std::thread::Builder::new().name("droidasc-cache-writer".into()).spawn(move || {
-                let mut noted = HashSet::new();
-                for (job, held) in rx {
-                    let derived = matches!(job.kind, Job::Derived(_));
-                    run_job(&thread_disk, thread_memory.as_ref(), job, &mut noted);
-                    thread_bytes.fetch_sub(held, Ordering::Relaxed);
-                    if derived {
-                        thread_pending.fetch_sub(1, Ordering::Relaxed);
-                    }
-                    // Throttled by bytes written, so a long burst still keeps
-                    // the directory within budget without a walk per entry.
-                    thread_disk.evict_lazily();
-                }
-            });
-            match spawned {
-                Ok(handle) => *writer = Some(Writer { tx, handle }),
-                Err(_) => {
-                    run_job(disk, self.memory.as_ref(), job, &mut HashSet::new());
+            match self.spawn_writers(disk) {
+                Some(w) => *writer = Some(w),
+                None => {
+                    run_job(disk, self.memory.as_ref(), job, &mut WriterState::default());
                     disk.evict_lazily();
                     return;
                 }
@@ -674,10 +689,46 @@ impl EngineCache {
             }
             writer.take()
         };
-        if let Some(Writer { tx, handle }) = taken {
+        if let Some(Writer { tx, handles }) = taken {
             drop(tx);
-            let _ = handle.join();
+            for handle in handles {
+                let _ = handle.join();
+            }
         }
+    }
+
+    /// Start the writer threads, sharing one queue; `None` when not even one
+    /// can be started.
+    fn spawn_writers(&self, disk: &Arc<DiskCache>) -> Option<Writer> {
+        let (tx, rx) = mpsc::channel::<(WriteJob, usize)>();
+        let rx = Arc::new(Mutex::new(rx));
+        let count = std::thread::available_parallelism().map_or(1, |n| n.get() / 8).clamp(1, MAX_WRITERS);
+        let handles: Vec<_> = (0..count)
+            .map_while(|_| {
+                let (rx, disk, memory) = (Arc::clone(&rx), Arc::clone(disk), self.memory.clone());
+                let (derived_pending, pending_bytes) = (Arc::clone(&self.derived_pending), Arc::clone(&self.pending_bytes));
+                std::thread::Builder::new()
+                    .name("droidasc-cache-writer".into())
+                    .spawn(move || {
+                        let mut state = WriterState::default();
+                        loop {
+                            // Only the receive holds the lock, so the writers run their jobs in parallel.
+                            let Ok((job, held)) = rx.lock().expect("writer queue mutex poisoned").recv() else { break };
+                            let derived = matches!(job.kind, Job::Derived(_));
+                            run_job(&disk, memory.as_ref(), job, &mut state);
+                            pending_bytes.fetch_sub(held, Ordering::Relaxed);
+                            if derived {
+                                derived_pending.fetch_sub(1, Ordering::Relaxed);
+                            }
+                            // Throttled by bytes written, so a long burst still keeps
+                            // the directory within budget without a walk per entry.
+                            disk.evict_lazily();
+                        }
+                    })
+                    .ok()
+            })
+            .collect();
+        (!handles.is_empty()).then_some(Writer { tx, handles })
     }
 
     /// Account for bytes just charged to the memory cache.
@@ -697,17 +748,55 @@ impl EngineCache {
     }
 }
 
-/// Run a queued write on the writer thread. The first write for an APK
-/// also records where it lives (`noted` remembers which were).
-fn run_job(disk: &DiskCache, memory: Option<&SharedMemory>, job: WriteJob, noted: &mut HashSet<ApkKey>) {
+/// What one writer thread keeps between jobs.
+#[derive(Default)]
+struct WriterState {
+    /// APKs whose location the cache already recorded.
+    noted: HashSet<ApkKey>,
+    /// The archive deferred L1 writes last inflated from: a sweep defers
+    /// runs of entries of the same APK.
+    opened: Option<(Arc<Path>, ApkKey, Apk)>,
+}
+
+impl WriterState {
+    /// `path` opened with `limits`, if it is still the archive `key` names.
+    fn apk(&mut self, path: &Arc<Path>, key: &ApkKey, limits: Limits) -> Option<&Apk> {
+        if !matches!(&self.opened, Some((p, k, _)) if p == path && k == key) {
+            self.opened = None;
+            let apk = Apk::open(path).ok()?.with_limits(limits);
+            // Rewritten since the job was queued: its entries are not the ones to store.
+            if ApkKey::for_apk(&apk).ok()? != *key {
+                return None;
+            }
+            self.opened = Some((Arc::clone(path), key.clone(), apk));
+        }
+        self.opened.as_ref().map(|(_, _, apk)| apk)
+    }
+}
+
+/// Run a queued write on a writer thread. The first write for an APK also
+/// records where it lives.
+fn run_job(disk: &DiskCache, memory: Option<&SharedMemory>, job: WriteJob, state: &mut WriterState) {
     let WriteJob { key, apk, kind } = job;
-    if noted.insert(key.clone()) {
+    if state.noted.insert(key.clone()) {
         let _ = disk.note_source(&key, &apk);
     }
     match kind {
-        Job::Dex { name, data, remap } => {
-            if disk.put(&key, &name, &data).is_ok() {
-                remap_entry(disk, memory, key, name, data, remap);
+        Job::Dex { entry, data, remap, .. } => {
+            if disk.put(&key, &entry.name, &data).is_ok() {
+                remap_entry(disk, memory, key, entry.name, data, remap);
+            }
+        }
+        Job::Reinflate { entry, limits, remap } => {
+            // Written meanwhile, by a later query of the entry or another process.
+            if disk.get(&key, &entry.name, entry.uncomp_size).is_some() {
+                return;
+            }
+            let Some(archive) = state.apk(&apk, &key, limits) else { return };
+            let Ok(Cow::Owned(bytes)) = archive.read_entry(&entry) else { return };
+            let data: DexBytes = Arc::new(DexData::Owned(bytes));
+            if disk.put(&key, &entry.name, &data).is_ok() {
+                remap_entry(disk, memory, key, entry.name, data, remap);
             }
         }
         Job::Derived(d) => tiers::write_derived(disk, memory, &key, d),
@@ -997,6 +1086,7 @@ impl Engine {
                 inflight_done: Condvar::new(),
                 derived_pending: Arc::new(AtomicUsize::new(0)),
                 pending_bytes: Arc::new(AtomicUsize::new(0)),
+                queue_cap: MAX_PENDING_WRITE_BYTES,
             };
             // Registers this process and takes its share right away.
             cache.charged();
@@ -1698,7 +1788,7 @@ fn load_entry<'a>(
             let job = WriteJob {
                 key: k.clone(),
                 apk: Arc::from(apk.path()),
-                kind: Job::Dex { name: entry.name.clone(), data: Arc::clone(&e.data), remap },
+                kind: Job::Dex { entry: entry.clone(), limits: apk.limits(), data: Arc::clone(&e.data), remap },
             };
             c.put_async(job);
         }
@@ -2095,6 +2185,69 @@ pub fn decompile_dex_class_method(buf: &[u8], descriptor: &str, opts: SmaliOptio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An APK of `n` deflated copies of the fixture DEX, an L1-only cache
+    /// (admitting entries of any size), and the entry names.
+    fn multi_dex_apk(dir: &Path, n: usize) -> (PathBuf, DiskCache, Vec<String>) {
+        let dex = asc_fixture::make_dex();
+        let names: Vec<String> = (1..=n).map(|i| if i == 1 { "classes.dex".into() } else { format!("classes{i}.dex") }).collect();
+        let entries: Vec<(&str, &[u8])> = names.iter().map(|name| (name.as_str(), dex.as_slice())).collect();
+        let apk = dir.join("multi.apk");
+        std::fs::write(&apk, asc_fixture::make_apk(&entries, true)).unwrap();
+        (apk, l1_cache(&dir.join("cache")), names)
+    }
+
+    fn l1_cache(dir: &Path) -> DiskCache {
+        DiskCache::open(dir).with_capacity(1 << 30).with_min_dex_bytes(0).with_tiers(&[Tier::Dex])
+    }
+
+    #[test]
+    fn a_full_write_queue_defers_l1_writes_instead_of_dropping_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (apk, disk, names) = multi_dex_apk(dir.path(), 8);
+        let mut engine = Engine::new(&apk).with_threads(4).with_cache(CacheConfig { disk: Some(disk), ..CacheConfig::default() });
+        // Room for one entry's bytes: every other write is queued without them.
+        Arc::get_mut(engine.cache.as_mut().unwrap()).unwrap().queue_cap = 1;
+        engine.find_refs(&Query::String("token".into()), |batch| assert!(batch.error.is_none())).unwrap();
+        engine.flush_cache_writes();
+        let cache = engine.cache.as_deref().unwrap();
+        assert_eq!(cache.pending_bytes.load(Ordering::Relaxed), 0);
+        let key = engine.apk_key(&Apk::open(&apk).unwrap()).unwrap();
+        let len = asc_fixture::make_dex().len() as u64;
+        for name in &names {
+            assert!(cache.disk.as_ref().unwrap().get(&key, name, len).is_some(), "{name} missing from L1");
+        }
+    }
+
+    #[test]
+    fn a_deferred_write_inflates_its_entry_again_unless_the_apk_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (apk_path, disk, names) = multi_dex_apk(dir.path(), 2);
+        let apk = Apk::open(&apk_path).unwrap();
+        let key = ApkKey::for_apk(&apk).unwrap();
+        let entries = apk.dex_entries().unwrap();
+        let limits = apk.limits();
+        let job = |entry: &Entry| WriteJob {
+            key: key.clone(),
+            apk: Arc::from(apk_path.as_path()),
+            kind: Job::Dex { entry: entry.clone(), limits, data: Arc::new(DexData::Owned(vec![0; 64])), remap: None },
+        };
+        // Deferring lets go of the bytes; the writer inflates the entry itself.
+        let deferred = job(&entries[0]).defer().unwrap();
+        assert!(matches!(deferred.kind, Job::Reinflate { .. }));
+        assert_eq!(deferred.held_bytes(), 0);
+        run_job(&disk, None, deferred, &mut WriterState::default());
+        let written = disk.get(&key, &entries[0].name, entries[0].uncomp_size).expect("inflated again and written");
+        assert_eq!(&*written, &*apk.read_entry(&entries[0]).unwrap());
+        // Replaced since the job was queued: nothing is written for the old key.
+        drop(apk);
+        let replacement = dir.path().join("replacement.apk");
+        std::fs::write(&replacement, asc_fixture::make_apk(&[(names[0].as_str(), &asc_fixture::make_dex()[..])], false)).unwrap();
+        std::fs::rename(&replacement, &apk_path).unwrap();
+        let other = l1_cache(&dir.path().join("other"));
+        run_job(&other, None, job(&entries[1]).defer().unwrap(), &mut WriterState::default());
+        assert!(other.get(&key, &entries[1].name, entries[1].uncomp_size).is_none());
+    }
 
     #[test]
     fn auto_budget_is_a_clamped_quarter_of_available_memory() {
