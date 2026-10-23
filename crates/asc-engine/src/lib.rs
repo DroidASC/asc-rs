@@ -19,8 +19,10 @@
 //! [`Engine::flush_cache_writes`] waits for them to land and [`Engine::close_cache_writes`]
 //! (run on drop) additionally stops queueing new ones.
 
+mod budget;
 mod callgraph;
 mod classes;
+pub mod config;
 mod hierarchy;
 pub mod hints;
 mod manifest;
@@ -53,6 +55,7 @@ pub use asc_arsc;
 pub use asc_cache;
 pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
+pub use budget::{available_memory, total_memory, Device, MemoryPolicy};
 pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
@@ -61,7 +64,7 @@ pub use prebuild::PrebuildReport;
 pub use resources::{parse_id, ResourceField, ResourceRow};
 pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
-pub use tiers::{auto_memory_share, auto_threads, auto_threads_for, Busy};
+pub use tiers::{auto_threads, auto_threads_for, Busy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -265,7 +268,6 @@ pub struct RefSummary {
 }
 
 /// Cache configuration for an [`Engine`].
-#[derive(Default)]
 pub struct CacheConfig {
     /// In-memory LRU capacity for inflated entries (0 disables it).
     pub memory_bytes: usize,
@@ -273,11 +275,25 @@ pub struct CacheConfig {
     pub disk: Option<DiskCache>,
     /// Treat `memory_bytes` as a starting point and keep resizing the LRU to
     /// this process's share of one budget for every resident host the user
-    /// runs ([`auto_memory_share`]), instead of a fixed capacity.
-    pub memory_auto: bool,
+    /// runs ([`MemoryPolicy::share`]), instead of a fixed capacity.
+    pub memory_auto: Option<MemoryPolicy>,
+    /// Heap queued disk writes may hold before new ones are deferred
+    /// ([`WriteJob::defer`]); a memory cache's budget lowers it further.
+    pub write_queue_bytes: usize,
+    /// Disk writer threads (`None`: [`CacheConfig::auto_writers`]).
+    pub writers: Option<usize>,
 }
 
 impl CacheConfig {
+    /// Default of [`CacheConfig::write_queue_bytes`]. A cold multi-APK sweep
+    /// inflates far faster than the writers persist, and each queued job
+    /// keeps its DEX bytes or tables alive until written; without a bound the
+    /// heap grows with the backlog (tens of GB over a phone's APKs).
+    pub const WRITE_QUEUE: usize = 512 << 20;
+    /// Most automatic writer threads: writing is I/O, but a deferred L1
+    /// write inflates its entry again first.
+    pub const MAX_AUTO_WRITERS: usize = 4;
+
     /// Disk cache in the default directory, no in-memory cache (CLI default).
     pub fn disk_default() -> CacheConfig {
         CacheConfig { disk: DiskCache::open_default(), ..CacheConfig::default() }
@@ -285,65 +301,19 @@ impl CacheConfig {
 
     /// Disk cache plus an in-memory LRU of a fixed capacity.
     pub fn resident(memory_bytes: usize) -> CacheConfig {
-        CacheConfig { memory_bytes, disk: DiskCache::open_default(), memory_auto: false }
+        CacheConfig { memory_bytes, disk: DiskCache::open_default(), ..CacheConfig::default() }
+    }
+
+    /// One writer per 8 CPUs, 1..=[`CacheConfig::MAX_AUTO_WRITERS`].
+    pub fn auto_writers(cpus: usize) -> usize {
+        (cpus / 8).clamp(1, CacheConfig::MAX_AUTO_WRITERS)
     }
 }
 
-/// Upper bound of [`auto_memory_bytes`].
-pub const AUTO_MEMORY_MAX: usize = 2 << 30;
-/// Lower bound of [`auto_memory_bytes`]: below this the LRU would thrash on
-/// every query (it always keeps at least one entry anyway).
-pub const AUTO_MEMORY_MIN: usize = 64 << 20;
-
-/// In-memory cache budget for this machine: a quarter of the memory
-/// currently available, clamped to [`AUTO_MEMORY_MIN`]..=[`AUTO_MEMORY_MAX`];
-/// [`AUTO_MEMORY_MAX`] when the available memory cannot be determined.
-pub fn auto_memory_bytes() -> usize {
-    auto_memory_bytes_for(available_memory())
-}
-
-/// [`auto_memory_bytes`] for a given amount of available memory.
-pub fn auto_memory_bytes_for(available: Option<u64>) -> usize {
-    match available {
-        Some(a) => usize::try_from(a / 4).unwrap_or(usize::MAX).clamp(AUTO_MEMORY_MIN, AUTO_MEMORY_MAX),
-        None => AUTO_MEMORY_MAX,
+impl Default for CacheConfig {
+    fn default() -> CacheConfig {
+        CacheConfig { memory_bytes: 0, disk: None, memory_auto: None, write_queue_bytes: CacheConfig::WRITE_QUEUE, writers: None }
     }
-}
-
-/// Bytes of memory available to this process: `MemAvailable`, lowered to
-/// the headroom left under a cgroup v2 `memory.max` when one applies.
-/// `None` where neither can be read (non-Linux systems).
-pub fn available_memory() -> Option<u64> {
-    let system = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| meminfo_available(&t));
-    let cgroup = cgroup_headroom();
-    match (system, cgroup) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
-}
-
-/// `MemAvailable` from `/proc/meminfo` text, in bytes.
-fn meminfo_available(meminfo: &str) -> Option<u64> {
-    let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
-    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    kb.checked_mul(1024)
-}
-
-/// `memory.max - memory.current` of this process's cgroup v2, if limited.
-fn cgroup_headroom() -> Option<u64> {
-    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
-    let rel = cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
-    let dir = Path::new("/sys/fs/cgroup").join(rel.trim_start_matches('/'));
-    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
-    cgroup_headroom_from(&read("memory.max")?, &read("memory.current")?)
-}
-
-/// Headroom from the text of `memory.max` (`max` when unlimited) and
-/// `memory.current`.
-fn cgroup_headroom_from(max: &str, current: &str) -> Option<u64> {
-    let max: u64 = max.trim().parse().ok()?;
-    let current: u64 = current.trim().parse().ok()?;
-    Some(max.saturating_sub(current))
 }
 
 /// A cache several [`Engine`]s share, so a process serving many APKs keeps
@@ -537,18 +507,6 @@ struct WriteJob {
     kind: Job,
 }
 
-/// Heap of queued L1 / L2 writes past which new ones stop holding their
-/// bytes ([`WriteJob::defer`]). A cold multi-APK sweep inflates far faster
-/// than the writers persist, and each queued job keeps its DEX bytes or
-/// tables alive until written; without a bound the heap grows with the
-/// backlog (tens of GB over a phone's APKs). A memory cache's budget lowers
-/// it further ([`EngineCache::queue_cap`]).
-const MAX_PENDING_WRITE_BYTES: usize = 512 << 20;
-
-/// Most writer threads per process: writing is I/O, but a deferred L1 write
-/// inflates its entry again first.
-const MAX_WRITERS: usize = 4;
-
 /// How often a call waiting on its workers checks for cancellation.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
 
@@ -644,12 +602,14 @@ struct EngineCache {
     derived_pending: Arc<AtomicUsize>,
     /// Heap held by queued writes, bounded by [`EngineCache::queue_cap`].
     pending_bytes: Arc<AtomicUsize>,
-    /// [`MAX_PENDING_WRITE_BYTES`]; lowered by tests.
+    /// [`CacheConfig::write_queue_bytes`].
     queue_cap: usize,
+    /// [`CacheConfig::writers`].
+    writers: Option<usize>,
 }
 
 impl EngineCache {
-    /// Heap the queued writes may hold: [`MAX_PENDING_WRITE_BYTES`], or the
+    /// Heap the queued writes may hold: [`CacheConfig::write_queue_bytes`], or the
     /// memory cache's budget when smaller. The budget is this process's share
     /// of the user's (`--memory-mb`, or split over the registered processes):
     /// sixteen servers sweeping at once would otherwise each queue 512 MiB
@@ -734,7 +694,7 @@ impl EngineCache {
     fn spawn_writers(&self, disk: &Arc<DiskCache>) -> Option<Writer> {
         let (tx, rx) = mpsc::channel::<(WriteJob, usize)>();
         let rx = Arc::new(Mutex::new(rx));
-        let count = std::thread::available_parallelism().map_or(1, |n| n.get() / 8).clamp(1, MAX_WRITERS);
+        let count = self.writers.unwrap_or_else(|| CacheConfig::auto_writers(tiers::cpus())).max(1);
         let handles: Vec<_> = (0..count)
             .map_while(|_| {
                 let (rx, disk, memory) = (Arc::clone(&rx), Arc::clone(disk), self.memory.clone());
@@ -1145,7 +1105,8 @@ impl Engine {
                 inflight_done: Condvar::new(),
                 derived_pending: Arc::new(AtomicUsize::new(0)),
                 pending_bytes: Arc::new(AtomicUsize::new(0)),
-                queue_cap: MAX_PENDING_WRITE_BYTES,
+                queue_cap: config.write_queue_bytes,
+                writers: config.writers,
             };
             // Registers this process and takes its share right away.
             cache.charged();
@@ -2330,11 +2291,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let disk = || Some(DiskCache::open(dir.path().join("cache")));
         let cap = |engine: &Engine| engine.cache.as_deref().unwrap().queue_cap();
-        assert_eq!(cap(&Engine::new("x.apk").with_cache(CacheConfig { disk: disk(), ..CacheConfig::default() })), MAX_PENDING_WRITE_BYTES);
-        let small = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 64 << 20, disk: disk(), memory_auto: false });
+        assert_eq!(cap(&Engine::new("x.apk").with_cache(CacheConfig { disk: disk(), ..CacheConfig::default() })), CacheConfig::WRITE_QUEUE);
+        let small = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 64 << 20, disk: disk(), ..CacheConfig::default() });
         assert_eq!(cap(&small), 64 << 20);
-        let large = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 4 << 30, disk: disk(), memory_auto: false });
-        assert_eq!(cap(&large), MAX_PENDING_WRITE_BYTES);
+        let large = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 4 << 30, disk: disk(), ..CacheConfig::default() });
+        assert_eq!(cap(&large), CacheConfig::WRITE_QUEUE);
+        let set = Engine::new("x.apk").with_cache(CacheConfig {
+            memory_bytes: 4 << 30,
+            disk: disk(),
+            write_queue_bytes: 1 << 20,
+            ..CacheConfig::default()
+        });
+        assert_eq!(cap(&set), 1 << 20);
+        assert_eq!((CacheConfig::auto_writers(4), CacheConfig::auto_writers(16), CacheConfig::auto_writers(64)), (1, 2, 4));
     }
 
     #[test]
@@ -2365,30 +2334,5 @@ mod tests {
         let other = l1_cache(&dir.path().join("other"));
         run_job(&other, None, job(&entries[1]).defer().unwrap(), &mut WriterState::default());
         assert!(other.get(&key, &entries[1].name, entries[1].uncomp_size).is_none());
-    }
-
-    #[test]
-    fn auto_budget_is_a_clamped_quarter_of_available_memory() {
-        assert_eq!(auto_memory_bytes_for(None), AUTO_MEMORY_MAX);
-        assert_eq!(auto_memory_bytes_for(Some(4 << 30)), 1 << 30);
-        assert_eq!(auto_memory_bytes_for(Some(8 << 30)), AUTO_MEMORY_MAX);
-        assert_eq!(auto_memory_bytes_for(Some(64 << 30)), AUTO_MEMORY_MAX);
-        assert_eq!(auto_memory_bytes_for(Some((8 << 30) - 4)), (2 << 30) - 1);
-        assert_eq!(auto_memory_bytes_for(Some(100 << 20)), AUTO_MEMORY_MIN);
-        assert_eq!(auto_memory_bytes_for(Some(0)), AUTO_MEMORY_MIN);
-        assert_eq!(auto_memory_bytes_for(Some(u64::MAX)), AUTO_MEMORY_MAX);
-        let auto = auto_memory_bytes();
-        assert!((AUTO_MEMORY_MIN..=AUTO_MEMORY_MAX).contains(&auto));
-    }
-
-    #[test]
-    fn meminfo_and_cgroup_parsing() {
-        let meminfo = "MemTotal:       12000000 kB\nMemFree:          500000 kB\nMemAvailable:    8000000 kB\n";
-        assert_eq!(meminfo_available(meminfo), Some(8_000_000 * 1024));
-        assert_eq!(meminfo_available("MemTotal: 1 kB\n"), None);
-        assert_eq!(meminfo_available("MemAvailable: lots kB\n"), None);
-        assert_eq!(cgroup_headroom_from("max\n", "123\n"), None);
-        assert_eq!(cgroup_headroom_from("1000\n", "300\n"), Some(700));
-        assert_eq!(cgroup_headroom_from("1000\n", "3000\n"), Some(0));
     }
 }

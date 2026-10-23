@@ -26,7 +26,7 @@
 //!   separate [`DiskCache::evict`] step so a host can batch it (writing a
 //!   30 MiB entry and walking the whole cache directory after every one of
 //!   them is what a query must never wait on). The budget follows the free
-//!   space of the file system by default ([`auto_disk_bytes_for`]).
+//!   space of the file system by default ([`AutoDisk`]).
 //!
 //!   Writes are never synced: everything here can be rebuilt, and a sync
 //!   per file costs more than the query that wrote it (macOS flushes the
@@ -187,7 +187,7 @@ pub enum Tier {
 impl Tier {
     pub const ALL: [Tier; 3] = [Tier::Dex, Tier::Derived, Tier::Rendered];
 
-    /// Name in [`TIERS_ENV`].
+    /// Name in a tier list (`dex,derived,rendered`).
     pub fn name(self) -> &'static str {
         match self {
             Tier::Dex => "dex",
@@ -225,15 +225,9 @@ pub const DERIVED_BUDGET_DIVISOR: u64 = 2;
 /// Inflated DEX entries smaller than this are not written to L1 by default:
 /// re-inflating them costs less than writing (and later evicting) them.
 pub const DEFAULT_MIN_DEX_BYTES: u64 = 4 << 20;
-/// Environment variable overriding [`DEFAULT_MIN_DEX_BYTES`], in MiB.
-pub const MIN_DEX_ENV: &str = "DROIDASC_CACHE_MIN_DEX_MB";
 /// Derived indexes that took less than this to build are not written to L2
 /// by default: mapping and checking a file would save next to nothing.
 pub const DEFAULT_MIN_DERIVED_COST: Duration = Duration::from_millis(2);
-
-/// Environment variable naming the tiers to use (`dex,derived,rendered`, the
-/// default: all of them), e.g. to measure one tier on its own.
-pub const TIERS_ENV: &str = "DROIDASC_CACHE_TIERS";
 
 /// Header of an L2 file; the payload follows at [`DERIVED_HEADER`], so it is
 /// as aligned as the mapping (page-aligned) up to that.
@@ -294,23 +288,24 @@ struct Item {
 /// How a [`DiskCache`] is bounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskCapacity {
-    /// Follow the free space of the cache's file system ([`auto_disk_bytes_for`]).
-    Auto,
+    /// Follow the free space of the cache's file system.
+    Auto(AutoDisk),
     /// A fixed number of bytes.
     Fixed(u64),
 }
 
-/// Upper bound of the automatic disk budget. Large enough for the inflated
-/// DEX of a phone's worth of APKs (416 system and store APKs: 8.6 GB).
-pub const AUTO_DISK_MAX: u64 = 32 << 30;
+impl Default for DiskCapacity {
+    fn default() -> DiskCapacity {
+        DiskCapacity::Auto(AutoDisk::default())
+    }
+}
+
 /// The automatic disk budget where the free space cannot be read.
 pub const AUTO_DISK_UNKNOWN: u64 = 4 << 30;
 /// Smallest free space the automatic budget leaves on the file system; the
 /// reserve is the larger of this and [`AUTO_DISK_RESERVE_PERCENT`] of it.
 pub const AUTO_DISK_RESERVE_MIN: u64 = 1 << 30;
 pub const AUTO_DISK_RESERVE_PERCENT: u64 = 5;
-/// Share of (free space + the cache's own bytes) the automatic budget takes.
-pub const AUTO_DISK_PERCENT: u64 = 20;
 
 /// Free space the automatic budget never writes into on a file system of
 /// `total` bytes.
@@ -318,21 +313,43 @@ pub fn auto_disk_reserve(total: u64) -> u64 {
     AUTO_DISK_RESERVE_MIN.max(total / 100 * AUTO_DISK_RESERVE_PERCENT)
 }
 
-/// The automatic disk budget for a cache holding `used` bytes on a file
-/// system with `(free, total)` bytes (`None`: unknown, e.g. on Windows,
-/// giving [`AUTO_DISK_UNKNOWN`]).
-///
-/// [`AUTO_DISK_PERCENT`] of what the cache could occupy (its own bytes plus
-/// the free space), at most [`AUTO_DISK_MAX`], and never more than leaves
-/// [`auto_disk_reserve`] free. When the disk is already below the reserve,
-/// that last bound falls under `used`, so eviction gives the shortfall back.
-/// (No separate floor: with a reserve of at least 1 GiB, the reserve is
-/// always the tighter bound on a disk too small for 20 % to reach 256 MiB.)
-pub fn auto_disk_bytes_for(space: Option<(u64, u64)>, used: u64) -> u64 {
-    let Some((free, total)) = space else { return AUTO_DISK_UNKNOWN };
-    let room = used.saturating_add(free);
-    let budget = (room / 100 * AUTO_DISK_PERCENT).min(AUTO_DISK_MAX);
-    budget.min(room.saturating_sub(auto_disk_reserve(total)))
+/// The automatic disk budget: a share of what the cache could occupy (its
+/// own bytes plus the free space), at most a ceiling, and never more than
+/// leaves [`auto_disk_reserve`] free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoDisk {
+    /// Share of (free space + the cache's own bytes), in percent.
+    pub percent: u8,
+    /// Upper bound, in bytes.
+    pub ceiling: u64,
+}
+
+impl AutoDisk {
+    /// Default share of the room.
+    pub const PERCENT: u8 = 20;
+    /// Default ceiling: large enough for the inflated DEX of a phone's worth
+    /// of APKs (416 system and store APKs: 8.6 GB).
+    pub const CEILING: u64 = 32 << 30;
+
+    /// The budget for a cache holding `used` bytes on a file system with
+    /// `(free, total)` bytes (`None`: unknown, e.g. on Windows, giving
+    /// [`AUTO_DISK_UNKNOWN`]). When the disk is already below the reserve,
+    /// the last bound falls under `used`, so eviction gives the shortfall
+    /// back. (No separate floor: with a reserve of at least 1 GiB, the
+    /// reserve is always the tighter bound on a disk too small for 20 % to
+    /// reach 256 MiB.)
+    pub fn bytes_for(&self, space: Option<(u64, u64)>, used: u64) -> u64 {
+        let Some((free, total)) = space else { return AUTO_DISK_UNKNOWN.min(self.ceiling) };
+        let room = used.saturating_add(free);
+        let budget = (room / 100 * u64::from(self.percent)).min(self.ceiling);
+        budget.min(room.saturating_sub(auto_disk_reserve(total)))
+    }
+}
+
+impl Default for AutoDisk {
+    fn default() -> AutoDisk {
+        AutoDisk { percent: AutoDisk::PERCENT, ceiling: AutoDisk::CEILING }
+    }
 }
 
 /// `(free, total)` bytes of the file system holding `path` (or its nearest
@@ -367,26 +384,6 @@ fn fs_space(path: &Path) -> Option<(u64, u64)> {
 #[cfg(not(unix))]
 fn fs_space(_path: &Path) -> Option<(u64, u64)> {
     None
-}
-
-/// Environment variable fixing the disk budget, in MiB (default: automatic).
-pub const CACHE_MAX_ENV: &str = "DROIDASC_CACHE_MAX_MB";
-
-impl DiskCapacity {
-    /// [`DiskCapacity::Fixed`] from [`CACHE_MAX_ENV`] when it holds a number,
-    /// [`DiskCapacity::Auto`] otherwise.
-    pub fn from_env() -> DiskCapacity {
-        DiskCapacity::from_mib(std::env::var(CACHE_MAX_ENV).ok().as_deref())
-    }
-
-    /// [`DiskCapacity::Fixed`] for a MiB count, [`DiskCapacity::Auto`] for
-    /// `None` or anything that is not one.
-    pub fn from_mib(value: Option<&str>) -> DiskCapacity {
-        match value.and_then(|v| v.trim().parse::<u64>().ok()) {
-            Some(mb) => DiskCapacity::Fixed(mb.saturating_mul(1 << 20)),
-            None => DiskCapacity::Auto,
-        }
-    }
 }
 
 /// What [`DiskCache::budget`] reports.
@@ -429,38 +426,25 @@ fn is_cache_dir_name(name: &str) -> bool {
 }
 
 impl DiskCache {
-    /// Capacity of [`DiskCapacity::Auto`] when the free space is unknown.
-    pub const DEFAULT_CAP: u64 = AUTO_DISK_UNKNOWN;
-
-    /// The default cache directory: `$DROIDASC_CACHE_DIR`, else
-    /// `$XDG_CACHE_HOME/droidasc`, else `~/.cache/droidasc`.
+    /// The default cache directory: `$XDG_CACHE_HOME/droidasc`, else
+    /// `~/.cache/droidasc`.
     pub fn default_dir() -> Option<PathBuf> {
-        if let Some(d) = std::env::var_os("DROIDASC_CACHE_DIR") {
-            return Some(PathBuf::from(d));
-        }
         if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
             return Some(PathBuf::from(d).join("droidasc"));
         }
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("droidasc"))
     }
 
-    /// A cache in `dir` bounded by [`DiskCapacity::from_env`] (automatic
-    /// unless [`CACHE_MAX_ENV`] is set).
+    /// A cache in `dir` with the default policy: automatic capacity, every
+    /// tier, [`DEFAULT_MIN_DEX_BYTES`]. Hosts apply the user's configuration
+    /// with the `with_*` methods.
     pub fn open(dir: impl Into<PathBuf>) -> DiskCache {
-        let min_dex_bytes = match std::env::var(MIN_DEX_ENV).ok().and_then(|v| v.trim().parse::<u64>().ok()) {
-            Some(mb) => mb.saturating_mul(1 << 20),
-            None => DEFAULT_MIN_DEX_BYTES,
-        };
-        let tiers = match std::env::var(TIERS_ENV) {
-            Ok(v) => Tier::ALL.map(|t| v.split(',').any(|n| n.trim() == t.name())),
-            Err(_) => [true; 3],
-        };
         DiskCache {
             dir: dir.into(),
-            cap: DiskCapacity::from_env(),
-            min_dex_bytes,
+            cap: DiskCapacity::default(),
+            min_dex_bytes: DEFAULT_MIN_DEX_BYTES,
             min_derived_cost: DEFAULT_MIN_DERIVED_COST,
-            tiers,
+            tiers: [true; 3],
             written: Default::default(),
             boot: boot_time(),
         }
@@ -484,7 +468,7 @@ impl DiskCache {
     }
 
     /// Smallest inflated entry worth writing to L1 ([`DEFAULT_MIN_DEX_BYTES`]
-    /// unless [`MIN_DEX_ENV`] says otherwise). [`DiskCache::put`] itself
+    /// unless configured otherwise). [`DiskCache::put`] itself
     /// writes whatever it is given; hosts ask [`DiskCache::admits_dex`] first.
     pub fn min_dex_bytes(&self) -> u64 {
         self.min_dex_bytes
@@ -535,7 +519,7 @@ impl DiskCache {
     pub fn capacity_for(&self, used: u64) -> u64 {
         match self.cap {
             DiskCapacity::Fixed(b) => b,
-            DiskCapacity::Auto => auto_disk_bytes_for(disk_space(&self.dir), used),
+            DiskCapacity::Auto(auto) => auto.bytes_for(disk_space(&self.dir), used),
         }
     }
 
@@ -545,7 +529,7 @@ impl DiskCache {
         let space = disk_space(&self.dir);
         let cap_bytes = match self.cap {
             DiskCapacity::Fixed(b) => b,
-            DiskCapacity::Auto => auto_disk_bytes_for(space, used),
+            DiskCapacity::Auto(auto) => auto.bytes_for(space, used),
         };
         DiskBudget { capacity: self.cap, cap_bytes, used, space }
     }
@@ -744,7 +728,7 @@ impl DiskCache {
         // One statvfs per write: with the automatic budget, never write into
         // the reserve the file system needs (another program may have filled
         // the disk since the last eviction).
-        if self.cap == DiskCapacity::Auto {
+        if matches!(self.cap, DiskCapacity::Auto(_)) {
             if let Some((free, total)) = disk_space(&self.dir) {
                 if free.saturating_sub(len) < auto_disk_reserve(total) {
                     return Err(CacheError::LowDiskSpace { path: self.dir.clone(), bytes: len });
@@ -1432,51 +1416,53 @@ mod tests {
     #[test]
     fn auto_disk_budget_follows_free_space() {
         // Unknown file system (Windows): the old fixed cap.
-        assert_eq!(auto_disk_bytes_for(None, 0), AUTO_DISK_UNKNOWN);
+        assert_eq!(AutoDisk::default().bytes_for(None, 0), AUTO_DISK_UNKNOWN);
         // Large disk: capped at 32 GiB.
-        assert_eq!(auto_disk_bytes_for(Some((500 * GIB, 1000 * GIB)), 0), AUTO_DISK_MAX);
+        assert_eq!(AutoDisk::default().bytes_for(Some((500 * GIB, 1000 * GIB)), 0), AutoDisk::CEILING);
+        // A lower share and ceiling.
+        let tight = AutoDisk { percent: 10, ceiling: 5 * GIB };
+        assert_eq!(tight.bytes_for(Some((100 * GIB, 500 * GIB)), 0), 5 * GIB);
+        assert_eq!(tight.bytes_for(Some((20 * GIB, 50 * GIB)), 0), 20 * GIB / 100 * 10);
+        assert_eq!(tight.bytes_for(None, 0), 4 * GIB);
         // 100 GiB free: 20 GiB, past the old 4 GiB cap.
-        assert_eq!(auto_disk_bytes_for(Some((100 * GIB, 500 * GIB)), 0), 100 * GIB / 100 * 20);
+        assert_eq!(AutoDisk::default().bytes_for(Some((100 * GIB, 500 * GIB)), 0), 100 * GIB / 100 * 20);
         // Small disk: 20 % of free + own bytes.
-        assert_eq!(auto_disk_bytes_for(Some((10 * GIB, 20 * GIB)), 0), 10 * GIB / 100 * 20);
-        assert_eq!(auto_disk_bytes_for(Some((9 * GIB, 20 * GIB)), GIB), 10 * GIB / 100 * 20);
+        assert_eq!(AutoDisk::default().bytes_for(Some((10 * GIB, 20 * GIB)), 0), 10 * GIB / 100 * 20);
+        assert_eq!(AutoDisk::default().bytes_for(Some((9 * GIB, 20 * GIB)), GIB), 10 * GIB / 100 * 20);
         // Never eats into the reserve (1 GiB here).
-        assert_eq!(auto_disk_bytes_for(Some((GIB + 100 * MIB, 16 * GIB)), 0), 100 * MIB);
-        assert_eq!(auto_disk_bytes_for(Some((GIB, 16 * GIB)), 0), 0);
+        assert_eq!(AutoDisk::default().bytes_for(Some((GIB + 100 * MIB, 16 * GIB)), 0), 100 * MIB);
+        assert_eq!(AutoDisk::default().bytes_for(Some((GIB, 16 * GIB)), 0), 0);
     }
 
     #[test]
     fn auto_disk_budget_shrinks_below_usage_on_a_nearly_full_disk() {
         // 100 GiB disk: 5 GiB reserve. 6 GiB cached, 0.5 GiB free: 20 % of
         // the 6.5 GiB the cache could hold, well below what it holds now.
-        assert_eq!(auto_disk_bytes_for(Some((GIB / 2, 100 * GIB)), 6 * GIB), (6 * GIB + GIB / 2) / 100 * 20);
+        assert_eq!(AutoDisk::default().bytes_for(Some((GIB / 2, 100 * GIB)), 6 * GIB), (6 * GIB + GIB / 2) / 100 * 20);
         // 5.5 GiB cached, 0.5 GiB free: the reserve binds (1 GiB < 20 % of
         // 6 GiB), giving back the 4.5 GiB shortfall.
-        assert_eq!(auto_disk_bytes_for(Some((GIB / 2, 100 * GIB)), 5 * GIB + GIB / 2), GIB);
+        assert_eq!(AutoDisk::default().bytes_for(Some((GIB / 2, 100 * GIB)), 5 * GIB + GIB / 2), GIB);
         // Nothing left to give: evict everything.
-        assert_eq!(auto_disk_bytes_for(Some((GIB / 2, 100 * GIB)), 3 * GIB), 0);
+        assert_eq!(AutoDisk::default().bytes_for(Some((GIB / 2, 100 * GIB)), 3 * GIB), 0);
         assert_eq!(auto_disk_reserve(100 * GIB), 5 * GIB);
         assert_eq!(auto_disk_reserve(4 * GIB), GIB);
     }
 
     #[test]
     fn explicit_disk_capacity_wins() {
-        assert_eq!(DiskCapacity::from_mib(Some(" 512 ")), DiskCapacity::Fixed(512 * MIB));
-        assert_eq!(DiskCapacity::from_mib(Some("lots")), DiskCapacity::Auto);
-        assert_eq!(DiskCapacity::from_mib(None), DiskCapacity::Auto);
         let dir = tempfile::tempdir().unwrap();
-        let cache = DiskCache::open(dir.path()).with_capacity_mode(DiskCapacity::Auto).with_capacity(7);
+        let cache = DiskCache::open(dir.path()).with_capacity_mode(DiskCapacity::default()).with_capacity(7);
         assert_eq!(cache.capacity_mode(), DiskCapacity::Fixed(7));
         assert_eq!(cache.capacity_for(1 << 40), 7);
         let b = cache.budget();
         assert_eq!((b.capacity, b.cap_bytes, b.used), (DiskCapacity::Fixed(7), 7, 0));
         // The file system of a real directory is known on Unix.
         assert_eq!(b.space.is_some(), cfg!(unix));
-        let auto = DiskCache::open(dir.path()).with_capacity_mode(DiskCapacity::Auto);
+        let auto = DiskCache::open(dir.path()).with_capacity_mode(DiskCapacity::default());
         // Compare against the space the budget itself measured: other tests write to the
         // same file system concurrently, so a second `disk_space` call may differ.
         let ab = auto.budget();
-        assert_eq!(ab.cap_bytes, auto_disk_bytes_for(ab.space, ab.used));
+        assert_eq!(ab.cap_bytes, AutoDisk::default().bytes_for(ab.space, ab.used));
         // A directory that does not exist yet is measured on its parent.
         assert_eq!(disk_space(&dir.path().join("a/b")).is_some(), cfg!(unix));
     }
@@ -1943,9 +1929,7 @@ mod tests {
     fn small_dex_entries_are_not_admitted_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path());
-        if std::env::var_os(MIN_DEX_ENV).is_none() {
-            assert_eq!(cache.min_dex_bytes(), DEFAULT_MIN_DEX_BYTES);
-        }
+        assert_eq!(cache.min_dex_bytes(), DEFAULT_MIN_DEX_BYTES);
         let cache = cache.with_min_dex_bytes(100);
         assert!(!cache.admits_dex(99));
         assert!(cache.admits_dex(100));

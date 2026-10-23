@@ -42,6 +42,7 @@ impl Env {
     fn run(&self, daemon: bool, args: &[&str]) -> Output {
         let mut cmd = Command::new(&self.exe);
         cmd.current_dir(self.work.path())
+            .env("DROIDASC_CONFIG", "")
             .env("DROIDASC_RUNTIME_DIR", self.runtime.path())
             .env("DROIDASC_CACHE_MAX_MB", "256")
             .env_remove("DROIDASC_DAEMON")
@@ -218,6 +219,7 @@ fn idle_and_wait_times_come_from_the_environment() {
     // No wait: the first command runs itself while the daemon starts.
     let mut cmd = Command::new(&env.exe);
     cmd.current_dir(env.work.path())
+        .env("DROIDASC_CONFIG", "")
         .env("DROIDASC_RUNTIME_DIR", env.runtime.path())
         .env("DROIDASC_CACHE_MAX_MB", "256")
         .env("DROIDASC_DAEMON_WAIT_MS", "0")

@@ -3,9 +3,11 @@
 #[cfg(unix)]
 mod daemon;
 mod output;
+mod settings;
 
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
-use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
+use asc_engine::config::Config;
+use asc_engine::{names, CacheConfig, CallQuery, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use output::{Io, LocalEngines, SpillTarget, Window};
@@ -16,18 +18,19 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 const EXAMPLES: &str = "global options (accepted by every command, after it too):
-  --threads N         worker threads (default: the logical CPUs; once more than 4 of this
-                      user's processes are busy, 4 per CPU split between them and the other
-                      busy mcp / daemon processes, at least 2)
-  --no-cache          do not read or write the on-disk cache of inflated DEX files
-  --cache-dir DIR     cache directory (default: $DROIDASC_CACHE_DIR, $XDG_CACHE_HOME/droidasc
-                      or ~/.cache/droidasc)
-  --cache-max-mb MIB  on-disk cache budget (default: $DROIDASC_CACHE_MAX_MB, else automatic:
-                      20% of the cache's file system room, at most 32768, never below a
-                      1 GiB / 5% free-space reserve)
-  --memory-mb MIB     in-memory cache budget of mcp and the daemon (default: a quarter of
-                      available memory, at most 2048); one-shot processes keep none
+  --set KEY=VALUE     any setting of `droidasc config` (repeatable), e.g. --set memory.max=4G
+  --threads N         = --set threads=N
+  --no-cache          = --set cache.enabled=off
+  --cache-dir DIR     = --set cache.dir=DIR
+  --cache-max-mb MIB  = --set cache.max=MIB
+  --memory-mb MIB     = --set memory.max=MIB (mcp and the daemon; one-shot commands keep none)
   --debug             timing and cache statistics on stderr
+
+settings:
+  Threads, memory and disk cache budgets are settings: a flag beats $DROIDASC_<KEY>, which
+  beats ~/.config/droidasc/config.toml ($DROIDASC_CONFIG), which beats the default; the
+  automatic defaults follow this machine. `droidasc config` lists them with their values
+  and sources (--json for scripts).
 
 common:
   Class names accept both com.poc.Main and Lcom/poc/Main;.
@@ -104,27 +107,24 @@ struct Common {
     /// Enable debug profiling output (written to stderr).
     #[arg(long, global = true, hide = true)]
     debug: bool,
-    /// Worker thread count (default: the logical CPUs; once more than 4 of
-    /// this user's processes are busy, 4 per CPU split between them and the
-    /// other busy `mcp` / daemon processes, at least 2. Resident hosts follow
-    /// them as they start and stop).
+    /// Set any setting of `droidasc config` (repeatable).
+    #[arg(long = "set", global = true, value_name = "KEY=VALUE", hide = true)]
+    set: Vec<String>,
+    /// Worker thread count (`--set threads=N`).
     #[arg(long, alias = "thread", global = true, value_name = "N", hide = true)]
     threads: Option<usize>,
-    /// Do not read or write the on-disk cache of inflated DEX files.
+    /// Do not read or write the on-disk cache (`--set cache.enabled=off`).
     #[arg(long, global = true, hide = true)]
     no_cache: bool,
-    /// Cache directory (default: $DROIDASC_CACHE_DIR, $XDG_CACHE_HOME/droidasc or ~/.cache/droidasc).
+    /// Cache directory (`--set cache.dir=DIR`).
     #[arg(long, global = true, value_name = "DIR", hide = true)]
     cache_dir: Option<PathBuf>,
-    /// On-disk cache budget, in MiB (default: $DROIDASC_CACHE_MAX_MB, else
-    /// automatic: 20% of the cache's file system room, at most 32768, never
-    /// below a 1 GiB / 5% free-space reserve).
+    /// On-disk cache budget, in MiB (`--set cache.max=MIB`).
     #[arg(long, global = true, value_name = "MIB", hide = true)]
     cache_max_mb: Option<u64>,
-    /// In-memory cache budget of `mcp` and the daemon, in MiB (default: a quarter
-    /// of available memory, at most 2048). One-shot commands keep no memory cache.
+    /// In-memory cache budget of `mcp` and the daemon, in MiB (`--set memory.max=MIB`).
     #[arg(long, global = true, value_name = "MIB", hide = true)]
-    memory_mb: Option<usize>,
+    memory_mb: Option<u64>,
     /// Show at most N records on stdout (results, rows, classes, smali
     /// lines); the whole output goes to a file named on the last line
     /// (default: $DROIDASC_LIMIT, else no limit).
@@ -138,31 +138,69 @@ struct Common {
     #[arg(long, global = true, value_name = "N", default_value_t = 0, help_heading = "Output")]
     offset: usize,
     /// Disk budget of the directory cut outputs (and `mcp` replies over their
-    /// budget) are written to, `out/` in the cache directory; 0 writes none.
-    #[arg(long, global = true, value_name = "MIB", default_value_t = 64, help_heading = "Output")]
-    spill_mb: u64,
+    /// budget) are written to, `out/` in the cache directory; 0 writes none
+    /// (`--set cache.spill=MIB`, default 64).
+    #[arg(long, global = true, value_name = "MIB", help_heading = "Output")]
+    spill_mb: Option<u64>,
+    /// The settings these flags, the environment and the config file make
+    /// ([`Common::resolve`]).
+    #[arg(skip)]
+    config: Option<Config>,
 }
 
 impl Common {
+    /// Read the settings: the flags above, then the environment and the
+    /// config file. Every command needs them; `main` calls this first.
+    fn resolve(&mut self) -> Result<(), String> {
+        let mut flags: Vec<(String, String)> = Vec::new();
+        let mut flag = |key: &str, value: String| flags.push((key.into(), value));
+        if let Some(n) = self.threads {
+            flag("threads", n.to_string());
+        }
+        if self.no_cache {
+            flag("cache.enabled", "off".into());
+        }
+        if let Some(d) = &self.cache_dir {
+            // Absolute, so a daemon started from here (in `/`) uses the same one.
+            let d = std::env::current_dir().map(|cwd| cwd.join(d)).unwrap_or_else(|_| d.clone());
+            flag("cache.dir", d.display().to_string());
+        }
+        if let Some(mb) = self.cache_max_mb {
+            flag("cache.max", mb.to_string());
+        }
+        if let Some(mb) = self.memory_mb {
+            flag("memory.max", mb.to_string());
+        }
+        if let Some(mb) = self.spill_mb {
+            flag("cache.spill", mb.to_string());
+        }
+        for pair in &self.set {
+            let Some((key, value)) = pair.split_once('=') else {
+                return Err(format!("--set {pair:?}: expected KEY=VALUE, e.g. --set memory.max=4G (keys: droidasc config)"));
+            };
+            flag(key.trim(), value.trim().to_string());
+        }
+        self.config = Some(Config::load(&flags).map_err(|e| format!("{e} (droidasc config lists the settings)"))?);
+        Ok(())
+    }
+
+    fn config(&self) -> &Config {
+        self.config.as_ref().expect("Common::resolve runs before any command")
+    }
+
     /// The engine every subcommand uses: shared flags, disk cache unless
     /// disabled, and log lines on stderr so stdout stays clean for redirection.
     fn engine(&self, apk_path: &Path) -> Engine {
-        let mut engine = Engine::new(apk_path).with_debug(self.debug).with_threads(self.threads).with_logger(|m| eprintln!("{m}"));
-        if !self.no_cache {
-            engine = engine.with_cache(CacheConfig { disk: self.disk_cache(), ..CacheConfig::default() });
+        let config = self.config();
+        let mut engine = Engine::new(apk_path).with_debug(self.debug).with_threads(config.threads()).with_logger(|m| eprintln!("{m}"));
+        if config.cache_enabled.value {
+            engine = engine.with_cache(config.one_shot_cache());
         }
         engine
     }
 
     fn disk_cache(&self) -> Option<DiskCache> {
-        let cache = match &self.cache_dir {
-            Some(d) => DiskCache::open(d),
-            None => DiskCache::open_default()?,
-        };
-        Some(match self.cache_max_mb {
-            Some(mb) => cache.with_capacity(mb.saturating_mul(1 << 20)),
-            None => cache,
-        })
+        self.config().disk_cache()
     }
 
     /// `--offset` / `--limit` / `--max-bytes`, the last two defaulting to
@@ -180,22 +218,15 @@ impl Common {
     /// Where a cut output is written: `out/` in the cache directory (else a
     /// per-user runtime directory); `None` with `--spill-mb 0`.
     fn spill(&self) -> Option<SpillTarget> {
-        let cache_dir = if self.no_cache { None } else { self.disk_cache().map(|c| c.dir().to_path_buf()) };
-        (self.spill_mb > 0).then(|| SpillTarget {
-            dir: asc_mcp::output::SpillDir::default_dir(cache_dir.as_deref()),
-            bytes: self.spill_mb.saturating_mul(1 << 20),
-        })
+        let config = self.config();
+        let bytes = config.cache_spill.value.0;
+        (bytes > 0).then(|| SpillTarget { dir: asc_mcp::output::SpillDir::default_dir(config.cache_dir().as_deref()), bytes })
     }
 
-    /// Cache of the resident hosts (`mcp`, the daemon): the memory budget plus
-    /// the disk cache unless disabled.
+    /// Cache of the resident hosts (`mcp`, the daemon): the memory budget
+    /// (following this machine unless fixed) plus the disk cache.
     fn resident_cache(&self) -> CacheConfig {
-        CacheConfig {
-            memory_bytes: self.memory_mb.map_or_else(asc_engine::auto_memory_bytes, |mb| mb.saturating_mul(1 << 20)),
-            disk: if self.no_cache { None } else { self.disk_cache() },
-            // Without an explicit budget, share one with the user's other resident hosts.
-            memory_auto: self.memory_mb.is_none(),
-        }
+        self.config().resident_cache(&Device::probe())
     }
 }
 
@@ -434,6 +465,14 @@ enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// The settings of threads, memory and the disk cache: values, sources and what `auto` is on this machine.
+    Config {
+        #[command(subcommand)]
+        action: Option<settings::ConfigAction>,
+        /// One JSON object (for scripts and agents).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Command {
@@ -451,7 +490,7 @@ impl Command {
             | Command::Findrefs { apk_path, .. }
             | Command::Callgraph { apk_path, .. }
             | Command::Hierarchy { apk_path, .. } => Some(apk_path),
-            Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => None,
+            Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } => None,
         }
     }
 }
@@ -1027,7 +1066,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 return Ok(EXIT_PARTIAL);
             }
         }
-        Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => {
+        Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } => {
             unreachable!("run handles the resident and maintenance commands")
         }
     }
@@ -1038,8 +1077,8 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
     let common = cli.common;
     match cli.command {
         Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes, structured } => {
-            let spill_mb = common.spill_mb;
-            let mut opts = asc_mcp::Options::new(common.threads, common.debug, common.resident_cache());
+            let spill_bytes = common.config().cache_spill.value.0;
+            let mut opts = asc_mcp::Options::new(common.config().fixed_threads(), common.debug, common.resident_cache());
             opts.limits.max_entry_bytes = max_entry_mb.saturating_mul(1 << 20);
             opts.limits.max_ratio = max_ratio;
             if let Some(p) = sdk_prefixes {
@@ -1049,10 +1088,10 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
                 StructuredArg::Compact => asc_mcp::output::Structured::Compact,
                 StructuredArg::Full => asc_mcp::output::Structured::Full,
             };
-            if spill_mb == 0 {
+            if spill_bytes == 0 {
                 opts.spill_dir = None;
             }
-            opts.spill_bytes = spill_mb.saturating_mul(1 << 20);
+            opts.spill_bytes = spill_bytes;
             asc_mcp::serve(std::io::stdin().lock(), std::io::stdout(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {
@@ -1067,7 +1106,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
                     }
                     let budget = cache.budget();
                     let source = match budget.capacity {
-                        DiskCapacity::Auto => "auto",
+                        DiskCapacity::Auto(_) => "auto",
                         DiskCapacity::Fixed(_) => "explicit",
                     };
                     println!("budget: {} ({source}), used {}", mib(budget.cap_bytes), mib(budget.used));
@@ -1083,6 +1122,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
             }
         }
         Command::Daemon { action } => return daemon_command(&common, action),
+        Command::Config { action, json } => return settings::print(common.config(), action.as_ref(), json),
         command => {
             // Not locked: engine threads log to stderr themselves (`--debug`).
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -1113,13 +1153,17 @@ fn main() -> ExitCode {
     let parsed = Cli::try_parse();
     // clap exits 2 on usage errors, which would collide with `EXIT_PARTIAL`;
     // usage errors are ordinary errors (1), help/version are not errors (0).
-    let cli = match parsed {
+    let mut cli = match parsed {
         Ok(cli) => cli,
         Err(e) => {
             let _ = e.print();
             return if e.use_stderr() { ExitCode::from(1) } else { ExitCode::SUCCESS };
         }
     };
+    if let Err(e) = cli.common.resolve() {
+        eprintln!("Error: {e}");
+        return ExitCode::from(1);
+    }
     #[cfg(unix)]
     if let Some(code) = daemon::forward(&cli) {
         return ExitCode::from(code);

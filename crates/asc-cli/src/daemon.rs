@@ -21,8 +21,8 @@
 //!
 //! The socket lives in a directory only the user can enter, and both ends
 //! check the other's uid. A client that disconnects (Ctrl-C) cancels its
-//! command. The daemon exits after [`IDLE_EXIT`] without requests
-//! (`$DROIDASC_DAEMON_IDLE` seconds, as set for the command that started it).
+//! command. The daemon exits after `daemon.idle` without requests (as
+//! configured for the command that started it).
 //!
 //! The class graphs and resource tables of the APKs it keeps open count
 //! against the memory budget of its cache, the least recently used APKs
@@ -54,20 +54,11 @@ pub(crate) const SWITCH_ENV: &str = "DROIDASC_DAEMON";
 /// Directory of the sockets (and of the process registry); as for
 /// [`asc_engine::asc_cache::ProcessRegistry::default_dir`].
 const RUNTIME_DIR_ENV: &str = "DROIDASC_RUNTIME_DIR";
-/// The daemon exits after this long without a request.
-const IDLE_EXIT: Duration = Duration::from_secs(15 * 60);
-/// Seconds overriding [`IDLE_EXIT`].
-const IDLE_ENV: &str = "DROIDASC_DAEMON_IDLE";
 /// How often the daemon checks for idleness.
 const IDLE_POLL: Duration = Duration::from_secs(10);
 /// APKs kept open; the least recently used beyond this is closed. Their
 /// inflated DEX stays in the shared memory cache, under its own budget.
 const MAX_ENGINES: usize = 64;
-/// How long the first command waits for the daemon it starts; then it runs
-/// itself. A daemon binds in a few milliseconds.
-const FIRST_WAIT: Duration = Duration::from_millis(300);
-/// Milliseconds overriding [`FIRST_WAIT`].
-const WAIT_ENV: &str = "DROIDASC_DAEMON_WAIT_MS";
 /// How long `daemon start` waits for a new daemon's socket.
 const START_WAIT: Duration = Duration::from_secs(5);
 /// The smallest `sockaddr_un` path room of the supported systems (macOS).
@@ -92,18 +83,9 @@ const DECLINE: u8 = b'D';
 /// Daemon to client: status text.
 const STATUS: u8 = b'T';
 
-/// `name` as a whole number of `unit`s, or `default` when unset or not one.
-fn env_duration(name: &str, unit: fn(u64) -> Duration, default: Duration) -> Duration {
-    std::env::var(name).ok().and_then(|v| parse_duration(&v, unit)).unwrap_or(default)
-}
-
-fn parse_duration(text: &str, unit: fn(u64) -> Duration) -> Option<Duration> {
-    text.trim().parse().ok().map(unit)
-}
-
 /// Commands a daemon may run for a client.
 pub(crate) fn forwardable(cli: &Cli) -> bool {
-    !cli.common.debug && !cli.common.no_cache && cli.command.apk_path().is_some()
+    !cli.common.debug && cli.common.config().cache_enabled.value && cli.command.apk_path().is_some()
 }
 
 /// Run the command in the daemon if one is up (starting one otherwise):
@@ -113,13 +95,14 @@ pub(crate) fn forward(cli: &Cli) -> Option<u8> {
         return None;
     }
     let cwd = std::env::current_dir().ok()?;
-    let id = Identity::of(&cli.common, &cwd)?;
+    let id = Identity::of(&cli.common)?;
     let dir = socket_dir()?;
     let sock = dir.join(id.socket_name());
     // Without a daemon, start one and hand it this command too: a cold query
     // answers sooner there (cache writes land after the reply, not before
     // the process exits) and leaves the APK warm for the next one.
-    let stream = connect(&sock).or_else(|| spawn(&cli.common, &cwd).ok().and_then(|child| wait_for(&sock, child)))?;
+    let wait = cli.common.config().daemon_wait.value.0;
+    let stream = connect(&sock).or_else(|| spawn(&cli.common).ok().and_then(|child| wait_for(&sock, child, wait)))?;
     let mut req = Vec::new();
     put(&mut req, id.tag.as_bytes());
     put(&mut req, cwd.as_os_str().as_bytes());
@@ -131,9 +114,8 @@ pub(crate) fn forward(cli: &Cli) -> Option<u8> {
 
 /// Connect to the socket a just spawned daemon binds: `None` once it exits
 /// without (another daemon holds the lock, the socket cannot be bound) or
-/// after [`FIRST_WAIT`].
-fn wait_for(sock: &Path, mut child: std::process::Child) -> Option<UnixStream> {
-    let wait = env_duration(WAIT_ENV, Duration::from_millis, FIRST_WAIT);
+/// after `wait` (`daemon.wait`; a daemon binds in a few milliseconds).
+fn wait_for(sock: &Path, mut child: std::process::Child, wait: Duration) -> Option<UnixStream> {
     let t0 = Instant::now();
     loop {
         if let Some(stream) = connect(sock) {
@@ -152,15 +134,14 @@ fn wait_for(sock: &Path, mut child: std::process::Child) -> Option<UnixStream> {
 /// `droidasc daemon <action>`.
 pub(crate) fn command(common: &Common, action: &crate::DaemonAction) -> Result<u8, String> {
     use crate::DaemonAction;
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let dir = socket_dir().ok_or("no private runtime directory for the daemon socket")?;
     match action {
-        DaemonAction::Serve => serve(common, &cwd, &dir),
+        DaemonAction::Serve => serve(common, &dir),
         DaemonAction::Start => {
-            let id = Identity::of(common, &cwd).ok_or("cannot identify this executable")?;
+            let id = Identity::of(common).ok_or("cannot identify this executable")?;
             let sock = dir.join(id.socket_name());
             if connect(&sock).is_none() {
-                let _child = spawn(common, &cwd).map_err(|e| format!("cannot start the daemon: {e}"))?;
+                let _child = spawn(common).map_err(|e| format!("cannot start the daemon: {e}"))?;
                 let t0 = Instant::now();
                 while connect(&sock).is_none() {
                     if t0.elapsed() > START_WAIT {
@@ -215,7 +196,7 @@ struct Identity {
 }
 
 impl Identity {
-    fn of(common: &Common, cwd: &Path) -> Option<Identity> {
+    fn of(common: &Common) -> Option<Identity> {
         let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
         let meta = fs::metadata(&exe).ok()?;
         let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
@@ -223,16 +204,26 @@ impl Identity {
         build.write(env!("CARGO_PKG_VERSION").as_bytes());
         build.write(&meta.len().to_le_bytes());
         build.write(&mtime.to_le_bytes());
+        // Every setting but the daemon's own timings, from whichever layer
+        // (flags, environment, config file), and the variables a command
+        // reads besides (`$DROIDASC_LIMIT`, ...): the daemon runs commands with
+        // the environment it was started with.
         let mut config = Fnv::default();
-        match &common.cache_dir {
-            Some(d) => config.write(cwd.join(d).as_os_str().as_bytes()),
-            None => config.write(b"\0default"),
+        for (key, value, _, _) in common.config().entries() {
+            if !key.name.starts_with("daemon.") {
+                config.write(key.name.as_bytes());
+                config.write(b"=");
+                config.write(value.as_bytes());
+                config.write(b"\0");
+            }
         }
-        config.write(&common.cache_max_mb.unwrap_or(u64::MAX).to_le_bytes());
         let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
             .filter(|(k, _)| {
                 let k = k.as_bytes();
-                (k.starts_with(b"DROIDASC_") && !k.starts_with(SWITCH_ENV.as_bytes())) || k == b"XDG_CACHE_HOME" || k == b"HOME"
+                (k.starts_with(b"DROIDASC_") && !k.starts_with(SWITCH_ENV.as_bytes()))
+                    || k == b"XDG_CACHE_HOME"
+                    || k == b"XDG_CONFIG_HOME"
+                    || k == b"HOME"
             })
             .collect();
         vars.sort();
@@ -361,19 +352,14 @@ fn status_of(sock: &Path) -> Option<String> {
 }
 
 /// Start `droidasc daemon serve` for `common`'s configuration, detached
-/// from this process and its terminal.
-fn spawn(common: &Common, cwd: &Path) -> io::Result<std::process::Child> {
+/// from this process and its terminal. It inherits the environment (and
+/// reads the same config file); the settings given as flags are handed on.
+fn spawn(common: &Common) -> io::Result<std::process::Child> {
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["daemon", "serve"]);
-    if let Some(d) = &common.cache_dir {
-        cmd.arg("--cache-dir").arg(cwd.join(d));
-    }
-    if let Some(mb) = common.cache_max_mb {
-        cmd.arg("--cache-max-mb").arg(mb.to_string());
-    }
-    if let Some(mb) = common.memory_mb {
-        cmd.arg("--memory-mb").arg(mb.to_string());
+    for (key, value) in common.config().flag_pairs() {
+        cmd.arg("--set").arg(format!("{key}={value}"));
     }
     cmd.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
@@ -490,7 +476,7 @@ impl Engines for Daemon {
         let mut pool = self.engines.lock().expect("engine pool mutex poisoned");
         pool.tick += 1;
         let tick = pool.tick;
-        let key = (path, common.threads);
+        let key = (path, common.config().fixed_threads());
         if let Some((engine, used)) = pool.engines.get_mut(&key) {
             *used = tick;
             return Arc::clone(engine);
@@ -503,15 +489,16 @@ impl Engines for Daemon {
         }
         // As `Common::engine`, but on the shared resident cache; its debug
         // output is off (`--debug` is never forwarded).
-        let engine = Arc::new(Engine::new(&key.0).with_threads(common.threads).with_logger(|_| {}).with_shared_cache(&self.cache));
+        let engine =
+            Arc::new(Engine::new(&key.0).with_threads(common.config().threads()).with_logger(|_| {}).with_shared_cache(&self.cache));
         pool.engines.insert(key, (Arc::clone(&engine), tick));
         engine
     }
 }
 
 /// `droidasc daemon serve`: bind the socket and answer until idle.
-fn serve(common: &Common, cwd: &Path, dir: &Path) -> Result<u8, String> {
-    let id = Identity::of(common, cwd).ok_or("cannot identify this executable")?;
+fn serve(common: &Common, dir: &Path) -> Result<u8, String> {
+    let id = Identity::of(common).ok_or("cannot identify this executable")?;
     // One daemon per identity: the lock is held for the daemon's lifetime.
     let lock_path = dir.join(format!("{}.lock", id.tag));
     let lock = File::create(&lock_path).map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
@@ -540,7 +527,7 @@ fn serve(common: &Common, cwd: &Path, dir: &Path) -> Result<u8, String> {
     });
     {
         let daemon = Arc::clone(&daemon);
-        let idle_exit = env_duration(IDLE_ENV, Duration::from_secs, IDLE_EXIT);
+        let idle_exit = common.config().daemon_idle.value.0;
         let poll = idle_exit.clamp(Duration::from_millis(100), IDLE_POLL);
         std::thread::spawn(move || loop {
             std::thread::sleep(poll);
@@ -671,7 +658,11 @@ impl Daemon {
         }
         let cwd = PathBuf::from(OsStr::from_bytes(cwd));
         let argv: Vec<OsString> = argv.iter().map(|a| OsString::from_vec(a.to_vec())).collect();
-        let Ok(cli) = Cli::try_parse_from(&argv) else { return decline(&stream, "arguments") };
+        let Ok(mut cli) = Cli::try_parse_from(&argv) else { return decline(&stream, "arguments") };
+        // The client resolved the same settings (same identity) before sending.
+        if cli.common.resolve().is_err() {
+            return decline(&stream, "settings");
+        }
         if !forwardable(&cli) {
             return decline(&stream, "not forwardable");
         }
@@ -821,15 +812,6 @@ mod tests {
         while !cancel.load(Ordering::Relaxed) {
             assert!(t0.elapsed() < Duration::from_secs(5), "cancel not set after the client hung up");
             std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    #[test]
-    fn durations_come_in_whole_units() {
-        assert_eq!(parse_duration(" 90 ", Duration::from_secs), Some(Duration::from_secs(90)));
-        assert_eq!(parse_duration("0", Duration::from_millis), Some(Duration::ZERO));
-        for bad in ["", "-1", "1.5", "15m"] {
-            assert_eq!(parse_duration(bad, Duration::from_secs), None, "{bad:?}");
         }
     }
 
