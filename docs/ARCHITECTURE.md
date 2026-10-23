@@ -203,7 +203,9 @@ be abandoned mid-way, so a worker that is already inflating finishes in the back
 the zlib-rs fallback path polls the flag every 512 KiB). `find_refs` uses scoped threads
 and an mpsc channel and hands out the largest entries first (every entry must be searched,
 so the longest inflate should start immediately); batches reach the caller in completion
-order, exactly like the Python process pool. `scan_classes` (behind MCP `listclass` and the
+order, exactly like the Python process pool; the CLI (`DexOrder`) holds each entry's batches
+until the earlier entries are complete, so it prints in DEX order (`classes.dex`,
+`classes2.dex`, ..., then other names) and still streams. `scan_classes` (behind MCP `listclass` and the
 multi-APK class counts) also runs largest first, but puts each entry's classes back in its
 central-directory slot, so the listing is in DEX order like the Python `list_classes`.
 `list_classes` fails on the first unreadable entry or bad `class_def`; `scan_classes` keeps
@@ -443,6 +445,14 @@ cache entries evicted as soon as its last unit finishes, so a sweep's resident s
 one LRU's worth. Each APK becomes a `Section` of pre-rendered lines; the `Report` is kept
 (last 16 per session) and paged by whole sections up to `max_bytes`, `cursor` naming
 report and section. New multi-APK tools add a `TOOLS` entry and call `sweep` + `report`.
+
+The CLI's one-shot commands use the same `SpillDir` through their own window
+(`asc-cli/src/output.rs`): `--offset` / `--limit` / `--max-bytes` (or `$DROIDASC_LIMIT` /
+`$DROIDASC_MAX_BYTES`) select which records of a `LineSink` reach stdout, `comment` lines
+(`#` headers, totals, tree footers) always do, and once a record is left out the sink keeps
+the whole output and, at `finish`, writes it to the spill directory (or names the `-o`
+file) on a last `#` line with the `--offset` of the next records. With none of the options
+the sink writes exactly what it did before, unbuffered.
 
 Every reply passes through `output::fit` on its way out, after the tool and before the
 `structuredContent` is trimmed (`Structured::Compact`, the `droidasc mcp` default, drops

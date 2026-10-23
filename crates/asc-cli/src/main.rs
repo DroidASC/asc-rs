@@ -8,16 +8,33 @@ use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use output::{Io, LocalEngines};
+use output::{Io, LocalEngines, SpillTarget, Window};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-const EXAMPLES: &str = "common:
+const EXAMPLES: &str = "global options (accepted by every command, after it too):
+  --threads N         worker threads (default: the logical CPUs; once more than 4 of this
+                      user's processes are busy, 4 per CPU split between them and the other
+                      busy mcp / daemon processes, at least 2)
+  --no-cache          do not read or write the on-disk cache of inflated DEX files
+  --cache-dir DIR     cache directory (default: $DROIDASC_CACHE_DIR, $XDG_CACHE_HOME/droidasc
+                      or ~/.cache/droidasc)
+  --cache-max-mb MIB  on-disk cache budget (default: $DROIDASC_CACHE_MAX_MB, else automatic:
+                      20% of the cache's file system room, at most 32768, never below a
+                      1 GiB / 5% free-space reserve)
+  --memory-mb MIB     in-memory cache budget of mcp and the daemon (default: a quarter of
+                      available memory, at most 2048); one-shot processes keep none
+  --debug             timing and cache statistics on stderr
+
+common:
   Class names accept both com.poc.Main and Lcom/poc/Main;.
   Commands with -o/--output write to stdout when the option is omitted.
-  --threads N controls parallel APK scanning; --debug enables timing output.
+  Output is one record per line, columns separated by ` | `; lines starting with `#`
+  are headers, totals and hints. --limit / --max-bytes keep stdout short: the whole
+  output then goes to a file the last line names, and --offset shows the next records.
 
 examples:
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
@@ -65,6 +82,8 @@ On Unix, commands answer through a per-user daemon that keeps APKs resident (sam
 DROIDASC_DAEMON=off runs each command in its own process.";
 
 const EXIT_OK: u8 = 0;
+/// `resources --search` rows printed without --limit / --max-bytes.
+const RESOURCE_SEARCH_ROWS: usize = 1000;
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
 
@@ -83,29 +102,45 @@ struct Cli {
 #[derive(Args, Clone)]
 struct Common {
     /// Enable debug profiling output (written to stderr).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     debug: bool,
     /// Worker thread count (default: the logical CPUs; once more than 4 of
     /// this user's processes are busy, 4 per CPU split between them and the
     /// other busy `mcp` / daemon processes, at least 2. Resident hosts follow
     /// them as they start and stop).
-    #[arg(long, alias = "thread", global = true, value_name = "N")]
+    #[arg(long, alias = "thread", global = true, value_name = "N", hide = true)]
     threads: Option<usize>,
     /// Do not read or write the on-disk cache of inflated DEX files.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     no_cache: bool,
     /// Cache directory (default: $DROIDASC_CACHE_DIR, $XDG_CACHE_HOME/droidasc or ~/.cache/droidasc).
-    #[arg(long, global = true, value_name = "DIR")]
+    #[arg(long, global = true, value_name = "DIR", hide = true)]
     cache_dir: Option<PathBuf>,
     /// On-disk cache budget, in MiB (default: $DROIDASC_CACHE_MAX_MB, else
     /// automatic: 20% of the cache's file system room, at most 32768, never
     /// below a 1 GiB / 5% free-space reserve).
-    #[arg(long, global = true, value_name = "MIB")]
+    #[arg(long, global = true, value_name = "MIB", hide = true)]
     cache_max_mb: Option<u64>,
     /// In-memory cache budget of `mcp` and the daemon, in MiB (default: a quarter
     /// of available memory, at most 2048). One-shot commands keep no memory cache.
-    #[arg(long, global = true, value_name = "MIB")]
+    #[arg(long, global = true, value_name = "MIB", hide = true)]
     memory_mb: Option<usize>,
+    /// Show at most N records on stdout (results, rows, classes, smali
+    /// lines); the whole output goes to a file named on the last line
+    /// (default: $DROIDASC_LIMIT, else no limit).
+    #[arg(long, global = true, value_name = "N", help_heading = "Output")]
+    limit: Option<usize>,
+    /// Show at most N bytes of records on stdout, whole records only, the
+    /// rest as with --limit (default: $DROIDASC_MAX_BYTES, else no limit).
+    #[arg(long, global = true, value_name = "N", help_heading = "Output")]
+    max_bytes: Option<usize>,
+    /// Skip the first N records (the next page after a cut output).
+    #[arg(long, global = true, value_name = "N", default_value_t = 0, help_heading = "Output")]
+    offset: usize,
+    /// Disk budget of the directory cut outputs (and `mcp` replies over their
+    /// budget) are written to, `out/` in the cache directory; 0 writes none.
+    #[arg(long, global = true, value_name = "MIB", default_value_t = 64, help_heading = "Output")]
+    spill_mb: u64,
 }
 
 impl Common {
@@ -127,6 +162,28 @@ impl Common {
         Some(match self.cache_max_mb {
             Some(mb) => cache.with_capacity(mb.saturating_mul(1 << 20)),
             None => cache,
+        })
+    }
+
+    /// `--offset` / `--limit` / `--max-bytes`, the last two defaulting to
+    /// `$DROIDASC_LIMIT` / `$DROIDASC_MAX_BYTES` so an agent host can set them
+    /// once.
+    fn window(&self) -> Window {
+        let env = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse().ok());
+        Window {
+            offset: self.offset,
+            limit: self.limit.or_else(|| env("DROIDASC_LIMIT")),
+            max_bytes: self.max_bytes.or_else(|| env("DROIDASC_MAX_BYTES")),
+        }
+    }
+
+    /// Where a cut output is written: `out/` in the cache directory (else a
+    /// per-user runtime directory); `None` with `--spill-mb 0`.
+    fn spill(&self) -> Option<SpillTarget> {
+        let cache_dir = if self.no_cache { None } else { self.disk_cache().map(|c| c.dir().to_path_buf()) };
+        (self.spill_mb > 0).then(|| SpillTarget {
+            dir: asc_mcp::output::SpillDir::default_dir(cache_dir.as_deref()),
+            bytes: self.spill_mb.saturating_mul(1 << 20),
         })
     }
 
@@ -246,9 +303,6 @@ enum Command {
         /// Follow QUERY's reference chain to its final value.
         #[arg(long, requires = "query")]
         resolve: bool,
-        /// At most this many rows for --search.
-        #[arg(long, default_value_t = 1000)]
-        limit: usize,
         /// Write the output to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -365,10 +419,6 @@ enum Command {
         /// the model both; `full` keeps everything.
         #[arg(long, value_enum, default_value_t = StructuredArg::Compact)]
         structured: StructuredArg,
-        /// Disk budget of the directory replies over their budget are
-        /// written to (`out/` in the cache directory); 0 pages them instead.
-        #[arg(long, default_value_t = 64)]
-        spill_mb: u64,
     },
     /// Inspect or clear the on-disk cache of inflated DEX files.
     Cache {
@@ -448,6 +498,7 @@ enum CacheAction {
 enum Find {
     /// Find references to a fuzzy string (regex).
     String {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Match VALUE as a plain substring instead of a regex.
@@ -458,6 +509,7 @@ enum Find {
     },
     /// Find references to a fuzzy type descriptor/name.
     Type {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Fuzzy type pattern.
@@ -465,6 +517,7 @@ enum Find {
     },
     /// Find classes that extend the target class.
     Extends {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Target class in dotted or Dalvik form, e.g. android.app.Activity or Lcom/poc/Base;.
@@ -472,6 +525,7 @@ enum Find {
     },
     /// Find classes that implement the target interface.
     Impl {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Target interface in dotted or Dalvik form, e.g. android.os.IInterface.
@@ -479,6 +533,7 @@ enum Find {
     },
     /// Find references to methods.
     Method {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Fuzzy method name, or the whole target: Lcom/a/B;->name,
@@ -504,6 +559,7 @@ enum Find {
     /// with its signature exact). The last column lists what each condition
     /// matched, in order.
     All {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Drop methods that also match this condition (repeatable).
@@ -519,6 +575,7 @@ enum Find {
     /// Each rule is a condition as for `all` (also extends:CLASS,
     /// impl:CLASS), or several joined with `&` for a compound rule.
     Rules {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Read more rules from this file, one per line (`#` comments).
@@ -529,6 +586,7 @@ enum Find {
     },
     /// Find references to fields.
     Field {
+        /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Fuzzy field name, or the whole target: Lcom/a/B;->name,
@@ -568,29 +626,43 @@ fn findrefs_rules(
     let rules = specs.iter().map(|spec| names::parse_rule(spec)).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
     let engine = io.engine(common, apk_path);
     let cancel = io.cancel;
+    let mut order = DexOrder::new(&engine, rules.len())?;
     let mut sink = io.sink(output.as_ref(), true)?;
     for (i, spec) in specs.iter().enumerate() {
-        sink.line(&format!("# r{} {spec}", i + 1));
+        sink.comment(&format!("# r{} {spec}", i + 1));
     }
     let mut errors = Vec::new();
     let mut totals = vec![0usize; rules.len()];
     let opts = FindOptions { aggregate: true, context };
+    let mut print = |(i, batch): (usize, asc_engine::RefBatch), sink: &mut output::LineSink<_>| {
+        if let Some(e) = batch.error {
+            errors.push(format!("{}: {e}", batch.entry_name));
+        }
+        totals[i] += batch.results.len();
+        for r in &batch.results {
+            let record: Vec<String> = r
+                .text()
+                .lines()
+                .enumerate()
+                .map(|(j, line)| if j == 0 { format!("r{} | {line}", i + 1) } else { format!("r{} |{line}", i + 1) })
+                .collect();
+            sink.line(&record.join("\n"));
+        }
+    };
     engine
         .find_refs_rules(&rules, opts, cancel, &mut |i, batch| {
-            if let Some(e) = batch.error {
-                errors.push(format!("{}: {e}", batch.entry_name));
-            }
-            totals[i] += batch.results.len();
-            for r in &batch.results {
-                for (j, line) in r.text().lines().enumerate() {
-                    sink.line(&if j == 0 { format!("r{} | {line}", i + 1) } else { format!("r{} |{line}", i + 1) });
-                }
+            let name = batch.entry_name.clone();
+            for item in order.push(&name, i, (i, batch)) {
+                print(item, &mut sink);
             }
             sink.flush_stdout();
         })
         .map_err(|e| e.to_string())?;
+    for item in order.finish() {
+        print(item, &mut sink);
+    }
     for (i, n) in totals.iter().enumerate() {
-        sink.line(&format!("# r{} {n} results", i + 1));
+        sink.comment(&format!("# r{} {n} results", i + 1));
     }
     let io_result = sink.finish();
     errors.sort();
@@ -603,6 +675,65 @@ fn findrefs_rules(
     }
     io_result?;
     Ok(if errors.is_empty() { EXIT_OK } else { EXIT_PARTIAL })
+}
+
+/// A findrefs run's batches in DEX order (`classes.dex`, `classes2.dex`, ...,
+/// then other names), whatever order the workers finish in. An entry's
+/// batches (one per rule, `parts` in all) wait until every earlier entry is
+/// complete, so the output is the same on every run and still streams as
+/// soon as the order allows.
+struct DexOrder<T> {
+    order: Vec<String>,
+    next: usize,
+    parts: usize,
+    pending: HashMap<String, Vec<(usize, T)>>,
+}
+
+impl<T> DexOrder<T> {
+    fn new(engine: &Engine, parts: usize) -> Result<DexOrder<T>, String> {
+        let mut order: Vec<String> = engine.dex_entries().map_err(|e| e.to_string())?.into_iter().map(|e| e.name).collect();
+        order.sort_by(|a, b| dex_rank(a).cmp(&dex_rank(b)));
+        Ok(DexOrder { order, next: 0, parts, pending: HashMap::new() })
+    }
+
+    /// Take `item` (part `part` of `entry`); the items now due, in order.
+    fn push(&mut self, entry: &str, part: usize, item: T) -> Vec<T> {
+        self.pending.entry(entry.to_string()).or_default().push((part, item));
+        let mut due = Vec::new();
+        while let Some(name) = self.order.get(self.next) {
+            if self.pending.get(name).is_none_or(|items| items.len() < self.parts) {
+                break;
+            }
+            if let Some(items) = self.pending.remove(name) {
+                due.extend(by_part(items));
+            }
+            self.next += 1;
+        }
+        due
+    }
+
+    /// Everything still held (entries a cancelled or replayed run left
+    /// incomplete), in order.
+    fn finish(mut self) -> Vec<T> {
+        let mut names: Vec<String> = self.pending.keys().cloned().collect();
+        names.sort_by(|a, b| dex_rank(a).cmp(&dex_rank(b)));
+        names.into_iter().filter_map(|n| self.pending.remove(&n)).flat_map(by_part).collect()
+    }
+}
+
+fn by_part<T>(mut items: Vec<(usize, T)>) -> impl Iterator<Item = T> {
+    items.sort_by_key(|(part, _)| *part);
+    items.into_iter().map(|(_, item)| item)
+}
+
+/// Sort key of a DEX entry name: `classes.dex`, `classes2.dex`, ... by
+/// number, then every other name alphabetically.
+fn dex_rank(name: &str) -> (u8, u64, &str) {
+    match name.strip_prefix("classes").and_then(|rest| rest.strip_suffix(".dex")) {
+        Some("") => (0, 1, name),
+        Some(n) if !n.starts_with('0') => n.parse().map_or((1, 0, name), |k| (0, k, name)),
+        _ => (1, 0, name),
+    }
 }
 
 /// Arguments shared by `getclass` and `disassemble`, which differ (as in
@@ -680,20 +811,14 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant)
     if args.output.is_some() && !args.tee {
         return Ok(());
     }
-    io.emit(&src.source)
-}
-
-/// Write a tree command's text to `-o` or stdout.
-fn emit_or_write(io: &mut Io<'_>, output: Option<&PathBuf>, text: &str) -> Result<(), String> {
-    match output {
-        Some(p) => io.write_file(p, text.as_bytes()),
-        None => io.emit(text),
-    }
+    io.emit_records(&src.source, args.output.as_ref())
 }
 
 /// Run a one-shot command (everything but `mcp`, `cache` and `daemon`,
 /// which [`run`] handles itself) against `io`: the exit status.
 fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instant) -> Result<u8, String> {
+    io.window = common.window();
+    io.spill = common.spill();
     match command {
         Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
             let args =
@@ -715,7 +840,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             match &output {
                 Some(p) => io.write_file(p, text.as_bytes())?,
                 None if text.is_empty() => {}
-                None => io.emit(&text)?,
+                None => io.emit_records(&text, None)?,
             }
             if common.debug {
                 io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
@@ -725,7 +850,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let engine = io.engine(common, &apk_path);
             let xml = if resolve { engine.manifest_xml_resolved() } else { engine.manifest_xml() }.map_err(|e| e.to_string())?;
             io.write_output(output.as_ref(), &xml)?;
-            io.emit(&xml)?;
+            io.emit_records(&xml, output.as_ref())?;
             if common.debug {
                 io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
             }
@@ -734,11 +859,13 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let summary = io.engine(common, &apk_path).manifest_summary().map_err(|e| e.to_string())?;
             let text = if json { format!("{:#}", summary.json()) } else { summary.lines().join("\n") };
             io.write_output(output.as_ref(), &text)?;
-            io.emit(&text)?;
+            io.emit_records(&text, output.as_ref())?;
         }
-        Command::Resources { search, literal, field, resolve, limit, output, apk_path, query } => {
+        Command::Resources { search, literal, field, resolve, output, apk_path, query } => {
             let engine = io.engine(common, &apk_path);
             let mut note = None;
+            // With a window every match goes through it (the file holds them all).
+            let search_cap = if output.is_none() && !io.window.is_everything() { usize::MAX } else { RESOURCE_SEARCH_ROWS };
             let mut sink = io.sink(output.as_ref(), output.is_none())?;
             match (search, query) {
                 (Some(pattern), _) => {
@@ -748,10 +875,13 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                         "any" => asc_engine::ResourceField::Any,
                         other => return Err(format!("--in must be name, value or any, not {other}")),
                     };
-                    let (rows, total) = engine.search_resources(&pattern, literal, field, limit).map_err(|e| e.to_string())?;
+                    let (rows, total) = engine.search_resources(&pattern, literal, field, search_cap).map_err(|e| e.to_string())?;
                     rows.iter().for_each(|r| sink.line(&r.line()));
                     if total > rows.len() {
-                        note = Some(format!("Note: {} of {total} matches shown; raise --limit for more", rows.len()));
+                        note = Some(format!(
+                            "Note: {} of {total} matches shown; with --limit or --max-bytes every match goes to a file",
+                            rows.len()
+                        ));
                     }
                 }
                 (None, Some(q)) if resolve => {
@@ -771,7 +901,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
         Command::Xml { output, apk_path, path } => {
             let xml = io.engine(common, &apk_path).xml(&path).map_err(|e| e.to_string())?;
             io.write_output(output.as_ref(), &xml)?;
-            io.emit(&xml)?;
+            io.emit_records(&xml, output.as_ref())?;
         }
         Command::Findrefs { apk_path, context, context_method, find } => {
             let context = match (context, context_method) {
@@ -812,20 +942,30 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             };
             let engine = io.engine(common, &apk_path);
             let cancel = io.cancel;
+            let mut order = DexOrder::new(&engine, 1)?;
             let mut sink = io.sink(output.as_ref(), true)?;
             let mut errors = Vec::new();
             let opts = FindOptions { aggregate: true, context };
+            let mut print = |batch: asc_engine::RefBatch, sink: &mut output::LineSink<_>| {
+                if let Some(e) = batch.error {
+                    errors.push(format!("{}: {e}", batch.entry_name));
+                }
+                for r in &batch.results {
+                    sink.line(&r.text());
+                }
+            };
             let summary = engine
                 .find_refs_opts(&query, opts, cancel, &mut |batch| {
-                    if let Some(e) = batch.error {
-                        errors.push(format!("{}: {e}", batch.entry_name));
-                    }
-                    for r in &batch.results {
-                        sink.line(&r.text());
+                    let name = batch.entry_name.clone();
+                    for b in order.push(&name, 0, batch) {
+                        print(b, &mut sink);
                     }
                     sink.flush_stdout();
                 })
                 .map_err(|e| e.to_string())?;
+            for b in order.finish() {
+                print(b, &mut sink);
+            }
             let io_result = sink.finish();
             for e in &errors {
                 io.note(format_args!("Warning: {e}"));
@@ -856,11 +996,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let engine = io.engine(common, &apk_path);
             let q = CallQuery { class, method, direction, depth, max_nodes, virtual_calls };
             let tree = engine.call_graph(&q).map_err(|e| e.to_string())?;
-            let mut text = tree.lines().join("\n");
-            text.push('\n');
-            text.push_str(&tree.footer());
-            text.push('\n');
-            emit_or_write(io, output.as_ref(), &text)?;
+            io.emit_tree(output.as_ref(), &tree.lines(), &tree.footer())?;
             for e in &tree.errors {
                 io.note(format_args!("Warning: {e}"));
             }
@@ -878,10 +1014,8 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 .engine(common, &apk_path)
                 .hierarchy(&HierarchyQuery { class, direction, depth, max_nodes, method })
                 .map_err(|e| e.to_string())?;
-            let mut text: String = tree.lines().into_iter().chain(tree.definition_lines()).map(|l| l + "\n").collect();
-            text.push_str(&tree.footer());
-            text.push('\n');
-            emit_or_write(io, output.as_ref(), &text)?;
+            let rows: Vec<String> = tree.lines().into_iter().chain(tree.definition_lines()).collect();
+            io.emit_tree(output.as_ref(), &rows, &tree.footer())?;
             for e in &tree.errors {
                 io.note(format_args!("Warning: {e}"));
             }
@@ -899,7 +1033,8 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
 fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
     let common = cli.common;
     match cli.command {
-        Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes, structured, spill_mb } => {
+        Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes, structured } => {
+            let spill_mb = common.spill_mb;
             let mut opts = asc_mcp::Options::new(common.threads, common.debug, common.resident_cache());
             opts.limits.max_entry_bytes = max_entry_mb.saturating_mul(1 << 20);
             opts.limits.max_ratio = max_ratio;
@@ -991,5 +1126,28 @@ fn main() -> ExitCode {
             eprintln!("Error: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dex_names_sort_by_number_then_name() {
+        let mut names = vec!["classes10.dex", "extra.dex", "classes2.dex", "classes.dex", "classes02.dex", "classesX.dex"];
+        names.sort_by(|a, b| dex_rank(a).cmp(&dex_rank(b)));
+        assert_eq!(names, ["classes.dex", "classes2.dex", "classes10.dex", "classes02.dex", "classesX.dex", "extra.dex"]);
+    }
+
+    #[test]
+    fn dex_order_holds_entries_until_earlier_ones_are_complete() {
+        let mut order = DexOrder { order: vec!["classes.dex".into(), "classes2.dex".into()], next: 0, parts: 2, pending: HashMap::new() };
+        assert!(order.push("classes2.dex", 1, "2b").is_empty());
+        assert!(order.push("classes.dex", 1, "1b").is_empty(), "classes.dex still misses a part");
+        assert_eq!(order.push("classes.dex", 0, "1a"), ["1a", "1b"]);
+        assert!(order.push("extra.dex", 0, "x").is_empty());
+        // A part that never came (a cancelled run) is released at the end, in order.
+        assert_eq!(order.finish(), ["2b", "x"]);
     }
 }

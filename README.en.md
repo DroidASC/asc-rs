@@ -35,6 +35,9 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
   --cache-max-mb MIB  on-disk cache budget (default: automatic, see "Caching")
   --memory-mb MIB  in-memory budget of mcp / the daemon (default: automatic)
   --debug          profiling output on stderr
+  --limit N / --max-bytes N / --offset N
+                   keep stdout to N records / bytes (whole records), from record N;
+                   the whole output goes to a file the last line names
   -v, -V, --version
 
 examples:
@@ -210,8 +213,8 @@ modules and where the port deliberately differs.
   and `--debug` adds timings but no per-instruction offset comments.
 * **Correct string decoding.** Non-ASCII class and member names (common in obfuscated apps)
   are decoded as MUTF-8; the Python version truncates them.
-* **Threads instead of processes** for `findrefs`; results still stream per DEX as they
-  complete. `getclass` returns as soon as one worker finds the class; workers still
+* **Threads instead of processes** for `findrefs`; results stream per DEX in DEX order
+  (each as soon as the earlier ones are done). `getclass` returns as soon as one worker finds the class; workers still
   inflating another DEX finish in the background.
 * Global `--debug` / `--threads` flags can appear anywhere on the command line;
   `--threads 0` runs one worker (Python's `listclass` rejects it).
@@ -373,6 +376,38 @@ The scan itself adapts to the query: up to eight target indexes are found with S
 `memmem` over the operand bytes (0.2 ms per 4 MB instead of 3 ms), string queries use
 `memchr2` over their two opcodes, and clustered index sets are prefiltered with `memchr`
 on the shared high operand byte before the linear sweep.
+
+## Output for agents
+
+Every one-shot command prints one record per line (`dex | Lcls;->m(..)V | "matched"`,
+columns separated by ` | `); lines starting with `#` are headers, totals and hints.
+`findrefs` (single queries and `rules`) prints in DEX order (`classes.dex`,
+`classes2.dex`, ..., then other names), the same on every run, streaming as soon as the
+earlier DEX files are done.
+
+Long outputs are cut only when asked to, so scripts keep the whole stream:
+
+| option | effect |
+|---|---|
+| `--limit N` | at most N records on stdout (a findrefs result with its `--context` lines is one record; smali, class and tree lines are one each) |
+| `--max-bytes N` | at most N bytes of records on stdout, whole records only |
+| `--offset N` | skip the first N records (the next page) |
+| `--spill-mb MIB` | budget of the directory cut outputs go to (`out/` in the cache directory, default 64; 0: no file) |
+| `$DROIDASC_LIMIT`, `$DROIDASC_MAX_BYTES` | defaults for `--limit` / `--max-bytes`, for an agent host to set once |
+
+When the window cuts the output, the whole output is written to a file (named by its
+content, so a rerun names the same file; `-o FILE` holds it instead) and the last stdout
+line says what was shown and where the rest is:
+
+```
+# records 1-50 of 523 shown; full output in /home/u/.cache/droidasc/out/3f2a….txt (grep it, or rerun with --offset 50)
+```
+
+`#` header and total lines (`# r1 ...`, `# r1 523 results`, a tree's footer) are always
+shown. Subcommand help lists only the command's own options; the cache and thread options
+are listed once by `droidasc --help`. [`skills/droidasc/SKILL.md`](skills/droidasc/SKILL.md)
+is an [Agent Skill](https://agentskills.io/specification) with the commands, the query
+syntax and an audit workflow, for agents that work through a shell.
 
 ## Daemon: warm one-shot commands
 

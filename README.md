@@ -34,6 +34,9 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
   --cache-max-mb MIB  on-disk cache budget (default: automatic, see "Caching")
   --memory-mb MIB  in-memory budget of mcp / the daemon (default: automatic)
   --debug          profiling output on stderr
+  --limit N / --max-bytes N / --offset N
+                   keep stdout to N records / bytes (whole records), from record N;
+                   the whole output goes to a file the last line names
   -v, -V, --version
 
 examples:
@@ -197,7 +200,7 @@ cargo test --workspace
   风格而非 dadguard 格式，`--debug` 会加上耗时信息，但不加逐指令的偏移注释。
 * **正确的字符串解码。** 非 ASCII 的类名和成员名（在混淆应用中很常见）按 MUTF-8 解码；Python 版本会
   将其截断。
-* `findrefs` **使用线程而非进程**；结果仍按 DEX 完成顺序流式输出。`getclass` 在任一 worker 找到该类
+* `findrefs` **使用线程而非进程**；结果按 DEX 顺序流式输出（前面的 DEX 完成后立即输出）。`getclass` 在任一 worker 找到该类
   后立即返回；仍在解压其他 DEX 的 worker 会在后台完成。
 * 全局的 `--debug` / `--threads` 参数可以出现在命令行的任意位置；`--threads 0` 以一个 worker 运行
   （Python 的 `listclass` 会拒绝它）。
@@ -333,6 +336,33 @@ asc-rs 找到的行与 Python 参考实现相同（采用自己的行格式）�
 扫描本身会根据查询自适应：最多八个目标索引时，用 SIMD `memmem` 在操作数字节上查找（每 4 MB 0.2 ms，
 而不是 3 ms），字符串查询对其两个操作码使用 `memchr2`，而聚集的索引集合在线性扫描前先用 `memchr`
 按共同的高位操作数字节做预过滤。
+
+## 面向 agent 的输出
+
+每个一次性命令每行输出一条记录（`dex | Lcls;->m(..)V | "matched"`，各列以 ` | ` 分隔）；以 `#` 开头的行是
+表头、合计和提示。`findrefs`（单条查询和 `rules`）按 DEX 顺序输出（`classes.dex`、`classes2.dex`……然后是
+其他名字），每次运行都相同，前面的 DEX 完成后立即流式输出。
+
+只有显式要求时才截断长输出，脚本仍能拿到完整输出：
+
+| 选项 | 作用 |
+|---|---|
+| `--limit N` | stdout 最多 N 条记录（findrefs 的一条结果连同其 `--context` 行算一条；smali、类名和树的每行各算一条） |
+| `--max-bytes N` | stdout 最多 N 字节的记录，只输出完整记录 |
+| `--offset N` | 跳过前 N 条记录（下一页） |
+| `--spill-mb MIB` | 截断输出写入目录的预算（cache 目录下的 `out/`，默认 64；0 表示不写文件） |
+| `$DROIDASC_LIMIT`、`$DROIDASC_MAX_BYTES` | `--limit` / `--max-bytes` 的默认值，供 agent 宿主统一设置 |
+
+窗口截断输出时，完整输出写入一个文件（按内容命名，重跑会得到同一个文件；给了 `-o FILE` 时就是该文件），
+stdout 的最后一行说明显示了哪些、其余在哪里：
+
+```
+# records 1-50 of 523 shown; full output in /home/u/.cache/droidasc/out/3f2a….txt (grep it, or rerun with --offset 50)
+```
+
+`#` 表头和合计行（`# r1 ...`、`# r1 523 results`、树的页脚）总是显示。子命令的 help 只列出该命令自己的选项；
+cache 和线程选项由 `droidasc --help` 统一列出一次。[`skills/droidasc/SKILL.md`](skills/droidasc/SKILL.md) 是一个
+[Agent Skill](https://agentskills.io/specification)，包含命令、查询语法和审计流程，供通过 shell 工作的 agent 使用。
 
 ## Daemon：预热的一次性命令
 
