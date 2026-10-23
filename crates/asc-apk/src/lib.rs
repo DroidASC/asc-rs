@@ -6,6 +6,10 @@
 //! flag; the streaming decoder polls it on every input read, the libdeflate
 //! path once per entry, so a parallel class search can abandon the remaining
 //! DEX files as soon as one worker hits).
+//!
+//! Several archives can also be read as one program ([`Apk::open`]).
+
+mod program;
 
 use memmap2::Mmap;
 use std::borrow::Cow;
@@ -13,6 +17,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
 
 const CD_SIG: &[u8; 4] = b"PK\x01\x02";
 const LH_SIG: &[u8; 4] = b"PK\x03\x04";
@@ -58,6 +63,8 @@ pub enum ApkError {
     LimitExceeded { name: String, reason: String },
     #[error("cancelled")]
     Cancelled,
+    #[error("no archive of {} has classes*.dex ({})", path.display(), notes.join("; "))]
+    NoCode { path: PathBuf, notes: Vec<String> },
 }
 
 pub type Result<T> = std::result::Result<T, ApkError>;
@@ -72,13 +79,8 @@ pub struct Entry {
     pub local_header_off: u64,
     /// CRC-32 of the uncompressed data, as the central directory records it.
     pub crc32: u32,
-}
-
-impl Entry {
-    /// Whether this is a root-level `*.dex` (`classes.dex`, `classes2.dex`, ...).
-    pub fn is_root_dex(&self) -> bool {
-        self.name.ends_with(".dex") && !self.name.contains('/')
-    }
+    /// The archive of a program it belongs to ([`Apk::archive_path`]).
+    pub archive: usize,
 }
 
 /// Caps on what reading an APK may inflate, against zip bombs. The default
@@ -107,11 +109,26 @@ impl Limits {
     }
 }
 
-/// A memory-mapped APK.
+/// A memory-mapped APK, or several archives (APKs, jars, bare DEX files)
+/// read as one program: see [`Apk::open`].
 pub struct Apk {
     path: PathBuf,
-    map: Mmap,
+    archives: Vec<Archive>,
     limits: Limits,
+    /// Archives of a program left out of its code, one line each.
+    notes: Vec<String>,
+}
+
+/// One file of an [`Apk`].
+struct Archive {
+    path: PathBuf,
+    map: Mmap,
+    /// Its name in a program of several archives (`services.jar`,
+    /// `app/TeleService/TeleService.apk`), which prefixes its entry names;
+    /// empty for a lone archive.
+    label: String,
+    /// A bare DEX file rather than a zip: one stored entry, the whole file.
+    bare_dex: bool,
 }
 
 /// `n` bytes at `o`, or `None` if they are not all inside `b` (offsets come
@@ -139,41 +156,58 @@ fn offset(v: u64) -> Option<usize> {
     usize::try_from(v).ok()
 }
 
-impl Apk {
-    /// Map `path` read-only.
-    pub fn open(path: impl AsRef<Path>) -> Result<Apk> {
-        let path = path.as_ref().to_path_buf();
+/// The archive of a program a DEX of it comes from, by the DEX's name
+/// (`app/Tele.apk` for `app/Tele.apk/classes2.dex`, also as a logical DEX
+/// `...classes2.dex!classes1.dex`); `None` for a lone archive's.
+pub fn archive_of(dex_name: &str) -> Option<&str> {
+    let entry = dex_name.split('!').next().unwrap_or(dex_name);
+    entry.rsplit_once('/').map(|(archive, _)| archive)
+}
+
+/// Whether `name` (inside one archive) is a root-level `*.dex`
+/// (`classes.dex`, `classes2.dex`, ...).
+fn is_root_dex(name: &[u8]) -> bool {
+    name.ends_with(b".dex") && !name.contains(&b'/')
+}
+
+/// The one entry of a bare DEX file, by its name inside the archive.
+const BARE_DEX_ENTRY: &str = "classes.dex";
+/// Size of the DEX header, which carries the file's checksum and SHA-1.
+const DEX_HEADER_SIZE: usize = 0x70;
+
+impl Archive {
+    fn open(path: PathBuf, label: String) -> Result<Archive> {
         let file = File::open(&path).map_err(|source| ApkError::Io { path: path.clone(), source })?;
         // SAFETY: the mapping is read-only and the file is not expected to be
         // modified while it is mapped (same contract as the Python mmap use).
         let map = unsafe { Mmap::map(&file) }.map_err(|source| ApkError::Io { path: path.clone(), source })?;
-        Ok(Apk { path, map, limits: Limits::default() })
+        let bare_dex = map.starts_with(b"dex\n");
+        Ok(Archive { path, map, label, bare_dex })
     }
 
-    /// Enforce `limits` on every later read.
-    pub fn with_limits(mut self, limits: Limits) -> Apk {
-        self.limits = limits;
-        self
+    /// `inner` (a name inside this archive) as the program names it:
+    /// `label/inner`, so the archive is all before the last `/`.
+    fn entry_name(&self, inner: &[u8]) -> String {
+        let inner = String::from_utf8_lossy(inner);
+        if self.label.is_empty() {
+            inner.into_owned()
+        } else {
+            format!("{}/{inner}", self.label)
+        }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// The limits every read enforces ([`Apk::with_limits`]).
-    pub fn limits(&self) -> Limits {
-        self.limits
-    }
-
-    /// The raw archive bytes.
-    #[inline]
-    pub fn data(&self) -> &[u8] {
-        &self.map
+    /// The name inside this archive of the program's entry `name`, if it
+    /// names one of this archive's entries.
+    fn inner_name<'n>(&self, name: &'n str) -> Option<&'n str> {
+        if self.label.is_empty() {
+            return None;
+        }
+        name.strip_prefix(self.label.as_str())?.strip_prefix('/')
     }
 
     /// Locate the central directory as `(offset, size)`, honouring zip64.
     fn central_directory(&self) -> Result<(usize, usize)> {
-        let data = self.data();
+        let data = &self.map[..];
         let search_start = data.len().saturating_sub(65536 + 22);
         let eocd = memchr::memmem::rfind(&data[search_start..], EOCD_SIG).map(|p| p + search_start).ok_or(ApkError::NoEocd)?;
         let mut cd_size = u32_at(data, eocd + 12).ok_or(ApkError::NoEocd)? as u64;
@@ -197,10 +231,35 @@ impl Apk {
         Ok((off, size))
     }
 
-    /// Walk the central directory. `keep` filters entries by name early so
-    /// the full name list is never materialised for large archives.
-    pub fn entries_filtered(&self, mut keep: impl FnMut(&[u8]) -> bool) -> Result<Vec<Entry>> {
-        let data = self.data();
+    /// What identifies this version of the archive: its central directory,
+    /// or a bare DEX file's header.
+    fn directory(&self) -> Result<&[u8]> {
+        if self.bare_dex {
+            return Ok(&self.map[..self.map.len().min(DEX_HEADER_SIZE)]);
+        }
+        let (off, size) = self.central_directory()?;
+        Ok(&self.map[off..off + size])
+    }
+
+    /// Walk the central directory, `keep` filtering by the name inside this
+    /// archive; the entries are of archive `index` of the program.
+    fn entries_filtered(&self, index: usize, keep: &mut impl FnMut(&[u8]) -> bool) -> Result<Vec<Entry>> {
+        if self.bare_dex {
+            if !keep(BARE_DEX_ENTRY.as_bytes()) {
+                return Ok(Vec::new());
+            }
+            let len = self.map.len() as u64;
+            return Ok(vec![Entry {
+                name: self.entry_name(BARE_DEX_ENTRY.as_bytes()),
+                method: METHOD_STORED,
+                comp_size: len,
+                uncomp_size: len,
+                local_header_off: 0,
+                crc32: 0,
+                archive: index,
+            }]);
+        }
+        let data = &self.map[..];
         let (cd_off, cd_size) = self.central_directory()?;
         let cd_end = cd_off + cd_size;
         let mut entries = Vec::new();
@@ -248,15 +307,171 @@ impl Apk {
                     }
                 }
                 entries.push(Entry {
-                    name: String::from_utf8_lossy(name).into_owned(),
+                    name: self.entry_name(name),
                     method: u16_at(data, p + 10).unwrap_or(0),
                     comp_size,
                     uncomp_size,
                     local_header_off,
                     crc32: u32_at(data, p + 16).unwrap_or(0),
+                    archive: index,
                 });
             }
             p = name_end + extra_len + comment_len;
+        }
+        Ok(entries)
+    }
+
+    /// Root-level DEX entries in central-directory order. Duplicate names
+    /// keep the last occurrence, like [`Apk::find_entry`] (and `zipfile`).
+    fn dex_entries_in_order(&self, index: usize) -> Result<Vec<Entry>> {
+        let mut entries = self.entries_filtered(index, &mut is_root_dex)?;
+        // Last occurrence wins: walk from the back keeping first-seen names.
+        entries.reverse();
+        let mut seen = std::collections::HashSet::with_capacity(entries.len());
+        entries.retain(|e| seen.insert(e.name.clone()));
+        entries.reverse();
+        Ok(entries)
+    }
+}
+
+impl Apk {
+    /// Open `path` read-only: an APK (any zip, e.g. a jar), a bare DEX file,
+    /// or a program of several archives read as one:
+    ///
+    /// - a directory: every `*.apk`, `*.jar`, `*.zip` and `*.dex` below it;
+    /// - several paths (files or directories) joined with `,`, when no file
+    ///   of that whole name exists.
+    ///
+    /// A program's entries are named after their archive
+    /// (`services.jar/classes2.dex`, `x.dex/classes.dex` for a bare DEX
+    /// file; see [`archive_of`]). Archives without root DEX entries, or
+    /// that do not open, are left out and named in [`Apk::notes`]; a program
+    /// none of whose archives has code is an error. A program that comes
+    /// down to one archive is that archive alone.
+    pub fn open(path: impl AsRef<Path>) -> Result<Apk> {
+        let path = path.as_ref().to_path_buf();
+        let sources = program::sources(&path)?;
+        if let [lone] = &sources[..] {
+            let archives = vec![Archive::open(lone.path.clone(), String::new())?];
+            return Ok(Apk { path, archives, limits: Limits::default(), notes: Vec::new() });
+        }
+        let mut archives = Vec::with_capacity(sources.len());
+        let mut notes = Vec::new();
+        for s in sources {
+            let archive = match Archive::open(s.path, s.label) {
+                Ok(a) => a,
+                Err(e) => {
+                    notes.push(format!("skipped: {e}"));
+                    continue;
+                }
+            };
+            match archive.dex_entries_in_order(archives.len()) {
+                Ok(dex) if dex.is_empty() => notes.push(format!("{}: no classes*.dex (odex/vdex only?): deodex first", archive.label)),
+                Ok(_) => archives.push(archive),
+                Err(e) => notes.push(format!("{}: skipped: {e}", archive.label)),
+            }
+        }
+        if archives.is_empty() {
+            return Err(ApkError::NoCode { path, notes });
+        }
+        if let [lone] = &mut archives[..] {
+            lone.label.clear();
+        }
+        Ok(Apk { path, archives, limits: Limits::default(), notes })
+    }
+
+    /// `spec` (a path [`Apk::open`] takes) with its relative paths resolved
+    /// against `base`: each of several paths joined with `,` on its own.
+    pub fn resolve(spec: &Path, base: &Path) -> PathBuf {
+        program::resolve(spec, base)
+    }
+
+    /// Enforce `limits` on every later read.
+    pub fn with_limits(mut self, limits: Limits) -> Apk {
+        self.limits = limits;
+        self
+    }
+
+    /// The path the APK was opened from (a program's directory or list).
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The limits every read enforces ([`Apk::with_limits`]).
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// How many archives make up the program: 1 for a lone archive, whose
+    /// entry names are the names inside it.
+    pub fn archive_count(&self) -> usize {
+        self.archives.len()
+    }
+
+    /// One line per archive of a program left out of its code.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// The file `entry` lives in.
+    pub fn archive_path(&self, entry: &Entry) -> &Path {
+        &self.archive(entry).path
+    }
+
+    /// The raw bytes of the file `entry` lives in.
+    pub fn archive_data(&self, entry: &Entry) -> &[u8] {
+        &self.archive(entry).map
+    }
+
+    fn archive(&self, entry: &Entry) -> &Archive {
+        self.archives.get(entry.archive).expect("entry of this APK")
+    }
+
+    /// `(file, bytes identifying its version)` of every archive: its central
+    /// directory, or a bare DEX file's header. A cache key hashes them.
+    pub fn directories(&self) -> Result<Vec<(&Path, &[u8])>> {
+        self.archives.iter().map(|a| Ok((a.path.as_path(), a.directory()?))).collect()
+    }
+
+    /// A short name for the APK: the file stem, or for a program the first
+    /// archive's and how many others follow.
+    pub fn stem(&self) -> String {
+        let first = self.archives[0].path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        match self.archives.len() {
+            1 => first,
+            n => format!("{first}-and-{}", n - 1),
+        }
+    }
+
+    /// `(size, modification time)` of the file; for a program, its sizes and
+    /// times hashed into one number and the latest time, so rewriting any
+    /// archive changes it.
+    pub fn stamp(&self) -> Result<(u64, Option<SystemTime>)> {
+        let meta = |a: &Archive| std::fs::metadata(&a.path).map_err(|source| ApkError::Io { path: a.path.clone(), source });
+        if let [lone] = &self.archives[..] {
+            let m = meta(lone)?;
+            return Ok((m.len(), m.modified().ok()));
+        }
+        let mut size = 0u64;
+        let mut latest = None;
+        for a in &self.archives {
+            let m = meta(a)?;
+            let since = m.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok());
+            // Only a hash input: the low bits of the nanoseconds are what differ.
+            let nanos = since.map_or(0, |d| d.as_nanos() as u64);
+            size = size.rotate_left(13) ^ m.len().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ nanos;
+            latest = latest.max(m.modified().ok());
+        }
+        Ok((size, latest))
+    }
+
+    /// Walk the central directories. `keep` filters entries by their name
+    /// inside their archive early, so the full name list is never
+    /// materialised for large archives.
+    pub fn entries_filtered(&self, mut keep: impl FnMut(&[u8]) -> bool) -> Result<Vec<Entry>> {
+        let mut entries = Vec::new();
+        for (i, a) in self.archives.iter().enumerate() {
+            entries.extend(a.entries_filtered(i, &mut keep)?);
         }
         Ok(entries)
     }
@@ -276,14 +491,13 @@ impl Apk {
         Ok(entries)
     }
 
-    /// The entries of [`Apk::dex_entries`] in central-directory order.
+    /// The entries of [`Apk::dex_entries`] in central-directory order, archive
+    /// by archive.
     pub fn dex_entries_in_order(&self) -> Result<Vec<Entry>> {
-        let mut entries = self.entries_filtered(|n| n.ends_with(b".dex") && !n.contains(&b'/'))?;
-        // Last occurrence wins: walk from the back keeping first-seen names.
-        entries.reverse();
-        let mut seen = std::collections::HashSet::with_capacity(entries.len());
-        entries.retain(|e| seen.insert(e.name.clone()));
-        entries.reverse();
+        let mut entries = Vec::new();
+        for (i, a) in self.archives.iter().enumerate() {
+            entries.extend(a.dex_entries_in_order(i)?);
+        }
         Ok(entries)
     }
 
@@ -298,16 +512,32 @@ impl Apk {
         Ok(())
     }
 
-    /// Find an entry by exact name.
+    /// Find an entry by exact name. In a program, a name without an
+    /// archive's prefix (`AndroidManifest.xml`) is looked up archive by
+    /// archive, the first that has it winning.
     pub fn find_entry(&self, name: &str) -> Result<Option<Entry>> {
-        let mut found = self.entries_filtered(|n| n == name.as_bytes())?;
-        Ok(found.pop())
+        let owner = self.archives.iter().enumerate().find_map(|(i, a)| Some((i, a.inner_name(name)?)));
+        let candidates: Vec<(usize, &str)> = match owner {
+            Some(found) => vec![found],
+            None => (0..self.archives.len()).map(|i| (i, name)).collect(),
+        };
+        for (i, inner) in candidates {
+            let mut found = self.archives[i].entries_filtered(i, &mut |n: &[u8]| n == inner.as_bytes())?;
+            if let Some(e) = found.pop() {
+                return Ok(Some(e));
+            }
+        }
+        Ok(None)
     }
 
     /// Compressed payload of `entry` inside the mapping.
     pub fn raw_payload(&self, entry: &Entry) -> Result<&[u8]> {
-        let data = self.data();
+        let archive = self.archive(entry);
+        let data = &archive.map[..];
         let bad = || ApkError::BadLocalHeader(entry.name.clone());
+        if archive.bare_dex {
+            return offset(entry.comp_size).and_then(|n| data.get(..n)).ok_or_else(bad);
+        }
         let lh = offset(entry.local_header_off).ok_or_else(bad)?;
         if bytes_at(data, lh, 4) != Some(LH_SIG) {
             return Err(bad());
@@ -318,12 +548,6 @@ impl Apk {
         let start = lh + 30 + name_len + extra_len;
         let end = offset(entry.comp_size).and_then(|n| start.checked_add(n));
         end.and_then(|end| data.get(start..end)).ok_or_else(bad)
-    }
-
-    /// The raw bytes of the central directory (used as a cache key).
-    pub fn central_directory_bytes(&self) -> Result<&[u8]> {
-        let (off, size) = self.central_directory()?;
-        Ok(&self.data()[off..off + size])
     }
 
     /// Extract `entry`: stored entries are borrowed straight from the mapping,
@@ -729,6 +953,55 @@ mod tests {
         // Central-directory order, the duplicate at its last position.
         let ordered: Vec<String> = apk.dex_entries_in_order().unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(ordered, ["classes2.dex", "classes.dex"]);
+    }
+
+    #[test]
+    fn programs_name_entries_after_their_archive() {
+        let dex = asc_fixture::make_dex();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("system");
+        std::fs::create_dir_all(root.join("app/Tele")).unwrap();
+        let both = [("classes.dex", &dex[..]), ("classes2.dex", &dex[..]), ("AndroidManifest.xml", b"first")];
+        std::fs::write(root.join("services.jar"), asc_fixture::make_apk(&both, true)).unwrap();
+        let apk = [("classes.dex", &dex[..]), ("AndroidManifest.xml", b"second")];
+        std::fs::write(root.join("app/Tele/Tele.apk"), asc_fixture::make_apk(&apk, false)).unwrap();
+        std::fs::write(root.join("odexed.jar"), asc_fixture::make_apk(&[("META-INF/MANIFEST.MF", b"m")], false)).unwrap();
+        std::fs::write(root.join("bare.dex"), &dex).unwrap();
+        std::fs::write(root.join("broken.zip"), b"not a zip").unwrap();
+
+        let program = Apk::open(&root).unwrap();
+        assert_eq!(program.archive_count(), 3);
+        let names: Vec<String> = program.dex_entries_in_order().unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(
+            names,
+            ["app/Tele/Tele.apk/classes.dex", "bare.dex/classes.dex", "services.jar/classes.dex", "services.jar/classes2.dex"]
+        );
+        for e in program.dex_entries().unwrap() {
+            assert_eq!(program.read_entry(&e).unwrap().as_ref(), dex.as_slice(), "{}", e.name);
+        }
+        let notes = program.notes().join("\n");
+        assert!(notes.contains("broken.zip") && notes.contains("odexed.jar: no classes*.dex"), "{notes}");
+        // Unprefixed names: the first archive that has one; prefixed: that archive's.
+        assert_eq!(program.read("AndroidManifest.xml").unwrap(), b"second");
+        assert_eq!(program.read("services.jar/AndroidManifest.xml").unwrap(), b"first");
+        let bare = program.find_entry("bare.dex/classes.dex").unwrap().unwrap();
+        assert_eq!(program.archive_path(&bare), root.join("bare.dex"));
+        assert_eq!(archive_of("app/Tele/Tele.apk/classes.dex"), Some("app/Tele/Tele.apk"));
+        assert_eq!(archive_of("services.jar/classes5.dex!classes1.dex"), Some("services.jar"));
+        assert_eq!(archive_of("classes5.dex!classes1.dex"), None);
+        assert_eq!(program.stem(), "Tele-and-2");
+        assert!(program.stamp().is_ok() && program.directories().unwrap().len() == 3);
+
+        // A lone bare DEX, and a list that comes down to one archive, read as before.
+        let lone = Apk::open(root.join("bare.dex")).unwrap();
+        assert_eq!(lone.dex_entries().unwrap()[0].name, "classes.dex");
+        let spec = format!("{},{}", root.join("services.jar").display(), root.join("odexed.jar").display());
+        let one = Apk::open(&spec).unwrap();
+        assert_eq!(one.archive_count(), 1);
+        assert_eq!(one.dex_entries_in_order().unwrap()[0].name, "classes.dex");
+        assert_eq!(one.notes().len(), 1);
+        let spec = format!("{},{}", root.join("odexed.jar").display(), root.join("broken.zip").display());
+        assert!(matches!(Apk::open(&spec), Err(ApkError::NoCode { .. })));
     }
 
     #[test]

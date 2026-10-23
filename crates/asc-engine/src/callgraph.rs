@@ -96,8 +96,9 @@ pub struct CallTree {
 impl CallTree {
     /// One line per row: indentation and the depth number, an arrow
     /// (`<-` caller, `->` callee), the signature and flags:
-    /// `[no body]` (defined in no DEX of the APK, e.g. a framework method)
-    /// and `(repeated)` (expanded elsewhere in the tree).
+    /// `[no body]` (defined in no DEX of the APK, e.g. a framework method),
+    /// `[services.jar]` (in a program of several archives: those defining
+    /// it) and `(repeated)` (expanded elsewhere in the tree).
     pub fn lines(&self) -> Vec<String> {
         self.rows
             .iter()
@@ -110,6 +111,13 @@ impl CallTree {
                 }
                 if r.dex.is_empty() {
                     s.push_str(" [no body]");
+                }
+                // In a program of several archives: which defines it.
+                let mut archives: Vec<&str> = r.dex.iter().filter_map(|d| crate::archive_of(d)).collect();
+                archives.sort_unstable();
+                archives.dedup();
+                if !archives.is_empty() {
+                    s.push_str(&format!(" [{}]", archives.join(", ")));
                 }
                 if let Some(v) = &r.via {
                     match self.direction {

@@ -1,7 +1,7 @@
 //! `resources.arsc` access and binary XML decoding with resource names.
 
 use crate::{Engine, EngineError, Result};
-use asc_apk::{Apk, METHOD_STORED};
+use asc_apk::{Apk, Entry, METHOD_STORED};
 use asc_arsc::{Config, EntryValue, ResTable, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -27,20 +27,20 @@ impl CachedTable {
 }
 
 pub(crate) fn file_ident(apk: &Apk) -> Option<FileIdent> {
-    let meta = std::fs::metadata(apk.path()).ok()?;
-    Some((meta.len(), meta.modified().ok()))
+    apk.stamp().ok()
 }
 
 /// A stored (uncompressed) entry, borrowed from the APK mapping.
 struct MappedEntry {
     apk: Apk,
+    entry: Entry,
     start: usize,
     len: usize,
 }
 
 impl AsRef<[u8]> for MappedEntry {
     fn as_ref(&self) -> &[u8] {
-        &self.apk.data()[self.start..self.start + self.len]
+        &self.apk.archive_data(&self.entry)[self.start..self.start + self.len]
     }
 }
 
@@ -104,8 +104,8 @@ impl Engine {
                 // Stored tables (the norm since API 30) stay in the mapping.
                 let table = match bytes {
                     Cow::Borrowed(b) if entry.method == METHOD_STORED => {
-                        let (start, len) = (b.as_ptr() as usize - apk.data().as_ptr() as usize, b.len());
-                        ResTable::parse(MappedEntry { apk, start, len })?
+                        let (start, len) = (b.as_ptr() as usize - apk.archive_data(&entry).as_ptr() as usize, b.len());
+                        ResTable::parse(MappedEntry { apk, entry: entry.clone(), start, len })?
                     }
                     b => {
                         inflated = b.len();

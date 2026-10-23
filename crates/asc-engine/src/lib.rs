@@ -50,6 +50,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+pub use asc_apk::archive_of;
 pub use asc_apk::Limits as InflateLimits;
 pub use asc_arsc;
 pub use asc_cache;
@@ -1042,6 +1043,9 @@ impl From<Option<usize>> for Threads {
 }
 
 impl Engine {
+    /// An engine over `apk_path`: an APK, a jar, a bare DEX file, or a
+    /// program of several read as one (a directory, or paths joined with
+    /// `,`; see [`Apk::open`]).
     pub fn new(apk_path: impl AsRef<Path>) -> Engine {
         Engine {
             apk_path: apk_path.as_ref().to_path_buf(),
@@ -1211,6 +1215,26 @@ impl Engine {
         Ok(Apk::open(&self.apk_path)?.with_limits(self.limits))
     }
 
+    /// `apk_path` (what [`Engine::new`] takes) with relative paths resolved
+    /// against `base`, each path of a program on its own.
+    pub fn resolve_path(apk_path: &Path, base: &Path) -> PathBuf {
+        Apk::resolve(apk_path, base)
+    }
+
+    /// Whether `apk_path` opens: a readable file, or a program with code.
+    pub fn can_open(apk_path: &Path) -> bool {
+        Apk::open(apk_path).is_ok()
+    }
+
+    /// One line per archive of a program left out of its code (no root DEX,
+    /// e.g. a jar deodexed into `oat/`, or not a zip); none for one file.
+    pub fn program_notes(&self) -> Vec<String> {
+        if self.apk_path.is_file() {
+            return Vec::new();
+        }
+        self.open().map(|apk| apk.notes().to_vec()).unwrap_or_default()
+    }
+
     /// Open the APK for [`Engine::search_target`].
     pub fn search_target(&self) -> Result<SearchTarget> {
         let apk = self.open()?;
@@ -1251,8 +1275,7 @@ impl Engine {
     /// directory is done once per APK version; later calls only `stat`.
     pub fn apk_key(&self, apk: &Apk) -> Option<ApkKey> {
         self.cache.as_ref()?;
-        let meta = std::fs::metadata(apk.path()).ok()?;
-        let ident = (meta.len(), meta.modified().ok());
+        let ident = apk.stamp().ok()?;
         let mut cached = self.key_cache.lock().unwrap();
         if let Some((len, mtime, key)) = cached.as_ref() {
             if (*len, *mtime) == ident {
@@ -1830,8 +1853,9 @@ fn load_entry<'a>(
                 if c.memory.is_none() && !c.disk.as_ref().is_some_and(|d| d.uses(Tier::Derived)) {
                     return Ok((Loaded::Borrowed(Cow::Borrowed(b)), Source::Stored));
                 }
-                let offset = b.as_ptr() as usize - apk.data().as_ptr() as usize;
-                let data = DexData::map_region(apk.path(), offset as u64, b.len()).unwrap_or_else(|_| DexData::Owned(b.to_vec()));
+                let offset = b.as_ptr() as usize - apk.archive_data(entry).as_ptr() as usize;
+                let data =
+                    DexData::map_region(apk.archive_path(entry), offset as u64, b.len()).unwrap_or_else(|_| DexData::Owned(b.to_vec()));
                 (data, c.memory.is_some(), Source::Stored)
             }
             Cow::Owned(v) => {

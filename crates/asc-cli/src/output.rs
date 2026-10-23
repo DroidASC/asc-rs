@@ -89,7 +89,10 @@ impl<'a> Io<'a> {
     }
 
     pub(crate) fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine> {
-        self.engines.engine(common, &self.path(apk_path))
+        match self.cwd {
+            Some(cwd) => self.engines.engine(common, &Engine::resolve_path(apk_path, cwd)),
+            None => self.engines.engine(common, apk_path),
+        }
     }
 
     /// One line on stderr. A failing stderr is ignored: there is nowhere left

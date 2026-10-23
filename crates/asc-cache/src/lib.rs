@@ -70,16 +70,21 @@ const HASH_HEX_LEN: usize = 16;
 impl ApkKey {
     /// Derive the key from the file size, mtime and a hash of the central
     /// directory (so a rewritten archive with the same size is not confused
-    /// with the old one).
+    /// with the old one); for a program of several archives, from those of
+    /// each and its path, in order.
     pub fn for_apk(apk: &asc_apk::Apk) -> asc_apk::Result<ApkKey> {
-        let meta = fs::metadata(apk.path()).map_err(|source| asc_apk::ApkError::Io { path: apk.path().to_path_buf(), source })?;
-        let mtime = meta.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
-        let mut h = fnv64(apk.central_directory_bytes()?);
-        h ^= meta.len().wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        h ^= (mtime as u64).rotate_left(17);
-        let stem = apk.path().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let stem: String = stem.chars().filter(|c| is_key_char(*c)).take(STEM_MAX).collect();
-        Ok(ApkKey(format!("{stem}-{h:0width$x}", width = HASH_HEX_LEN)))
+        let mut key = 0u64;
+        for (i, (path, directory)) in apk.directories()?.into_iter().enumerate() {
+            let meta = fs::metadata(path).map_err(|source| asc_apk::ApkError::Io { path: path.to_path_buf(), source })?;
+            let mtime = meta.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+            let mut h = fnv64(directory);
+            h ^= meta.len().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            h ^= (mtime as u64).rotate_left(17);
+            // A lone archive keeps the key it always had.
+            key = if i == 0 { h } else { key.rotate_left(11) ^ h ^ fnv64(path.as_os_str().as_encoded_bytes()).rotate_left(29) };
+        }
+        let stem: String = apk.stem().chars().filter(|c| is_key_char(*c)).take(STEM_MAX).collect();
+        Ok(ApkKey(format!("{stem}-{key:0width$x}", width = HASH_HEX_LEN)))
     }
 
     pub fn as_str(&self) -> &str {
