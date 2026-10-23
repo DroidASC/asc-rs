@@ -222,7 +222,8 @@ impl Engine {
             }
         }
         if roots.is_empty() {
-            return Err(EngineError::Query(format!("no method {}->{} in this APK", q.class, q.method)));
+            let hint = self.member_not_found_hint(&q.class, Some(&name), true);
+            return Err(EngineError::Query(format!("no method {}->{} in this APK{hint}", q.class, q.method)));
         }
         let max_nodes = q.max_nodes.max(roots.len());
         // Breadth-first: `depth_of` is each method's shallowest level, `next`

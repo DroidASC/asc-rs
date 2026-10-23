@@ -124,7 +124,10 @@ fn full_session() {
 
     // The fixture defines `first` but never invokes it.
     assert_eq!(ok(&replies[5])["total"], 0);
-    assert_eq!(text(&replies[5]), "# 0 results\n");
+    assert_eq!(
+        text(&replies[5]),
+        "# 0 results\n# hint: searched 2 DEX entries\n# hint: Lexample/Test;->first exists (first()V), but no code calls it: findrefs lists references, not definitions\n"
+    );
 
     let class = ok(&replies[6]);
     assert_eq!(class["class"], "Lexample/Test;");
@@ -710,10 +713,11 @@ fn findrefs_combines_conditions_in_one_method() {
     assert_eq!(both["results"][0]["matched"], json!(["token", "token"]));
     assert!(text(&replies[0]).starts_with("classes.dex | Lexample/Test;->first()V | \"token\", \"token\"\n"), "{}", text(&replies[0]));
     assert_eq!(ok(&replies[1])["total"], 0);
-    for r in &replies[2..] {
+    // A complete query beside `all` is one more condition.
+    assert_eq!(ok(&replies[2])["total"], 0);
+    for r in &replies[3..] {
         assert_eq!(r["result"]["isError"], true, "{r}");
     }
-    assert!(text(&replies[2]).contains("not both"));
     assert!(text(&replies[3]).contains("at least one"));
     assert!(text(&replies[4]).contains("cannot be combined"));
 }
@@ -1014,4 +1018,64 @@ fn tool_definitions_stay_small_and_take_the_output_options() {
         let p = &t["inputSchema"]["properties"];
         assert!(p["max_bytes"].is_object() && p["spill"].is_object() && p["page"].is_object(), "{}", t["name"]);
     }
+}
+
+#[test]
+fn lenient_spellings_answer_like_the_documented_ones() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
+    let a = apk.path().to_str().unwrap();
+    let canonical_method = json!({"apk": a, "kind": "method", "class": "java.lang.Object", "name": "<init>", "exact": true});
+    let canonical_field = json!({"apk": a, "kind": "field", "class": "Lexample/Rich;", "name": "value", "exact": true});
+    let replies = session(&[
+        call(1, "findrefs", canonical_method),
+        call(2, "findrefs", json!({"apk": a, "kind": "Methods", "value": "Ljava/lang/Object;-><init>()V"})),
+        call(3, "findrefs", json!({"apk_path": a, "type": "method", "class_name": "java.lang.Object", "method_name": "=<init>"})),
+        call(4, "findrefs", canonical_field),
+        call(5, "findrefs", json!({"apk": a, "kind": "fields", "value": "example.Rich#value:I"})),
+        call(6, "findrefs", json!({"apk": a, "rules": ["field:Lexample/Rich;->=value", "method:java.lang.Object.<init>()V"]})),
+        call(7, "findrefs", json!({"apk": a, "kind": "field", "value": "Lexample/Rich;->value:I", "context": true})),
+        call(8, "findrefs", json!({"apk": a, "kind": "type", "class": "Lexample/Rich;"})),
+        call(9, "findrefs", json!({"apk": a, "kind": "metod", "value": "x"})),
+        call(10, "findrefs", json!({"apk": a, "kind": "extends", "value": "Ljava/lang/Object;"})),
+        call(11, "findrefs", json!({"apk": a, "kind": "subclass", "class": "java.lang.Object"})),
+    ]);
+    let rows = |r: &Value| ok(r)["results"].clone();
+    assert!(ok(&replies[0])["total"].as_u64().unwrap() > 0, "{}", replies[0]);
+    assert_eq!(rows(&replies[1]), rows(&replies[0]));
+    assert_eq!(rows(&replies[2]), rows(&replies[0]));
+    assert!(ok(&replies[3])["total"].as_u64().unwrap() > 0, "{}", replies[3]);
+    assert_eq!(rows(&replies[4]), rows(&replies[3]));
+    // String rules run like their objects, and their follow-ups are objects too.
+    let rules = text(&replies[5]);
+    assert!(rules.contains("r1 | classes.dex | Lexample/Rich;->run()V") && rules.contains("r2 | classes.dex | "), "{rules}");
+    assert!(text(&replies[6]).contains(">"), "{}", text(&replies[6]));
+    assert_eq!(ok(&replies[7])["total"], 0, "{}", replies[7]);
+    // `class` stands in for the `value` of a type / class relation query.
+    assert!(ok(&replies[9])["total"].as_u64().unwrap() > 0, "{}", replies[9]);
+    assert_eq!(rows(&replies[10]), rows(&replies[9]));
+    assert_eq!(replies[8]["result"]["isError"], true);
+    assert!(text(&replies[8]).contains("closest: method"), "{}", text(&replies[8]));
+}
+
+#[test]
+fn misses_say_what_to_try() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
+    let a = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "getclass", json!({"apk": a, "class": "android.app.Activity"})),
+        call(2, "getclass", json!({"apk": a, "class": "example.Rch"})),
+        call(3, "findrefs", json!({"apk": a, "kind": "string", "value": "HÉLLO"})),
+        call(4, "callgraph", json!({"apk": a, "class": "Lexample/Rich;->compte"})),
+        call(5, "findrefs", json!({"apk": a, "kind": "method", "class": "Lexample/Rich;", "name": "nothing"})),
+        call(6, "findrefs", json!({"apk": a, "kind": "method", "class": "Lexample/Nowhere;", "name": "x"})),
+    ]);
+    let framework = text(&replies[0]);
+    assert!(framework.contains("framework class") && framework.contains("findrefs type Landroid/app/Activity;"), "{framework}");
+    assert!(text(&replies[1]).contains("did you mean Lexample/Rich;"), "{}", text(&replies[1]));
+    let zero = text(&replies[2]);
+    assert!(zero.contains("# hint: searched 1 DEX entry") && zero.contains("(?i)"), "{zero}");
+    assert_eq!(ok(&replies[2])["hints"].as_array().unwrap().len(), 2);
+    assert!(text(&replies[3]).contains("Lexample/Rich; has compute(II)I"), "{}", text(&replies[3]));
+    assert!(text(&replies[4]).contains("Lexample/Rich; has no method \"nothing\"; it has "), "{}", text(&replies[4]));
+    assert!(text(&replies[5]).contains("no DEX references Lexample/Nowhere;"), "{}", text(&replies[5]));
 }

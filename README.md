@@ -62,7 +62,8 @@ examples:
   droidasc findrefs app.apk field apiKey -o field_refs.txt
   droidasc findrefs app.apk string token --no-cache
   droidasc findrefs app.apk string token --context 3
-  droidasc findrefs app.apk method loadUrl --context-method
+  droidasc findrefs app.apk method loadUrl --context method
+  droidasc findrefs app.apk method android.webkit.WebView.loadUrl
   droidasc callgraph app.apk com.poc.Main onCreate --depth 3
   droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
   droidasc callgraph app.apk com.poc.Base run --virtual
@@ -96,13 +97,14 @@ classes4.dex | Ldxbs; | extends Landroid/webkit/WebViewClient;
 The rows found are the Python tool's (`bench/parity/semantic.py` compares the two by dex,
 method and matched set).
 
-`getclass` and `disassemble` take `--method 'run(I)V'` to render a single method given its
-exact signature (a bare name is rejected). `findrefs extends` / `impl` list the classes
+`getclass` and `disassemble` take `--method` to render only some methods: a name (every
+overload), an exact signature (`'run(I)V'`), a signature prefix or a Java-style one
+(`'run(int)'`); a method the class lacks fails with the methods it has. `findrefs extends` / `impl` list the classes
 whose direct superclass / one of whose direct interfaces is the target (dotted or Dalvik
 form). `findrefs string --literal` matches a plain substring instead of a regex.
 
 `findrefs --context N` prints, after each result, where the references are and the smali
-around them, so the next step rarely needs a `getclass`; `--context-method` prints the
+around them, so the next step rarely needs a `getclass`; `--context method` prints the
 whole method (a method over 150 lines shows 10 lines around each reference instead):
 
 ```
@@ -133,12 +135,22 @@ its subclasses (`(override of Lcom/poc/Base;)`).
 
 `findrefs APK all COND...` finds methods whose code matches every condition, `--none COND`
 drops those matching another. A condition is `KIND:VALUE`: `string:REGEX`, `literal:TEXT`,
-`type:PATTERN`, `method:[CLASS->]NAME`, `field:[CLASS->]NAME` (CLASS exact, `~CLASS` fuzzy;
-NAME a regex / substring, `=NAME` exact). The matched column lists what each condition
+`type:PATTERN`, `method:TARGET`, `field:TARGET`. A TARGET is `[CLASS->]NAME`, also written
+`com.a.B.name`, `com.a.B#name` or `Lcom/a/B;->name(I)V` (CLASS exact, `~CLASS` fuzzy, a class
+without package such as `WebView` in any package; NAME a regex / substring, `=NAME` or a
+name with its signature exact). `findrefs method` / `field` take the same targets in place
+of the name, and the kind is forgiving (`methods:`, `Method:`). The matched column lists what each condition
 matched, in order. `findrefs APK rules RULE...` (and `--file`, one rule per line) answers several
 queries in one pass over each DEX, rows prefixed `r1 | `, `r2 | `...; a rule is a condition,
 `extends:CLASS` / `impl:CLASS`, or conditions joined with `&`. On Douyin, eight audit rules
 take 114 ms in one `rules` call against 700 ms as eight `findrefs` processes.
+
+A miss says what to try. A class the APK does not define is either a framework class
+(find its uses with `findrefs type` / `extends`) or gets the closest classes it does
+define; a missing method lists the class's methods; a search without results prints, on
+stderr (`# hint:` lines over MCP), how many DEX entries it searched and why it may have
+found nothing (case-sensitive patterns, a class no DEX references, a member that exists
+but is never referenced); missing resource files and names point at shrunk layouts.
 
 `hierarchy APK CLASS` prints the transitive subclasses and implementers (`--supers`: the
 superclasses and interfaces) across DEX files, one line per class with its DEX or

@@ -153,7 +153,7 @@ fn member_query_needs_a_class_or_a_name() {
     let apk = temp_apk();
     let out = droidasc(&["findrefs", path(apk.path()), "method"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("method query needs at least one of class or method name"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("method query needs a class or a method name"), "{}", stderr(&out));
     let out = droidasc(&["findrefs", path(apk.path()), "method", "first", "--class", "example.Test"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
@@ -391,7 +391,7 @@ fn disassemble_defaults_to_no_debug_directives_and_writes_only_the_file() {
 }
 
 #[test]
-fn method_flag_renders_one_exact_signature() {
+fn method_flag_takes_a_name_or_a_signature() {
     let apk = rich_apk();
     for cmd in ["getclass", "disassemble"] {
         let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run()V"]);
@@ -399,16 +399,19 @@ fn method_flag_renders_one_exact_signature() {
         let text = stdout(&out);
         assert_eq!(text.matches(".method ").count(), 1, "{text}");
         assert!(text.contains(".method public run()V") && !text.contains(".field"), "{text}");
-        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run"]);
-        assert_eq!(out.status.code(), Some(1));
-        assert!(stderr(&out).contains("Error: method signature must include the name"), "{}", stderr(&out));
+        // A bare name or a Java-style signature picks the same method.
+        for m in ["run", "run()", "Lexample/Rich;->run()V"] {
+            let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", m]);
+            assert!(out.status.success(), "{m}: {}", stderr(&out));
+            let picked = stdout(&out);
+            assert_eq!(picked.matches(".method ").count(), 1, "{m}: {picked}");
+            assert!(picked.contains(".method public run()V") && !picked.contains(".field"), "{m}: {picked}");
+        }
+        // A method the class lacks: the error lists the ones it has.
         let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run(I)V"]);
         assert_eq!(out.status.code(), Some(1));
-        assert!(
-            stderr(&out).contains("Error: method not found or signature is not defined in the target DEX: run(I)V"),
-            "{}",
-            stderr(&out)
-        );
+        let err = stderr(&out);
+        assert!(err.contains("Lexample/Rich; has no method \"run(I)V\"; its methods: ") && err.contains("run()V"), "{err}");
     }
     // The dumped DEX still holds the whole class.
     let dir = tempfile::tempdir().unwrap();
@@ -652,4 +655,39 @@ fn manifest_summary_resources_and_xml() {
     assert!(stdout(&out).contains("android:networkSecurityConfig=\"@xml/network_security_config\""), "{}", stdout(&out));
     let out = droidasc(&["getmanifest", p]);
     assert!(stdout(&out).contains("android:networkSecurityConfig=\"@7F030000\""), "{}", stdout(&out));
+}
+
+#[test]
+fn member_targets_and_context_spellings_agree() {
+    let apk = rich_apk();
+    let p = path(apk.path());
+    let want = droidasc(&["findrefs", p, "field", "value", "--class", "example.Rich", "--exact"]);
+    assert!(want.status.success() && !stdout(&want).is_empty(), "{}", stderr(&want));
+    for target in ["Lexample/Rich;->value:I", "example.Rich.value", "example.Rich#value", "Rich.value"] {
+        let out = droidasc(&["findrefs", p, "field", target]);
+        assert_eq!(stdout(&out), stdout(&want), "{target}: {}", stderr(&out));
+    }
+    let a = droidasc(&["findrefs", p, "--context", "method", "field", "Lexample/Rich;->value:I"]);
+    let b = droidasc(&["findrefs", p, "--context-method", "field", "Lexample/Rich;->value:I"]);
+    assert!(a.status.success() && stdout(&a).contains(".method"), "{}", stderr(&a));
+    assert_eq!(stdout(&a), stdout(&b));
+    let bad = droidasc(&["findrefs", p, "--context", "lots", "string", "x"]);
+    assert!(stderr(&bad).contains("neither a number of lines nor `method`"), "{}", stderr(&bad));
+}
+
+#[test]
+fn misses_print_hints_on_stderr() {
+    let apk = rich_apk();
+    let p = path(apk.path());
+    let out = droidasc(&["findrefs", p, "string", "HÉLLO"]);
+    assert!(out.status.success());
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    assert!(stderr(&out).contains("hint: searched 2 DEX entries") && stderr(&out).contains("(?i)"), "{}", stderr(&out));
+    let out = droidasc(&["getclass", p, "android.app.Activity"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("framework class"), "{}", stderr(&out));
+    let out = droidasc(&["getclass", p, "example.Rch"]);
+    assert!(stderr(&out).contains("did you mean Lexample/Rich;"), "{}", stderr(&out));
+    let out = droidasc(&["manifest_summary", p]);
+    assert!(!stderr(&out).contains("unrecognized subcommand"), "{}", stderr(&out));
 }

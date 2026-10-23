@@ -63,20 +63,27 @@ impl<'a> ClassText<'a> {
     }
 
     /// The methods `query` names: an exact signature, a signature prefix
-    /// (`onCreate(Landroid/os/Bundle;`), or a bare name (every overload).
-    /// `Lcls;->` in front is ignored.
+    /// (`onCreate(Landroid/os/Bundle;`), a Java-style signature
+    /// (`onCreate(android.os.Bundle)`), or a bare name (every overload).
+    /// `Lcls;->` in front is ignored, and so is whitespace.
     pub fn select(&self, query: &str) -> Vec<&MethodBlock<'a>> {
-        let q = query.trim();
-        let q = q.rsplit_once("->").map_or(q, |(_, m)| m);
+        let q: String = query.split_whitespace().collect();
+        let q = q.rsplit_once("->").map_or(q.as_str(), |(_, m)| m);
         let exact: Vec<_> = self.methods.iter().filter(|m| m.signature == q).collect();
         if !exact.is_empty() {
             return exact;
         }
-        if q.contains('(') {
-            self.methods.iter().filter(|m| m.signature.starts_with(q)).collect()
-        } else {
-            self.methods.iter().filter(|m| m.name() == q).collect()
+        if !q.contains('(') {
+            return self.methods.iter().filter(|m| m.name() == q).collect();
         }
+        let prefixed: Vec<_> = self.methods.iter().filter(|m| m.signature.starts_with(q)).collect();
+        if !prefixed.is_empty() {
+            return prefixed;
+        }
+        // `name(java.lang.String,int)`: compare its Dalvik form, return type optional.
+        let member = query.rsplit_once("->").map_or(query, |(_, m)| m);
+        let Some(dalvik) = asc_engine::names::java_signature_to_dalvik(member) else { return Vec::new() };
+        self.methods.iter().filter(|m| m.signature == dalvik || m.signature.starts_with(&dalvik)).collect()
     }
 
     /// The header and `picked` methods, as smali.

@@ -95,9 +95,18 @@ differ only as Python's do: `disassemble` leaves out debug directives unless
 `.param` (`--no-debug-info`) and also prints to stdout. The output stays baksmali-style
 rather than copying dadguard's format (`# CLASS:` / `## METHOD:` comments, `.locals`), and
 `--debug` does not add per-instruction offset comments. `--method 'name(params)ret'`
-(both commands) is normalised as in Python (whitespace dropped from the descriptors, a
-bare name rejected) and keeps the class header, interfaces and class annotations, no
-fields, and only that method; the rebuilt DEX (`--dump-dex`) still holds the whole class.
+(both commands) is normalised as in Python (whitespace dropped from the descriptors) and
+keeps the class header, interfaces and class annotations, no fields, and only that method;
+the rebuilt DEX (`--dump-dex`) still holds the whole class. Unlike Python, a bare name, a
+signature prefix or a Java-style signature also works: the whole class is disassembled and
+the matching methods picked from it (`asc_mcp::class_text`, as MCP `getclass` does).
+
+Query spellings are parsed in one place, `asc_engine::names`: `MemberTarget::parse` reads
+every form of a method / field target, `member_query` builds the query from wherever the
+class was written, `parse_kind` forgives kinds, `parse_condition` / `parse_rule` read CLI
+conditions and MCP string rules. MCP rewrites aliased argument keys (`class_name`,
+`apk_path`, …) before a tool runs (`asc-mcp/src/lenient.rs`). What a miss tells the agent
+is `asc-engine/src/hints.rs`, computed only on those paths.
 
 ### Output format
 
