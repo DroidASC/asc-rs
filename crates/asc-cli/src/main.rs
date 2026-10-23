@@ -19,7 +19,10 @@ const EXAMPLES: &str = "examples:
   droidasc listclass app.apk --prefix com.poc
   droidasc getmanifest app.apk -o AndroidManifest.xml
   droidasc findrefs app.apk string token -o string_refs.txt
+  droidasc findrefs app.apk string 'a.b(c)' --literal
   droidasc findrefs app.apk type com.poc.Main
+  droidasc findrefs app.apk extends android.app.Activity -o subclasses.txt
+  droidasc findrefs app.apk impl android.os.IInterface
   droidasc findrefs app.apk method onCreate --class com.poc.Main
   droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
   droidasc findrefs app.apk method run --class com.poc.Main --exact
@@ -162,6 +165,9 @@ enum Find {
     String {
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Match VALUE as a plain substring instead of a regex.
+        #[arg(long)]
+        literal: bool,
         /// Fuzzy string pattern.
         value: String,
     },
@@ -170,6 +176,20 @@ enum Find {
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Fuzzy type pattern.
+        value: String,
+    },
+    /// Find classes that extend the target class.
+    Extends {
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Target class in dotted or Dalvik form, e.g. android.app.Activity or Lcom/poc/Base;.
+        value: String,
+    },
+    /// Find classes that implement the target interface.
+    Impl {
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Target interface in dotted or Dalvik form, e.g. android.os.IInterface.
         value: String,
     },
     /// Find references to methods.
@@ -370,8 +390,12 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
         }
         Command::Findrefs { apk_path, find } => {
             let (query, output) = match find {
-                Find::String { output, value } => (Query::String(value), output),
+                Find::String { output, literal: false, value } => (Query::String(value), output),
+                Find::String { output, literal: true, value } => (Query::StringLiteral(value), output),
                 Find::Type { output, value } => (Query::Type(value), output),
+                // The class-def lookups need the precise Dalvik form.
+                Find::Extends { output, value } => (Query::Extends(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
+                Find::Impl { output, value } => (Query::Implements(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
                 Find::Method { output, name, class_name, fuzzy_class, exact } => (
                     Query::Method(
                         names::member_query("method", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)

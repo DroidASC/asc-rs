@@ -12,11 +12,17 @@
 //!    method that owns it through a dense 16-byte bucket table, and confirms
 //!    the offset really sits on an instruction boundary.
 //!
+//! String queries are a regex, or a plain substring found with SIMD `memmem`
+//! ([`Query::StringLiteral`]). `Extends` / `Implements` queries skip the
+//! pipeline: they compare `class_def_item`s with the target's type index
+//! ([`FindRefs::class_relation`]).
+//!
 //! Queries can be pre-compiled once per search ([`CompiledQuery`]) and run
 //! against many DEX files with [`FindRefs::find_ref_compiled`].
 
 #![forbid(unsafe_code)]
 
+mod classdefs;
 mod insn_locator;
 mod locators;
 mod query;
@@ -66,19 +72,57 @@ pub struct MemberQuery {
 /// A reference search request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Query {
+    /// Strings matching a regex.
     String(String),
+    /// Strings containing a plain substring (no regex syntax).
+    StringLiteral(String),
     Type(String),
     Method(MemberQuery),
     Field(MemberQuery),
+    /// Classes whose superclass is exactly this descriptor (`Lcom/poc/Base;`).
+    /// Answered from `class_def_item`s, not by a code scan.
+    Extends(String),
+    /// Classes that directly implement exactly this interface descriptor.
+    Implements(String),
 }
 
 impl Query {
+    /// The index table the query targets; class relations report
+    /// [`RefKind::Type`] (their results are classes).
     pub fn kind(&self) -> RefKind {
         match self {
-            Query::String(_) => RefKind::String,
-            Query::Type(_) => RefKind::Type,
+            Query::String(_) | Query::StringLiteral(_) => RefKind::String,
+            Query::Type(_) | Query::Extends(_) | Query::Implements(_) => RefKind::Type,
             Query::Method(_) => RefKind::Method,
             Query::Field(_) => RefKind::Field,
+        }
+    }
+
+    /// The class relation of an `Extends` / `Implements` query.
+    pub fn relation(&self) -> Option<ClassRelation> {
+        match self {
+            Query::Extends(_) => Some(ClassRelation::Extends),
+            Query::Implements(_) => Some(ClassRelation::Implements),
+            _ => None,
+        }
+    }
+}
+
+/// How a class relates to the target of an `Extends` / `Implements` query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClassRelation {
+    /// The class's `superclass_idx` is the target.
+    Extends,
+    /// The target is in the class's `interfaces` list.
+    Implements,
+}
+
+impl ClassRelation {
+    /// The verb of the Python output line (`Lsub; extends Lbase;`).
+    pub fn verb(self) -> &'static str {
+        match self {
+            ClassRelation::Extends => "extends",
+            ClassRelation::Implements => "implements",
         }
     }
 }
@@ -207,8 +251,10 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     pub fn locate_compiled(&self, query: &CompiledQuery) -> Result<BTreeSet<u32>> {
         let buf = self.dex.buf();
         match (query.kind(), query.parts()) {
-            (_, Parts::Pattern(None)) => Ok(BTreeSet::new()),
+            (_, Parts::Pattern(None)) | (_, Parts::Literal(None)) => Ok(BTreeSet::new()),
             (RefKind::String, Parts::Pattern(Some(re))) => Ok(self.string_locator()?.locate(buf, re)),
+            (RefKind::String, Parts::Literal(Some(f))) => Ok(self.string_locator()?.locate_literal(buf, f)),
+            (_, Parts::Relation(..)) => Ok(self.class_relation(query)?.unwrap_or_default().into_iter().collect()),
             (RefKind::Type, Parts::Pattern(Some(re))) => Ok(self.type_locator()?.locate(buf, self.string_locator()?, re)),
             (RefKind::Method, Parts::Member(_)) => {
                 self.method_locator()?.locate_compiled(self.dex, self.string_locator()?, self.type_locator()?, query)
@@ -228,12 +274,28 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
 
     /// Full search with a query compiled once (typically shared by every DEX
     /// of an APK).
+    ///
+    /// Class relations (`Extends` / `Implements`) reference no code and give
+    /// no hits here; [`FindRefs::class_relation`] answers them.
     pub fn find_ref_compiled(&self, query: &CompiledQuery) -> Result<Vec<Hit>> {
+        if query.relation().is_some() {
+            return Ok(Vec::new());
+        }
         let idxs = self.locate_compiled(query)?;
         if idxs.is_empty() {
             return Ok(Vec::new());
         }
         self.scan_idxs(query.kind(), &idxs)
+    }
+
+    /// Answer an `Extends` / `Implements` query: the `class_idx` of every
+    /// class definition that extends / implements the target, in
+    /// `class_defs` order. `None` for any other query.
+    pub fn class_relation(&self, query: &CompiledQuery) -> Result<Option<Vec<u32>>> {
+        match query.parts() {
+            Parts::Relation(rel, descriptor) => Ok(Some(classdefs::related_classes(self.dex, *rel, descriptor)?)),
+            _ => Ok(None),
+        }
     }
 
     /// Scan for already-located indexes of `kind`.

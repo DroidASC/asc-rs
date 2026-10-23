@@ -238,7 +238,7 @@ mod tests {
     use super::*;
 
     fn row(m: &str) -> RefResult {
-        RefResult { dex_name: "classes.dex".into(), method_idx: 0, method: m.into(), matched: vec!["x".into()] }
+        RefResult { dex_name: "classes.dex".into(), method_idx: 0, method: m.into(), matched: vec!["x".into()], relation: None }
     }
 
     #[test]

@@ -230,6 +230,69 @@ fn class_that_cannot_be_rebuilt_is_still_disassembled() {
     assert!(stderr(&out).contains("not rebuilt"), "{}", stderr(&out));
 }
 
+// ---- upstream parity: extends / impl, disassemble, --method -------------
+
+fn rich_apk() -> tempfile::NamedTempFile {
+    let dex = asc_fixture::make_rich_dex();
+    temp_apk_from(&make_apk(&[("classes.dex", &dex), ("classes2.dex", &make_dex())], true))
+}
+
+fn sorted_lines(o: &Output) -> Vec<String> {
+    let mut v: Vec<String> = stdout(o).lines().map(str::to_string).collect();
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn findrefs_extends_and_impl_print_python_lines() {
+    let apk = rich_apk();
+    for target in ["java.lang.Object", "Ljava/lang/Object;", "java/lang/Object"] {
+        let out = droidasc(&["findrefs", path(apk.path()), "extends", target]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(
+            sorted_lines(&out),
+            [
+                "classes.dex | Lexample/Broken; extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Custom; extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Iface; extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Rich; extends Ljava/lang/Object;",
+                "classes2.dex | Lexample/Test; extends Ljava/lang/Object;",
+            ]
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("impls.txt");
+    let out = droidasc(&["findrefs", path(apk.path()), "impl", "example.Iface", "-o", path(&file)]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "classes.dex | Lexample/Rich; implements Lexample/Iface;\n");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), stdout(&out));
+    // Direct relations only; unknown targets give no rows and no error.
+    for args in [["extends", "example.Iface"], ["impl", "java.lang.Object"], ["extends", "no.such.Clazz"]] {
+        let out = droidasc(&["findrefs", path(apk.path()), args[0], args[1]]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(out.stdout.is_empty(), "{args:?}: {}", stdout(&out));
+    }
+    let out = droidasc(&["findrefs", path(apk.path()), "extends", ""]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("Class name cannot be empty"), "{}", stderr(&out));
+}
+
+#[test]
+fn findrefs_string_literal_ignores_regex_syntax() {
+    let apk = temp_apk();
+    let regex = droidasc(&["findrefs", path(apk.path()), "string", "t.k"]);
+    assert_eq!(sorted_lines(&regex).len(), 4, "{}", stderr(&regex));
+    let literal = droidasc(&["findrefs", path(apk.path()), "string", "--literal", "t.k"]);
+    assert!(literal.status.success() && literal.stdout.is_empty(), "{}", stderr(&literal));
+    // An invalid regex is a fine literal.
+    let out = droidasc(&["findrefs", path(apk.path()), "string", "oke(", "--literal"]);
+    assert!(out.status.success() && out.stdout.is_empty(), "{}", stderr(&out));
+    assert_eq!(droidasc(&["findrefs", path(apk.path()), "string", "oke("]).status.code(), Some(1));
+    let out = droidasc(&["findrefs", path(apk.path()), "string", "--literal", "oke"]);
+    assert_eq!(sorted_lines(&out), sorted_lines(&droidasc(&["findrefs", path(apk.path()), "string", "oke"])));
+    assert_eq!(sorted_lines(&out).len(), 4);
+}
+
 // ---- listclass (ported from the Python `test_listclass.py`) -------------
 
 #[test]

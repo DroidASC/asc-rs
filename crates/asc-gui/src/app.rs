@@ -458,6 +458,10 @@ impl AscApp {
         let title = match &query {
             Query::String(v) => format!("string: {v}"),
             Query::Type(v) => format!("type: {v}"),
+            // Not issued by the GUI; named for completeness.
+            Query::StringLiteral(v) => format!("string (literal): {v}"),
+            Query::Extends(v) => format!("extends: {v}"),
+            Query::Implements(v) => format!("impl: {v}"),
             Query::Method(MemberQuery { class, name, exact_name }) | Query::Field(MemberQuery { class, name, exact_name }) => format!(
                 "{}: {}{}{}",
                 kind.as_str(),
