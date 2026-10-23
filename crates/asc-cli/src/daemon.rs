@@ -25,9 +25,8 @@
 //! (`$DROIDASC_DAEMON_IDLE` seconds, as set for the command that started it).
 //!
 //! The class graphs and resource tables of the APKs it keeps open count
-//! against the memory budget of its cache: they take at most
-//! 1/[`POOL_SHARE`] of it, the least recently used APKs closing beyond that,
-//! and the cache keeps the rest for inflated DEX.
+//! against the memory budget of its cache, the least recently used APKs
+//! closing beyond their share ([`SharedCache::fit_resident`]).
 
 use crate::output::{Engines, Io};
 use crate::{run_query, Cli, Common};
@@ -69,9 +68,6 @@ const MAX_ENGINES: usize = 64;
 const FIRST_WAIT: Duration = Duration::from_millis(300);
 /// Milliseconds overriding [`FIRST_WAIT`].
 const WAIT_ENV: &str = "DROIDASC_DAEMON_WAIT_MS";
-/// The open APKs' class graphs and resource tables take at most this
-/// fraction (1/n) of the memory budget.
-const POOL_SHARE: usize = 2;
 /// How long `daemon start` waits for a new daemon's socket.
 const START_WAIT: Duration = Duration::from_secs(5);
 /// The smallest `sockaddr_un` path room of the supported systems (macOS).
@@ -612,9 +608,8 @@ impl Daemon {
         }
     }
 
-    /// Close the least recently used APKs while the class graphs and resource
-    /// tables of the open ones exceed their share of the memory budget, and
-    /// reserve what stays in the cache's budget.
+    /// Close the least recently used APKs whose class graphs and resource
+    /// tables exceed their share of the memory budget ([`SharedCache::fit_resident`]).
     fn trim_pool(&self) {
         // Sized outside the pool lock: an engine building its class graph
         // holds the graph's lock until done.
@@ -623,15 +618,14 @@ impl Daemon {
             pool.engines.iter().map(|(k, (e, used))| (*used, k.clone(), Arc::clone(e))).collect()
         };
         open.sort_unstable_by_key(|(used, ..)| std::cmp::Reverse(*used));
-        let sizes: Vec<usize> = open.iter().map(|(_, _, e)| e.resident_bytes()).collect();
-        let (held, closing) = within_share(&sizes, self.cache.memory_capacity() / POOL_SHARE);
+        let engines: Vec<&Engine> = open.iter().map(|(_, _, e)| &**e).collect();
+        let closing = self.cache.fit_resident(&engines);
         if !closing.is_empty() {
             let mut pool = self.engines.lock().expect("engine pool mutex poisoned");
             for i in closing {
                 pool.engines.remove(&open[i].1);
             }
         }
-        self.cache.set_reserved(held);
     }
 
     fn status(&self) -> String {
@@ -711,22 +705,6 @@ impl Daemon {
         let _ = frames.stream.shutdown(std::net::Shutdown::Both);
         true
     }
-}
-
-/// Of the resident sizes of the open APKs, most recently used first: the
-/// bytes of those that fit in `share` together, and the indexes of the rest
-/// (to close). The most recent one stays whatever its size.
-fn within_share(sizes: &[usize], share: usize) -> (usize, Vec<usize>) {
-    let mut held = 0;
-    let mut closing = Vec::new();
-    for (i, &bytes) in sizes.iter().enumerate() {
-        if i > 0 && bytes > 0 && held + bytes > share {
-            closing.push(i);
-        } else {
-            held += bytes;
-        }
-    }
-    (held, closing)
 }
 
 /// Set `cancel` once the client hangs up (it sends nothing after the request).
@@ -844,14 +822,6 @@ mod tests {
             assert!(t0.elapsed() < Duration::from_secs(5), "cancel not set after the client hung up");
             std::thread::sleep(Duration::from_millis(1));
         }
-    }
-
-    #[test]
-    fn open_apks_beyond_their_share_close_least_recent_first() {
-        assert_eq!(within_share(&[], 10), (0, vec![]));
-        assert_eq!(within_share(&[50], 10), (50, vec![]), "the APK in use stays");
-        assert_eq!(within_share(&[4, 5, 3, 1], 10), (10, vec![2]), "smaller older ones still fit");
-        assert_eq!(within_share(&[4, 0, 0], 0), (4, vec![]), "nothing resident, nothing closed");
     }
 
     #[test]

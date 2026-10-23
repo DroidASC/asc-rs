@@ -7,4 +7,4 @@ python3 failed.py RUN_DIR... > failed.jsonl                                  # �
 python3 replay.py DROIDASC DOUYIN_APK results/failed-calls.jsonl > replay.jsonl
 ```
 
-`replay.py` 先 `open_apk`，把每次调用的 `apk` 改成同一个 APK 再发出，输出 `ok` 与 `actionable`（回复是否带可操作提示，按脚本里的 `ACTIONABLE` 正则）。`results/failed-calls.jsonl` 是 92 次调用的参数与当时的错误文本（不含调用不存在工具的 12 次）。
+`replay.py` 把每次调用的 `apk` 改成同一个 APK 再发出，输出 `ok` 与 `actionable`（回复是否带可操作提示，按脚本里的 `ACTIONABLE` 正则）。`results/failed-calls.jsonl` 是 92 次调用的参数与当时的错误文本（不含调用不存在工具的 12 次）。

@@ -71,8 +71,8 @@ classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Pa
 - **Daemon**（Unix）：一次性命令自动交给按用户运行的 daemon，它让打开的 APK 常驻，输出（stdout、stderr、
   退出码）与不用 daemon 时逐字节相同。第一个命令自动启动它，空闲后自动退出；客户端 Ctrl-C 会取消 daemon
   中的查询。`droidasc daemon status|stop|start` 管理，`DROIDASC_DAEMON=off` 关闭。
-- **MCP**：`droidasc mcp` 是 stdio 上的常驻会话，工具有 `open_apk`、`close_apk`、`getclass`、`findrefs`、
-  `callgraph`、`hierarchy`、`listclass`、`getmanifest`、`manifest_summary`、`resources`。
+- **MCP**：`droidasc mcp` 是 stdio 上的常驻会话，工具有 `getclass`、`findrefs`、`callgraph`、`hierarchy`、
+  `listclass`、`getmanifest`、`manifest_summary`、`resources`，传 `apk` 路径即打开，回复里的 `apk_id` 可代替路径。
   `findrefs`、`listclass`、`manifest_summary`、`resources` 可用 `apks` / `dir` 一次处理多个 APK。回复控制在
   `max_bytes`（默认 16384）内，超出部分按 `spill` 写文件或分页。
 

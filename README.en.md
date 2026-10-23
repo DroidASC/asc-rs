@@ -78,9 +78,9 @@ classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Pa
   output (stdout, stderr, exit status) is byte-identical to running without it. The first command starts
   it and it exits when idle; Ctrl-C in the client cancels the query in the daemon. `droidasc daemon
   status|stop|start` controls it, `DROIDASC_DAEMON=off` turns it off.
-- **MCP**: `droidasc mcp` is a resident session over stdio with the tools `open_apk`, `close_apk`,
-  `getclass`, `findrefs`, `callgraph`, `hierarchy`, `listclass`, `getmanifest`, `manifest_summary`,
-  `resources`. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
+- **MCP**: `droidasc mcp` is a resident session over stdio with the tools `getclass`, `findrefs`,
+  `callgraph`, `hierarchy`, `listclass`, `getmanifest`, `manifest_summary`, `resources`. Passing an
+  `apk` path opens it; the `apk_id` in replies can stand in for the path. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
   APKs in one call. Replies stay within `max_bytes` (default 16384); the rest is spilled to a file or paged,
   per `spill`.
 

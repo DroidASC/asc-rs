@@ -373,7 +373,7 @@ impl Server {
 
 /// `tools/list` entries of this module's tools.
 pub mod defs {
-    use crate::defs::{apk_props, many, merge, shape};
+    use crate::defs::{apk_props, many, merge, shape_many};
     use serde_json::{json, Value};
 
     pub fn manifest_summary() -> Value {
@@ -389,7 +389,7 @@ pub mod defs {
                 "name": {"type": "string", "description": "Regex over the record (case-insensitive)."},
                 "offset": {"type": "integer"},
             }), many()])},
-            "outputSchema": shape(&[
+            "outputSchema": shape_many(&[
                 ("apk_id", "string"), ("package", "string?"), ("application", "object"), ("uses_permissions", "array"),
                 ("components", "array"), ("warnings", "array"), ("records_total", "integer"),
             ]),
@@ -410,7 +410,7 @@ pub mod defs {
                 "limit": {"type": "integer", "description": format!("Default {}.", super::RESOURCES_LIMIT)},
                 "xml": {"type": "string", "description": "Path inside the APK, e.g. res/xml/file_paths.xml"},
             }), many()])},
-            "outputSchema": shape(&[("apk_id", "string"), ("total", "integer"), ("rows", "array"), ("chain", "array"), ("xml", "string")]),
+            "outputSchema": shape_many(&[("apk_id", "string"), ("total", "integer"), ("rows", "array"), ("chain", "array"), ("xml", "string")]),
         })
     }
 }
