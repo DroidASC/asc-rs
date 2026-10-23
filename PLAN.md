@@ -1,6 +1,6 @@
 # asc-rs 改进计划
 
-更新：2026-10-22。基线：main `3a1e5cd`。
+更新：2026-10-22。基线：main `3a1e5cd`；A–D 四条线的第一轮已合到 `integrate/plan`（见第 6 节）。
 
 ## 0. 目标场景
 
@@ -149,6 +149,8 @@
 
 ## 4. 验收评测
 
+所有评测都是**脚本回放**（固定的步骤或规则），不跑真实 agent。"调用次数"和"上下文体积"是脚本里两种调用方式之间的对比，不是 agent 实测。
+
 | 场景 | 方法 | 指标 |
 |---|---|---|
 | S1 | dexsql 那 17 个目标，加上新增的调用链目标（例如"导出 Provider → 文件读写"、"deep link → WebView loadUrl"） | **每个目标的调用次数**、整轮耗时、每个目标的几何平均、内存峰值；和 dexsql 对比 |
@@ -162,3 +164,30 @@
 2. 已定：不追求兼容 rasc 和 rust_ASC 的输出格式。`classes`、`manifest`、`--thread` 只作为方便迁移的别名，输出按 asc-rs 自己的格式，以对 agent 好用为准。新增的输出（manifest 摘要、多 APK 汇总、调用图）都按这个原则设计：每行一条记录、可直接 grep，MCP 同时给 JSON。
 3. 已定：S2 真实数据集先用测试机（Pixel 6）上安装的全部系统 APK（`adb shell pm list packages -f -s`，约 320 个、3.8 GB），拉到 `target/device-apks/`（不入库）。C、D 线的 S2 评测以它为准，100 个 APK 的合成集只作对照。
 4. 暂定：资源对比以 aapt2 为准；aapt2 拒绝或丢弃而我们能恢复的条目（apktool 式），单独标记为“恢复”，不算差异。
+
+## 6. 第一轮结果（`integrate/plan`）
+
+| 线 | 完成 | 未做 |
+|---|---|---|
+| A | `asc-arsc`（全部条目编码、复合条目、Library/Overlayable/StagedAlias）；res/xml；`@0x7f…` 解析；manifest 摘要（含隐式导出）；CLI `resources`/`manifest-summary`/`xml`；MCP `resources`/`manifest_summary`（单个或多个 APK）；getclass 资源名注释 | — |
+| B | findrefs 上下文（`--context N`/`--context-method`，MCP `context`）；调用图 `callgraph`（CLI + MCP） | 组合条件、继承递归、多规则一次扫描 |
+| C | MCP 多 APK（`apks`/`dir`）、按 APK 分节、SDK 折叠、按包合并、字节预算 + cursor、续页提示是完整参数、取消、防解压炸弹 | 跨 APK 去重 |
+| D | L1/L2/L3 分层，共用预算；小 DEX 不写 L1；不压缩的 DEX 直接映射 APK；索引表与调用图进 L2；findrefs 结果进 L3；按进程登记分配内存预算 | 后台预建索引；多 APK 路径用 L3；调用图原地映射；共享映射页的预算计费 |
+
+**资源对比**：419 个 APK（312 个设备系统 APK、Douyin、快手、美团、拼多多、淘宝两个版本、小红书、100 个 APK 的合成集），160 万个资源 id、1094 万个取值，与 aapt2 只剩 4 处差异，都是 aapt2 文本输出无法拆准的带样式字符串。
+
+**S1 Douyin，47 步回放**：不开缓存时整轮 242 ms，几何平均 5.2 ms，峰值 648 MB；磁盘缓存命中时整轮 82 ms，几何平均 4.7 ms，峰值 227 MB（dexsql 1112 ms）。
+
+**S2 设备上的 312 个系统 APK（3.8 GB），8 条规则，2496 次查询：**
+
+| 跑法 | main `3a1e5cd` | `integrate/plan` |
+|---|---:|---:|
+| 一个 MCP 进程，空缓存 | 683–842 ms，峰值 1.75 GB | 428 ms，峰值 1.49 GB |
+| 一个 MCP 进程，缓存已建好 | — | 144 ms，峰值 122 MB |
+| CLI，16 个进程 | 949 ms，每进程 108 MB | 525 ms，每进程 21 MB |
+| 每条规则一次 `dir` 调用 | — | 8 次调用，返回 166 KiB（逐个 APK 调用时返回 762 KiB） |
+| `manifest_summary dir=…`（暴露面） | 不支持 | 115–230 ms，217 个 APK 有导出组件 |
+
+**回归**：310 个测试、clippy、fmt 全过；在 reference-workload 上与 Python 上游逐行对比，开不开缓存差异都是 0；在 40 个设备 APK 上用 9 条规则加 getclass，比较开缓存和不开缓存的输出，内容一致（CLI 按各 DEX 完成的先后输出，DEX 的顺序本来就不固定）。
+
+**还没处理的问题**：CLI 文本输出里，命中的字符串如果本身带换行，一条记录会跨多行。保留现状是为了和 Python 上游逐行一致；是否改成转义待定。
