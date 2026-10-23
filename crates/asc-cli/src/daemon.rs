@@ -25,7 +25,7 @@
 
 use crate::output::{Engines, Io};
 use crate::{run_query, Cli, Common};
-use asc_engine::{Engine, SharedCache};
+use asc_engine::{Busy, Engine, SharedCache};
 use clap::Parser;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -567,9 +567,11 @@ impl Daemon {
         match kind {
             REQ_RUN => {
                 self.active.fetch_add(1, Ordering::SeqCst);
+                let busy = Busy::enter();
                 if self.run(stream, &body) {
                     self.served.fetch_add(1, Ordering::Relaxed);
                 }
+                drop(busy);
                 *self.last.lock().expect("idle clock mutex poisoned") = Instant::now();
                 self.active.fetch_sub(1, Ordering::SeqCst);
             }

@@ -34,7 +34,7 @@ mod res;
 mod rules;
 
 use asc_engine::{
-    names, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch, RefContext,
+    names, Busy, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch, RefContext,
     RefResult, SharedCache, SmaliOptions, Threads,
 };
 use asc_findrefs::Query;
@@ -382,6 +382,7 @@ impl Server {
                 // A `more` / `next` hint passed back as the cursor is a call.
                 let followed = follow_up(args);
                 let args = followed.as_ref().unwrap_or(args);
+                let _busy = Busy::enter();
                 // A bug in the engine must not take the whole session down.
                 let result = guarded(name, || {
                     let (text, structured) = match str_arg(args, "cursor")? {
@@ -593,7 +594,7 @@ impl Server {
                 apk.engine.release_memory_cache();
             }
         };
-        let mut outcomes = multi::fan_out(self.threads.count(), &apks, &call.cancel, &plan, &run, done).into_iter();
+        let mut outcomes = multi::fan_out(self.threads, &apks, &call.cancel, &plan, &run, done).into_iter();
         let mut stats = SweepStats { released: release, ..SweepStats::default() };
         let (mut sections, mut empty) = (Vec::new(), Vec::new());
         for (path, o) in paths.iter().zip(&opened) {
