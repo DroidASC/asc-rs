@@ -368,7 +368,7 @@ impl Apk {
     pub fn open(path: impl AsRef<Path>) -> Result<Apk> {
         let path = path.as_ref().to_path_buf();
         let sources = program::sources(&path)?;
-        let version = Version::of_sources(&sources)?;
+        let version = Version::of_sources(&sources);
         if let [lone] = &sources[..] {
             let archives = Arc::new([Archive::open(lone.path.clone(), String::new())?]);
             return Ok(Apk { path, archives, limits: Limits::default(), notes: Arc::new([]), version });
@@ -403,7 +403,7 @@ impl Apk {
     /// when opening again would read the same files. Costs a directory walk
     /// and a `stat` per archive, not a mapping.
     pub fn version_of(path: impl AsRef<Path>) -> Result<Version> {
-        Version::of_sources(&program::sources(path.as_ref())?)
+        Ok(Version::of_sources(&program::sources(path.as_ref())?))
     }
 
     /// The files read and their sizes and times when this was opened.
