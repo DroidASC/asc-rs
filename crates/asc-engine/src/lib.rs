@@ -23,6 +23,7 @@ mod callgraph;
 mod classes;
 mod manifest;
 pub mod names;
+mod prebuild;
 mod resources;
 mod tiers;
 
@@ -48,6 +49,7 @@ pub use asc_smali::Options as SmaliOptions;
 pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
+pub use prebuild::PrebuildReport;
 pub use resources::{parse_id, ResourceField, ResourceRow};
 pub use tiers::auto_memory_share;
 
@@ -360,6 +362,20 @@ pub struct LogicalDex {
     persisted: Arc<tiers::Persisted>,
 }
 
+/// The memory cache charges file-backed bytes (mapped from the disk cache
+/// or the APK) at this fraction of their size, heap bytes in full.
+///
+/// File pages are not what runs a machine out of memory: the kernel drops
+/// clean ones under pressure (they are re-read from the file) and every
+/// process mapping the same L1 / L2 file or APK shares one copy, so charging
+/// them in full made each of N processes evict as if it held its own copy,
+/// and summed to N times the real footprint in the process registry
+/// (`MemAvailable`, which the budget starts from, already counts reclaimable
+/// page cache). They still cost something (address space, page cache churn,
+/// the re-reads), so they are not free either: the LRU still bounds them, at
+/// up to this many times the budget.
+pub const MAPPED_CHARGE_DIVISOR: usize = 8;
+
 /// A cached inflated entry.
 pub struct CachedEntry {
     pub name: String,
@@ -402,10 +418,20 @@ impl CachedEntry {
         self.logical.get().map_or(0, |l| l.iter().map(|d| d.state.heap_bytes() + d.state.mapped_bytes()).sum())
     }
 
-    /// What the in-memory cache charges for this entry: its bytes plus the
-    /// locator tables built for it.
+    /// What the in-memory cache charges for this entry: heap bytes in full
+    /// (the inflated entry when not mapped, a container's logical copies,
+    /// tables built on the heap) and file-backed bytes (the entry mapped from
+    /// L1 or the APK, tables mapped from L2) at 1/[`MAPPED_CHARGE_DIVISOR`].
     pub fn charged_bytes(&self) -> usize {
-        self.resident_bytes() + self.state_bytes()
+        let copies = dex041_logical_offsets(&self.data).len();
+        let len = self.data.len();
+        let own =
+            if self.is_mapped() { (len / MAPPED_CHARGE_DIVISOR) * copies.min(1) + len * copies.saturating_sub(1) } else { len * copies };
+        let tables = self
+            .logical
+            .get()
+            .map_or(0, |l| l.iter().map(|d| d.state.heap_bytes() + d.state.mapped_bytes() / MAPPED_CHARGE_DIVISOR).sum::<usize>());
+        own + tables
     }
 
     /// The same entry over `data` (identical bytes from another source, e.g.
@@ -627,7 +653,12 @@ fn remap_entry(
         return;
     }
     let new = Arc::new(entry.with_data(Arc::new(mapped)));
-    memory.lock().unwrap().replace(&key, &name, &entry, new);
+    // Now file-backed: charged less.
+    let size = new.charged_bytes();
+    let mut memory = memory.lock().unwrap();
+    if memory.replace(&key, &name, &entry, Arc::clone(&new)) {
+        memory.resize(&key, &name, &new, size);
+    }
 }
 
 /// Make freed DEX-sized blocks go straight back to the OS. glibc serves
@@ -750,6 +781,9 @@ pub struct Engine {
     limits: Limits,
     /// Parsed `resources.arsc` for the APK version it was read from.
     resources: Mutex<Option<resources::CachedTable>>,
+    /// Background table builds ([`Engine::prebuild`]) and the searches they
+    /// give way to.
+    prebuild: prebuild::Prebuild,
 }
 
 /// An APK opened for a search whose DEX entries are scheduled by the caller,
@@ -787,6 +821,7 @@ impl Engine {
             key_cache: Mutex::new(None),
             limits: Limits::default(),
             resources: Mutex::new(None),
+            prebuild: prebuild::Prebuild::default(),
         }
     }
 
@@ -1214,6 +1249,7 @@ impl Engine {
         sink: &mut dyn FnMut(RefBatch),
     ) -> Result<RefSummary> {
         let t0 = Instant::now();
+        let _query = self.prebuild.query();
         let compiled = CompiledQuery::new(query)?;
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
@@ -1299,6 +1335,7 @@ impl Engine {
         if ctx == RefContext::None || rows.is_empty() {
             return Ok(Vec::new());
         }
+        let _query = self.prebuild.query();
         let wanted: HashSet<String> = rows.iter().map(|r| entry_of(&r.dex_name).to_string()).collect();
         let (views, errors) = self.load_views(Some(&wanted))?;
         let mut errors = errors;
@@ -1416,6 +1453,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.prebuild.cancel();
         // A shared cache outlives this engine; its `SharedCache` owner closes it.
         if !self.shared_cache {
             self.close_cache_writes();
@@ -1461,7 +1499,7 @@ fn lookup_cached(cache: &EngineCache, key: Option<&ApkKey>, entry: &Entry, stats
                 if let Some(mem) = &cache.memory {
                     // The declared size may be 0 (undeclared) and omits a
                     // container's logical copies; charge what will be resident.
-                    let size = e.resident_bytes();
+                    let size = e.charged_bytes();
                     mem.lock().unwrap().insert(key, &entry.name, Arc::clone(&e), size);
                     cache.charged();
                 }
@@ -1514,7 +1552,7 @@ fn load_entry<'a>(
         if keep_in_memory {
             if let Some(mem) = &c.memory {
                 // Account for the container copies too, so the LRU cap holds.
-                let size = e.resident_bytes();
+                let size = e.charged_bytes();
                 mem.lock().unwrap().insert(k, &entry.name, Arc::clone(&e), size);
                 c.charged();
                 remap = Some(Arc::downgrade(&e));

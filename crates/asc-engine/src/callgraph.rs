@@ -188,6 +188,7 @@ impl Engine {
             None => (q.method.clone(), None),
         };
         let t0 = std::time::Instant::now();
+        let _query = self.prebuild.query();
         let (views, mut errors) = self.load_views(None)?;
         let load_us = t0.elapsed().as_micros();
         // Roots: every matching signature any DEX knows.
