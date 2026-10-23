@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 
 /// How a paused worker polls for the searches it gave way to.
 const YIELD_POLL: Duration = Duration::from_millis(1);
+/// L2 writes a prebuild lets queue up before it waits for the writer.
+const MAX_PENDING_WRITES: usize = 2;
 
 /// The tables a prebuild prepares, in order (every search needs the
 /// instruction table; strings and types back most member queries too). The
@@ -154,6 +156,11 @@ impl Engine {
                             if let Some((disk, k)) = l2 {
                                 if let Some(job) = tiers::derived_job(disk, &e, i, mask, t.elapsed()) {
                                     cache.put_async(WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Derived(job) });
+                                    // Built tables stay on the heap until the writer maps them:
+                                    // building far ahead of it only adds up heap.
+                                    while cache.derived_pending.load(Ordering::Relaxed) > MAX_PENDING_WRITES && !self.prebuild.cancelled() {
+                                        std::thread::sleep(YIELD_POLL);
+                                    }
                                 }
                             }
                             let mut tally = tally.lock().unwrap();

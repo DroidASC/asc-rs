@@ -525,6 +525,9 @@ struct EngineCache {
     /// inflate instead of racing (and replacing each other's locator tables).
     inflight: Mutex<HashSet<String>>,
     inflight_done: Condvar,
+    /// L2 writes queued and not yet written: their tables stay on the heap
+    /// until written and mapped, so a prebuild waits while this is high.
+    derived_pending: Arc<AtomicUsize>,
 }
 
 impl EngineCache {
@@ -540,6 +543,7 @@ impl EngineCache {
             let (tx, rx) = mpsc::channel::<WriteJob>();
             let thread_disk = Arc::clone(disk);
             let thread_memory = self.memory.clone();
+            let thread_pending = Arc::clone(&self.derived_pending);
             let spawned = std::thread::Builder::new().name("droidasc-cache-writer".into()).spawn(move || {
                 let mut pending: Option<WriteJob> = None;
                 let mut noted = HashSet::new();
@@ -551,7 +555,11 @@ impl EngineCache {
                             Err(_) => break,
                         },
                     };
+                    let derived = matches!(job.kind, Job::Derived(_));
                     run_job(&thread_disk, thread_memory.as_ref(), job, &mut noted);
+                    if derived {
+                        thread_pending.fetch_sub(1, Ordering::Relaxed);
+                    }
                     // Walk the cache directory once per burst, not once per entry.
                     match rx.try_recv() {
                         Ok(next) => pending = Some(next),
@@ -569,7 +577,14 @@ impl EngineCache {
             }
         }
         if let Some(w) = writer.as_ref() {
+            let derived = matches!(job.kind, Job::Derived(_));
+            if derived {
+                self.derived_pending.fetch_add(1, Ordering::Relaxed);
+            }
             if w.tx.send(job).is_err() {
+                if derived {
+                    self.derived_pending.fetch_sub(1, Ordering::Relaxed);
+                }
                 *writer = None;
             }
         }
@@ -871,6 +886,7 @@ impl Engine {
                 closed: AtomicBool::new(false),
                 inflight: Mutex::new(HashSet::new()),
                 inflight_done: Condvar::new(),
+                derived_pending: Arc::new(AtomicUsize::new(0)),
             };
             // Registers this process and takes its share right away.
             cache.charged();
