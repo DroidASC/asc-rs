@@ -660,7 +660,7 @@ impl Daemon {
         let argv: Vec<OsString> = argv.iter().map(|a| OsString::from_vec(a.to_vec())).collect();
         let Ok(mut cli) = Cli::try_parse_from(&argv) else { return decline(&stream, "arguments") };
         // The client resolved the same settings (same identity) before sending.
-        if cli.common.resolve().is_err() {
+        if cli.common.resolve_in(&cwd).is_err() {
             return decline(&stream, "settings");
         }
         if !forwardable(&cli) {

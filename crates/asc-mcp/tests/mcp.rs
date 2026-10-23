@@ -1186,3 +1186,31 @@ fn misses_say_what_to_try() {
     assert!(text(&replies[4]).contains("Lexample/Rich; has no method \"nothing\"; it has "), "{}", text(&replies[4]));
     assert!(text(&replies[5]).contains("no DEX references Lexample/Nowhere;"), "{}", text(&replies[5]));
 }
+
+#[test]
+fn programs_name_left_out_archives_and_classes_defined_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let dex = make_dex();
+    std::fs::write(dir.path().join("a.jar"), make_apk(&[("classes.dex", &dex)], true)).unwrap();
+    std::fs::write(dir.path().join("b.jar"), make_apk(&[("classes.dex", &dex)], false)).unwrap();
+    std::fs::write(dir.path().join("odexed.jar"), make_apk(&[("META-INF/MANIFEST.MF", b"m")], false)).unwrap();
+    let d = dir.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "findrefs", json!({"apk": d, "kind": "string", "value": "token"})),
+        call(2, "getclass", json!({"apk": d, "class": "Lexample/Test;"})),
+        call(3, "listclass", json!({"apk": d})),
+    ]);
+    for r in &replies {
+        let s = ok(r);
+        assert!(s["notes"][0].as_str().unwrap().starts_with("odexed.jar: no classes*.dex"), "{s}");
+        assert!(text(r).starts_with("# warning: odexed.jar: no classes*.dex"), "{}", text(r));
+    }
+    let s = ok(&replies[1]);
+    assert_eq!((&s["dex_name"], &s["also_defined_in"]), (&json!("a.jar/classes.dex"), &json!(["b.jar/classes.dex"])));
+    assert!(text(&replies[1]).contains("# from a.jar/classes.dex; also defined in b.jar/classes.dex\n"), "{}", text(&replies[1]));
+    // A lone APK says nothing of the kind.
+    let apk = temp_apk();
+    let replies = session(&[call(1, "getclass", json!({"apk": apk.path().to_str().unwrap(), "class": "Lexample/Test;"}))]);
+    let s = ok(&replies[0]);
+    assert!(s.get("notes").is_none() && s.get("also_defined_in").is_none(), "{s}");
+}

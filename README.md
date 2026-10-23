@@ -40,8 +40,11 @@ droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec
 APK 参数也可以是 jar、`.dex`，或作为一个程序一起分析的多个文件：一个目录（其下所有 `*.apk`、`*.jar`、`*.zip`、`*.dex`），
 或用 `,` 连接的多个路径（如 `framework.jar,services.jar,TeleService.apk`）。类层次、调用图和 findrefs 跨所有文件，
 DEX 名带上所属文件（`services.jar/classes2.dex`），`callgraph` 行尾标 `[services.jar]`，`listclass` 多一列文件名；
-没有 `classes*.dex` 的文件（只剩 odex/vdex）在 stderr 以 `# warning:` 列出，需先 deodex。同一个类在多个文件中都有定义时，
-findrefs 报告所有位置，`getclass` 取其中任一个。
+没有 `classes*.dex` 的文件（只剩 odex/vdex）在 stderr 以 `# warning:` 列出（MCP 回复的 `notes` 字段和文本首行），需先 deodex。
+同一个类在多个文件中都有定义时，findrefs 报告所有位置；`getclass` 按类加载器的顺序取：程序中靠前的文件（目录按路径排序，
+`,` 列表按给出的顺序），同一文件内 `classes.dex`、`classes2.dex`……，并用 `# … also defined in …` 列出其他文件中的定义。
+磁盘 cache 的解压 DEX 和索引按单个文件存放：改动一个 jar 只让它自己的条目失效，单独分析某个 jar 也复用程序里读过的条目；
+渲染结果（L3）仍按整个程序存放。
 
 完整选项见 `droidasc --help` 和 `droidasc <命令> --help`。退出码：0 成功，1 出错，2 部分 DEX 条目无法搜索（其余结果有效）。
 

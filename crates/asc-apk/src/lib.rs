@@ -11,12 +11,15 @@
 
 mod program;
 
+pub use program::Version;
+
 use memmap2::Mmap;
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 const CD_SIG: &[u8; 4] = b"PK\x01\x02";
@@ -110,13 +113,27 @@ impl Limits {
 }
 
 /// A memory-mapped APK, or several archives (APKs, jars, bare DEX files)
-/// read as one program: see [`Apk::open`].
+/// read as one program: see [`Apk::open`]. Clones share the mappings, so a
+/// host can keep one open and hand out copies while [`Apk::version`] holds.
+#[derive(Clone)]
 pub struct Apk {
     path: PathBuf,
-    archives: Vec<Archive>,
+    archives: Arc<[Archive]>,
     limits: Limits,
     /// Archives of a program left out of its code, one line each.
-    notes: Vec<String>,
+    notes: Arc<[String]>,
+    version: Version,
+}
+
+/// One archive of an [`Apk`] as a cache key sees it ([`Apk::directories`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveId<'a> {
+    pub path: &'a Path,
+    /// What its entry names start with in a program ([`archive_of`]); empty
+    /// for a lone archive.
+    pub label: &'a str,
+    /// Its central directory, or a bare DEX file's header.
+    pub directory: &'a [u8],
 }
 
 /// One file of an [`Apk`].
@@ -351,9 +368,10 @@ impl Apk {
     pub fn open(path: impl AsRef<Path>) -> Result<Apk> {
         let path = path.as_ref().to_path_buf();
         let sources = program::sources(&path)?;
+        let version = Version::of_sources(&sources)?;
         if let [lone] = &sources[..] {
-            let archives = vec![Archive::open(lone.path.clone(), String::new())?];
-            return Ok(Apk { path, archives, limits: Limits::default(), notes: Vec::new() });
+            let archives = Arc::new([Archive::open(lone.path.clone(), String::new())?]);
+            return Ok(Apk { path, archives, limits: Limits::default(), notes: Arc::new([]), version });
         }
         let mut archives = Vec::with_capacity(sources.len());
         let mut notes = Vec::new();
@@ -377,7 +395,20 @@ impl Apk {
         if let [lone] = &mut archives[..] {
             lone.label.clear();
         }
-        Ok(Apk { path, archives, limits: Limits::default(), notes })
+        Ok(Apk { path, archives: archives.into(), limits: Limits::default(), notes: notes.into(), version })
+    }
+
+    /// The files `path` (as [`Apk::open`] takes it) names now, with their
+    /// sizes and modification times: equal to an open [`Apk::version`]
+    /// when opening again would read the same files. Costs a directory walk
+    /// and a `stat` per archive, not a mapping.
+    pub fn version_of(path: impl AsRef<Path>) -> Result<Version> {
+        Version::of_sources(&program::sources(path.as_ref())?)
+    }
+
+    /// The files read and their sizes and times when this was opened.
+    pub fn version(&self) -> &Version {
+        &self.version
     }
 
     /// `spec` (a path [`Apk::open`] takes) with its relative paths resolved
@@ -427,10 +458,10 @@ impl Apk {
         self.archives.get(entry.archive).expect("entry of this APK")
     }
 
-    /// `(file, bytes identifying its version)` of every archive: its central
-    /// directory, or a bare DEX file's header. A cache key hashes them.
-    pub fn directories(&self) -> Result<Vec<(&Path, &[u8])>> {
-        self.archives.iter().map(|a| Ok((a.path.as_path(), a.directory()?))).collect()
+    /// What identifies each archive's version, in program order. A cache key
+    /// hashes them.
+    pub fn directories(&self) -> Result<Vec<ArchiveId<'_>>> {
+        self.archives.iter().map(|a| Ok(ArchiveId { path: &a.path, label: &a.label, directory: a.directory()? })).collect()
     }
 
     /// A short name for the APK: the file stem, or for a program the first
@@ -454,7 +485,7 @@ impl Apk {
         }
         let mut size = 0u64;
         let mut latest = None;
-        for a in &self.archives {
+        for a in self.archives.iter() {
             let m = meta(a)?;
             let since = m.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok());
             // Only a hash input: the low bits of the nanoseconds are what differ.

@@ -372,7 +372,8 @@ impl Server {
                         reply has a section per APK (per_apk rows each) and a cursor for its next page. Replies stay \
                         within max_bytes (16 KB): beyond it the full output is written to a file whose path the reply \
                         gives (read the lines you need), or with spill=\"never\" paged (page=N). A `more` / `next` hint \
-                        is the complete arguments of the next call. Booleans default to false unless described otherwise.",
+                        is the complete arguments of the next call. Booleans default to false unless described otherwise. A program \
+                        (several archives) whose archives were left out (no dex) names them in `notes`.",
                 }))
             }
             "ping" => Ok(json!({})),
@@ -399,6 +400,7 @@ impl Server {
                         Some(cursor) => self.more(name, cursor)?,
                         None => (tool.run)(self, args, call)?,
                     };
+                    let (text, structured) = self.with_program_notes(text, structured);
                     output::fit(name, args, text, structured, self.spill.as_ref())
                 });
                 Ok(match result {
@@ -419,6 +421,22 @@ impl Server {
             }
             _ => Err((-32601, format!("method not found: {method}"))),
         }
+    }
+
+    /// A reply about a program some of whose archives were left out (no
+    /// `classes*.dex`, not a zip) says so first, in the text and as `notes`:
+    /// an empty answer must not read as "nothing there".
+    fn with_program_notes(&self, mut text: String, mut structured: Value) -> (String, Value) {
+        let Some(id) = structured.get("apk_id").and_then(Value::as_str) else { return (text, structured) };
+        let Some(apk) = lock(&self.sessions).apks.iter().find(|a| a.id == id).cloned() else { return (text, structured) };
+        let notes = apk.engine.program_notes();
+        if notes.is_empty() {
+            return (text, structured);
+        }
+        let head: String = notes.iter().map(|n| format!("# warning: {n}\n")).collect();
+        text.insert_str(0, &head);
+        structured["notes"] = json!(notes);
+        (text, structured)
     }
 
     // ---- APK sessions ------------------------------------------------------
@@ -642,6 +660,9 @@ impl Server {
             // A smali comment, so the text still assembles.
             text.push_str(&format!("# Warning: {w}\n"));
         }
+        if !src.also_defined_in.is_empty() {
+            text.push_str(&format!("# from {}; also defined in {}\n", src.dex_name, src.also_defined_in.join(", ")));
+        }
         let parsed = ClassText::parse(&src.source);
         let budget = output::budget(args)?;
         let mut structured = json!({
@@ -651,6 +672,9 @@ impl Server {
             "warning": src.warning,
             "rebuilt": src.rebuilt.is_some(),
         });
+        if !src.also_defined_in.is_empty() {
+            structured["also_defined_in"] = json!(src.also_defined_in);
+        }
         match str_arg(args, "method")? {
             Some(m) => {
                 let picked = parsed.select(m);
