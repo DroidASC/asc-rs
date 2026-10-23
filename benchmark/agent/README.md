@@ -86,7 +86,7 @@ python3 extract.py s2 RUNS_DIR ROUND s2/ref-k80.json > round2-s2.csv
 
 **原始记录不提交**：其中有 Douyin 的反编译代码片段，总共约 80 MB。存放位置：
 - 第一轮：本地 `target/grok-eval/runs/round1/`。
-- 第二轮 S1：ams `/private/tmp/asc-grok/runs/r2s1/`，本地也有一份 `target/grok-eval/runs/r2s1/`，只有第 1、2 次。
-- 第二轮 S2：ams `/private/tmp/asc-grok/s2/runs/r2s2/`。
+- 第二轮 S1：ams `~/asc-eval/results/agent-raw/s1-runs/r2s1/`（评测结束后从 `/private/tmp/asc-grok/runs/` 移来，macOS 重启会清空 /private/tmp），本地也有一份 `target/grok-eval/runs/r2s1/`，只有第 1、2 次。
+- 第二轮 S2：ams `~/asc-eval/results/agent-raw/s2-runs/r2s2/`（同样移自 `/private/tmp/asc-grok/s2/runs/`）。
 
 `/private/tmp` 下的内容可能被系统清理。
