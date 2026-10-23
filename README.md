@@ -242,7 +242,10 @@ on the shared high operand byte before the linear sweep.
 message per line). It keeps every APK it opens in one process, so the inflated DEX files
 and locator tables stay in memory between calls instead of being rebuilt by a new process
 per question. All opened APKs share one in-memory budget (`--memory-mb`, default a quarter of available memory, at most 2048 MiB); `close_apk` releases that APK's share; the
-on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`).
+on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`). Tool calls run concurrently (a slow
+query does not block `ping` or other calls; replies carry their request id and may arrive
+out of order), and a panic inside one call is returned as an error result rather than
+ending the session.
 
 ```json
 {

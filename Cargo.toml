@@ -51,7 +51,8 @@ egui = "0.33"
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Unwind so `droidasc mcp` can turn a panic in one tool call into an error result.
+panic = "unwind"
 debug = false
 opt-level = 3
 

@@ -7,7 +7,12 @@
 //! and locator tables already resident.
 //!
 //! Transport: JSON-RPC 2.0, one message per line on stdin/stdout (the MCP
-//! stdio transport). Requests are handled in order. Supported methods:
+//! stdio transport). `initialize`, `ping` and `tools/list` are answered as
+//! they are read; tool calls run concurrently, so a slow query never holds up
+//! a `ping` or a quick lookup, and replies may come back out of order (each
+//! carries its request `id`). The APK a call opens gets its `apk_id` before
+//! the next message is read, and `close_apk` waits for the calls already running.
+//! A panic inside a tool call becomes an `isError` result. Supported methods:
 //! `initialize`, `notifications/initialized` (and any other notification,
 //! ignored), `ping`, `tools/list` and `tools/call`. Tool failures are
 //! reported as results with `isError: true`; the server keeps running.
@@ -19,7 +24,10 @@ use asc_engine::{names, CacheConfig, Engine, SharedCache, SmaliOptions};
 use asc_findrefs::Query;
 use serde_json::{json, Map, Value};
 use std::io::{self, BufRead, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::Instant;
 
 /// Protocol version answered when the client does not name one.
@@ -37,20 +45,68 @@ pub struct Options {
 }
 
 /// Serve MCP requests from `input` until it closes, writing responses to `output`.
-pub fn serve(input: impl BufRead, mut output: impl Write, opts: Options) -> io::Result<()> {
-    let mut server = Server::new(opts);
-    for line in input.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> io::Result<()> {
+    let server = Server::new(opts);
+    let output = Mutex::new(output);
+    // The first failed write, reported once input ends.
+    let write_error = Mutex::new(None);
+    let send = |reply: Option<Value>| {
+        let Some(reply) = reply else { return };
+        let mut line = reply.to_string();
+        line.push('\n');
+        let mut out = output.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(e) = out.write_all(line.as_bytes()).and_then(|()| out.flush()) {
+            lock(&write_error).get_or_insert(e);
         }
-        if let Some(reply) = server.handle_line(&line) {
-            serde_json::to_writer(&mut output, &reply)?;
-            output.write_all(b"\n")?;
-            output.flush()?;
+    };
+    thread::scope(|scope| -> io::Result<()> {
+        let mut running = Vec::new();
+        for line in input.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            running.retain(|h: &thread::ScopedJoinHandle<()>| !h.is_finished());
+            match tool_call_name(&line).as_deref() {
+                None => send(server.handle_line(&line)),
+                Some("close_apk") => {
+                    for h in running.drain(..) {
+                        let _ = h.join();
+                    }
+                    send(server.handle_line(&line));
+                }
+                Some(_) => {
+                    // Open the APK a call names (open_apk, or any tool given a
+                    // new `apk` path) before reading on, so apk_ids follow request
+                    // order and later calls can use them; a failure is reported by
+                    // the call itself.
+                    let _ = server.register(&line);
+                    let (server, send) = (&server, &send);
+                    running.push(scope.spawn(move || send(server.handle_line(&line))));
+                }
+            }
         }
+        Ok(())
+    })?;
+    match write_error.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The tool a `tools/call` request names, if `line` is one.
+fn tool_call_name(line: &str) -> Option<String> {
+    let msg: Value = serde_json::from_str(line).ok()?;
+    if msg.get("method")?.as_str()? != "tools/call" || msg.get("id").is_none() {
+        return None;
+    }
+    msg.get("params")?.get("name")?.as_str().map(str::to_string)
+}
+
+/// Lock `m` even if a panicking tool call poisoned it; the guarded state is
+/// only ever left consistent.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 struct OpenApk {
@@ -59,15 +115,20 @@ struct OpenApk {
     engine: Engine,
 }
 
-/// Session state: the opened APKs and the cache they share.
+struct Sessions {
+    apks: Vec<Arc<OpenApk>>,
+    next_id: usize,
+}
+
+/// Session state: the opened APKs and the cache they share. Tool calls take
+/// `&self` and may run concurrently.
 pub struct Server {
     threads: usize,
     debug: bool,
     // Declared before `cache` so engines drop first; dropping the shared
     // cache then lands their queued disk writes.
-    apks: Vec<OpenApk>,
+    sessions: Mutex<Sessions>,
     cache: SharedCache,
-    next_id: usize,
 }
 
 /// A tool failure, reported to the client as `isError: true`.
@@ -86,14 +147,13 @@ impl Server {
         Server {
             threads: opts.threads,
             debug: opts.debug,
-            apks: Vec::new(),
+            sessions: Mutex::new(Sessions { apks: Vec::new(), next_id: 1 }),
             cache: SharedCache::new(opts.cache, |m| eprintln!("{m}")),
-            next_id: 1,
         }
     }
 
     /// Handle one JSON-RPC message; `None` for notifications.
-    pub fn handle_line(&mut self, line: &str) -> Option<Value> {
+    pub fn handle_line(&self, line: &str) -> Option<Value> {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => return Some(error_reply(Value::Null, -32700, &format!("parse error: {e}"))),
@@ -114,7 +174,14 @@ impl Server {
         })
     }
 
-    fn request(&mut self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
+    /// Open (register) the APK a `tools/call` line names, without running it.
+    fn register(&self, line: &str) -> Result<(), ToolError> {
+        let msg: Value = serde_json::from_str(line)?;
+        let args = msg.get("params").and_then(|p| p.get("arguments")).cloned().unwrap_or(Value::Null);
+        self.resolve(&args).map(drop)
+    }
+
+    fn request(&self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
         match method {
             "initialize" => {
                 let version = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(DEFAULT_PROTOCOL_VERSION);
@@ -136,15 +203,17 @@ impl Server {
                 if !args.is_object() {
                     return Err((-32602, "`arguments` must be an object".into()));
                 }
-                let result = match name {
-                    "open_apk" => self.open_apk(args),
-                    "close_apk" => self.close_apk(args),
-                    "getclass" => self.getclass(args),
-                    "findrefs" => self.findrefs(args),
-                    "listclass" => self.listclass(args),
-                    "getmanifest" => self.getmanifest(args),
+                let tool: fn(&Server, &Value) -> ToolResult = match name {
+                    "open_apk" => Server::open_apk,
+                    "close_apk" => Server::close_apk,
+                    "getclass" => Server::getclass,
+                    "findrefs" => Server::findrefs,
+                    "listclass" => Server::listclass,
+                    "getmanifest" => Server::getmanifest,
                     _ => return Err((-32602, format!("unknown tool: {name}"))),
                 };
+                // A bug in the engine must not take the whole session down.
+                let result = guarded(name, || tool(self, args));
                 Ok(match result {
                     Ok((text, structured)) => json!({
                         "content": [{"type": "text", "text": text}],
@@ -163,9 +232,9 @@ impl Server {
 
     // ---- APK sessions ------------------------------------------------------
 
-    fn index_of(&self, args: &Value) -> Result<Option<usize>, ToolError> {
+    fn index_of(sessions: &Sessions, args: &Value) -> Result<Option<usize>, ToolError> {
         if let Some(id) = str_arg(args, "apk_id")? {
-            return match self.apks.iter().position(|a| a.id == id) {
+            return match sessions.apks.iter().position(|a| a.id == id) {
                 Some(i) => Ok(Some(i)),
                 None => Err(ToolError(format!("no open APK with apk_id {id:?}"))),
             };
@@ -173,16 +242,18 @@ impl Server {
         match str_arg(args, "apk")? {
             Some(path) => {
                 let path = canonical(path)?;
-                Ok(self.apks.iter().position(|a| a.path == path))
+                Ok(sessions.apks.iter().position(|a| a.path == path))
             }
             None => Err(ToolError("pass `apk_id` (from open_apk) or `apk` (a path)".into())),
         }
     }
 
     /// The APK `args` names, opening it when given by a path not yet open.
-    fn resolve(&mut self, args: &Value) -> Result<usize, ToolError> {
-        if let Some(i) = self.index_of(args)? {
-            return Ok(i);
+    fn resolve(&self, args: &Value) -> Result<Arc<OpenApk>, ToolError> {
+        // Held while opening, so two calls naming a new path get one session.
+        let mut sessions = lock(&self.sessions);
+        if let Some(i) = Self::index_of(&sessions, args)? {
+            return Ok(Arc::clone(&sessions.apks[i]));
         }
         // `index_of` only returns `Ok(None)` for an `apk` path.
         let path = canonical(str_arg(args, "apk")?.unwrap_or_default())?;
@@ -193,17 +264,17 @@ impl Server {
             .with_shared_cache(&self.cache);
         // Fail now on a file that is not a readable APK, not on the first query.
         engine.dex_entries()?;
-        let id = format!("apk{}", self.next_id);
-        self.next_id += 1;
-        self.apks.push(OpenApk { id, path, engine });
-        Ok(self.apks.len() - 1)
+        let id = format!("apk{}", sessions.next_id);
+        sessions.next_id += 1;
+        let apk = Arc::new(OpenApk { id, path, engine });
+        sessions.apks.push(Arc::clone(&apk));
+        Ok(apk)
     }
 
-    fn open_apk(&mut self, args: &Value) -> ToolResult {
+    fn open_apk(&self, args: &Value) -> ToolResult {
         let t = Instant::now();
-        let i = self.resolve(args)?;
+        let apk = self.resolve(args)?;
         let warm = bool_arg(args, "warm")?.unwrap_or(true);
-        let apk = &self.apks[i];
         let dex_entries = apk.engine.dex_entries()?.len();
         let mut classes = Value::Null;
         if warm {
@@ -232,9 +303,12 @@ impl Server {
         Ok((text, structured))
     }
 
-    fn close_apk(&mut self, args: &Value) -> ToolResult {
-        let Some(i) = self.index_of(args)? else { return Err(ToolError("that APK is not open".into())) };
-        let apk = self.apks.remove(i);
+    fn close_apk(&self, args: &Value) -> ToolResult {
+        let apk = {
+            let mut sessions = lock(&self.sessions);
+            let Some(i) = Self::index_of(&sessions, args)? else { return Err(ToolError("that APK is not open".into())) };
+            sessions.apks.remove(i)
+        };
         let released = apk.engine.release_memory_cache();
         Ok((
             format!("closed {} (released {} MiB of cached DEX)", apk.id, released >> 20),
@@ -244,14 +318,14 @@ impl Server {
 
     // ---- queries -----------------------------------------------------------
 
-    fn getclass(&mut self, args: &Value) -> ToolResult {
-        let i = self.resolve(args)?;
+    fn getclass(&self, args: &Value) -> ToolResult {
+        let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("getclass needs `class`".into()))?;
         let debug_info = bool_arg(args, "debug_info")?.unwrap_or(true);
         let descriptor = names::format_class_name(class)?;
         let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
         let method = str_arg(args, "method")?;
-        let src = self.apks[i].engine.get_class_method(&descriptor, opts, method)?;
+        let src = apk.engine.get_class_method(&descriptor, opts, method)?;
         let mut text = String::new();
         if let Some(w) = &src.warning {
             // A smali comment, so the text still assembles.
@@ -259,7 +333,7 @@ impl Server {
         }
         text.push_str(&src.source);
         let structured = json!({
-            "apk_id": self.apks[i].id,
+            "apk_id": apk.id,
             "class": descriptor,
             "dex_name": src.dex_name,
             "warning": src.warning,
@@ -269,8 +343,8 @@ impl Server {
         Ok((text, structured))
     }
 
-    fn findrefs(&mut self, args: &Value) -> ToolResult {
-        let i = self.resolve(args)?;
+    fn findrefs(&self, args: &Value) -> ToolResult {
+        let apk = self.resolve(args)?;
         let kind = str_arg(args, "kind")?
             .ok_or_else(|| ToolError("findrefs needs `kind` (string, type, method, field, extends or impl)".into()))?;
         let query = match kind {
@@ -302,7 +376,7 @@ impl Server {
         };
         let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
         let mut batches = Vec::new();
-        self.apks[i].engine.find_refs(&query, |b| batches.push(b))?;
+        apk.engine.find_refs(&query, |b| batches.push(b))?;
         // Entries finish in any order; page over a stable one.
         batches.sort_by_cached_key(|b| dex_order(&b.entry_name));
         let errors: Vec<String> = batches.iter().filter_map(|b| b.error.as_ref().map(|e| format!("{}: {e}", b.entry_name))).collect();
@@ -320,7 +394,7 @@ impl Server {
         }
         let results: Vec<Value> = page.iter().map(|r| json!({"dex": r.dex_name, "method": r.method, "matched": r.matched})).collect();
         let structured = json!({
-            "apk_id": self.apks[i].id,
+            "apk_id": apk.id,
             "total": total,
             "offset": offset,
             "returned": page.len(),
@@ -331,10 +405,10 @@ impl Server {
         Ok((text, structured))
     }
 
-    fn listclass(&mut self, args: &Value) -> ToolResult {
-        let i = self.resolve(args)?;
+    fn listclass(&self, args: &Value) -> ToolResult {
+        let apk = self.resolve(args)?;
         let (offset, limit) = page_args(args, LISTCLASS_LIMIT)?;
-        let classes = self.apks[i].engine.list_classes(str_arg(args, "prefix")?)?;
+        let classes = apk.engine.list_classes(str_arg(args, "prefix")?)?;
         let total = classes.len();
         let page: Vec<_> = classes.iter().skip(offset).take(limit).collect();
         let mut text = String::new();
@@ -345,7 +419,7 @@ impl Server {
         let next = (offset + page.len() < total).then_some(offset + page.len());
         text.push_str(&page_footer("classes", offset, page.len(), total, next));
         let structured = json!({
-            "apk_id": self.apks[i].id,
+            "apk_id": apk.id,
             "total": total,
             "offset": offset,
             "returned": page.len(),
@@ -355,12 +429,22 @@ impl Server {
         Ok((text, structured))
     }
 
-    fn getmanifest(&mut self, args: &Value) -> ToolResult {
-        let i = self.resolve(args)?;
-        let xml = self.apks[i].engine.manifest_xml()?;
-        let structured = json!({"apk_id": self.apks[i].id, "xml": xml});
+    fn getmanifest(&self, args: &Value) -> ToolResult {
+        let apk = self.resolve(args)?;
+        let xml = apk.engine.manifest_xml()?;
+        let structured = json!({"apk_id": apk.id, "xml": xml});
         Ok((xml, structured))
     }
+}
+
+/// Run a tool, turning a panic into a tool error.
+fn guarded(name: &str, tool: impl FnOnce() -> ToolResult) -> ToolResult {
+    panic::catch_unwind(AssertUnwindSafe(tool))
+        .unwrap_or_else(|p| Err(ToolError(format!("internal error in {name}: {}", panic_message(&*p)))))
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str)).unwrap_or("panic")
 }
 
 fn error_reply(id: Value, code: i64, message: &str) -> Value {
@@ -512,6 +596,14 @@ fn tool_definitions() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panicking_tool_becomes_a_tool_error() {
+        let err = guarded("findrefs", || panic!("boom {}", 42)).err().unwrap();
+        assert_eq!(err.0, "internal error in findrefs: boom 42");
+        let err = guarded("getclass", || std::panic::panic_any(7u8)).err().unwrap();
+        assert_eq!(err.0, "internal error in getclass: panic");
+    }
 
     #[test]
     fn dex_names_sort_numerically() {

@@ -27,7 +27,10 @@ fn session(messages: &[Value]) -> Vec<Value> {
     let input: String = messages.iter().map(|m| m.to_string() + "\n").collect();
     let mut out = Vec::new();
     asc_mcp::serve(input.as_bytes(), &mut out, opts()).unwrap();
-    String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    // Tool calls run concurrently, so replies come back in any order.
+    let mut replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    replies.sort_by_key(|r| r["id"].as_u64().unwrap_or(0));
+    replies
 }
 
 fn call(id: u64, name: &str, args: Value) -> Value {
@@ -182,4 +185,34 @@ fn findrefs_literal_and_class_relations_and_method_filter() {
     assert!(text(&replies[3]).contains("Lexample/Test; extends Ljava/lang/Object;"), "{}", text(&replies[3]));
     assert_eq!(ok(&replies[4])["total"], 0);
     assert_eq!(replies[5]["result"]["isError"], true, "{}", replies[5]);
+}
+
+#[test]
+fn concurrent_calls_all_answer_and_close_waits_for_running_ones() {
+    let apk = temp_apk();
+    let path = apk.path().to_str().unwrap();
+    let mut msgs = vec![call(1, "open_apk", json!({"apk": path}))];
+    for id in 2..40 {
+        msgs.push(if id % 3 == 0 {
+            json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
+        } else {
+            call(id, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token"}))
+        });
+    }
+    msgs.push(call(40, "close_apk", json!({"apk_id": "apk1"})));
+    msgs.push(call(41, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "token"})));
+    let replies = session(&msgs);
+    let ids: Vec<u64> = replies.iter().map(|r| r["id"].as_u64().unwrap()).collect();
+    assert_eq!(ids, (1..=41).collect::<Vec<_>>());
+    let first = ok(&replies[1]).clone();
+    for r in &replies[1..39] {
+        if r["id"].as_u64().unwrap() % 3 == 0 {
+            assert_eq!(r["result"], json!({}));
+        } else {
+            // Every call issued before close_apk ran against the open APK.
+            assert_eq!(ok(r)["results"], first["results"]);
+        }
+    }
+    assert_eq!(ok(&replies[39])["closed"], true);
+    assert_eq!(replies[40]["result"]["isError"], true);
 }

@@ -519,7 +519,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                     disk,
                 },
             };
-            asc_mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), opts).map_err(|e| format!("mcp: {e}"))?;
+            asc_mcp::serve(std::io::stdin().lock(), std::io::stdout(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {
             let Some(cache) = common.disk_cache() else { return Err("no cache directory could be determined".into()) };

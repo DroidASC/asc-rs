@@ -258,8 +258,13 @@ writer running, and dropping the `SharedCache` lands the queued writes.
 ### MCP session
 
 `asc-mcp` is the resident front end for agents. `serve` reads one JSON-RPC message per
-line and answers in order on the same thread; tools run on the engine's worker threads as
-in the CLI. Each `open_apk` (or first use of an `apk` path) creates an `Engine` attached
+line. `initialize`, `ping` and `tools/list` are answered on the reading thread; each tool
+call runs on its own scoped thread (and the engine's worker threads, as in the CLI), so a
+slow query does not hold up the next message, and replies are written as calls finish. To
+keep request order where it matters, the APK a call opens is registered (and gets its
+`apk_id`) before the next line is read, and `close_apk` first joins the calls still
+running. Each call runs under `catch_unwind` (the release profile unwinds for this), so a
+panic in the engine becomes an `isError` result instead of ending the process. Each `open_apk` (or first use of an `apk` path) creates an `Engine` attached
 to the server's `SharedCache`; `open_apk` with `warm` runs `scan_classes`, which inflates
 every entry into the LRU, so later `findrefs` / `getclass` calls only build locator tables
 once and then scan. Results are paged over a stable order (entries sorted as
