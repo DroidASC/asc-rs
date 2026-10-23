@@ -75,6 +75,20 @@ pub(crate) struct DerivedJob {
     data: DexBytes,
     state: Arc<SearchState>,
     persisted: Arc<Persisted>,
+    /// The `queued` bits this job claimed.
+    claimed: u32,
+}
+
+impl DerivedJob {
+    /// Heap the job keeps alive until written: the tables it persists.
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.state.heap_bytes()
+    }
+
+    /// Not written after all: a later search may queue these tables again.
+    pub(crate) fn abandon(self) {
+        self.persisted.queued.fetch_and(!self.claimed, Ordering::Relaxed);
+    }
 }
 
 /// A write of the tables of `entry.logical()[idx]`, when a search that
@@ -92,7 +106,11 @@ pub(crate) fn derived_job(disk: &DiskCache, entry: &CachedEntry, idx: usize, mas
     } else {
         p.cost_us.load(Ordering::Relaxed)
     };
-    if !disk.admits_derived(Duration::from_micros(cost)) || p.queued.fetch_or(mask, Ordering::Relaxed) & mask == mask {
+    if !disk.admits_derived(Duration::from_micros(cost)) {
+        return None;
+    }
+    let claimed = mask & !p.queued.fetch_or(mask, Ordering::Relaxed);
+    if claimed == 0 {
         return None;
     }
     Some(DerivedJob {
@@ -102,6 +120,7 @@ pub(crate) fn derived_job(disk: &DiskCache, entry: &CachedEntry, idx: usize, mas
         data: Arc::clone(&l.data),
         state: Arc::clone(&l.state),
         persisted: Arc::clone(&l.persisted),
+        claimed,
     })
 }
 

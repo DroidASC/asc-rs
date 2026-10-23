@@ -527,6 +527,32 @@ struct WriteJob {
     kind: Job,
 }
 
+/// Heap of queued L1 / L2 writes past which new ones are dropped. A cold
+/// multi-APK sweep inflates far faster than one writer persists, and each
+/// queued job keeps its DEX bytes or tables alive until written; without a
+/// bound the heap grows with the backlog (tens of GB over a phone's APKs).
+const MAX_PENDING_WRITE_BYTES: usize = 512 << 20;
+
+impl WriteJob {
+    /// Heap the job keeps alive until written. L3 payloads are small and
+    /// not counted.
+    fn held_bytes(&self) -> usize {
+        match &self.kind {
+            Job::Dex { data, .. } => data.len(),
+            Job::Derived(d) => d.held_bytes(),
+            Job::Rendered { .. } => 0,
+        }
+    }
+
+    /// Dropped unwritten: an L1 entry is simply written by a later query;
+    /// L2 tables must be released for one to queue them again.
+    fn abandon(self) {
+        if let Job::Derived(d) = self.kind {
+            d.abandon();
+        }
+    }
+}
+
 enum Job {
     /// An inflated entry for L1: the bytes are shared with the query that
     /// produced them, so queueing costs nothing.
@@ -544,7 +570,8 @@ enum Job {
 }
 
 struct Writer {
-    tx: mpsc::Sender<WriteJob>,
+    /// Each job with its [`WriteJob::held_bytes`] when queued.
+    tx: mpsc::Sender<(WriteJob, usize)>,
     handle: std::thread::JoinHandle<()>,
 }
 
@@ -566,43 +593,45 @@ struct EngineCache {
     /// L2 writes queued and not yet written: their tables stay on the heap
     /// until written and mapped, so a prebuild waits while this is high.
     derived_pending: Arc<AtomicUsize>,
+    /// Heap held by queued writes, bounded by [`MAX_PENDING_WRITE_BYTES`].
+    pending_bytes: Arc<AtomicUsize>,
 }
 
 impl EngineCache {
     /// Queue a disk write; falls back to a synchronous write only when the
-    /// writer thread cannot be started.
+    /// writer thread cannot be started. A write that would take the queued
+    /// heap past [`MAX_PENDING_WRITE_BYTES`] is dropped instead: the cache
+    /// is an optimisation, a later query offers it again.
     fn put_async(&self, job: WriteJob) {
         let Some(disk) = &self.disk else { return };
         let mut writer = self.writer.lock().unwrap();
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
+        let held = job.held_bytes();
+        let pending = self.pending_bytes.load(Ordering::Relaxed);
+        if pending > 0 && pending + held > MAX_PENDING_WRITE_BYTES {
+            job.abandon();
+            return;
+        }
         if writer.is_none() {
-            let (tx, rx) = mpsc::channel::<WriteJob>();
+            let (tx, rx) = mpsc::channel::<(WriteJob, usize)>();
             let thread_disk = Arc::clone(disk);
             let thread_memory = self.memory.clone();
             let thread_pending = Arc::clone(&self.derived_pending);
+            let thread_bytes = Arc::clone(&self.pending_bytes);
             let spawned = std::thread::Builder::new().name("droidasc-cache-writer".into()).spawn(move || {
-                let mut pending: Option<WriteJob> = None;
                 let mut noted = HashSet::new();
-                loop {
-                    let job = match pending.take() {
-                        Some(j) => j,
-                        None => match rx.recv() {
-                            Ok(j) => j,
-                            Err(_) => break,
-                        },
-                    };
+                for (job, held) in rx {
                     let derived = matches!(job.kind, Job::Derived(_));
                     run_job(&thread_disk, thread_memory.as_ref(), job, &mut noted);
+                    thread_bytes.fetch_sub(held, Ordering::Relaxed);
                     if derived {
                         thread_pending.fetch_sub(1, Ordering::Relaxed);
                     }
-                    // Walk the cache directory once per burst, not once per entry.
-                    match rx.try_recv() {
-                        Ok(next) => pending = Some(next),
-                        Err(_) => thread_disk.evict_lazily(),
-                    }
+                    // Throttled by bytes written, so a long burst still keeps
+                    // the directory within budget without a walk per entry.
+                    thread_disk.evict_lazily();
                 }
             });
             match spawned {
@@ -619,10 +648,13 @@ impl EngineCache {
             if derived {
                 self.derived_pending.fetch_add(1, Ordering::Relaxed);
             }
-            if w.tx.send(job).is_err() {
+            self.pending_bytes.fetch_add(held, Ordering::Relaxed);
+            if let Err(mpsc::SendError((job, _))) = w.tx.send((job, held)) {
                 if derived {
                     self.derived_pending.fetch_sub(1, Ordering::Relaxed);
                 }
+                self.pending_bytes.fetch_sub(held, Ordering::Relaxed);
+                job.abandon();
                 *writer = None;
             }
         }
@@ -935,6 +967,7 @@ impl Engine {
                 inflight: Mutex::new(HashSet::new()),
                 inflight_done: Condvar::new(),
                 derived_pending: Arc::new(AtomicUsize::new(0)),
+                pending_bytes: Arc::new(AtomicUsize::new(0)),
             };
             // Registers this process and takes its share right away.
             cache.charged();
