@@ -43,7 +43,8 @@ def peak_rss(pid, stop, out):
 
 
 def session(calls):
-    p = subprocess.Popen([bin_, *extra, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    # Per-rule totals live in structuredContent, which the default compact mode trims.
+    p = subprocess.Popen([bin_, *extra, "mcp", "--structured", "full"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
     stop, peak = threading.Event(), []
     mon = threading.Thread(target=peak_rss, args=(p.pid, stop, peak))
     mon.start()

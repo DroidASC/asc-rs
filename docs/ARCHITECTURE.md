@@ -381,6 +381,23 @@ one LRU's worth. Each APK becomes a `Section` of pre-rendered lines; the `Report
 (last 16 per session) and paged by whole sections up to `max_bytes`, `cursor` naming
 report and section. New multi-APK tools add a `TOOLS` entry and call `sweep` + `report`.
 
+Every reply passes through `output::fit` on its way out, after the tool and before the
+`structuredContent` is trimmed (`Structured::Compact`, the `droidasc mcp` default, drops
+top-level values over 256 bytes: clients that show the model text *and* JSON would otherwise
+send rows and smali twice). `fit` holds the text to `max_bytes` (16 KiB): past it, `spill:
+auto` writes the full text to `SpillDir` (`out/` beside the cache tiers, a file per content
+hash, 0600, LRU-pruned to 64 MiB under a lock so a prune never takes a file a reply is about
+to name) and sends its head, the path, a `resource_link` and, for smali, a method index;
+`spill: never` (or no spill directory) cuts it into pages of whole records (a column-0 line
+with the indented lines under it) whose footer is the next call's complete arguments
+(`page`). Tools steer this through two private structured keys: `__full` hands over more
+text than they show inline (the whole class behind a getclass outline, the whole report
+behind its first page), `__fitted` marks text already paged by the tool (a report page,
+paged by its `cursor`), which `fit` never cuts. `getclass` renders the whole class once and
+picks methods from the smali (`class_text.rs`: by exact signature, signature prefix or bare
+name), so a name without a signature is never an error. Hints a model passes back as the
+`cursor` (a JSON object, or `tool {json}` as printed) are taken as the call's arguments.
+
 A findrefs sweep (`asc-engine/src/sweep.rs`) first asks L3 for the APK's rows
 (`Engine::cached_refs`, the key the one-APK path uses too) and plans a single unit that
 replays them; completed APKs are written back (`store_refs`). Otherwise every entry claims

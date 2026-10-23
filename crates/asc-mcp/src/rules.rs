@@ -409,32 +409,26 @@ pub mod defs {
 
     pub fn hierarchy() -> Value {
         json!({
-            "description": "Class hierarchy across every DEX: the transitive subclasses / implementers (default) or \
-                supertypes of a class, as an indented tree (`depth subclass Lx; classes2.dex`, `[not in APK]` for \
-                framework types, `(repeated)` for a class reached twice). With `method`, marks the classes defining it \
-                (`[defines m(..)V]`) and lists each as `override Lsub;->m(..)V dex` (or `inherited` going up).",
+            "description": "Subclasses / implementers (default) or supertypes of a class, as an indented tree; with \
+                `method`, which of them override it.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "class": {"type": "string", "description": "Lcom/poc/Base; or com.poc.Base."},
-                "direction": {"type": "string", "enum": ["subclasses", "supers"], "description": "Default subclasses."},
-                "depth": {"type": "integer", "minimum": 1, "description": "Levels to walk (default 16)."},
-                "max_nodes": {"type": "integer", "minimum": 1, "description": "Stop after this many classes (default 500)."},
-                "method": {"type": "string", "description": "Method name (every overload) or exact name(params)ret to find \
-                    overrides of."},
+                "class": {"type": "string"},
+                "direction": {"type": "string", "enum": ["subclasses", "supers"]},
+                "depth": {"type": "integer"},
+                "max_nodes": {"type": "integer"},
+                "method": {"type": "string", "description": "A name or name(params)ret."},
             })]), "required": ["class"]},
         })
     }
 
     /// findrefs properties for compound conditions and rule sets.
     pub fn findrefs_props() -> Value {
-        let condition = json!({"type": "object", "description": "A findrefs condition: kind + value / name / class / \
-            literal / exact / fuzzy_class, as for a single query (not extends / impl)."});
+        let condition = json!({"type": "object", "description": "{kind, value / name / class, ...} as for one query."});
         json!({
-            "all": {"type": "array", "items": condition, "description": "Instead of kind: methods whose code matches \
-                every condition (e.g. a string and a method call); `matched` lists what each matched, in order."},
-            "none": {"type": "array", "items": condition, "description": "With all: drop methods matching any of these."},
-            "rules": {"type": "array", "items": {"type": "object", "description": "A single query (kind ...) or a \
-                compound (all / none)."}, "description": "Instead of one query: several, answered by one pass over each \
-                DEX; output grouped by rule (`r1 | ...`, many APKs: `apkN | r1 | ...`), limit / per_apk per rule."},
+            "all": {"type": "array", "items": condition, "description": "Instead of kind: methods matching every condition."},
+            "none": {"type": "array", "items": condition, "description": "With all: minus methods matching any."},
+            "rules": {"type": "array", "items": condition, "description": "Several queries (or all / none) in one pass, \
+                output grouped `r1 | ...`."},
         })
     }
 }
