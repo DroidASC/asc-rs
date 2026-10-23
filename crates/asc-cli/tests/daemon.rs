@@ -35,6 +35,12 @@ impl Env {
         let broken = make_apk(&[("classes.dex", &dex), ("classes2.dex", b"this is not a dex file")], true);
         std::fs::write(env.work.path().join("broken.apk"), broken).unwrap();
         std::fs::write(env.work.path().join("rules.txt"), "# comment\nextends:java.lang.Object\n").unwrap();
+        // A program of several archives (one without code).
+        let sys = env.work.path().join("sys");
+        std::fs::create_dir(&sys).unwrap();
+        std::fs::write(sys.join("a.jar"), make_apk(&[("classes.dex", &dex)], true)).unwrap();
+        std::fs::write(sys.join("b.jar"), make_apk(&[("classes.dex", &dex)], false)).unwrap();
+        std::fs::write(sys.join("odexed.jar"), make_apk(&[("META-INF/MANIFEST.MF", b"m")], false)).unwrap();
         env
     }
 
@@ -127,6 +133,11 @@ fn daemon_output_is_byte_identical() {
         &["getclass", "app.apk", "example.Test", "--limit", "3"],
         &["listclass", "app.apk", "--offset", "9"],
         &["callgraph", "app.apk", "example.Test", "first", "--limit", "1", "--spill-mb", "0"],
+        // Programs: a directory, and relative paths joined with commas.
+        &["findrefs", "sys", "string", "token", "--threads", "1"],
+        &["findrefs", "app.apk,sys/b.jar", "string", "token", "--threads", "1"],
+        &["listclass", "sys"],
+        &["callgraph", "sys", "example.Test", "first"],
         // Declined by the daemon (the error names the path as given).
         &["findrefs", "missing.apk", "string", "token"],
     ];

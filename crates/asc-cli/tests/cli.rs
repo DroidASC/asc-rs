@@ -351,6 +351,32 @@ fn findrefs_extends_and_impl_print_class_rows() {
 }
 
 #[test]
+fn programs_of_several_archives_name_the_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let dex = make_dex();
+    std::fs::write(dir.path().join("framework.jar"), make_apk(&[("classes.dex", &dex)], true)).unwrap();
+    std::fs::write(dir.path().join("services.jar"), make_apk(&[("classes.dex", &dex), ("classes2.dex", &dex)], false)).unwrap();
+    std::fs::write(dir.path().join("odexed.jar"), make_apk(&[("META-INF/MANIFEST.MF", b"m")], false)).unwrap();
+    let out = droidasc(&["findrefs", path(dir.path()), "string", "token", "--threads", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let lines = sorted_lines(&out);
+    assert_eq!(lines.len(), 6, "{lines:?}");
+    assert_eq!(lines[0], "framework.jar/classes.dex | Lexample/Test;->first()V | \"token\"");
+    assert_eq!(lines[5], "services.jar/classes2.dex | Lexample/Test;->second()V | \"token\"");
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("# warning: odexed.jar: no classes*.dex"), "{}", stderr(&out));
+    let out = droidasc(&["listclass", path(dir.path())]);
+    assert_eq!(sorted_lines(&out), ["Lexample/Test; | framework.jar", "Lexample/Test; | services.jar", "Lexample/Test; | services.jar"]);
+    // A lone jar reads as before.
+    let out = droidasc(&["listclass", path(&dir.path().join("framework.jar"))]);
+    assert_eq!(stdout(&out), "Lexample/Test;\n");
+    assert!(out.stderr.is_empty());
+    let none = format!("{0}/odexed.jar,{0}/missing.jar", path(dir.path()));
+    let out = droidasc(&["listclass", &none]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("missing.jar"), "{}", stderr(&out));
+}
+
+#[test]
 fn findrefs_string_literal_ignores_regex_syntax() {
     let apk = temp_apk();
     let regex = droidasc(&["findrefs", path(apk.path()), "string", "t.k"]);

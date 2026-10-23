@@ -34,6 +34,10 @@ settings:
 
 common:
   Class names accept both com.poc.Main and Lcom/poc/Main;.
+  The APK may also be a jar or a .dex, or several read as one program: a directory (every
+  *.apk, *.jar, *.zip, *.dex below it) or paths joined with `,`. DEX names then start with
+  their archive (services.jar/classes2.dex); archives without classes*.dex are named in a
+  `# warning:` line on stderr (deodex them first).
   Commands with -o/--output write to stdout when the option is omitted.
   Output is one record per line, columns separated by ` | `; lines starting with `#`
   are headers, totals and hints. --limit / --max-bytes keep stdout short: the whole
@@ -71,6 +75,8 @@ examples:
   droidasc findrefs app.apk method loadUrl --context-method
   droidasc callgraph app.apk com.poc.Main onCreate --depth 3
   droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
+  droidasc findrefs system/framework impl com.android.internal.telephony.ITelephony
+  droidasc callgraph framework.jar,services.jar,TeleService.apk android.telephony.TelephonyManager getImei
   droidasc mcp --memory-mb 4096
   droidasc cache stats
   droidasc daemon status
@@ -250,7 +256,7 @@ enum Command {
         /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
         #[arg(long)]
         res_names: bool,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
         dalvik_class: String,
@@ -273,7 +279,7 @@ enum Command {
         /// Write the rebuilt single-class DEX to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Class name in dotted or Dalvik form, e.g. com.poc.Main or Lcom/poc/Main;.
         dalvik_class: String,
@@ -287,7 +293,7 @@ enum Command {
         /// Write class names to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
     /// Decode AndroidManifest.xml from APK and print it as XML.
@@ -299,7 +305,7 @@ enum Command {
         /// Show resource references (@7F0C0001) by name, from resources.arsc.
         #[arg(short, long)]
         resolve: bool,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
     /// Summarize the manifest's attack surface, one record per line:
@@ -314,7 +320,7 @@ enum Command {
         /// Also write the output to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
     /// Query resources.arsc: one line per resource and configuration,
@@ -337,7 +343,7 @@ enum Command {
         /// Write the output to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// A resource id (0x7f0d0001) or name (string/app_name, @pkg:type/name).
         query: Option<String>,
@@ -348,7 +354,7 @@ enum Command {
         /// Also write the decoded XML to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Path inside the APK, e.g. res/xml/network_security_config.xml.
         path: String,
@@ -358,7 +364,7 @@ enum Command {
     /// Exits with status 2 when some DEX entries could not be searched; the
     /// results of the other entries are still printed.
     Findrefs {
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// After each result, show the referencing instructions (marked `>`)
         /// with N smali lines around them, and their pc / source line; or
@@ -396,7 +402,7 @@ enum Command {
         /// subclasses (`(override of Lbase;)`).
         #[arg(long = "virtual")]
         virtual_calls: bool,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Declaring class (com.poc.Main or Lcom/poc/Main;).
         class: String,
@@ -426,7 +432,7 @@ enum Command {
         /// Mark the classes defining this method: a name or name(params)ret.
         #[arg(long)]
         method: Option<String>,
-        /// Path to the input APK file.
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Class in dotted or Dalvik form.
         class: String,
@@ -864,6 +870,11 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant)
 fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instant) -> Result<u8, String> {
     io.window = common.window();
     io.spill = common.spill();
+    if let Some(apk_path) = command.apk_path() {
+        for note in io.engine(common, apk_path).program_notes() {
+            io.note(format_args!("# warning: {note}"));
+        }
+    }
     match command {
         Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
             let args =
@@ -880,6 +891,11 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let mut text = String::with_capacity(classes.iter().map(|c| c.descriptor.len() + 1).sum());
             for c in &classes {
                 text.push_str(&c.descriptor);
+                // A program of several archives also names the one defining it.
+                if let Some(archive) = asc_engine::archive_of(&c.dex_name) {
+                    text.push_str(" | ");
+                    text.push_str(archive);
+                }
                 text.push('\n');
             }
             match &output {

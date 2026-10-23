@@ -213,3 +213,43 @@ fn findrefs_context_marks_the_referencing_instructions() {
     cold.fill_context(&mut rows, RefContext::Lines(0)).unwrap();
     assert_eq!(rows, inline);
 }
+
+/// The two DEX files as two jars of one program (a directory), with a jar
+/// that has no code.
+fn temp_program() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.jar"), make_apk(&[("classes.dex", &app_dex())], true)).unwrap();
+    std::fs::write(dir.path().join("lib.jar"), make_apk(&[("classes.dex", &lib_dex())], false)).unwrap();
+    std::fs::write(dir.path().join("odexed.jar"), make_apk(&[("META-INF/MANIFEST.MF", b"m")], false)).unwrap();
+    dir
+}
+
+#[test]
+fn programs_of_several_archives_read_as_one() {
+    let dir = temp_program();
+    let list = format!("{},{}", dir.path().join("app.jar").display(), dir.path().join("lib.jar").display());
+    for path in [dir.path().to_path_buf(), list.into()] {
+        let cached = CacheConfig { memory_bytes: 64 << 20, ..Default::default() };
+        for engine in [Engine::new(&path).with_threads(2), Engine::new(&path).with_threads(2).with_cache(cached)] {
+            let t = engine.call_graph(&query(LIB, "helper", Direction::Callers, 3)).unwrap();
+            assert_eq!(
+                t.lines(),
+                [
+                    "0 Lb/Lib;->helper(I)V [lib.jar]",
+                    "  1 <- La/Entry;->start()V [app.jar]",
+                    "    2 <- Lb/Lib;->sink()V [lib.jar]",
+                    "      3 <- Lb/Lib;->helper(I)V [lib.jar] (repeated)",
+                    "  1 <- La/Other;->other()V [app.jar]",
+                ]
+            );
+            let mut rows = Vec::new();
+            let opts = FindOptions { aggregate: true, context: RefContext::Lines(0) };
+            engine.find_refs_opts(&Query::String("secret".into()), opts, &AtomicBool::new(false), &mut |b| rows.extend(b.results)).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].text().starts_with("app.jar/classes.dex | La/Entry;->start()V | \"secret\"\n"), "{}", rows[0].text());
+            assert_eq!(engine.get_class_dex(LIB).unwrap().unwrap().dex_name, "lib.jar/classes.dex");
+        }
+    }
+    let notes = Engine::new(dir.path()).program_notes();
+    assert!(matches!(&notes[..], [n] if n.starts_with("odexed.jar: no classes*.dex")), "{notes:?}");
+}

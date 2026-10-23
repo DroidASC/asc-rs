@@ -37,6 +37,12 @@ droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec
 | `resources` / `xml` | 查询 `resources.arsc`；解码任意二进制 XML |
 | `mcp` / `daemon` / `cache` | MCP 服务器；daemon 管理；磁盘 cache 管理（`path` / `stats` / `clear`） |
 
+APK 参数也可以是 jar、`.dex`，或作为一个程序一起分析的多个文件：一个目录（其下所有 `*.apk`、`*.jar`、`*.zip`、`*.dex`），
+或用 `,` 连接的多个路径（如 `framework.jar,services.jar,TeleService.apk`）。类层次、调用图和 findrefs 跨所有文件，
+DEX 名带上所属文件（`services.jar/classes2.dex`），`callgraph` 行尾标 `[services.jar]`，`listclass` 多一列文件名；
+没有 `classes*.dex` 的文件（只剩 odex/vdex）在 stderr 以 `# warning:` 列出，需先 deodex。同一个类在多个文件中都有定义时，
+findrefs 报告所有位置，`getclass` 取其中任一个。
+
 完整选项见 `droidasc --help` 和 `droidasc <命令> --help`。退出码：0 成功，1 出错，2 部分 DEX 条目无法搜索（其余结果有效）。
 
 ## 输出与查询写法

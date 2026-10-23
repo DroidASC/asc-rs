@@ -249,8 +249,8 @@ const MAX_CONTENT_IDS: usize = 1 << 16;
 /// version of the APK file.
 fn content_id(target: &SearchTarget, entry: &Entry, hash: impl FnOnce() -> Option<Ident>) -> Option<Ident> {
     static IDS: OnceLock<Mutex<HashMap<ContentKey, Ident>>> = OnceLock::new();
-    let meta = std::fs::metadata(target.apk.path()).ok()?;
-    let key = (target.apk.path().to_path_buf(), meta.len(), meta.modified().ok(), entry.name.clone(), entry.crc32, entry.uncomp_size);
+    let (size, modified) = target.apk.stamp().ok()?;
+    let key = (target.apk.path().to_path_buf(), size, modified, entry.name.clone(), entry.crc32, entry.uncomp_size);
     let ids = IDS.get_or_init(Mutex::default);
     if let Some(id) = ids.lock().unwrap().get(&key) {
         return Some(*id);

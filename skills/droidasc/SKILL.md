@@ -48,6 +48,21 @@ Member targets accept `Lcom/a/B;->name(sig)`, `com.a.B->name`, `com.a.B#name`, `
 or `B.name` (any package). A name alone is a substring / regex (`=name` or a signature: exact). A signature picks that
 overload: `run(I)V`, `run(I)` (any return), `run(int, String)`; `f:I` a field of that type.
 
+## Several archives as one program
+
+Framework and system-app paths span files (`framework.jar` -> `services.jar` -> `TeleService.apk`).
+Pass a directory (every `*.apk`, `*.jar`, `*.zip`, `*.dex` below it) or paths joined with `,`
+wherever an APK goes: findrefs, callgraph, hierarchy and getclass then span every archive.
+
+```sh
+droidasc findrefs system/framework impl com.android.internal.telephony.ITelephony
+droidasc callgraph framework.jar,telephony-common.jar,TeleService.apk android.telephony.TelephonyManager getImei --depth 3
+```
+
+DEX names start with their archive (`services.jar/classes2.dex | ...`), callgraph rows end with
+`[services.jar]`. Archives with no `classes*.dex` (odex/vdex only) are listed as `# warning:` on
+stderr: deodex them first.
+
 ## Audit workflow
 
 1. `droidasc manifest-summary app.apk | grep exported=true`: exported components, providers

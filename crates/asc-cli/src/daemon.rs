@@ -667,8 +667,8 @@ impl Daemon {
             return decline(&stream, "not forwardable");
         }
         // Open failures name the path as given: leave them to the client.
-        let apk = cli.command.apk_path().map(|p| cwd.join(p));
-        if !apk.as_deref().is_some_and(|p| File::open(p).and_then(|f| f.metadata()).is_ok_and(|m| m.is_file())) {
+        let apk = cli.command.apk_path().map(|p| Engine::resolve_path(p, &cwd));
+        if !apk.as_deref().is_some_and(Engine::can_open) {
             return decline(&stream, "APK not readable");
         }
         let cancel = Arc::new(AtomicBool::new(false));

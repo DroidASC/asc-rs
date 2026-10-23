@@ -438,8 +438,8 @@ impl Server {
                     None => return Err(ToolError(format!("no APK with apk_id {id:?}; pass `apk` (a path)"))),
                 }
             }
-            None => match str_arg(args, "apk")? {
-                Some(path) => (None, canonical(path)?),
+            None => match apk_arg(args)? {
+                Some(path) => (None, canonical(&path)?),
                 None => return Err(ToolError("pass `apk` (a path)".into())),
             },
         };
@@ -1239,11 +1239,35 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+/// `apk`: a path (a file, a directory or paths joined with `,`, read as one
+/// program), or a list of paths read as one program.
+fn apk_arg(args: &Value) -> Result<Option<String>, ToolError> {
+    match args.get("apk") {
+        Some(Value::Array(list)) => {
+            let paths: Option<Vec<&str>> = list.iter().map(Value::as_str).collect();
+            let paths = paths.ok_or_else(|| ToolError("`apk` must be a path or a list of paths".into()))?;
+            Ok(Some(paths.join(",")))
+        }
+        _ => Ok(str_arg(args, "apk")?.map(str::to_string)),
+    }
+}
+
+/// `path` made absolute and canonical, each path of a program on its own.
 fn canonical(path: &str) -> Result<PathBuf, ToolError> {
     if path.is_empty() {
         return Err(ToolError("`apk` is empty".into()));
     }
-    Path::new(path).canonicalize().map_err(|e| ToolError(format!("cannot open {path}: {e}")))
+    let one = |p: &str| Path::new(p).canonicalize().map_err(|e| ToolError(format!("cannot open {p}: {e}")));
+    if Path::new(path).exists() || !path.contains(',') {
+        return one(path);
+    }
+    let parts: Vec<String> = path
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| Ok(one(p)?.to_string_lossy().into_owned()))
+        .collect::<Result<_, ToolError>>()?;
+    Ok(PathBuf::from(parts.join(",")))
 }
 
 pub fn str_arg<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, ToolError> {
@@ -1415,7 +1439,11 @@ pub mod defs {
     pub fn apk_props() -> Value {
         json!({
             "apk_id": {"type": "string"},
-            "apk": {"type": "string", "description": "APK path (opened on first use)."},
+            "apk": {
+                "type": ["string", "array"],
+                "items": {"type": "string"},
+                "description": "APK path (opened on first use). Also a jar or .dex, or one program of several read together: a directory, paths joined with ',' or a list (DEX names then start with their archive, e.g. services.jar/classes.dex)."
+            },
         })
     }
 
