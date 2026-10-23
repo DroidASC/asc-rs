@@ -78,6 +78,8 @@ dexsql-release 的 17 个目标共 47 步，5 次中位数，耗时 / 峰值 RSS
 | `string ttdownloaderClickId` | 71 ms | 47 ms |
 | `field SDK_INT`、`string http://` | 95 / 92 ms | 97 / 92 ms |
 
+**签名选重载走 prefix-skip**（本地，`--no-cache`，3 次中位数，[`sig_prefix.py`](deterministic/sig_prefix.py)）：Douyin 40.7.0 与 4 个 Pixel 大 APK 上，带签名的结果与「只写名字的结果按签名收窄」逐行相同，CLI 与 MCP 常驻路径（不探测）相同；Dalvik、只写参数、Java 三种写法一致。Douyin 上 `getDeviceId()` 63 ms（跳过 38 个 DEX，与只写名字相同）；不存在的重载 `getDeviceId(I)`、`valueOf(UUID)` 跳过 39 个，零结果提示列出已有重载，94–96 ms（提示改为读前缀前约 133 ms）。Pixel 的 APK 字符串数据在后部，不探测。
+
 **daemon**（本地，`b3320c2`）
 
 | 场景 | 不经 daemon | 经 daemon |

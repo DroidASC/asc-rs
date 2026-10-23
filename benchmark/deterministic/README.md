@@ -30,6 +30,7 @@
 | `s1_all.sh`、`s2_all.sh`、`s2_rules.sh`、`s2_rest.sh` | 完整矩阵（S1；每规则一次；规则集；rust_ASC 与 dexsql） | `ASC_EVAL` 布局下 `zsh s2_rules.sh` |
 | `bm.sh` | 多进程自动线程、固定线程、磁盘上限，新旧版交替 | 需要 `src-r2/`、`src-bm/` |
 | `prefix_skip.py` | 一次性冷查询的耗时与 RSS | `prefix_skip.py APK N BIN… -- QUERY ; QUERY …` |
+| `sig_prefix.py` | 带签名的 findrefs 在 prefix-skip 路径上：与只写名字收窄后、与 MCP 逐行一致，耗时与跳过数 | `sig_prefix.py DROIDASC TRIALS APK…` |
 | `cache/consistency.py` | 冷 / 热 / `--no-cache` 结果比较 | `consistency.py DROIDASC CORPUS_DIR CACHE_DIR` |
 | `cache/nofsync_bench.py` | no-fsync 计时 | `nofsync_bench.py BASE NEW DOUYIN CORPUS_DIR CACHE_ROOT TRIALS` |
 | `cache/nofsync_check.sh` | 新鲜 / 重启前写入 / 损坏时结果与 `--no-cache` 相同 | `nofsync_check.sh BASE NEW APK CACHE_DIR` |

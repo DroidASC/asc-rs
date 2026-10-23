@@ -2,9 +2,12 @@
 //! to the framework, the classes or members it probably meant, why a search
 //! found nothing. Only computed on those paths, so it may scan the APK.
 
-use crate::{names, Engine, Result};
+use crate::{names, skip, Engine, Result};
 use asc_dex::Dex;
 use asc_findrefs::{MemberQuery, MemberSignature, Query};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// Suggestions per hint.
 const MAX_SUGGESTIONS: usize = 5;
@@ -249,12 +252,44 @@ impl Engine {
     }
 
     /// Every member of `class` any DEX references or defines, sorted.
+    ///
+    /// An entry no cache keeps (a one-shot cold query, whose search likely
+    /// left it out after a prefix probe) is read from a streamed prefix when
+    /// its id tables lie in one, rather than inflated whole again for a hint.
     fn class_member_list(&self, class: &str, methods: bool) -> Vec<String> {
-        let Ok((views, _)) = self.load_views(None, &crate::NOT_CANCELLED) else { return Vec::new() };
-        let mut members = Vec::new();
-        for v in &views {
-            if let Ok(dex) = Dex::with_name(&v.data, &v.name) {
-                members.extend(class_members(&dex, class, methods).unwrap_or_default());
+        let Ok(apk) = self.open() else { return Vec::new() };
+        let Ok(entries) = apk.dex_entries() else { return Vec::new() };
+        let cache = self.cache.as_deref();
+        let members = Mutex::new(Vec::new());
+        let whole = Mutex::new(HashSet::new());
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..self.threads().min(entries.len()) {
+                s.spawn(|| {
+                    while let Some(entry) = entries.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let from_prefix = skip::worth_a_prefix(entry, cache)
+                            .then(|| skip::id_prefix(&apk, entry))
+                            .flatten()
+                            .and_then(|bytes| class_members(&Dex::with_name(&bytes, &entry.name).ok()?, class, methods).ok());
+                        match from_prefix {
+                            Some(m) => members.lock().expect("hint members mutex poisoned").extend(m),
+                            None => {
+                                whole.lock().expect("hint entries mutex poisoned").insert(entry.name.clone());
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let mut members = members.into_inner().expect("hint members mutex poisoned");
+        let whole = whole.into_inner().expect("hint entries mutex poisoned");
+        if !whole.is_empty() {
+            if let Ok((views, _)) = self.load_views(Some(&whole), &crate::NOT_CANCELLED) {
+                for v in &views {
+                    if let Ok(dex) = Dex::with_name(&v.data, &v.name) {
+                        members.extend(class_members(&dex, class, methods).unwrap_or_default());
+                    }
+                }
             }
         }
         members.sort();

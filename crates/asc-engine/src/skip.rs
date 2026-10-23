@@ -52,7 +52,7 @@ impl<'q> Probe<'q> {
     /// Whether `entry` can be left out of the search: none of the queries
     /// can match it. `false` also when a probe is not worth it or cannot tell.
     pub(crate) fn skips(&self, apk: &Apk, entry: &Entry, cache: Option<&EngineCache>, stats: &Stats) -> bool {
-        if entry.method != asc_apk::METHOD_DEFLATE || entry.uncomp_size <= MIN_GAIN || kept(cache, entry) || !self.admit() {
+        if !worth_a_prefix(entry, cache) || !self.admit() {
             return false;
         }
         let skip = self.cannot_match(apk, entry);
@@ -76,33 +76,48 @@ impl<'q> Probe<'q> {
     }
 
     fn cannot_match(&self, apk: &Apk, entry: &Entry) -> bool {
-        let size = entry.uncomp_size as usize;
-        let budget = (size as f64 * WORTH_BELOW) as usize;
-        let prefix = apk.inflate_until(entry, |out| {
-            if out.len() >= 8 && (&out[..4] != b"dex\n" || &out[..8] == asc_dex::container::DEX041_MAGIC) {
-                return PrefixStep::Abort;
-            }
-            // The usual d8 / R8 layout puts the string data near the end: a
-            // first few strings already past the budget settle it at once.
-            if asc_dex::quick::leading_string_data_off(out).is_some_and(|off| off > budget) {
-                return PrefixStep::Abort;
-            }
-            match asc_dex::quick::id_tables_needed_len(out) {
-                Some(needed) if needed + SLACK <= budget => PrefixStep::Continue(needed + SLACK),
-                Some(_) => PrefixStep::Abort,
-                None if out.len() > budget => PrefixStep::Abort,
-                None => PrefixStep::Continue(0),
-            }
-        });
-        let bytes = match prefix {
-            Ok(Prefix::Partial(b) | Prefix::Complete(b)) => b,
-            Ok(Prefix::Aborted(_)) | Err(_) => return false,
-        };
+        let Some(bytes) = id_prefix(apk, entry) else { return false };
         let Ok(dex) = Dex::with_name(&bytes, &entry.name) else { return false };
         let fr = FindRefs::new(&dex);
         // An error is a prefix too short for the answer, or a damaged DEX the
         // full search reports itself.
         self.queries.iter().all(|q| fr.cannot_match(q).unwrap_or(false))
+    }
+}
+
+/// Whether reading `entry`'s id tables from a streamed prefix
+/// ([`id_prefix`]) can beat inflating it: a Deflate entry large enough that
+/// no cache will keep once inflated.
+pub(crate) fn worth_a_prefix(entry: &Entry, cache: Option<&EngineCache>) -> bool {
+    entry.method == asc_apk::METHOD_DEFLATE && entry.uncomp_size > MIN_GAIN && !kept(cache, entry)
+}
+
+/// The leading bytes of `entry` through its id tables and string data,
+/// streamed, when they end within [`WORTH_BELOW`] of it; `None` otherwise
+/// (also for what is not a single plain DEX). A [`Dex`] over them answers
+/// what the id tables and strings hold and fails on anything past them.
+pub(crate) fn id_prefix(apk: &Apk, entry: &Entry) -> Option<Vec<u8>> {
+    let size = entry.uncomp_size as usize;
+    let budget = (size as f64 * WORTH_BELOW) as usize;
+    let prefix = apk.inflate_until(entry, |out| {
+        if out.len() >= 8 && (&out[..4] != b"dex\n" || &out[..8] == asc_dex::container::DEX041_MAGIC) {
+            return PrefixStep::Abort;
+        }
+        // The usual d8 / R8 layout puts the string data near the end: a
+        // first few strings already past the budget settle it at once.
+        if asc_dex::quick::leading_string_data_off(out).is_some_and(|off| off > budget) {
+            return PrefixStep::Abort;
+        }
+        match asc_dex::quick::id_tables_needed_len(out) {
+            Some(needed) if needed + SLACK <= budget => PrefixStep::Continue(needed + SLACK),
+            Some(_) => PrefixStep::Abort,
+            None if out.len() > budget => PrefixStep::Abort,
+            None => PrefixStep::Continue(0),
+        }
+    });
+    match prefix {
+        Ok(Prefix::Partial(b) | Prefix::Complete(b)) => Some(b),
+        Ok(Prefix::Aborted(_)) | Err(_) => None,
     }
 }
 
