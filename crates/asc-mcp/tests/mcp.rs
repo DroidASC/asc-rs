@@ -1,7 +1,7 @@
 //! MCP sessions against synthetic APKs, driven through `serve`.
 
 use asc_engine::CacheConfig;
-use asc_fixture::{make_apk, make_class_only_dex, make_dex};
+use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_rich_dex};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -18,8 +18,19 @@ fn temp_apk() -> tempfile::NamedTempFile {
     temp_apk_from(&make_apk(&[("classes.dex", &dex), ("classes2.dex", &dex)], true))
 }
 
+/// Replies past their budget are paged, not written anywhere (see
+/// `spill_opts` for the file).
 fn opts() -> asc_mcp::Options {
-    asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() })
+    let mut o = asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() });
+    o.spill_dir = None;
+    o
+}
+
+/// [`opts`] that spills replies into `dir`.
+fn spill_opts(dir: &std::path::Path) -> asc_mcp::Options {
+    let mut o = opts();
+    o.spill_dir = Some(dir.to_path_buf());
+    o
 }
 
 /// Run one session: `messages` in, one parsed reply per request out.
@@ -467,7 +478,7 @@ fn manifest_summary_and_resources_for_one_apk() {
     let apk = temp_apk_from(&audit_apk_bytes(30));
     let path = apk.path().to_str().unwrap();
     let replies = session(&[
-        call(1, "manifest_summary", json!({"apk": path})),
+        call(1, "manifest_summary", json!({"apk": path, "filter": "all"})),
         call(2, "manifest_summary", json!({"apk": path, "filter": "exported"})),
         call(3, "resources", json!({"apk": path, "query": "bool/exported_flag"})),
         call(4, "resources", json!({"apk": path, "query": "0x7f010000", "resolve": true})),
@@ -792,4 +803,215 @@ fn hierarchy_lists_subclasses_and_overrides() {
     assert!(text(&replies[1]).starts_with("0 Lexample/Test; classes.dex\n  1 extends Ljava/lang/Object; [not in APK]\n"));
     assert_eq!(replies[2]["result"]["isError"], true);
     assert_eq!(ok(&replies[3])["rows"][0]["via"], Value::Null);
+}
+
+/// The text of a reply's `resource_link`, read from its file.
+fn linked_file(reply: &Value) -> (String, String) {
+    let link = reply["result"]["content"].as_array().unwrap().iter().find(|c| c["type"] == "resource_link").expect("a resource_link");
+    let path = link["uri"].as_str().unwrap().strip_prefix("file://").unwrap().to_string();
+    let body = std::fs::read_to_string(&path).unwrap();
+    (path, body)
+}
+
+#[test]
+fn getclass_picks_methods_by_name_or_prefix_and_lists_them_when_missing() {
+    let apk = temp_apk();
+    let a = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "first"})),
+        call(2, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "second("})),
+        call(3, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "Lexample/Test;->first()V"})),
+        call(4, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "third"})),
+    ]);
+    let first = text(&replies[0]);
+    assert!(first.starts_with(".class public Lexample/Test;\n"), "{first}");
+    assert!(first.contains(" first()V\n") && !first.contains(" second()V"), "{first}");
+    assert_eq!(ok(&replies[0])["methods"], json!(["first()V"]));
+    assert_eq!(ok(&replies[1])["methods"], json!(["second()V"]));
+    assert_eq!(ok(&replies[2])["methods"], json!(["first()V"]));
+    assert_eq!(replies[3]["result"]["isError"], true);
+    assert_eq!(text(&replies[3]), "Error: Lexample/Test; has no method \"third\"; its methods: first()V, second()V");
+}
+
+#[test]
+fn getclass_leaves_debug_info_out_unless_asked() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
+    let a = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": 65536})),
+        call(2, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": 65536, "debug_info": true})),
+    ]);
+    assert!(!text(&replies[0]).contains(".line "), "{}", text(&replies[0]));
+    assert!(text(&replies[1]).contains(".line 10"), "{}", text(&replies[1]));
+}
+
+#[test]
+fn an_oversized_class_comes_as_an_outline_and_a_file() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
+    let a = apk.path().to_str().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let whole = session(&[call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": 65536}))]);
+    let source = text(&whole[0]).to_string();
+    // Room for the outline and the file's index, not for the class.
+    let budget = source.len() * 4 / 5;
+    let replies = session_with(
+        spill_opts(out.path()),
+        &[
+            call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": budget})),
+            call(2, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": 256, "full": true, "spill": "never"})),
+            call(3, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": budget})),
+        ],
+    );
+    let outline = text(&replies[0]);
+    assert!(outline.len() <= budget, "{} > {budget}: {outline}", outline.len());
+    assert!(outline.contains("# outline: the class is ") && outline.contains("run()V  # "), "{outline}");
+    assert!(!outline.contains("sparse-switch"), "{outline}");
+    // The whole class, in a private file named by its content, indexed by method.
+    let (path, body) = linked_file(&replies[0]);
+    assert_eq!(body, source);
+    assert!(path.starts_with(out.path().to_str().unwrap()) && path.ends_with(".txt"), "{path}");
+    assert!(outline.contains(&format!("in {path}")), "{outline}");
+    let s = ok(&replies[0]);
+    assert_eq!((s["outline"].as_bool(), s["file"].as_str(), s["bytes"].as_u64()), (Some(true), Some(&*path), Some(source.len() as u64)));
+    let index = s["index"].as_array().unwrap();
+    assert_eq!(index.len(), body.matches("\n.method ").count());
+    let range = |i: usize| (index[i]["lines"][0].as_u64().unwrap() as usize, index[i]["lines"][1].as_u64().unwrap() as usize);
+    let (a1, b1) = range(0);
+    let lines: Vec<&str> = body.lines().collect();
+    assert!(lines[a1 - 1].starts_with(".method ") && lines[a1 - 1].ends_with(&*index[0]["method"].as_str().unwrap().to_string()));
+    assert_eq!(lines[b1 - 1], ".end method");
+    // full + never: the class itself, paged.
+    let page = ok(&replies[1]);
+    assert_eq!(page["page"], 0);
+    assert!(page["pages"].as_u64().unwrap() > 1, "{page}");
+    // The same content, the same file.
+    assert_eq!(linked_file(&replies[2]).0, path);
+}
+
+#[test]
+fn spill_never_pages_by_record_with_complete_next_arguments() {
+    let apk = temp_apk_from(&audit_apk_bytes(30));
+    let a = apk.path().to_str().unwrap();
+    let full = session(&[call(1, "getmanifest", json!({"apk": a}))]);
+    let manifest = text(&full[0]).to_string();
+    let server = asc_mcp::Server::new(opts());
+    let send = |m: Value| server.handle_line(&m.to_string()).unwrap();
+    let mut args = json!({"apk": a, "max_bytes": 600, "spill": "never"});
+    let mut pages = Vec::new();
+    for i in 0..50 {
+        let r = send(call(i, "getmanifest", args.clone()));
+        let s = ok(&r).clone();
+        let body = text(&r).to_string();
+        assert!(body.len() <= 600, "page {i} is {} bytes: {body}", body.len());
+        // The footer names the next call; the page itself is whole lines of the output.
+        let content: String = body.lines().filter(|l| !l.starts_with("# page ")).map(|l| format!("{l}\n")).collect();
+        pages.push(content);
+        if s["next"].is_null() {
+            break;
+        }
+        let hint = body.lines().find(|l| l.starts_with("# page ")).unwrap();
+        let hinted: Value = serde_json::from_str(hint.split_once("next page: getmanifest ").unwrap().1).unwrap();
+        assert_eq!(hinted, s["next"]);
+        args = s["next"].clone();
+    }
+    assert!(pages.len() > 2, "{}", pages.len());
+    assert_eq!(pages.concat(), manifest);
+    // Without a spill directory, auto falls back to the same pages.
+    let r = send(call(99, "getmanifest", json!({"apk": a, "max_bytes": 256})));
+    assert_eq!(ok(&r)["page"], 0);
+}
+
+#[test]
+fn spill_always_and_auto_write_files_only_when_asked_or_needed() {
+    let apk = temp_apk_from(&audit_apk_bytes(30));
+    let a = apk.path().to_str().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let replies = session_with(
+        spill_opts(out.path()),
+        &[
+            call(1, "findrefs", json!({"apk": a, "kind": "string", "value": "token"})),
+            call(2, "findrefs", json!({"apk": a, "kind": "string", "value": "token", "spill": "always"})),
+            call(3, "getmanifest", json!({"apk": a, "max_bytes": 256})),
+        ],
+    );
+    assert_eq!(replies[0]["result"]["content"].as_array().unwrap().len(), 1, "small enough: no file");
+    let (_, body) = linked_file(&replies[1]);
+    assert!(body.contains("Lexample/Test;->first()V | \"token\""), "{body}");
+    assert_eq!(ok(&replies[1])["file"].as_str().map(|p| p.ends_with(".txt")), Some(true));
+    let manifest = text(&replies[2]);
+    assert!(manifest.len() < 2600, "a head and the path: {manifest}");
+    assert!(manifest.contains("or page through it here: getmanifest {"), "{manifest}");
+    let (_, body) = linked_file(&replies[2]);
+    assert!(body.starts_with("<?xml") || body.starts_with("<manifest"), "{body}");
+}
+
+#[test]
+fn manifest_summary_narrows_by_kind_and_name_and_defaults_to_exported() {
+    let apk = temp_apk_from(&audit_apk_bytes(30));
+    let path = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "manifest_summary", json!({"apk": path})),
+        call(2, "manifest_summary", json!({"apk": path, "kind": "service"})),
+        call(3, "manifest_summary", json!({"apk": path, "kind": ["activity", "receiver"], "name": "IMPLICIT"})),
+        call(4, "manifest_summary", json!({"apk": path, "filter": "all", "offset": "2"})),
+    ]);
+    let default = text(&replies[0]);
+    assert!(default.contains("# filter=exported (the default without kind / name)"), "{default}");
+    assert!(!default.contains("com.demo.Sync"), "{default}");
+    // A kind is a search: not-exported records too.
+    let services = text(&replies[1]);
+    assert!(services.starts_with("service com.demo.Sync exported=false (default)"), "{services}");
+    assert!(services.ends_with("# records 0..1 of 1\n"), "{services}");
+    assert_eq!(text(&replies[2]).lines().next(), Some("activity com.demo.Implicit exported=true (intent-filter)"));
+    let all = ok(&replies[3])["records_total"].as_u64().unwrap();
+    assert!(text(&replies[3]).ends_with(&format!("# records 2..{all} of {all}\n")), "{}", text(&replies[3]));
+}
+
+#[test]
+fn hints_passed_back_as_cursors_and_numbers_as_strings_are_understood() {
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let server = asc_mcp::Server::new(opts());
+    let send = |m: Value| server.handle_line(&m.to_string()).unwrap();
+    let sweep = send(call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "token", "per_apk": "1"})));
+    let line = text(&sweep).lines().find(|l| l.starts_with("apk1 | more | ")).unwrap().to_string();
+    let hint = line.split_once(" more: ").unwrap().1.to_string();
+    let json_only = hint.split_once(' ').unwrap().1.to_string();
+    for cursor in [json!(hint), json!(json_only), serde_json::from_str::<Value>(&json_only).unwrap()] {
+        let r = send(call(2, "findrefs", json!({"cursor": cursor, "limit": "2"})));
+        let s = ok(&r);
+        assert_eq!((s["offset"].as_u64(), s["returned"].as_u64()), (Some(1), Some(2)), "{r}");
+    }
+    let bad = send(call(3, "findrefs", json!({"cursor": "apk1"})));
+    assert!(text(&bad).contains("bad cursor \"apk1\": pass the `cursor` a reply returned"), "{bad}");
+    let apk = temp_apk();
+    let ctx = send(call(4, "findrefs", json!({"apk": apk.path().to_str().unwrap(), "kind": "string", "value": "token", "context": "1"})));
+    assert!(ok(&ctx)["results"][0]["context"].is_string(), "{ctx}");
+    let flag = send(call(5, "getclass", json!({"apk": apk.path().to_str().unwrap(), "class": "Lexample/Test;", "full": "true"})));
+    assert_eq!(flag["result"]["isError"], false);
+}
+
+#[test]
+fn compact_structured_content_leaves_the_bulk_to_the_text() {
+    let apk = temp_apk();
+    let a = apk.path().to_str().unwrap();
+    let mut o = opts();
+    o.structured = asc_mcp::output::Structured::Compact;
+    let replies = session_with(o, &[call(1, "getclass", json!({"apk": a, "class": "Lexample/Test;"})), call(2, "tools/list", json!({}))]);
+    let s = &replies[0]["result"]["structuredContent"];
+    assert!(s.get("source").is_none() && s["omitted"] == json!(["source"]), "{s}");
+    assert_eq!(s["class"], "Lexample/Test;");
+    assert!(text(&replies[0]).contains("const-string v0, \"token\""));
+}
+
+#[test]
+fn tool_definitions_stay_small_and_take_the_output_options() {
+    let replies = session(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
+    let tools = &replies[0]["result"]["tools"];
+    // What an agent reads before its first call; it was 16 KB.
+    assert!(tools.to_string().len() <= 10 << 10, "{} bytes", tools.to_string().len());
+    for t in tools.as_array().unwrap() {
+        let p = &t["inputSchema"]["properties"];
+        assert!(p["max_bytes"].is_object() && p["spill"].is_object() && p["page"].is_object(), "{}", t["name"]);
+    }
 }

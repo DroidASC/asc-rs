@@ -4,6 +4,7 @@
 use crate::multi::{self, Report, Section};
 use crate::{bool_arg, max_bytes, str_arg, usize_arg, Call, OpenApk, Server, ToolError, ToolResult};
 use asc_engine::{ManifestSummary, ResourceField, ResourceRow};
+use regex::Regex;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -29,6 +30,26 @@ fn filter_arg(args: &Value, default: Filter) -> Result<Filter, ToolError> {
         Some("exported") => Ok(Filter::Exported),
         Some(f) => Err(ToolError(format!("unknown filter {f:?}: use all or exported"))),
     }
+}
+
+/// `kind`: record kinds (the first word of a record: `provider`,
+/// `uses-permission`, `deeplink`, ...), as a string (comma separated) or a list.
+fn kinds_arg(args: &Value) -> Result<Vec<String>, ToolError> {
+    let bad = || ToolError("`kind` must be a record kind (provider, activity, ...) or a list of them".into());
+    match args.get("kind") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(s)) => Ok(s.split(',').map(str::trim).filter(|k| !k.is_empty()).map(String::from).collect()),
+        Some(Value::Array(list)) => list.iter().map(|k| k.as_str().map(String::from).ok_or_else(bad)).collect(),
+        Some(_) => Err(bad()),
+    }
+}
+
+/// `name`: a case-insensitive regex over the record (plain text when it is
+/// not a valid regex).
+fn name_arg(args: &Value) -> Result<Option<Regex>, ToolError> {
+    let Some(pattern) = str_arg(args, "name")? else { return Ok(None) };
+    let re = Regex::new(&format!("(?i){pattern}")).or_else(|_| Regex::new(&format!("(?i){}", regex::escape(pattern))))?;
+    Ok(Some(re))
 }
 
 /// `summary.lines()`, or only the externally reachable part.
@@ -134,19 +155,41 @@ impl Server {
             return self.manifest_summary_many(args, call, &paths);
         }
         let apk = self.resolve(args)?;
-        let filter = filter_arg(args, Filter::All)?;
+        let kinds = kinds_arg(args)?;
+        let name = name_arg(args)?;
+        // Narrowing by kind or name looks for something specific: do not hide
+        // what is not exported.
+        let narrowed = !kinds.is_empty() || name.is_some();
+        let filter = filter_arg(args, if narrowed { Filter::All } else { Filter::Exported })?;
+        let offset = usize_arg(args, "offset")?.unwrap_or(0);
         let s = apk.engine.manifest_summary()?;
+        let records: Vec<String> = summary_lines(&s, filter)
+            .into_iter()
+            .filter(|l| kinds.is_empty() || kinds.iter().any(|k| l.split(' ').next() == Some(k.as_str())))
+            .filter(|l| name.as_ref().is_none_or(|n| n.is_match(l)))
+            .collect();
         let mut text = String::new();
         if filter == Filter::Exported {
             text.push_str(&summary_head(&s));
             text.push('\n');
+            if str_arg(args, "filter")?.is_none() {
+                text.push_str(
+                    "# filter=exported (the default without kind / name): what other apps can reach; filter=\"all\" \
+                     for every record, kind / name to narrow\n",
+                );
+            }
         }
-        for l in summary_lines(&s, filter) {
-            text.push_str(&l);
+        for l in records.iter().skip(offset) {
+            text.push_str(l);
             text.push('\n');
+        }
+        let shown = records.len().saturating_sub(offset);
+        if offset > 0 || narrowed {
+            text.push_str(&format!("# records {offset}..{} of {}\n", offset + shown, records.len()));
         }
         let mut structured = summary_json(&s, filter);
         structured["apk_id"] = json!(apk.id);
+        structured["records_total"] = json!(records.len());
         Ok((text, structured))
     }
 
@@ -333,37 +376,33 @@ pub mod defs {
 
     pub fn manifest_summary() -> Value {
         json!({
-            "description": "The manifest's attack surface, one record per line: `package`, `application` (debuggable, \
-                allowBackup, effective cleartext policy, network security config), `uses-permission`, `permission` \
-                (protectionLevel), one line per component (`activity <class> exported=true (intent-filter)`: exported or \
-                not and why, permission, provider authorities / grantUriPermissions / read / write permissions), \
-                `intent-filter`, `deeplink <class> scheme://host/path*`, `provider-path` (FileProvider paths) and `nsc` \
-                (network security config). Resource references are resolved; a boolean that differs between \
-                configurations lists every variant. Class names are fully qualified, ready for getclass. With apks / \
-                dir: per APK a head line (package, SDKs, exported counts, risky flags) and its exported records.",
+            "description": "The manifest's attack surface, one record per line: package, application flags, \
+                (uses-)permission, each component (`provider <class> exported=true (intent-filter) authorities=...`), \
+                intent-filter, deeplink, provider-path, nsc. Default filter=exported unless kind / name narrow it. \
+                With apks / dir: a head line and exported records per APK.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "filter": {"type": "string", "enum": ["all", "exported"], "description": "all records, or only what other \
-                    apps can reach: exported components, deep links, non-signature permissions, cleartext domains \
-                    (default all for one APK, exported for many)."},
+                "filter": {"type": "string", "enum": ["all", "exported"]},
+                "kind": {"type": ["string", "array"], "description": "Record kinds: provider, activity, service, receiver, \
+                    permission, deeplink, ..."},
+                "name": {"type": "string", "description": "Regex over the record (case-insensitive)."},
+                "offset": {"type": "integer"},
             }), many()])},
         })
     }
 
     pub fn resources() -> Value {
         json!({
-            "description": "Query resources.arsc. One row per resource and configuration: `0x7f0d0001 string/app_name \
-                [zh-rCN] \"value\"` (no brackets for the default configuration; bags as {parent=@style/X key=value ...}). \
-                `query` lists every configuration's value of one resource (with `resolve`: follows the reference chain); \
-                `search` matches names and / or string values; `xml` decodes a binary XML file of the APK \
-                (res/xml/..., layouts) with references shown by name. With apks / dir: `query` or `search` in each APK.",
+            "description": "resources.arsc rows `0x7f0d0001 | string/app_name [zh-rCN] | \"value\"`: `query` one \
+                resource (every configuration; resolve=true follows references), `search` names / values, or `xml` \
+                decodes a binary XML file (res/xml/..., layouts).",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "query": {"type": "string", "description": "A resource id (0x7f0d0001) or name (string/app_name, @pkg:type/name)."},
-                "resolve": {"type": "boolean", "description": "With query: follow references to the final value."},
-                "search": {"type": "string", "description": "Regex over resource names and string values."},
-                "literal": {"type": "boolean", "description": "Match `search` as plain text."},
-                "in": {"type": "string", "enum": ["name", "value", "any"], "description": "What `search` matches (default any)."},
-                "limit": {"type": "integer", "minimum": 1, "description": "Most rows to return (default 200)."},
-                "xml": {"type": "string", "description": "Path of a binary XML file inside the APK to decode."},
+                "query": {"type": "string", "description": "0x7f0d0001 or string/app_name"},
+                "resolve": {"type": "boolean"},
+                "search": {"type": "string", "description": "Regex (literal=true: text)."},
+                "literal": {"type": "boolean"},
+                "in": {"type": "string", "enum": ["name", "value", "any"]},
+                "limit": {"type": "integer"},
+                "xml": {"type": "string", "description": "Path inside the APK, e.g. res/xml/file_paths.xml"},
             }), many()])},
         })
     }

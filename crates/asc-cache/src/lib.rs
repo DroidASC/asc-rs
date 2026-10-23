@@ -198,6 +198,9 @@ const DERIVED_DIR: &str = "derived";
 const RENDERED_DIR: &str = "rendered";
 /// Where each APK key's source path is recorded, to spot dead entries.
 const SOURCES_DIR: &str = "sources";
+/// Where the MCP server writes replies too long for the client (its own
+/// budget and pruning; this cache only recognizes and clears it).
+pub const SPILL_DIR: &str = "out";
 
 /// Absolute cap of L3, which also never takes more than
 /// 1/[`RENDERED_BUDGET_DIVISOR`] of the total budget.
@@ -737,7 +740,7 @@ impl DiskCache {
             remove_item(&item).map_err(io_err(&item.path))?;
             bytes += item.bytes;
         }
-        for sub in [DERIVED_DIR, RENDERED_DIR, SOURCES_DIR] {
+        for sub in [DERIVED_DIR, RENDERED_DIR, SOURCES_DIR, SPILL_DIR] {
             let path = self.dir.join(sub);
             if path.is_dir() {
                 fs::remove_dir_all(&path).map_err(io_err(&path))?;
@@ -800,7 +803,7 @@ impl DiskCache {
                 let name = d.file_name();
                 let name = name.to_string_lossy();
                 match d.file_type() {
-                    Ok(t) if t.is_dir() => is_cache_dir_name(&name) || TIER_DIRS.contains(&&*name),
+                    Ok(t) if t.is_dir() => is_cache_dir_name(&name) || TIER_DIRS.contains(&&*name) || name == SPILL_DIR,
                     Ok(t) if t.is_file() => name == ".DS_Store" || name == EVICT_MARKER,
                     _ => false,
                 }
@@ -1432,6 +1435,19 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(DiskCache::open(empty.path()).clear().unwrap(), 0);
         assert_eq!(DiskCache::open(empty.path().join("missing")).clear().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_directory_holding_only_spilled_replies_is_still_a_cache() {
+        // The MCP server may spill a reply before the first DEX is cached.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(SPILL_DIR)).unwrap();
+        fs::write(dir.path().join(SPILL_DIR).join("ab.txt"), b"reply").unwrap();
+        let cache = DiskCache::open(dir.path());
+        assert!(cache.check_usable().is_ok());
+        cache.put(&ApkKey("app-0123456789abcdef".into()), "classes.dex", &[0; 4]).unwrap();
+        cache.clear().unwrap();
+        assert!(!dir.path().join(SPILL_DIR).exists(), "clear removes spilled replies too");
     }
 
     #[test]

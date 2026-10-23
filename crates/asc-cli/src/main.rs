@@ -3,7 +3,7 @@
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::fs::File;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -374,12 +374,28 @@ enum Command {
         /// Lcom/foo/), replacing the built-in list.
         #[arg(long, value_delimiter = ',')]
         sdk_prefixes: Option<Vec<String>>,
+        /// structuredContent: `compact` leaves out its bulky values (rows,
+        /// smali) that the text already carries, since some clients show
+        /// the model both; `full` keeps everything.
+        #[arg(long, value_enum, default_value_t = StructuredArg::Compact)]
+        structured: StructuredArg,
+        /// Disk budget of the directory replies over their budget are
+        /// written to (`out/` in the cache directory); 0 pages them instead.
+        #[arg(long, default_value_t = 64)]
+        spill_mb: u64,
     },
     /// Inspect or clear the on-disk cache of inflated DEX files.
     Cache {
         #[command(subcommand)]
         action: CacheAction,
     },
+}
+
+/// `mcp --structured`.
+#[derive(Clone, Copy, ValueEnum)]
+enum StructuredArg {
+    Compact,
+    Full,
 }
 
 #[derive(Subcommand)]
@@ -904,13 +920,21 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
         Command::Gui { apk_path } => {
             launch_gui(apk_path, common.threads, common.debug, common.resident_cache())?;
         }
-        Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes } => {
+        Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes, structured, spill_mb } => {
             let mut opts = asc_mcp::Options::new(common.threads, common.debug, common.resident_cache());
             opts.limits.max_entry_bytes = max_entry_mb.saturating_mul(1 << 20);
             opts.limits.max_ratio = max_ratio;
             if let Some(p) = sdk_prefixes {
                 opts.sdk_prefixes = p;
             }
+            opts.structured = match structured {
+                StructuredArg::Compact => asc_mcp::output::Structured::Compact,
+                StructuredArg::Full => asc_mcp::output::Structured::Full,
+            };
+            if spill_mb == 0 {
+                opts.spill_dir = None;
+            }
+            opts.spill_bytes = spill_mb.saturating_mul(1 << 20);
             asc_mcp::serve(std::io::stdin().lock(), std::io::stdout(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {

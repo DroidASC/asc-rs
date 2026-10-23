@@ -15,8 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Default output budget of one multi-APK reply (text bytes, about 8k tokens).
-pub const MAX_BYTES: usize = 32 << 10;
 /// Default budget of one APK's section.
 pub const MAX_APK_BYTES: usize = 4 << 10;
 /// Most apk_ids of empty APKs a page lists by name.
@@ -240,6 +238,19 @@ pub struct Report {
 }
 
 impl Report {
+    /// Every section, as one text (what a spill file holds).
+    pub fn full_text(&self) -> String {
+        let mut text = format!("{}\n", self.header);
+        for l in self.sections.iter().flat_map(|s| &s.lines) {
+            text.push_str(l);
+            text.push('\n');
+        }
+        if !self.empty.is_empty() {
+            text.push_str(&format!("# nothing in {} APKs: {}\n", self.empty.len(), self.empty.join(" ")));
+        }
+        text
+    }
+
     /// The page starting at section `from`: whole sections up to the byte
     /// budget (at least one), and the section index to continue from.
     pub fn page(&self, from: usize, cursor_id: Option<usize>) -> (String, Value) {

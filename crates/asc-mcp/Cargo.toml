@@ -10,7 +10,9 @@ description = "Droid ASC MCP server: a resident stdio session that keeps APKs op
 [dependencies]
 asc-engine.workspace = true
 asc-findrefs.workspace = true
+regex.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 asc-fixture.workspace = true

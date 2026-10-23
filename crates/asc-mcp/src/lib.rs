@@ -26,7 +26,9 @@
 //! (`apks` or `dir`, see [`multi`]): the reply has one section per APK, cut
 //! to a byte budget, with a `cursor` to page through the rest.
 
+mod class_text;
 pub mod multi;
+pub mod output;
 mod res;
 mod rules;
 
@@ -35,7 +37,9 @@ use asc_engine::{
     RefResult, SharedCache, SmaliOptions,
 };
 use asc_findrefs::Query;
+use class_text::ClassText;
 use multi::{Report, Reports, Section};
+use output::{SpillDir, Structured, FITTED, FULL};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
@@ -68,17 +72,28 @@ pub struct Options {
     pub limits: InflateLimits,
     /// Package prefixes folded by `collapse_sdks` (`com.foo` or `Lcom/foo/`).
     pub sdk_prefixes: Vec<String>,
+    /// Where replies over their budget are written (`spill`); `None` pages them.
+    pub spill_dir: Option<PathBuf>,
+    /// Disk budget of `spill_dir`.
+    pub spill_bytes: u64,
+    pub structured: Structured,
 }
 
 impl Options {
-    /// Guarded inflate limits and the built-in SDK prefixes.
+    /// Guarded inflate limits, the built-in SDK prefixes, replies spilled
+    /// under the cache directory (see [`SpillDir::default_dir`]) and the
+    /// full structured results.
     pub fn new(threads: usize, debug: bool, cache: CacheConfig) -> Options {
+        let spill_dir = SpillDir::default_dir(cache.disk.as_ref().map(|d| d.dir()));
         Options {
             threads,
             debug,
             cache,
             limits: InflateLimits::guarded(),
             sdk_prefixes: multi::DEFAULT_SDK_PREFIXES.iter().map(|p| p.to_string()).collect(),
+            spill_dir: Some(spill_dir),
+            spill_bytes: output::SPILL_BUDGET,
+            structured: Structured::Full,
         }
     }
 }
@@ -245,6 +260,8 @@ pub struct Server {
     sessions: Mutex<Sessions>,
     /// Multi-APK reports, for `cursor`.
     reports: Mutex<Reports>,
+    spill: Option<SpillDir>,
+    structured: Structured,
     cache: SharedCache,
 }
 
@@ -287,6 +304,8 @@ impl Server {
             sdk_prefixes: opts.sdk_prefixes.iter().map(|p| multi::normalize_prefix(p)).collect(),
             sessions: Mutex::new(Sessions { apks: Vec::new(), next_id: 1 }),
             reports: Mutex::new(Reports::default()),
+            spill: opts.spill_dir.map(|d| SpillDir::new(d, opts.spill_bytes)),
+            structured: opts.structured,
             cache: SharedCache::new(opts.cache, |m| eprintln!("{m}")),
         }
     }
@@ -333,15 +352,16 @@ impl Server {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "droidasc", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "Droid ASC: query an APK without preprocessing. open_apk once (it inflates every DEX \
-                        so later calls are fast), then findrefs to locate strings / types / methods / fields (with \
-                        `context` it also returns the code around each hit), callgraph to walk callers / callees, and \
-                        getclass to read the smali of a class. manifest_summary lists the attack surface (exported \
-                        components and why, permissions, providers, deep links, cleartext policy); resources queries \
-                        resources.arsc and decodes res/xml files. Every tool also accepts `apk` (a path) instead of `apk_id`. To sweep \
-                        many APKs, give findrefs / listclass / open_apk / manifest_summary / resources `apks` (paths) or `dir` (+ `glob`) instead: the \
-                        reply has one section per APK (every line starts with its apk_id), cut to an output budget, and \
-                        a `cursor` to pass back to the same tool for the rest.",
+                    "instructions": "Droid ASC: Android APK code search and smali. Pass `apk` (a path) to any tool, or \
+                        open_apk once and use its apk_id. Usual flow: findrefs with context=\"method\" (finds the code \
+                        and shows it, often no getclass needed) -> getclass with method=\"name\" for more of a class \
+                        (a large class comes as an outline first) -> callgraph / hierarchy to follow calls. \
+                        manifest_summary gives the attack surface (kind=\"provider\" etc. to narrow); resources reads \
+                        resources.arsc and res/xml. Many APKs: give apks (paths) or dir (+ glob) instead of apk; the \
+                        reply has a section per APK (per_apk rows each) and a cursor for its next page. Replies stay \
+                        within max_bytes (16 KB): beyond it the full output is written to a file whose path the reply \
+                        gives (read the lines you need), or with spill=\"never\" paged (page=N). A `more` / `next` hint \
+                        is the complete arguments of the next call.",
                 }))
             }
             "ping" => Ok(json!({})),
@@ -356,17 +376,27 @@ impl Server {
                 let Some(tool) = TOOLS.iter().find(|t| t.name == name) else {
                     return Err((-32602, format!("unknown tool: {name}")));
                 };
+                // A `more` / `next` hint passed back as the cursor is a call.
+                let followed = follow_up(args);
+                let args = followed.as_ref().unwrap_or(args);
                 // A bug in the engine must not take the whole session down.
-                let result = guarded(name, || match str_arg(args, "cursor")? {
-                    Some(cursor) => self.more(name, cursor),
-                    None => (tool.run)(self, args, call),
+                let result = guarded(name, || {
+                    let (text, structured) = match str_arg(args, "cursor")? {
+                        Some(cursor) => self.more(name, cursor)?,
+                        None => (tool.run)(self, args, call)?,
+                    };
+                    output::fit(name, args, text, structured, self.spill.as_ref())
                 });
                 Ok(match result {
-                    Ok((text, structured)) => json!({
-                        "content": [{"type": "text", "text": text}],
-                        "structuredContent": structured,
-                        "isError": false,
-                    }),
+                    Ok(f) => {
+                        let mut content = vec![json!({"type": "text", "text": f.text})];
+                        content.extend(f.link);
+                        json!({
+                            "content": content,
+                            "structuredContent": self.structured.apply(f.structured),
+                            "isError": false,
+                        })
+                    }
                     Err(ToolError(msg)) => json!({
                         "content": [{"type": "text", "text": format!("Error: {msg}")}],
                         "isError": true,
@@ -601,17 +631,22 @@ impl Server {
     pub fn report(&self, report: Report) -> ToolResult {
         let report = Arc::new(report);
         let id = lock(&self.reports).keep(Arc::clone(&report));
-        Ok(report.page(0, Some(id)))
+        Ok(with_full_report(&report, report.page(0, Some(id))))
     }
 
     /// The page of a kept report a `cursor` points at.
     fn more(&self, tool: &str, cursor: &str) -> ToolResult {
-        let (id, from) = multi::parse_cursor(cursor).ok_or_else(|| ToolError(format!("bad cursor {cursor:?}")))?;
+        let (id, from) = multi::parse_cursor(cursor).ok_or_else(|| {
+            ToolError(format!(
+                "bad cursor {cursor:?}: pass the `cursor` a reply returned (like \"3:2\"), or the JSON arguments of a \
+                 `more` / `next` hint as the call's arguments"
+            ))
+        })?;
         let report = lock(&self.reports).get(id).ok_or_else(|| ToolError(format!("cursor {cursor:?} has expired; run the query again")))?;
         if report.tool != tool {
             return Err(ToolError(format!("cursor {cursor:?} belongs to {}", report.tool)));
         }
-        Ok(report.page(from, Some(id)))
+        Ok(with_full_report(&report, report.page(from, Some(id))))
     }
 
     /// SDK prefixes to fold away, if `collapse_sdks` (default `default`) is on.
@@ -632,14 +667,18 @@ impl Server {
 
     // ---- queries -----------------------------------------------------------
 
+    /// A class's smali, or the methods `method` names. A class over the output
+    /// budget comes as an outline (unless `full`), the whole class handed on
+    /// for a spill file.
     fn getclass(&self, args: &Value, _: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("getclass needs `class`".into()))?;
-        let debug_info = bool_arg(args, "debug_info")?.unwrap_or(true);
+        // Off by default: obfuscated APKs carry meaningless `.line`s, and agents
+        // turned them off in 259 of 292 getclass calls of the Grok replay.
+        let debug_info = bool_arg(args, "debug_info")?.unwrap_or(false);
         let descriptor = names::format_class_name(class)?;
         let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
-        let method = str_arg(args, "method")?;
-        let mut src = apk.engine.get_class_method(&descriptor, opts, method)?;
+        let mut src = apk.engine.get_class_method(&descriptor, opts, None)?;
         if bool_arg(args, "resource_names")?.unwrap_or(true) {
             src.source = apk.engine.annotate_resource_ids(&src.source);
         }
@@ -648,15 +687,32 @@ impl Server {
             // A smali comment, so the text still assembles.
             text.push_str(&format!("# Warning: {w}\n"));
         }
-        text.push_str(&src.source);
-        let structured = json!({
+        let parsed = ClassText::parse(&src.source);
+        let budget = output::budget(args)?;
+        let mut structured = json!({
             "apk_id": apk.id,
             "class": descriptor,
             "dex_name": src.dex_name,
             "warning": src.warning,
             "rebuilt": src.rebuilt.is_some(),
-            "source": src.source,
         });
+        match str_arg(args, "method")? {
+            Some(m) => {
+                let picked = parsed.select(m);
+                if picked.is_empty() {
+                    return Err(ToolError(format!("{descriptor} has no method {m:?}; its methods: {}", parsed.signatures(4 << 10))));
+                }
+                structured["methods"] = json!(picked.iter().map(|b| b.signature).collect::<Vec<_>>());
+                text.push_str(&parsed.with_methods(&picked));
+            }
+            None if text.len() + src.source.len() > budget && !bool_arg(args, "full")?.unwrap_or(false) => {
+                structured["outline"] = json!(true);
+                structured[FULL] = json!(format!("{text}{}", src.source));
+                text.push_str(&parsed.outline(src.source.len(), budget));
+            }
+            None => text.push_str(&src.source),
+        }
+        structured["source"] = json!(text);
         Ok((text, structured))
     }
 
@@ -924,6 +980,46 @@ impl Server {
     }
 }
 
+/// A page of `report`, handing over the whole report (for a spill file)
+/// when the page does not show all of it.
+fn with_full_report(report: &Report, (text, mut structured): (String, Value)) -> (String, Value) {
+    let partial = !structured["cursor"].is_null() || structured["shown"][0].as_u64().is_some_and(|from| from > 0);
+    if partial {
+        structured[FULL] = json!(report.full_text());
+    }
+    // The report pages itself (by cursor).
+    structured[FITTED] = json!(true);
+    (text, structured)
+}
+
+/// The arguments a call means when its `cursor` is not a report cursor but
+/// a hint passed back: a JSON object of arguments, or `tool {json}` as a
+/// `more` line prints it. Arguments given next to it fill in what it lacks.
+fn follow_up(args: &Value) -> Option<Value> {
+    let mut hint = match args.get("cursor")? {
+        Value::Object(o) => o.clone(),
+        Value::String(s) if multi::parse_cursor(s).is_none() => {
+            let s = s.trim();
+            let brace = s.find('{')?;
+            if !s[..brace].trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return None;
+            }
+            match serde_json::from_str::<Value>(&s[brace..]).ok()? {
+                Value::Object(o) => o,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    hint.remove("cursor");
+    for (k, v) in args.as_object()? {
+        if k != "cursor" && !hint.contains_key(k) {
+            hint.insert(k.clone(), v.clone());
+        }
+    }
+    Some(Value::Object(hint))
+}
+
 /// Inflate every DEX into the shared cache (as a side effect of listing its
 /// classes) and return the class count.
 fn warm_classes(apk: &OpenApk) -> Result<usize, ToolError> {
@@ -1141,11 +1237,11 @@ fn describe_query(args: &Value) -> String {
 }
 
 fn max_bytes(args: &Value) -> Result<usize, ToolError> {
-    Ok(usize_arg(args, "max_bytes")?.unwrap_or(multi::MAX_BYTES).max(256))
+    output::budget(args)
 }
 
 /// Run a tool, turning a panic into a tool error.
-fn guarded(name: &str, tool: impl FnOnce() -> ToolResult) -> ToolResult {
+fn guarded<T>(name: &str, tool: impl FnOnce() -> Result<T, ToolError>) -> Result<T, ToolError> {
     panic::catch_unwind(AssertUnwindSafe(tool))
         .unwrap_or_else(|p| Err(ToolError(format!("internal error in {name}: {}", panic_message(&*p)))))
 }
@@ -1173,18 +1269,30 @@ pub fn str_arg<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, ToolEr
     }
 }
 
+/// A boolean argument; `"true"` / `"false"` are taken too, as models write them.
 pub fn bool_arg(args: &Value, key: &str) -> Result<Option<bool>, ToolError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(Value::String(s)) if s == "true" => Ok(Some(true)),
+        Some(Value::String(s)) if s == "false" => Ok(Some(false)),
         Some(_) => Err(ToolError(format!("`{key}` must be a boolean"))),
     }
 }
 
+/// A non-negative integer argument, also given as a string of digits.
 pub fn usize_arg(args: &Value, key: &str) -> Result<Option<usize>, ToolError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => v.as_u64().map(|n| Some(n as usize)).ok_or_else(|| ToolError(format!("`{key}` must be a non-negative integer"))),
+        Some(v) => as_usize(v).map(Some).ok_or_else(|| ToolError(format!("`{key}` must be a non-negative integer"))),
+    }
+}
+
+fn as_usize(v: &Value) -> Option<usize> {
+    match v {
+        Value::Number(n) => n.as_u64().and_then(|n| usize::try_from(n).ok()),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
     }
 }
 
@@ -1194,10 +1302,9 @@ fn context_arg(args: &Value) -> Result<RefContext, ToolError> {
     match args.get("context") {
         None | Some(Value::Null) => Ok(RefContext::None),
         Some(Value::String(s)) if s == "method" => Ok(RefContext::Method),
-        Some(v) => v
-            .as_u64()
-            .map(|n| RefContext::Lines(n as usize))
-            .ok_or_else(|| ToolError("`context` must be a non-negative integer or \"method\"".into())),
+        Some(v) => {
+            as_usize(v).map(RefContext::Lines).ok_or_else(|| ToolError("`context` must be a non-negative integer or \"method\"".into()))
+        }
     }
 }
 
@@ -1247,6 +1354,10 @@ fn tool_definitions() -> Value {
             .map(|t| {
                 let mut d = (t.definition)();
                 d["name"] = json!(t.name);
+                // Every reply is fitted to its budget (see `output`).
+                if let Some(p) = d["inputSchema"]["properties"].as_object_mut() {
+                    p.extend(defs::output_props().as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())));
+                }
                 d
             })
             .collect(),
@@ -1260,32 +1371,36 @@ pub mod defs {
 
     pub fn apk_props() -> Value {
         json!({
-            "apk_id": {"type": "string", "description": "Id returned by open_apk."},
-            "apk": {"type": "string", "description": "APK path; opened implicitly if not open yet (alternative to apk_id)."},
+            "apk_id": {"type": "string"},
+            "apk": {"type": "string", "description": "APK path instead of apk_id (opened on first use)."},
         })
     }
 
-    /// The selection, budget and paging properties of a multi-APK call.
+    /// Budget and spill properties every tool takes (explained once, in the
+    /// server instructions).
+    pub fn output_props() -> Value {
+        json!({
+            "max_bytes": {"type": "integer"},
+            "spill": {"type": "string", "enum": ["auto", "always", "never"]},
+            "page": {"type": "integer"},
+        })
+    }
+
+    /// The selection and paging properties of a multi-APK call.
     pub fn many() -> Value {
         json!({
-            "apks": {"type": "array", "items": {"type": "string"}, "description": "Run over these APK paths instead of one APK."},
-            "dir": {"type": "string", "description": "Run over the APKs under this directory instead of one APK."},
-            "glob": {"type": "string", "description": "With dir: file name pattern (* and ?), default *.apk."},
-            "recursive": {"type": "boolean", "description": "With dir: descend into subdirectories (default true)."},
-            "per_apk": {"type": "integer", "minimum": 0, "description": "Rows shown per APK (default 10)."},
-            "max_bytes": {"type": "integer", "minimum": 256, "description": "Output budget of the reply in bytes (default 32768); \
-                whole APK sections that do not fit are left for `cursor`."},
-            "cursor": {"type": "string", "description": "Continue a multi-APK reply: pass the `cursor` it returned (alone)."},
-            "release": {"type": "boolean", "description": "Drop each APK's DEX from memory once searched (default: when \
-                their DEX would not fit the memory budget together)."},
+            "apks": {"type": "array", "items": {"type": "string"}},
+            "dir": {"type": "string"},
+            "glob": {"type": "string"},
+            "recursive": {"type": "boolean"},
+            "per_apk": {"type": "integer"},
+            "cursor": {"type": "string"},
+            "release": {"type": "boolean"},
         })
     }
 
     pub fn page_props() -> Value {
-        json!({
-            "offset": {"type": "integer", "minimum": 0, "description": "Skip this many results (default 0)."},
-            "limit": {"type": "integer", "minimum": 1, "description": "Return at most this many results."},
-        })
+        json!({"offset": {"type": "integer"}, "limit": {"type": "integer"}})
     }
 
     /// `base` plus every property of `extra`.
@@ -1300,15 +1415,12 @@ pub mod defs {
 
     pub fn open_apk() -> Value {
         json!({
-            "description": "Open an APK for this session and return its apk_id. With warm (default true) every DEX is \
-                inflated now, so later calls answer from memory. Opening the same path again returns the same apk_id. \
-                With apks / dir: register all of them (one line per APK: apk_id, DEX count and size, path), inflating \
-                nothing unless warm is set.",
+            "description": "Open an APK (inflating its DEX unless warm=false) and return its apk_id. With apks / dir: \
+                register each (apk_id, DEX size, path).",
             "inputSchema": {"type": "object", "properties": merge(json!({
-                "apk": {"type": "string", "description": "APK path."},
-                "warm": {"type": "boolean", "description": "Inflate every DEX now (default true for one APK, false for many)."},
-                "prebuild": {"type": "boolean", "description": "One warm APK: also build its search tables in the background \
-                    (default true), so the first query of each kind is as fast as later ones."},
+                "apk": {"type": "string"},
+                "warm": {"type": "boolean"},
+                "prebuild": {"type": "boolean", "description": "Build search tables in the background (default true)."},
             }), &[many()])},
         })
     }
@@ -1319,79 +1431,70 @@ pub mod defs {
 
     pub fn getclass() -> Value {
         json!({
-            "description": "Disassemble one class to smali (rebuilt into a minimal DEX first).",
+            "description": "A class as smali. Over the budget: an outline (fields, method signatures and sizes) unless \
+                full=true; then ask for methods.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "class": {"type": "string", "description": "Lcom/poc/Main; or com.poc.Main."},
-                "debug_info": {"type": "boolean", "description": "Emit .line / .param directives (default true)."},
-                "method": {"type": "string", "description": "Only this method, by exact signature: name(params)ret, e.g. onCreate(Landroid/os/Bundle;)V."},
-                "resource_names": {"type": "boolean", "description": "Append `# @type/name` to constants that are resource ids (default true)."},
+                "class": {"type": "string", "description": "Lcom/a/B; or com.a.B"},
+                "method": {"type": "string", "description": "Only these methods: a name (every overload) or name(params)ret."},
+                "full": {"type": "boolean"},
+                "debug_info": {"type": "boolean", "description": ".line / .param (default false)."},
+                "resource_names": {"type": "boolean", "description": "`# @type/name` after resource ids (default true)."},
             })]), "required": ["class"]},
         })
     }
 
     pub fn findrefs() -> Value {
         json!({
-            "description": "Find code references to a string, type, method or field across every DEX (one line per \
-                referencing method: `dex | Lcls;->method(params)ret | \"a string\", Lcls;->m(I)V, Lcls;->f:I`, strings \
-                quoted and escaped as JSON), or the classes that extend / implement a type (`dex | Lsub; | extends \
-                Lbase;`). Paged; the last line says how many there are. With apks / dir: \
-                one section per APK (`apkN | 12 hits (+3 in SDKs) | path`, then its first per_apk rows, each line \
-                prefixed `apkN | `), hits in common SDK packages folded into a count, APKs without hits listed by id. \
-                Give `kind` for one query, `all` / `none` for methods matching several conditions at once, or `rules` \
-                for several queries in one pass.",
+            "description": "Methods referencing a string / type / method / field, one per line: `dex | Lcls;->m(I)V | \
+                \"str\", Lx;->f:I`; or classes extending / implementing a type. context=N or \"method\" adds the code. \
+                `all` / `none`: several conditions in one method; `rules`: several queries in one pass. With apks / dir: \
+                a section per APK, SDK hits folded.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "kind": {"type": "string", "enum": ["string", "type", "method", "field", "extends", "impl"]},
-                "value": {"type": "string", "description": "string: regex over string constants (plain text with `literal`); \
-                    type: fuzzy type descriptor / name; extends / impl: the superclass / interface (Lcom/poc/Base; or com.poc.Base)."},
-                "literal": {"type": "boolean", "description": "string: match `value` as plain text instead of a regex."},
-                "name": {"type": "string", "description": "method / field: name (regex or substring; exact with `exact`)."},
-                "class": {"type": "string", "description": "method / field: declaring class (Lcom/poc/Main; or com.poc.Main)."},
-                "fuzzy_class": {"type": "boolean", "description": "Treat `class` as a fuzzy pattern."},
-                "exact": {"type": "boolean", "description": "Match `name` exactly."},
-                "collapse_sdks": {"type": "boolean", "description": "Fold hits inside common SDK packages (androidx, kotlin, \
-                    gms, okhttp3, ...) into per-SDK counts (default true for many APKs, false for one)."},
-                "sdk_prefixes": {"type": "array", "items": {"type": "string"}, "description": "Packages collapse_sdks folds \
-                    (com.foo or Lcom/foo/), replacing the built-in list."},
-                "group": {"type": "string", "enum": ["none", "package"], "description": "Many APKs: merge each APK's hits \
-                    by package (count + one example) instead of listing them."},
-                "package_depth": {"type": "integer", "minimum": 1, "description": "group=package: package segments (default 3)."},
+                "value": {"type": "string", "description": "string: regex (literal=true: text); type, extends, impl: a type."},
+                "literal": {"type": "boolean"},
+                "name": {"type": "string", "description": "method / field name, regex (exact=true: equal)."},
+                "class": {"type": "string", "description": "method / field: declaring class."},
+                "fuzzy_class": {"type": "boolean"},
+                "exact": {"type": "boolean"},
+                "context": {"type": ["integer", "string"], "description": "Lines of smali around each hit, or \"method\"."},
+                "collapse_sdks": {"type": "boolean", "description": "Fold androidx, kotlin, gms... hits into counts."},
+                "sdk_prefixes": {"type": "array", "items": {"type": "string"}},
+                "group": {"type": "string", "enum": ["none", "package"]},
+                "package_depth": {"type": "integer"},
             }), crate::rules::defs::findrefs_props(), page_props(), many()])},
         })
     }
 
     pub fn callgraph() -> Value {
         json!({
-            "description": "Callers (default) or callees of a method across every DEX, as an indented tree: one line per \
-                call, `depth <- caller` or `depth -> callee`. `[no body]` marks methods the APK does not define \
-                (framework / SDK), `(repeated)` methods expanded elsewhere. Static references only: a call through \
-                a subclass is not a call of the base method, unless `virtual`.",
+            "description": "Callers (default) or callees of a method across every DEX, as an indented tree (`2 <- \
+                Lx;->m()V`). `[no body]`: not in the APK. Static calls only unless virtual=true.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "class": {"type": "string", "description": "Declaring class: Lcom/poc/Main; or com.poc.Main."},
-                "method": {"type": "string", "description": "Method name (every overload) or exact name(params)ret."},
-                "direction": {"type": "string", "enum": ["callers", "callees"], "description": "Default callers."},
-                "depth": {"type": "integer", "minimum": 1, "description": "Levels to expand (default 2)."},
-                "max_nodes": {"type": "integer", "minimum": 1, "description": "Stop after this many methods (default 200)."},
-                "virtual": {"type": "boolean", "description": "Follow virtual dispatch: callers also through each \
-                    supertype's signature (`(via Lbase;)`), callees also the overrides in subclasses (`(override of Lbase;)`)."},
+                "class": {"type": "string"},
+                "method": {"type": "string", "description": "A name (every overload) or name(params)ret."},
+                "direction": {"type": "string", "enum": ["callers", "callees"]},
+                "depth": {"type": "integer", "description": "Default 2."},
+                "max_nodes": {"type": "integer"},
+                "virtual": {"type": "boolean"},
             })]), "required": ["class", "method"]},
         })
     }
 
     pub fn listclass() -> Value {
         json!({
-            "description": "List the classes the APK defines, in DEX order. Paged. With apks / dir: per APK the class \
-                count and the first per_apk classes under `prefix`; APKs without any are listed by id.",
+            "description": "Classes the APK defines, optionally under a prefix. With apks / dir: count and first classes per APK.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "prefix": {"type": "string", "description": "Package / class prefix (com.poc or Lcom/poc)."},
+                "prefix": {"type": "string", "description": "com.a or Lcom/a"},
             }), page_props(), many()])},
         })
     }
 
     pub fn getmanifest() -> Value {
         json!({
-            "description": "Decode AndroidManifest.xml (for the attack surface as records, use manifest_summary).",
+            "description": "AndroidManifest.xml as XML (records: manifest_summary).",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "resolve": {"type": "boolean", "description": "Show resource references (@7F0C0001) by name (default false)."},
+                "resolve": {"type": "boolean", "description": "Resource references by name."},
             })])},
         })
     }
@@ -1403,9 +1506,9 @@ mod tests {
 
     #[test]
     fn a_panicking_tool_becomes_a_tool_error() {
-        let err = guarded("findrefs", || panic!("boom {}", 42)).err().unwrap();
+        let err = guarded::<()>("findrefs", || panic!("boom {}", 42)).err().unwrap();
         assert_eq!(err.0, "internal error in findrefs: boom 42");
-        let err = guarded("getclass", || std::panic::panic_any(7u8)).err().unwrap();
+        let err = guarded::<()>("getclass", || std::panic::panic_any(7u8)).err().unwrap();
         assert_eq!(err.0, "internal error in getclass: panic");
     }
 

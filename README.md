@@ -382,7 +382,7 @@ ending the session.
 |---|---|---|
 | `open_apk` | `apk`, `warm` (default true: inflate every DEX now), `prebuild` (default true: then build the search tables in the background, queries first); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
 | `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
-| `getclass` | `class`, `debug_info`, `method` (exact signature), `resource_names` (default true) | smali, as `droidasc getclass [--method] --res-names`: constants that are resource ids end in `# @type/name` |
+| `getclass` | `class`, `method` (a name: every overload; `name(params)ret`, or a prefix of it), `full`, `debug_info` (default false), `resource_names` (default true) | smali, as `droidasc getclass --res-names`: constants that are resource ids end in `# @type/name`. A class over the output budget comes as an outline (header, fields, every method's declaration with its instruction count and size) unless `full`; an unknown `method` is an error listing the class's signatures |
 | `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; `structuredContent` rows carry `dex`, `method`, `signature` (full) and `matched` (unquoted values); with `context` they also carry `sites` (`pc`, `line`, `matched`) and `context` |
 | `findrefs` (several conditions) | `all` / `none`: lists of condition objects (`kind`, `value` / `name`, `class`, ...) instead of `kind` | methods matching every `all` condition and no `none` one |
 | `findrefs` (rule set) | `rules`: list of queries (single or `all` / `none`); `limit` (100) per rule | per rule a `# r1 string "http://": 12 results` line and its `r1 \| ...` rows; `rules` in `structuredContent`, each with a complete follow-up call in `next` |
@@ -390,13 +390,36 @@ ending the session.
 | `hierarchy` | `class`, `direction` (`subclasses`/`supers`), `depth` (16), `max_nodes` (500), `method` | the `droidasc hierarchy` tree and `override` lines; `rows` with `depth`, `parent`, `class`, `relation`, `dex`, `defines` |
 | `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
 | `getmanifest` | `resolve` | decoded XML (references by name with `resolve`) |
-| `manifest_summary` | `filter` (`all` / `exported`); or `apks` / `dir` | the `droidasc manifest-summary` records; `exported` keeps what other apps can reach (exported components, deep links, non-signature permissions, cleartext domains). For many APKs (default `exported`): per APK `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`, then its records |
+| `manifest_summary` | `filter` (`all` / `exported`), `kind` (record kinds: `provider`, `activity`, `uses-permission`, `deeplink`, …; a string or a list), `name` (case-insensitive regex over the record), `offset`; or `apks` / `dir` | the `droidasc manifest-summary` records; `exported` (the default unless `kind` / `name` narrow the search) keeps what other apps can reach (exported components, deep links, non-signature permissions, cleartext domains). For many APKs: per APK `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`, then its records |
 | `resources` | `query` (+ `resolve`), `search` (+ `in`, `literal`), `limit`, or `xml` (a path in the APK); or `apks` / `dir` | `droidasc resources` rows (`0x7f0d0001 \| string/app_name [zh-rCN] \| "..."`), or the decoded XML file |
 
 Every tool except `open_apk` takes `apk_id` or an `apk` path (opened on first use). Results
 carry the CLI text as `content` and the same data as `structuredContent` (`total` and
-`next_offset` for paged tools). Failures come back as `isError: true` results; the session
-keeps running.
+`next_offset` for paged tools). Some clients (Grok Build, for one) show the model both, so
+`droidasc mcp` by default sends a compact `structuredContent` without the values longer than
+256 bytes the text already carries (rows, smali; `omitted` names them); `--structured full`
+keeps everything. Failures come back as `isError: true` results; the session keeps running.
+Integer arguments may be given as strings of digits and booleans as `"true"` / `"false"`.
+
+#### Output budget and spill files
+
+Clients cut long tool results (Grok Build at about 20 KB), and every byte of a reply is read
+again on each later turn, so every reply stays within `max_bytes` (default 16384). What does
+not fit goes where `spill` says:
+
+| `spill` | reply | for |
+|---|---|---|
+| `auto` (default) | the text if it fits, else its first lines; then `# full output (N lines, M bytes) in /abs/path.txt` and the call that pages through it instead. A class adds an index (`#   10-580 LJII(I)V`: each method's line range in that file). The file is also a `resource_link` content item, and `structuredContent` names `file`, `lines`, `bytes`, `index` | agents that can read files (Claude Code, Codex, Grok Build with its file tools): they grep or read the lines they need |
+| `always` | every reply goes to a file; inline only its head and the path | the same, when even mid-size replies should stay out of the context |
+| `never` | pages of whole records (a line with the indented lines under it: a findrefs row and its context, a smali method), each ending `# page 0 of 0..5 …; next page: tool {…}` with the complete arguments of the next call (`next` in `structuredContent`) | clients whose agent cannot read local files (a remote or sandboxed agent) |
+
+Files are named by content (`out/<sha256>.txt`, mode 0600, directory 0700) in the cache
+directory, or `$XDG_RUNTIME_DIR/droidasc/out` without one; the same reply reuses its file, and
+the directory is kept under 64 MiB (`--spill-mb`, least recently used first; `--spill-mb 0`
+pages instead). `droidasc cache clear` removes it with the rest of the cache. A multi-APK
+report pages by `cursor` as before and, when it has more pages, spills the whole report next
+to the first one. A `more` / `next` hint passed back as the `cursor` (as a JSON object, or the
+`tool {…}` text of a hint) runs as the call it names.
 
 `notifications/cancelled` stops a running call (work not yet started is skipped and the call
 gets no reply). Every APK is treated as untrusted: an entry that would inflate past 1 GiB or
@@ -423,7 +446,7 @@ apk124 | classes3.dex | Lzlc;->c(Ljava/lang/String;)V | Landroid/webkit/WebView;
 apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
 ...
 # nothing in the other 292 APKs
-# APKs 0..4 of 20 shown (output budget 32768 bytes); call findrefs with cursor="1:4" for the rest
+# APKs 0..4 of 20 shown (output budget 16384 bytes); call findrefs with cursor="1:4" for the rest
 ```
 
 | argument | effect |
@@ -431,7 +454,7 @@ apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInte
 | `per_apk` (10) | rows shown per APK; the `more` line says how to page that APK |
 | `collapse_sdks` (true for many APKs) / `sdk_prefixes` | fold hits in common SDK packages (androidx, kotlin, gms, okhttp3, …; `--sdk-prefixes` replaces the list) into per-SDK counts |
 | `group: "package"`, `package_depth` (3) | one line per package with its hit count and an example, instead of rows |
-| `max_bytes` (32768) | output budget; whole APK sections that do not fit are left for `cursor` |
+| `max_bytes` (16384) | output budget; whole APK sections that do not fit are left for `cursor` |
 | `cursor` | pass back alone to the same tool for the next page (the session keeps the last 16 reports) |
 | `release` | drop each APK's DEX from memory once searched (default: when the selected APKs' DEX would not fit the memory budget) |
 
