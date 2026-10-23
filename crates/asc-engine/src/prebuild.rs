@@ -202,9 +202,26 @@ impl Drop for Finished<'_> {
     }
 }
 
-/// Run the calling thread at the lowest CPU priority (nice 19), so the
-/// prebuild only uses cycles queries leave idle.
-fn lower_priority() {
+/// Run the calling thread at the lowest CPU priority (nice 19 on Linux, the
+/// utility QoS class on Apple platforms), so background work (prebuilds,
+/// cache writers) only uses cycles queries leave idle. Utility rather than
+/// background QoS: the latter also throttles the thread's disk I/O.
+pub(crate) fn lower_priority() {
+    #[cfg(target_vendor = "apple")]
+    {
+        const QOS_CLASS_UTILITY: std::os::raw::c_uint = 0x11;
+        extern "C" {
+            fn pthread_set_qos_class_self_np(
+                qos_class: std::os::raw::c_uint,
+                relative_priority: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        // SAFETY: plain call on the calling thread; it only changes that
+        // thread's scheduling class.
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+        }
+    }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         extern "C" {

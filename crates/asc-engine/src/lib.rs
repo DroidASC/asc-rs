@@ -710,6 +710,8 @@ impl EngineCache {
                 std::thread::Builder::new()
                     .name("droidasc-cache-writer".into())
                     .spawn(move || {
+                        // Writes (and re-inflating deferred entries) must not take CPU from queries.
+                        prebuild::lower_priority();
                         let mut state = WriterState::default();
                         loop {
                             // Only the receive holds the lock, so the writers run their jobs in parallel.
