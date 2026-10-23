@@ -451,6 +451,31 @@ share at most three distinct high operand bytes → `memchr{,2,3}` on that byte 
 `opcode + 3`; otherwise a linear sweep with a 256-entry opcode table. All paths produce
 the same unverified candidates, which the instruction locator then confirms.
 
+### Skipping entries a search cannot match (`engine::skip`)
+
+A search locates its targets in the id tables and string data before it reads code
+(`FindRefs::cannot_match` answers from those alone). For a Deflate entry no cache keeps —
+no memory cache, and an L1 that does not admit it, i.e. one-shot `--no-cache` CLI runs and
+DEX files below the L1 minimum — the worker first streams a prefix with zlib-rs: header,
+every id table and every `string_data_item`. When no query (no rule of a rule set, no
+`all` part of a compound query) can match, the entry is left out and never inflated whole
+(`source=skipped`, `CacheStats::skipped`); otherwise it is inflated with libdeflate as
+usual. The same locators run on the same bytes, and a prefix they cannot read (string
+data cut off, a 041 container, a non-DEX entry) sends the entry down the normal path, so
+rows never change.
+
+The streamed prefix costs about 1.6× per byte what a one-shot libdeflate inflate does and
+is wasted when the entry matches, so a probe only runs while it pays: the string data must
+end within 45 % of the entry (checked first on the first strings' offsets, so the usual
+d8 layout with string data at the end gives up after a 16 KiB chunk), and after four
+probes it continues only while at most half of them found a possible match. On Douyin
+(string data in the first third) a targeted cold query such as `method exec --class
+java.lang.Runtime` leaves out 37 of 55 entries: 77 → 57 ms, peak RSS 328 → 201 MB; the
+47-step replay as one CLI process per step goes 2724 → 2212 ms. Broad queries
+(`field SDK_INT`, `string http://`) and late-string APKs (Chrome) are unchanged. Resident
+hosts (`mcp`, `gui`) never probe: their memory cache keeps the inflated entry for the next
+query.
+
 ### Resources and the manifest summary (not in Python)
 
 `asc-arsc` follows AOSP `libs/androidfw` (`ResourceTypes.h`, `LoadedArsc.cpp`) rather than

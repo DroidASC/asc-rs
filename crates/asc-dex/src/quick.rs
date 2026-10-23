@@ -107,3 +107,72 @@ pub fn probe_needed_len(buf: &[u8]) -> Option<usize> {
     }
     Some(needed)
 }
+
+/// The largest data offset among the first strings of the string table
+/// (up to 64 of them), once the prefix holds the header and those ids:
+/// a cheap first look at where the string data sits.
+pub fn leading_string_data_off(buf: &[u8]) -> Option<usize> {
+    const SAMPLE: usize = 64;
+    if buf.len() < HEADER_SIZE || &buf[..4] != b"dex\n" {
+        return None;
+    }
+    let count = (u32_at(buf, 0x38).ok()? as usize).min(SAMPLE);
+    let off = u32_at(buf, 0x3C).ok()? as usize;
+    if count == 0 || off.checked_add(count * 4)? > buf.len() {
+        return None;
+    }
+    let mut max = 0;
+    for i in 0..count {
+        max = max.max(u32_at(buf, off + i * 4).ok()? as usize);
+    }
+    Some(max)
+}
+
+/// Like [`probe_needed_len`], for a reference-search probe: every id table
+/// (strings, types, protos, fields, methods, class defs) plus the start of
+/// the last `string_data_item`. The caller adds room for that string itself.
+/// `None` while the prefix does not yet hold the header and those tables.
+pub fn id_tables_needed_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < HEADER_SIZE || &buf[..4] != b"dex\n" {
+        return None;
+    }
+    // (size, offset, item size) of every id table, as the header lists them.
+    let tables = [(0x38, 4), (0x40, 4), (0x48, 12), (0x50, 8), (0x58, 8), (0x60, 32)];
+    let mut tables_end = HEADER_SIZE;
+    for (at, item) in tables {
+        let size = u32_at(buf, at).ok()? as usize;
+        let off = u32_at(buf, at + 4).ok()? as usize;
+        tables_end = tables_end.max(off.checked_add(size.checked_mul(item)?)?);
+    }
+    if tables_end > buf.len() {
+        return None;
+    }
+    let string_ids_size = u32_at(buf, 0x38).ok()? as usize;
+    let string_ids_off = u32_at(buf, 0x3C).ok()? as usize;
+    let mut needed = tables_end;
+    for i in 0..string_ids_size {
+        needed = needed.max(u32_at(buf, string_ids_off + i * 4).ok()? as usize);
+    }
+    Some(needed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_lengths_need_the_tables_and_string_offsets() {
+        let data = asc_fixture::make_dex();
+        let needed = id_tables_needed_len(&data).unwrap();
+        // The fixture puts the string data right after the tables.
+        let first = leading_string_data_off(&data).unwrap();
+        assert!(first <= needed && needed < data.len());
+        assert_eq!(id_tables_needed_len(&data[..0x70]), None, "tables not there yet");
+        assert_eq!(leading_string_data_off(&data[..0x70]), None);
+        assert_eq!(id_tables_needed_len(&[b'x'; 0x100]), None, "not a DEX");
+
+        let late = asc_fixture::make_padded_dex(4096, 0);
+        assert!(leading_string_data_off(&late).unwrap() >= 4096);
+        assert_eq!(id_tables_needed_len(&late).unwrap(), needed + 4096);
+    }
+}

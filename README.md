@@ -176,7 +176,7 @@ Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is he
 | `asc-findrefs` | Cross-reference search on one DEX: regex / literal (`memmem`) string locator, subclass / implementor lookup over `class_def_item`s, type/method/field locators, dense 16-byte-bucket instruction→method resolver, raw code-region opcode scan. |
 | `asc-rebuild` | Extracts one class plus everything it references and writes a minimal, spec-valid DEX (sorted id tables, annotations, debug info, try/catch, static values, Adler-32 + SHA-1). |
 | `asc-smali` | baksmali-style disassembler used as the built-in output backend. |
-| `asc-apk` | Memory-mapped zip access: central directory (incl. zip64), root-level DEX enumeration, Deflate inflation (libdeflate, or streaming zlib-rs for prefixes / cancellation). |
+| `asc-apk` | Memory-mapped zip access: central directory (incl. zip64), root-level DEX enumeration, Deflate inflation (libdeflate, or streaming zlib-rs for prefixes / cancellation; a one-shot `findrefs` streams a prefix first and skips entries it shows cannot match). |
 | `asc-cache` | Inflated-DEX caches: an on-disk cache shared across processes and a byte-bounded in-memory LRU for resident hosts. |
 | `asc-axml` | Android binary XML: text XML, an element tree, names for references through a resolver; lazy string pools. |
 | `asc-arsc` | `resources.arsc` reader: indexes chunks only and decodes names and values on demand (u32 / 16-bit / sparse entry tables, compact entries, bags, library / overlayable / staged-alias chunks); per-config values, AOSP config matching and reference resolution. Checked against `aapt2 dump resources` (`bench/arsc-compare`). |
