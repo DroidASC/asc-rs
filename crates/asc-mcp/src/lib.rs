@@ -440,8 +440,20 @@ impl Server {
         let warm = bool_arg(args, "warm")?.unwrap_or(true);
         let dex_entries = apk.engine.dex_entries()?.len();
         let mut classes = Value::Null;
+        let mut prebuild = false;
         if warm {
             classes = json!(warm_classes(&apk)?);
+            // The locator tables too, in the background, so the first query
+            // of each kind skips its builds (queries take priority).
+            if bool_arg(args, "prebuild")?.unwrap_or(true) {
+                let apk = Arc::clone(&apk);
+                prebuild = thread::Builder::new()
+                    .name("droidasc-prebuild".into())
+                    .spawn(move || {
+                        let _ = apk.engine.prebuild();
+                    })
+                    .is_ok();
+            }
         }
         let open_ms = t.elapsed().as_secs_f64() * 1e3;
         let mut text = format!("apk_id: {}\npath: {}\ndex entries: {dex_entries}", apk.id, apk.path.display());
@@ -453,6 +465,7 @@ impl Server {
             "path": apk.path.display().to_string(),
             "dex_entries": dex_entries,
             "classes": classes,
+            "prebuild": prebuild,
             "open_ms": open_ms,
             "memory_cache_bytes": self.cache.memory_bytes(),
         });
@@ -503,6 +516,7 @@ impl Server {
             let Some(i) = Self::index_of(&sessions, args)? else { return Err(ToolError("that APK is not open".into())) };
             sessions.apks.remove(i)
         };
+        apk.engine.cancel_prebuild();
         let released = apk.engine.release_memory_cache();
         Ok((
             format!("closed {} (released {} MiB of cached DEX)", apk.id, released >> 20),
@@ -1283,6 +1297,8 @@ pub mod defs {
             "inputSchema": {"type": "object", "properties": merge(json!({
                 "apk": {"type": "string", "description": "APK path."},
                 "warm": {"type": "boolean", "description": "Inflate every DEX now (default true for one APK, false for many)."},
+                "prebuild": {"type": "boolean", "description": "One warm APK: also build its search tables in the background \
+                    (default true), so the first query of each kind is as fast as later ones."},
             }), &[many()])},
         })
     }

@@ -80,6 +80,8 @@ fn full_session() {
     assert_eq!(open["apk_id"], "apk1");
     assert_eq!(open["dex_entries"], 2);
     assert_eq!(open["classes"], 2);
+    // Its tables are being built in the background; close_apk stops that.
+    assert_eq!(open["prebuild"], true);
     assert!(open["memory_cache_bytes"].as_u64().unwrap() > 0);
 
     // CLI line format, stable order across entries, footer with the total.

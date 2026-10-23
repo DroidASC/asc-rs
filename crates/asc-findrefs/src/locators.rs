@@ -181,11 +181,6 @@ impl TypeLocator {
     }
 }
 
-/// Heap bytes of a vector's allocation (its capacity, not its length).
-pub(crate) fn vec_bytes<T>(v: &Vec<T>) -> usize {
-    v.capacity() * std::mem::size_of::<T>()
-}
-
 /// Shared implementation for method and field id tables (both are
 /// `class_idx:u16, x:u16, name_idx:u32`).
 ///

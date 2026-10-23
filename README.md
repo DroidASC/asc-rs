@@ -318,7 +318,7 @@ on the shared high operand byte before the linear sweep.
 `droidasc mcp` is a resident session for agents: an MCP server on stdio (JSON-RPC 2.0, one
 message per line). It keeps every APK it opens in one process, so the inflated DEX files
 and locator tables stay in memory between calls instead of being rebuilt by a new process
-per question. All opened APKs share one in-memory budget (`--memory-mb`, default a quarter of available memory, at most 2048 MiB); `close_apk` releases that APK's share; the
+per question. All opened APKs share one in-memory budget (`--memory-mb`, default a quarter of available memory, at most 2048 MiB; DEX and tables mapped from the disk cache or the APK count at 1/8 of their size, since they are shared, reclaimable file pages); `close_apk` releases that APK's share; the
 on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`). Tool calls run concurrently (a slow
 query does not block `ping` or other calls; replies carry their request id and may arrive
 out of order), and a panic inside one call is returned as an error result rather than
@@ -334,7 +334,7 @@ ending the session.
 
 | tool | arguments | result |
 |---|---|---|
-| `open_apk` | `apk`, `warm` (default true: inflate every DEX now); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
+| `open_apk` | `apk`, `warm` (default true: inflate every DEX now), `prebuild` (default true: then build the search tables in the background, queries first); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
 | `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
 | `getclass` | `class`, `debug_info`, `method` (exact signature), `resource_names` (default true) | smali, as `droidasc getclass [--method] --res-names`: constants that are resource ids end in `# @type/name` |
 | `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; with `context`, `structuredContent` rows carry `sites` (`pc`, `line`, `matched`) and `context` |

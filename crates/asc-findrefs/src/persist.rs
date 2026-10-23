@@ -16,7 +16,8 @@
 //! ```
 //!
 //! The call graph is stored in its own flat form ([`CallGraph::to_bytes`])
-//! and copied out on load.
+//! and viewed in place on load like the other tables ([`CallGraph::view`];
+//! copied out only on a big-endian target).
 //!
 //! The DEX identity in the header ties the file to the buffer it was built
 //! from; every table is bounds-checked against that DEX on load. Lookups stay
@@ -92,7 +93,7 @@ impl SearchState {
     /// Adopt the tables of `other` (built from the same buffer) that this
     /// state lacks; tables it already has are kept.
     pub fn fill_from(&self, other: SearchState) {
-        let SearchState { strings, types, methods, fields, insns, calls } = other;
+        let SearchState { strings, types, methods, fields, insns, calls, .. } = other;
         if let Some(t) = strings.into_inner() {
             let _ = self.strings.set(t);
         }
@@ -126,6 +127,7 @@ impl SearchState {
                 .map(|l| m(&l.by_name) + l.by_class.as_ref().map_or(0, m))
                 .sum::<usize>()
             + self.insns.get().map_or(0, |i| w(&i.table) + w(&i.method_bounds) + w(&i.shared_starts) + w(&i.shared_ids))
+            + self.calls.get().map_or(0, CallGraph::mapped_bytes)
     }
 
     /// The tables built so far, as bytes for [`SearchState::from_persisted`].
@@ -241,7 +243,10 @@ impl SearchState {
         }
         if mask & CALLS != 0 {
             let (off, len) = r.slot(T_CALLS)?;
-            let graph = CallGraph::from_bytes(r.bytes.get(off..off.checked_add(len)?)?)?;
+            let graph = match CallGraph::view(r.backing, off, len) {
+                Some(g) => g,
+                None => CallGraph::from_bytes(r.bytes.get(off..off.checked_add(len)?)?)?,
+            };
             // As many method ids as the graph is built for (at most 2^16).
             if graph.method_count() != (dex.method_count() as usize).min(buf_len / 8).min(1 << 16) {
                 return None;

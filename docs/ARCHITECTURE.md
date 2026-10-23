@@ -251,10 +251,20 @@ lazily by the queries themselves):
   `CachedEntry` per entry, which owns the bytes and, per logical DEX, an
   `Arc<SearchState>` (`OnceLock`s for the string/type/member/instruction locators).
   `FindRefs::with_state` reuses those tables; `FindRefs::new` builds throw-away ones.
-  An entry is charged `resident_bytes` on insertion; after each search `recharge` adds
-  `SearchState::heap_bytes` (vector capacities of the built locators) through
-  `MemoryCache::resize`, which evicts least recently used entries when that crosses the
-  cap. `CacheConfig::resident_auto` sizes the cap with `auto_memory_bytes` (a quarter of
+  An entry is charged `CachedEntry::charged_bytes` on insertion; after each search
+  `recharge` adds the tables it built through `MemoryCache::resize`, which evicts least
+  recently used entries when that crosses the cap. Heap bytes (an inflated entry not yet
+  remapped, a 041 container's logical copies, `SearchState::heap_bytes`) are charged in
+  full, file-backed bytes (an entry mapped from L1 or from the APK, tables viewed in L2,
+  `SearchState::mapped_bytes`) at 1/`MAPPED_CHARGE_DIVISOR` (8): the kernel reclaims
+  clean file pages under pressure and every process mapping the same file shares one
+  copy, so charging them in full made N processes each evict as if they held a private
+  copy and published N times the real footprint to the registry (whose share starts from
+  `MemAvailable`, which already counts reclaimable page cache). They are not free either
+  (address space, page-cache churn, re-reads), so the LRU still bounds them at 8× the cap.
+  An L1 remap (`remap_entry`) and an L2 swap (`write_derived`) resize the entry to its new
+  charge. On Douyin with a filled cache a warm session is charged 71 MB (was 574 MB) for
+  27 MB of anonymous memory. `CacheConfig::resident_auto` sizes the cap with `auto_memory_bytes` (a quarter of
   `available_memory()`, clamped to 64 MiB–2 GiB; 2 GiB where it cannot be read) and sets
   `memory_auto`: the cache then registers the process in a `ProcessRegistry` (one file per
   pid in `$XDG_RUNTIME_DIR/droidasc` holding its start time and the bytes its caches hold;
@@ -289,7 +299,8 @@ instead (`DexData::map_region`), so they are file pages, never heap copies.
   `Vec` or a bytemuck-checked view into an `Arc<dyn AsRef<[u8]>>` (the mapped file).
   `persist` writes the built tables after a header with the DEX length, checksum and
   signature; `from_persisted` checks those and every table's length against the DEX,
-  then views them in place (the call graph, in its own flat form, is copied out). A
+  then views them in place, the call graph too (`CallGraph::view` over its flat
+  little-endian form; copied out only on a big-endian target). A
   search first `fill_from`s what L2 has for a logical DEX (once per `LogicalDex`), and
   when it built new tables queues a write with the time it took; the writer then swaps
   the memory cache's `SearchState` for the mapped one, as for L1 bytes. Lookups stay
@@ -315,8 +326,18 @@ keep request order where it matters, the APK a call opens is registered (and get
 running. Each call runs under `catch_unwind` (the release profile unwinds for this), so a
 panic in the engine becomes an `isError` result instead of ending the process. Each `open_apk` (or first use of an `apk` path) creates an `Engine` attached
 to the server's `SharedCache`; `open_apk` with `warm` runs `scan_classes`, which inflates
-every entry into the LRU, so later `findrefs` / `getclass` calls only build locator tables
-once and then scan. Results are paged over a stable order (entries sorted as
+every entry into the LRU, and then (`prebuild`, default true) starts `Engine::prebuild`
+on a background thread: the instruction, string, type, method and field tables of every
+entry the caches hold are mapped from L2 or built (never inflating: on a budget too
+small for the APK it does nothing) and queued for L2, so the first query of each kind
+only scans. Its workers run at nice 19 and pause between tables while a search of the
+engine runs (`Prebuild::query` guards in `find_refs_opts`, `fill_context`,
+`call_graph`); `SearchState` builds each table under its own lock, so a query that needs
+a table a worker is building waits for that build instead of starting another.
+`close_apk` cancels it (`cancel_prebuild` waits for the workers to finish their table).
+On Douyin, once the prebuild has run (a few hundred ms after `open_apk`), the first
+string / method / field query takes 18 / 1.3 / 9.6 ms instead of 27 / 9.5 / 16 ms, the
+same as when repeated; what remains is the scan. Results are paged over a stable order (entries sorted as
 `classes.dex, classes2.dex, …`), because the engine streams entries as they finish. Tool
 failures are `isError` results, protocol errors JSON-RPC errors; neither ends the session.
 

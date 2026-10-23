@@ -11,7 +11,9 @@ pub type Backing = Arc<dyn AsRef<[u8]> + Send + Sync>;
 
 /// Plain element types a table may be viewed as.
 pub(crate) trait Pod: bytemuck::Pod + Send + Sync {}
+impl Pod for u16 {}
 impl Pod for u32 {}
+impl Pod for u64 {}
 impl Pod for [u32; 2] {}
 
 /// A table of `T`, owned or viewed in [`Backing`] bytes.
@@ -49,6 +51,30 @@ impl<T: Pod> Table<T> {
     /// The elements as native-endian bytes, for persisting.
     pub(crate) fn as_bytes(&self) -> &[u8] {
         bytemuck::cast_slice(self)
+    }
+}
+
+impl<T: Pod> Clone for Table<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Table::Owned(v) => Table::Owned(v.clone()),
+            Table::Mapped { backing, off, len } => Table::Mapped { backing: Arc::clone(backing), off: *off, len: *len },
+        }
+    }
+}
+
+/// Tables compare by their elements, however they are stored.
+impl<T: Pod + PartialEq> PartialEq for Table<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T: Pod + Eq> Eq for Table<T> {}
+
+impl<T: Pod + std::fmt::Debug> std::fmt::Debug for Table<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 

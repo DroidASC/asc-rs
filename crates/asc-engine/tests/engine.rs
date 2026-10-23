@@ -142,13 +142,18 @@ fn written_entries_are_remapped_from_the_disk_cache() {
     };
     let before = lines(&engine);
     assert_eq!(before.len(), 4);
-    let charged = engine.memory_cache_bytes();
     // The writer swaps each heap copy for a mapping of the file it wrote.
     engine.flush_cache_writes();
     assert_eq!(engine.memory_cache_mapped_bytes(), 2 * dex.len());
-    // Same bytes, same charge, and the tables built before the swap are kept.
-    assert_eq!(engine.memory_cache_bytes(), charged);
-    assert!(charged > 2 * dex.len());
+    // The tables built before the swap are kept (charged as on the heap, see
+    // the same search with a memory-only cache), the entries now at the
+    // file-backed rate.
+    let heap_only =
+        Engine::new(apk.path()).with_threads(2).with_cache(asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
+    assert_eq!(lines(&heap_only), before);
+    let tables = heap_only.memory_cache_bytes() - 2 * dex.len();
+    assert!(tables > 0);
+    assert_eq!(engine.memory_cache_bytes(), tables + 2 * (dex.len() / asc_engine::MAPPED_CHARGE_DIVISOR));
     let apk_handle = engine.open().unwrap();
     let key = engine.apk_key(&apk_handle);
     for entry in apk_handle.dex_entries().unwrap() {
@@ -258,11 +263,14 @@ fn engines_share_one_cache_budget() {
     let q = Query::String("token".into());
     let ea = Engine::new(a.path()).with_threads(2).with_shared_cache(&shared);
     ea.find_refs(&q, |_| {}).unwrap();
+    // Settle the writes (each remap lowers the charge of what it maps).
+    shared.flush_writes();
     let after_a = shared.memory_bytes();
     assert!(after_a > 0);
     {
         let eb = Engine::new(b.path()).with_threads(2).with_shared_cache(&shared);
         eb.find_refs(&q, |_| {}).unwrap();
+        shared.flush_writes();
         assert!(shared.memory_bytes() > after_a);
     }
     // Dropping an engine leaves the shared cache usable for the others.
@@ -431,4 +439,66 @@ fn locator_tables_are_mapped_from_l2_by_the_next_process() {
     assert_eq!(rows_of(&third, &m).1, expected);
     assert_eq!(third.cache_stats().derived_hits, 2);
     assert!(mapped > 0);
+}
+
+#[test]
+fn prebuild_builds_the_tables_of_cached_entries_only() {
+    use asc_engine::asc_cache::Tier;
+    let apk = temp_apk(true);
+    let q = Query::String("token".into());
+    let expected = rows_of(&Engine::new(apk.path()), &q).1;
+    // Nothing to keep the tables in: nothing done.
+    assert_eq!(Engine::new(apk.path()).prebuild().unwrap(), Default::default());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = || asc_engine::CacheConfig {
+        memory_bytes: 64 << 20,
+        disk: Some(tiered_cache(dir.path()).with_tiers(&[Tier::Dex, Tier::Derived])),
+        ..Default::default()
+    };
+    // Not warmed: the entries are not cached, and a prebuild never inflates.
+    let cold = Engine::new(apk.path()).with_threads(2).with_cache(cfg());
+    let r = cold.prebuild().unwrap();
+    assert_eq!((r.dex, r.skipped, cold.cache_stats().inflates), (0, 2, 0));
+    // Warmed: every logical DEX gets its tables, which go to L2.
+    let warm = Engine::new(apk.path()).with_threads(2).with_cache(cfg());
+    warm.scan_classes(None, |_, _| {}).unwrap();
+    // Settle the L1 writes (a remap lowers the entries' charge).
+    warm.flush_cache_writes();
+    let before = warm.memory_cache_bytes();
+    let r = warm.prebuild().unwrap();
+    assert_eq!((r.dex, r.from_disk, r.skipped, r.cancelled), (2, 0, 0, false));
+    assert!(warm.memory_cache_bytes() > before, "tables are charged");
+    assert_eq!(rows_of(&warm, &q).1, expected);
+    warm.flush_cache_writes();
+    assert_eq!(tiered_cache(dir.path()).tier_stats()[Tier::Derived as usize].files, 2);
+    // The next process maps them.
+    let next = Engine::new(apk.path()).with_threads(2).with_cache(cfg());
+    next.scan_classes(None, |_, _| {}).unwrap();
+    assert_eq!(next.prebuild().unwrap().from_disk, 2);
+    assert_eq!(rows_of(&next, &q).1, expected);
+    // Cancelled for good.
+    next.cancel_prebuild();
+    assert!(next.prebuild().unwrap().cancelled);
+}
+
+#[test]
+fn a_query_during_a_prebuild_gets_the_same_rows() {
+    let apk = temp_apk(true);
+    let queries = [
+        Query::String("token".into()),
+        Query::Method(asc_findrefs::MemberQuery { name: Some("first".into()), ..Default::default() }),
+        Query::Type("Lexample/".into()),
+    ];
+    let expected: Vec<_> = queries.iter().map(|q| rows_of(&Engine::new(apk.path()), q).1).collect();
+    for _ in 0..20 {
+        let engine =
+            Engine::new(apk.path()).with_threads(2).with_cache(asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
+        engine.scan_classes(None, |_, _| {}).unwrap();
+        std::thread::scope(|s| {
+            s.spawn(|| engine.prebuild().unwrap());
+            for (q, rows) in queries.iter().zip(&expected) {
+                assert_eq!(&rows_of(&engine, q).1, rows);
+            }
+        });
+    }
 }
