@@ -188,6 +188,46 @@ fn a_rule_set_answers_like_one_query_per_rule() {
     }
 }
 
+#[test]
+fn a_rule_set_shares_rendered_results_with_single_queries() {
+    let apk = temp_apk();
+    let cache = tempfile::tempdir().unwrap();
+    let engine = || {
+        let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+    };
+    let (alone, set) = (cond("string:token"), vec![cond("string:token"), cond("method:run")]);
+    let e = engine();
+    let first = lines(&e, &alone);
+    e.flush_cache_writes();
+    // The set replays the rule a single query left in L3 and searches the other.
+    let e = engine();
+    let mut sources: Vec<Vec<&str>> = vec![Vec::new(); set.len()];
+    let mut got: Vec<Vec<String>> = vec![Vec::new(); set.len()];
+    e.find_refs_rules(&set, FindOptions::default(), &AtomicBool::new(false), &mut |i, b| {
+        sources[i].push(b.source);
+        got[i].extend(b.results.iter().map(|r| r.line()));
+    })
+    .unwrap();
+    assert!(sources[0].iter().all(|s| *s == "result"), "{sources:?}");
+    assert!(sources[1].iter().all(|s| *s != "result"), "{sources:?}");
+    got[0].sort();
+    assert_eq!(got[0], first);
+    e.flush_cache_writes();
+    // And a single query replays what the set searched.
+    let e = engine();
+    let mut replayed = Vec::new();
+    e.find_refs(&set[1], |b| {
+        assert_eq!(b.source, "result");
+        replayed.extend(b.results.iter().map(|r| r.line()));
+    })
+    .unwrap();
+    replayed.sort();
+    got[1].sort();
+    assert_eq!(replayed, got[1]);
+    assert_eq!(replayed.len(), 2, "{replayed:?}");
+}
+
 fn hq(class: &str, direction: Lineage, method: Option<&str>) -> HierarchyQuery {
     HierarchyQuery { class: class.into(), direction, depth: 16, max_nodes: 100, method: method.map(String::from) }
 }
