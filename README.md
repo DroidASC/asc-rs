@@ -330,7 +330,8 @@ expand more than 100:1 is refused (`--max-entry-mb`, `--max-ratio`), and only th
 default `*.apk`, and `recursive`, default true) instead of one APK. Every DEX of every APK
 goes on one work queue (heaviest APK first), and the reply has one section per APK, every
 line prefixed with its `apk_id` (excerpt of a real reply; a section can also end with
-`apkN | more | …` paging hints, `apkN | sdk | Landroidx/ 23, …` folded counts and warnings):
+`apkN | more | 3 more: findrefs {"apk_id":"apkN","kind":…,"offset":10,…}` hints whose JSON is
+the complete arguments of the follow-up call (also in `structuredContent` as `next`), `apkN | sdk | Landroidx/ 23, …` folded counts and warnings):
 
 ```
 # findrefs method addJavascriptInterface over 312 APKs: 20 with hits, 103 hits, 0 errors, 193 ms

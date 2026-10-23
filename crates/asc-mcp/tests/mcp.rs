@@ -301,7 +301,8 @@ fn findrefs_over_a_directory_reports_per_apk() {
     // A tiny budget: one section per page and a cursor for the rest.
     let first = ok(&replies[1]);
     assert_eq!(first["shown"], json!([0, 1]));
-    assert!(text(&replies[1]).contains("apk1 | more | 3 more: findrefs apk_id=apk1 offset=1 collapse_sdks=true"));
+    assert!(text(&replies[1])
+        .contains(r#"apk1 | more | 3 more: findrefs {"apk_id":"apk1","collapse_sdks":true,"kind":"string","offset":1,"value":"token"}"#));
     // Cursors live in the session that made them.
     let other = session(&[call(1, "findrefs", json!({"cursor": first["cursor"]}))]);
     assert!(text(&other[0]).contains("expired"), "{}", other[0]);
@@ -336,6 +337,30 @@ fn cursors_page_through_a_report_in_one_session() {
     assert_eq!(ok(&replies[3])["cursor"], Value::Null);
     assert!(text(&replies[6]).contains("belongs to findrefs"));
     assert!(text(&replies[7]).contains("bad cursor"));
+}
+
+#[test]
+fn more_hints_are_complete_follow_up_calls() {
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    // In order: the hint names apk_ids of this session.
+    let server = asc_mcp::Server::new(opts());
+    let send = |m: Value| server.handle_line(&m.to_string()).unwrap();
+    let sweep = send(call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "tok", "literal": true, "per_apk": 1})));
+    let a = ok(&sweep)["apks"].as_array().unwrap().iter().find(|s| s["apk_id"] == "apk1").unwrap().clone();
+    let next = &a["next"];
+    assert_eq!((next["kind"].as_str(), next["value"].as_str(), next["literal"].as_bool()), (Some("string"), Some("tok"), Some(true)));
+    // The hint line carries the same arguments.
+    let line = text(&sweep).lines().find(|l| l.starts_with("apk1 | more | ")).unwrap();
+    let hinted: Value = serde_json::from_str(line.split_once("findrefs ").unwrap().1).unwrap();
+    assert_eq!(&hinted, next);
+    let rest = send(call(2, "findrefs", next.clone()));
+    assert_eq!((ok(&rest)["total"].as_u64(), ok(&rest)["returned"].as_u64()), (Some(4), Some(3)), "{rest}");
+
+    let classes = send(call(3, "listclass", json!({"dir": d, "prefix": "example", "per_apk": 0})));
+    let a = ok(&classes)["apks"].as_array().unwrap().iter().find(|s| s["apk_id"] == "apk1").unwrap().clone();
+    assert_eq!(a["next"], json!({"apk_id": "apk1", "offset": 0, "prefix": "example"}));
+    assert!(ok(&send(call(4, "listclass", a["next"].clone())))["returned"].as_u64().unwrap() > 0);
 }
 
 #[test]

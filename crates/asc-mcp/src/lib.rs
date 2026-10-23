@@ -729,6 +729,7 @@ impl Server {
                 g => return Err(ToolError(format!("unknown group {g:?}: use none or package"))),
             },
             collapsed: sdks.is_some(),
+            query: query_args(args, FINDREFS_QUERY_KEYS),
         };
         let release = bool_arg(args, "release")?;
         let (sections, empty, stats) = self.sweep(
@@ -821,10 +822,17 @@ impl Server {
                 let id = &apk.id;
                 let mut lines = vec![format!("{id} | {} classes | {}", classes.len(), apk.path.display())];
                 lines.extend(classes.iter().take(per_apk).map(|c| format!("{id} | {}", c.descriptor)));
-                if classes.len() > per_apk {
-                    lines.push(format!("{id} | more | {} more: listclass apk_id={id} offset={per_apk}", classes.len() - per_apk));
+                let next = (classes.len() > per_apk).then(|| {
+                    let mut next = query_args(args, &["prefix"]);
+                    next.insert("apk_id".into(), json!(id));
+                    next.insert("offset".into(), json!(per_apk));
+                    Value::Object(next)
+                });
+                if let Some(next) = &next {
+                    lines.push(format!("{id} | more | {} more: listclass {next}", classes.len() - per_apk));
                 }
                 let json = json!({
+                    "next": next,
                     "apk_id": id,
                     "path": apk.path.display().to_string(),
                     "total": classes.len(),
@@ -874,6 +882,8 @@ struct View {
     group: Option<usize>,
     /// SDK hits were folded away.
     collapsed: bool,
+    /// The query part of the call's arguments, repeated in `more` hints.
+    query: Map<String, Value>,
 }
 
 /// One APK's findrefs results: rows in DEX order, minus folded SDK hits.
@@ -952,8 +962,12 @@ impl Found {
                 }
                 let n = shown.len();
                 if n < self.rows.len() {
-                    let sdk_flag = if view.collapsed { " collapse_sdks=true" } else { "" };
-                    lines.push(format!("{id} | more | {} more: findrefs apk_id={id} offset={n}{sdk_flag}", self.rows.len() - n));
+                    let mut next = view.query.clone();
+                    next.insert("apk_id".into(), json!(id));
+                    next.insert("offset".into(), json!(n));
+                    next.insert("collapse_sdks".into(), json!(view.collapsed));
+                    lines.push(format!("{id} | more | {} more: findrefs {}", self.rows.len() - n, Value::Object(next.clone())));
+                    json["next"] = Value::Object(next);
                 }
                 json["results"] = Value::Array(shown);
                 json["next_offset"] = json!((n < self.rows.len()).then_some(n));
@@ -978,7 +992,18 @@ impl Found {
                     shown.push(json!({"package": pkg, "hits": n, "example": example}));
                 }
                 if shown.len() < groups.len() {
-                    lines.push(format!("{id} | more | {} more packages: findrefs apk_id={id}", groups.len() - shown.len()));
+                    let mut next = view.query.clone();
+                    next.insert("apks".into(), json!([apk.path.display().to_string()]));
+                    next.insert("group".into(), json!("package"));
+                    next.insert("package_depth".into(), json!(depth));
+                    next.insert("per_apk".into(), json!(groups.len()));
+                    next.insert("collapse_sdks".into(), json!(view.collapsed));
+                    lines.push(format!(
+                        "{id} | more | {} more packages: findrefs {}",
+                        groups.len() - shown.len(),
+                        Value::Object(next.clone())
+                    ));
+                    json["next"] = Value::Object(next);
                 }
                 json["packages"] = Value::Array(shown);
             }
@@ -1028,6 +1053,14 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
         }
         _ => return Err(ToolError(format!("unknown kind {kind:?}: use string, type, method, field, extends or impl"))),
     })
+}
+
+/// The findrefs arguments that define the query (not the APKs, paging or view).
+const FINDREFS_QUERY_KEYS: &[&str] = &["kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "sdk_prefixes"];
+
+/// The `keys` present in `args`, for the arguments of a follow-up call.
+fn query_args(args: &Value, keys: &[&str]) -> Map<String, Value> {
+    keys.iter().filter_map(|&k| Some((k.to_string(), args.get(k)?.clone()))).collect()
 }
 
 /// `string "http://"`, `method Ljava/lang/Runtime;->exec`, ... for a report header.
