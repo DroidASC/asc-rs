@@ -22,12 +22,14 @@
 
 #![forbid(unsafe_code)]
 
+mod callgraph;
 mod classdefs;
 mod insn_locator;
 mod locators;
 mod query;
 mod scanner;
 
+pub use callgraph::CallGraph;
 pub use insn_locator::{InsnLocator, MethodRef};
 pub use locators::{FieldLocator, MethodLocator, StringLocator, TypeLocator};
 pub use query::CompiledQuery;
@@ -151,6 +153,7 @@ pub struct SearchState {
     methods: OnceLock<MethodLocator>,
     fields: OnceLock<FieldLocator>,
     insns: OnceLock<InsnLocator>,
+    calls: OnceLock<CallGraph>,
 }
 
 impl SearchState {
@@ -171,6 +174,19 @@ impl SearchState {
             + self.methods.get().map_or(0, MethodLocator::heap_bytes)
             + self.fields.get().map_or(0, FieldLocator::heap_bytes)
             + self.insns.get().map_or(0, InsnLocator::heap_bytes)
+            + self.calls.get().map_or(0, CallGraph::heap_bytes)
+    }
+
+    /// The call graph, if a query has built it.
+    pub fn call_graph(&self) -> Option<&CallGraph> {
+        self.calls.get()
+    }
+
+    /// Install a call graph loaded from elsewhere (e.g. an on-disk cache of
+    /// [`CallGraph::to_bytes`]); `false` if one is already built. It must
+    /// describe the same buffer this state is used with.
+    pub fn set_call_graph(&self, graph: CallGraph) -> bool {
+        self.calls.set(graph).is_ok()
     }
 }
 
@@ -250,6 +266,16 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         }
         let l = InsnLocator::build(self.dex)?;
         Ok(st.insns.get_or_init(|| l))
+    }
+
+    /// The DEX's call graph, built on first use (the instruction table too).
+    pub fn call_graph(&self) -> Result<&CallGraph> {
+        let st = self.state();
+        if let Some(g) = st.calls.get() {
+            return Ok(g);
+        }
+        let g = CallGraph::build(self.dex.buf(), self.insn_locator()?);
+        Ok(st.calls.get_or_init(|| g))
     }
 
     /// Resolve the query to constant-pool indexes (compiling its patterns).
