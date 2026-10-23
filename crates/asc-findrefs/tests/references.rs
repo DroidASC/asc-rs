@@ -477,3 +477,30 @@ fn exact_member_queries_compile_like_plain_ones() {
         assert_eq!(fr.find_ref_compiled(&compiled).unwrap(), fr.find_ref(&q).unwrap());
     }
 }
+
+#[test]
+fn find_many_matches_one_search_per_query() {
+    let data = asc_fixture::make_rich_dex();
+    let dex = Dex::with_name(&data, "rich.dex").unwrap();
+    let member = |name: &str| MemberQuery { class: None, name: Some(name.into()), exact_name: false };
+    let queries = [
+        Query::String("l".into()),
+        Query::StringLiteral("wörld".into()),
+        Query::Type("Exception".into()),
+        Query::Method(member("compute")),
+        Query::Method(member(".")),
+        Query::Field(member("COUNT")),
+        Query::Field(member("value")),
+        Query::Implements("Lexample/Iface;".into()),
+        Query::All { all: vec![Query::String("l".into())], none: vec![] },
+        Query::String("no such string".into()),
+    ];
+    let compiled: Vec<CompiledQuery> = queries.iter().map(|q| CompiledQuery::new(q).unwrap()).collect();
+    let fr = FindRefs::new(&dex);
+    let many = fr.find_many(&compiled.iter().collect::<Vec<_>>()).unwrap();
+    for (i, q) in compiled.iter().enumerate() {
+        // A fresh state, so nothing is shared with the merged run.
+        assert_eq!(many[i], FindRefs::new(&dex).find_ref_compiled(q).unwrap(), "{:?}", queries[i]);
+    }
+    assert!(!many[0].is_empty() && !many[3].is_empty() && !many[5].is_empty());
+}

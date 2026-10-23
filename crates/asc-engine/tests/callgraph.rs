@@ -104,7 +104,7 @@ fn temp_apk() -> tempfile::NamedTempFile {
 }
 
 fn query(class: &str, method: &str, direction: Direction, depth: usize) -> CallQuery {
-    CallQuery { class: class.into(), method: method.into(), direction, depth, max_nodes: 100 }
+    CallQuery { class: class.into(), method: method.into(), direction, depth, max_nodes: 100, virtual_calls: false }
 }
 
 #[test]

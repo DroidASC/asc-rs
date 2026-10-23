@@ -35,7 +35,7 @@ pub use callgraph::CallGraph;
 pub use insn_locator::{InsnLocator, MethodRef};
 pub use locators::{FieldLocator, MethodLocator, StringLocator, TypeLocator};
 pub use persist::FORMAT_VERSION as PERSIST_FORMAT_VERSION;
-pub use query::CompiledQuery;
+pub use query::{CompiledQuery, Compound};
 pub use scanner::{CodeScanner, IdxSet, RefKind};
 pub use table::Backing;
 
@@ -51,6 +51,8 @@ pub enum FindError {
     Dex(#[from] asc_dex::DexError),
     #[error("invalid pattern: {0}")]
     Pattern(#[from] regex::Error),
+    #[error("invalid query: {0}")]
+    Invalid(String),
 }
 
 pub type Result<T> = std::result::Result<T, FindError>;
@@ -90,6 +92,13 @@ pub enum Query {
     Extends(String),
     /// Classes that directly implement exactly this interface descriptor.
     Implements(String),
+    /// Methods whose code matches every query of `all` and none of `none`
+    /// (string / type / method / field queries; at least one in `all`).
+    /// A row lists the constants each `all` query matched, in that order.
+    All {
+        all: Vec<Query>,
+        none: Vec<Query>,
+    },
 }
 
 impl Query {
@@ -101,6 +110,8 @@ impl Query {
             Query::Type(_) | Query::Extends(_) | Query::Implements(_) => RefKind::Type,
             Query::Method(_) => RefKind::Method,
             Query::Field(_) => RefKind::Field,
+            // Rows of a compound query list constants of several kinds.
+            Query::All { all, .. } => all.first().map_or(RefKind::String, Query::kind),
         }
     }
 
@@ -316,9 +327,10 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     /// of an APK).
     ///
     /// Class relations (`Extends` / `Implements`) reference no code and give
-    /// no hits here; [`FindRefs::class_relation`] answers them.
+    /// no hits here; [`FindRefs::class_relation`] answers them. Compound
+    /// queries give none either: run their parts with [`FindRefs::find_many`].
     pub fn find_ref_compiled(&self, query: &CompiledQuery) -> Result<Vec<Hit>> {
-        if query.relation().is_some() {
+        if query.relation().is_some() || query.compound().is_some() {
             return Ok(Vec::new());
         }
         let idxs = self.locate_compiled(query)?;
@@ -326,6 +338,36 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             return Ok(Vec::new());
         }
         self.scan_idxs(query.kind(), &idxs)
+    }
+
+    /// Hits of several queries with one code scan per index kind: the
+    /// located sets of the queries of a kind are merged, scanned once, and
+    /// each hit is handed to every query whose set holds its index. Gives,
+    /// per query, what [`FindRefs::find_ref_compiled`] would (class relations
+    /// and compound queries: nothing).
+    pub fn find_many(&self, queries: &[&CompiledQuery]) -> Result<Vec<Vec<Hit>>> {
+        let mut out: Vec<Vec<Hit>> = (0..queries.len()).map(|_| Vec::new()).collect();
+        let mut located: Vec<Option<BTreeSet<u32>>> = Vec::with_capacity(queries.len());
+        for q in queries {
+            let skip = q.relation().is_some() || q.compound().is_some();
+            located.push(if skip { None } else { Some(self.locate_compiled(q)?).filter(|s| !s.is_empty()) });
+        }
+        for kind in [RefKind::String, RefKind::Type, RefKind::Method, RefKind::Field] {
+            let mine: Vec<usize> = (0..queries.len()).filter(|&i| queries[i].kind() == kind && located[i].is_some()).collect();
+            let union: BTreeSet<u32> = match mine.as_slice() {
+                [] => continue,
+                [only] => located[*only].clone().unwrap_or_default(),
+                _ => mine.iter().flat_map(|&i| located[i].iter().flatten().copied()).collect(),
+            };
+            for hit in self.scan_idxs(kind, &union)? {
+                for &i in &mine {
+                    if located[i].as_ref().is_some_and(|s| s.contains(&hit.matched_idx)) {
+                        out[i].push(hit.clone());
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Answer an `Extends` / `Implements` query: the `class_idx` of every

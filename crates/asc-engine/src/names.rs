@@ -1,7 +1,7 @@
 //! Class-name normalisation shared by the CLI and GUI.
 
 use crate::{EngineError, Result};
-use asc_findrefs::{ClassQuery, MemberQuery};
+use asc_findrefs::{ClassQuery, MemberQuery, Query};
 
 /// Turn `com.poc.Main` / `com/poc/Main` / `Lcom/poc/Main;` into a Dalvik descriptor.
 /// Array descriptors (`[Ljava/lang/Object;`, whose methods such as `clone`
@@ -78,6 +78,54 @@ pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Op
         None => None,
     };
     Ok(MemberQuery { class, name: name.map(String::from), exact_name })
+}
+
+/// Parse a one-word findrefs condition, as the CLI's compound and rule
+/// options take them:
+///
+/// - `string:REGEX`, `literal:TEXT`, `type:PATTERN`
+/// - `method:[CLASS->]NAME`, `field:[CLASS->]NAME`: CLASS is exact
+///   (`com.poc.Main` or `Lcom/poc/Main;`) unless prefixed `~` (fuzzy), NAME a
+///   regex / substring unless prefixed `=` (exact)
+/// - `extends:CLASS`, `impl:CLASS`
+pub fn parse_condition(spec: &str) -> Result<Query> {
+    let bad = || {
+        EngineError::Query(format!(
+            "bad condition {spec:?}: use KIND:VALUE, KIND one of string, literal, type, method, field, extends, impl"
+        ))
+    };
+    let (kind, value) = spec.split_once(':').ok_or_else(bad)?;
+    Ok(match kind {
+        "string" => Query::String(value.to_string()),
+        "literal" => Query::StringLiteral(value.to_string()),
+        "type" => Query::Type(value.to_string()),
+        "extends" => Query::Extends(format_class_name(value)?),
+        "impl" => Query::Implements(format_class_name(value)?),
+        "method" | "field" => {
+            let (class, name) = match value.split_once("->") {
+                Some((c, n)) => (Some(c), n),
+                None => (None, value),
+            };
+            let (class, fuzzy) = match class {
+                Some(c) => match c.strip_prefix('~') {
+                    Some(f) => (Some(f), true),
+                    None => (Some(c), false),
+                },
+                None => (None, false),
+            };
+            let (name, exact) = match name.strip_prefix('=') {
+                Some(n) => (n, true),
+                None => (name, false),
+            };
+            let m = member_query(kind, class, fuzzy, Some(name), exact)?;
+            if kind == "method" {
+                Query::Method(m)
+            } else {
+                Query::Field(m)
+            }
+        }
+        _ => return Err(bad()),
+    })
 }
 
 #[cfg(test)]
