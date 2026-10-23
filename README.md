@@ -1,9 +1,10 @@
-# asc-rs — Droid ASC in Rust
+[English](README.en.md) | 简体中文
 
-Rust port of [Droid ASC](https://github.com/MG1937/ASC) ("R8 Compiler Optimization as a
-DeCompiler Primitive"): a stateless, zero-preprocessing engine that treats an APK as a
-read-only database. It locates a class, searches cross references or decodes the manifest
-directly from the compressed artifact in milliseconds, without building any global index.
+# asc-rs — Droid ASC 的 Rust 实现
+
+[Droid ASC](https://github.com/MG1937/ASC)（"R8 Compiler Optimization as a
+DeCompiler Primitive"）的 Rust 移植版：一个无状态、零预处理的引擎，把 APK 当作只读数据库来用。
+它直接在压缩产物上定位类、搜索交叉引用或解码 manifest，耗时以毫秒计，无需构建任何全局索引。
 
 ```
 usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-max-mb MIB]
@@ -75,16 +76,14 @@ examples:
   droidasc cache stats
 ```
 
-Exit status is 0 on success, 1 on error and 2 when `findrefs` or `callgraph` finished but
-some DEX entries could not be searched (a warning per entry is printed on stderr).
+成功时退出码为 0，出错时为 1；`findrefs` 或 `callgraph` 执行完毕但有部分 DEX 条目无法搜索时为 2
+（每个这样的条目都会在 stderr 上打印一条警告）。
 
-The command line and query semantics are the Python tool's; the output is asc-rs's own, one
-record per line in `|` columns so it greps and cuts. A `findrefs` row is `dex | method |
-matched`: the method with its full signature (ready for `getclass --method` or
-`callgraph`), then what it references, `, `-separated: strings quoted and escaped as JSON
-(a multi-line string stays on its line), types as descriptors, methods as
-`Lcls;->name(params)ret`, fields as `Lcls;->name:type`. `extends` / `impl` rows are
-`dex | class | extends Lbase;`:
+命令行和查询语义与 Python 工具一致；输出格式则是 asc-rs 自己的：每条记录一行，以 `|` 分列，便于
+grep 和 cut。`findrefs` 的一行是 `dex | method | matched`：先是带完整签名的方法（可直接交给
+`getclass --method` 或 `callgraph`），然后是它引用的内容，以 `, ` 分隔：字符串加引号并按 JSON
+转义（多行字符串仍保持在同一行），类型写成描述符，方法写成 `Lcls;->name(params)ret`，字段写成
+`Lcls;->name:type`。`extends` / `impl` 的行是 `dex | class | extends Lbase;`：
 
 ```
 classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
@@ -94,18 +93,15 @@ classes8.dex | Lcgjc;->apply(Ljava/lang/Object;)Ljava/lang/Object; | Landroid/os
 classes4.dex | Ldxbs; | extends Landroid/webkit/WebViewClient;
 ```
 
-The rows found are the Python tool's (`bench/parity/semantic.py` compares the two by dex,
-method and matched set).
+找到的行与 Python 工具相同（`bench/parity/semantic.py` 按 dex、方法和匹配集合对两者做比较）。
 
-`getclass` and `disassemble` take `--method` to render only some methods: a name (every
-overload), an exact signature (`'run(I)V'`), a signature prefix or a Java-style one
-(`'run(int)'`); a method the class lacks fails with the methods it has. `findrefs extends` / `impl` list the classes
-whose direct superclass / one of whose direct interfaces is the target (dotted or Dalvik
-form). `findrefs string --literal` matches a plain substring instead of a regex.
+`getclass` 和 `disassemble` 支持 `--method`，只输出部分方法：可以是方法名（所有重载）、精确签名
+（`'run(I)V'`）、签名前缀或 Java 风格的签名（`'run(int)'`）；若类中没有该方法，命令会失败并列出它
+已有的方法。`findrefs extends` / `impl` 列出直接父类 / 某个直接接口为目标的类（目标可用点分形式或
+Dalvik 形式）。`findrefs string --literal` 按普通子串匹配，而不是 regex。
 
-`findrefs --context N` prints, after each result, where the references are and the smali
-around them, so the next step rarely needs a `getclass`; `--context method` prints the
-whole method (a method over 150 lines shows 10 lines around each reference instead):
+`findrefs --context N` 在每条结果之后打印引用所在的位置及其周围的 smali，这样下一步很少还需要
+`getclass`；`--context method` 打印整个方法（超过 150 行的方法改为显示每处引用前后各 10 行）：
 
 ```
 classes.dex | Lcom/poc/Main;->run()V | "token"
@@ -115,10 +111,10 @@ classes.dex | Lcom/poc/Main;->run()V | "token"
         invoke-static {v0}, Lcom/poc/Net;->send(Ljava/lang/String;)V
 ```
 
-`callgraph APK CLASS METHOD` walks callers (or `--callees`) `--depth` levels (default 2,
-at most `--max-nodes` methods, default 500), across DEX files. `METHOD` is a name (every
-overload) or an exact `name(params)ret`. One line per call; `[no body]` marks methods no
-DEX of the APK defines (framework / SDK), `(repeated)` methods expanded elsewhere:
+`callgraph APK CLASS METHOD` 跨 DEX 文件遍历调用者（或 `--callees` 被调用者），共 `--depth` 层
+（默认 2，最多 `--max-nodes` 个方法，默认 500）。`METHOD` 是方法名（所有重载）或精确的
+`name(params)ret`。每次调用一行；`[no body]` 标记 APK 中没有任何 DEX 定义的方法（framework / SDK），
+`(repeated)` 标记已在别处展开过的方法：
 
 ```
 0 Landroid/webkit/WebView;->loadUrl(Ljava/lang/String;)V [no body]
@@ -127,35 +123,31 @@ DEX of the APK defines (framework / SDK), `(repeated)` methods expanded elsewher
 # 3 rows, 3 distinct methods (callers, depth 2)
 ```
 
-The graph is the static references in the bytecode: a call through `Lcom/poc/Sub;->m()V`
-is not a call of `Lcom/poc/Base;->m()V`. With `--virtual` it follows dispatch through the
-class hierarchy: the callers of a method also include the callers of the same signature on
-each supertype (`(via Lcom/poc/Base;)`), the callees also the overrides of each callee in
-its subclasses (`(override of Lcom/poc/Base;)`).
+调用图基于字节码中的静态引用：通过 `Lcom/poc/Sub;->m()V` 发起的调用不算作对
+`Lcom/poc/Base;->m()V` 的调用。加上 `--virtual` 后，它会沿类层次跟踪分派：一个方法的调用者还包括
+各个父类型上同一签名的调用者（`(via Lcom/poc/Base;)`），被调用者还包括每个被调用方法在其子类中的
+重写（`(override of Lcom/poc/Base;)`）。
 
-`findrefs APK all COND...` finds methods whose code matches every condition, `--none COND`
-drops those matching another. A condition is `KIND:VALUE`: `string:REGEX`, `literal:TEXT`,
-`type:PATTERN`, `method:TARGET`, `field:TARGET`. A TARGET is `[CLASS->]NAME`, also written
-`com.a.B.name`, `com.a.B#name` or `Lcom/a/B;->name(I)V` (CLASS exact, `~CLASS` fuzzy, a class
-without package such as `WebView` in any package; NAME a regex / substring, `=NAME` or a
-name with its signature exact). `findrefs method` / `field` take the same targets in place
-of the name, and the kind is forgiving (`methods:`, `Method:`). The matched column lists what each condition
-matched, in order. `findrefs APK rules RULE...` (and `--file`, one rule per line) answers several
-queries in one pass over each DEX, rows prefixed `r1 | `, `r2 | `...; a rule is a condition,
-`extends:CLASS` / `impl:CLASS`, or conditions joined with `&`. On Douyin, eight audit rules
-take 114 ms in one `rules` call against 700 ms as eight `findrefs` processes.
+`findrefs APK all COND...` 查找代码满足所有条件的方法，`--none COND` 排除满足另一条件的方法。条件
+写作 `KIND:VALUE`：`string:REGEX`、`literal:TEXT`、`type:PATTERN`、`method:TARGET`、
+`field:TARGET`。TARGET 是 `[CLASS->]NAME`，也可写成 `com.a.B.name`、`com.a.B#name` 或
+`Lcom/a/B;->name(I)V`（CLASS 为精确匹配，`~CLASS` 为模糊匹配，不带包名的类如 `WebView` 可匹配任意
+包；NAME 为 regex / 子串，`=NAME` 或带签名的名字为精确匹配）。`findrefs method` / `field` 也接受同样
+的 TARGET 来代替名字，且 kind 的写法很宽松（`methods:`、`Method:`）。matched 列按顺序列出每个条件
+匹配到的内容。`findrefs APK rules RULE...`（以及 `--file`，每行一条规则）在每个 DEX 上只扫描一遍就
+回答多个查询，结果行带有 `r1 | `、`r2 | `... 前缀；一条规则可以是一个条件、`extends:CLASS` /
+`impl:CLASS`，或用 `&` 连接的多个条件。在抖音上，八条审计规则用一次 `rules` 调用耗时 114 ms，而作为
+八个 `findrefs` 进程则需 700 ms。
 
-A miss says what to try. A class the APK does not define is either a framework class
-(find its uses with `findrefs type` / `extends`) or gets the closest classes it does
-define; a missing method lists the class's methods; a search without results prints, on
-stderr (`# hint:` lines over MCP), how many DEX entries it searched and why it may have
-found nothing (case-sensitive patterns, a class no DEX references, a member that exists
-but is never referenced); missing resource files and names point at shrunk layouts.
+查不到结果时会提示接下来该怎么做。APK 中未定义的类要么是 framework 类（可用 `findrefs type` /
+`extends` 查找其用法），要么会给出 APK 中最接近的已定义类；找不到方法时会列出该类的方法；没有结果的
+搜索会在 stderr 上（MCP 中为 `# hint:` 行）打印搜索了多少个 DEX 条目，以及可能找不到的原因
+（模式区分大小写、没有任何 DEX 引用该类、成员存在但从未被引用）；缺失的资源文件和名称会提示布局已被
+shrink。
 
-`hierarchy APK CLASS` prints the transitive subclasses and implementers (`--supers`: the
-superclasses and interfaces) across DEX files, one line per class with its DEX or
-`[not in APK]`; `--method NAME` marks the classes defining it and adds one
-`override Lcom/poc/Sub;->m(...)V classes2.dex` line per definition:
+`hierarchy APK CLASS` 跨 DEX 文件打印传递的子类和实现类（`--supers`：父类和接口），每个类一行，附带
+其所在 DEX 或 `[not in APK]`；`--method NAME` 标记定义了该方法的类，并为每处定义添加一行
+`override Lcom/poc/Sub;->m(...)V classes2.dex`：
 
 ```
 0 Landroid/webkit/WebViewClient; [not in APK]
@@ -165,11 +157,11 @@ override Lcom/poc/WebClient;->shouldOverrideUrlLoading(Landroid/webkit/WebView;L
 # 3 rows, 3 distinct classes (subclasses, depth 16); 1 define shouldOverrideUrlLoading
 ```
 
-Scripts written for the other Rust ports keep working: `classes` and `manifest` are
-aliases of `listclass` and `getmanifest` (as in rasc), `--thread` of `--threads` (as in
-rust_ASC), and `--literal` gives their literal string matching.
+为其他 Rust 移植版编写的脚本仍然可用：`classes` 和 `manifest` 是 `listclass` 与 `getmanifest` 的
+别名（同 rasc），`--thread` 是 `--threads` 的别名（同 rust_ASC），`--literal` 提供它们的字面量字符串
+匹配。
 
-## Build
+## 构建
 
 ```sh
 cargo build --release                       # CLI + GUI  -> target/release/droidasc
@@ -177,78 +169,67 @@ cargo build --release --no-default-features # CLI only (no egui/winit dependenci
 cargo test --workspace
 ```
 
-Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is headless.
+需要 Rust 1.85 或更高版本。GUI（egui/eframe，OpenGL）需要显示环境；CLI 可无头运行。
 
-## Workspace layout
+## Workspace 结构
 
-| crate | role |
+| crate | 作用 |
 |---|---|
-| `asc-dex` | Zero-copy DEX parser: header, id tables, MUTF-8, LEB128, class data, code items, encoded values, debug info, annotations, DEX 041 containers, checksum/signature. |
-| `asc-dalvik` | Dalvik opcode table (generated from ART's `dex_instruction_list.h`), instruction formats, operand decoding, payload-aware instruction walk. |
-| `asc-findrefs` | Cross-reference search on one DEX: regex / literal (`memmem`) string locator, subclass / implementor lookup over `class_def_item`s, type/method/field locators, dense 16-byte-bucket instruction→method resolver, raw code-region opcode scan. |
-| `asc-rebuild` | Extracts one class plus everything it references and writes a minimal, spec-valid DEX (sorted id tables, annotations, debug info, try/catch, static values, Adler-32 + SHA-1). |
-| `asc-smali` | baksmali-style disassembler used as the built-in output backend. |
-| `asc-apk` | Memory-mapped zip access: central directory (incl. zip64), root-level DEX enumeration, Deflate inflation (libdeflate, or streaming zlib-rs for prefixes / cancellation; a one-shot `findrefs` streams a prefix first and skips entries it shows cannot match). |
-| `asc-cache` | Inflated-DEX caches: an on-disk cache shared across processes and a byte-bounded in-memory LRU for resident hosts. |
-| `asc-axml` | Android binary XML: text XML, an element tree, names for references through a resolver; lazy string pools. |
-| `asc-arsc` | `resources.arsc` reader: indexes chunks only and decodes names and values on demand (u32 / 16-bit / sparse entry tables, compact entries, bags, library / overlayable / staged-alias chunks); per-config values, AOSP config matching and reference resolution. Checked against `aapt2 dump resources` (`bench/arsc-compare`). |
-| `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding and summary, resource queries. |
-| `asc-mcp` | MCP server over stdio (`droidasc mcp`): one resident session, several APKs sharing one memory budget, CLI-format text plus structured results, paging. |
-| `asc-cli` | `droidasc` binary (clap). |
-| `asc-gui` | egui browser: package tree with context menus, tabbed disassembly with find and jump-to-method, `X` for references to the member under the cursor and Ctrl+click to its declaration, streaming reference searches kept as a history panel, class-name suggestions, manifest view; panel sizes, theme and search preferences persist across runs. |
-| `asc-fixture` | Synthetic DEX/APK fixtures shared by the tests. |
+| `asc-dex` | 零拷贝 DEX 解析器：header、id 表、MUTF-8、LEB128、class data、code item、encoded value、debug info、annotation、DEX 041 容器、checksum/signature。 |
+| `asc-dalvik` | Dalvik 操作码表（由 ART 的 `dex_instruction_list.h` 生成）、指令格式、操作数解码、能识别 payload 的指令遍历。 |
+| `asc-findrefs` | 单个 DEX 上的交叉引用搜索：regex / 字面量（`memmem`）字符串定位器、基于 `class_def_item` 的子类 / 实现类查找、类型/方法/字段定位器、稠密的 16 字节分桶 指令→方法 解析器、原始代码区操作码扫描。 |
+| `asc-rebuild` | 提取一个类及其引用的全部内容，写出一个最小且符合规范的 DEX（排序的 id 表、annotation、debug info、try/catch、静态值、Adler-32 + SHA-1）。 |
+| `asc-smali` | baksmali 风格的反汇编器，作为内置输出后端。 |
+| `asc-apk` | 内存映射的 zip 访问：central directory（含 zip64）、根目录 DEX 枚举、Deflate 解压（libdeflate，或用于前缀 / 取消的流式 zlib-rs；一次性 `findrefs` 先流式解压前缀，跳过据此可判定不可能匹配的条目）。 |
+| `asc-cache` | 解压后 DEX 的缓存：跨进程共享的磁盘 cache，以及供常驻宿主使用、按字节限额的内存 LRU。 |
+| `asc-axml` | Android 二进制 XML：文本 XML、元素树、通过 resolver 将引用解析为名称；惰性字符串池。 |
+| `asc-arsc` | `resources.arsc` 读取器：只索引 chunk，按需解码名称和值（u32 / 16 位 / 稀疏 entry 表、紧凑 entry、bag、library / overlayable / staged-alias chunk）；按配置取值、AOSP 配置匹配和引用解析。已与 `aapt2 dump resources` 对照验证（`bench/arsc-compare`）。 |
+| `asc-engine` | 编排层：带提前终止的并行类查找、流式多 DEX 引用搜索、类重建 + 反汇编、manifest 解码与摘要、资源查询。 |
+| `asc-mcp` | 基于 stdio 的 MCP 服务器（`droidasc mcp`）：一个常驻会话，多个 APK 共享同一内存预算，CLI 格式的文本加结构化结果，分页。 |
+| `asc-cli` | `droidasc` 可执行文件（clap）。 |
+| `asc-gui` | egui 浏览器：带右键菜单的包树、带查找和跳转到方法的标签页式反汇编视图、`X` 查找光标所在成员的引用、Ctrl+单击跳转到声明、以历史面板保存的流式引用搜索、类名提示、manifest 视图；面板尺寸、主题和搜索偏好在多次运行间保留。 |
+| `asc-fixture` | 测试共用的合成 DEX/APK fixture。 |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces map onto the Python
-modules and where the port deliberately differs.
+各部分如何对应 Python 模块、移植在哪些地方有意与之不同，见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-## Differences from the Python implementation
+## 与 Python 实现的差异
 
-* **Output of `getclass` is smali, not Java.** The Python tool leans on androguard's
-  decompiler; there is no equivalent Rust library. Instead the rebuilt DEX is a fully valid
-  single-class DEX (canonically sorted tables, correct checksum and signature), so it can be
-  written out with `--dump-dex` and fed to jadx, baksmali, dexdump or any other tool. jadx
-  has been verified to decompile such DEX files to Java. `disassemble` (upstream's smali
-  command) shares the same backend: baksmali-style output rather than dadguard's format,
-  and `--debug` adds timings but no per-instruction offset comments.
-* **Correct string decoding.** Non-ASCII class and member names (common in obfuscated apps)
-  are decoded as MUTF-8; the Python version truncates them.
-* **Threads instead of processes** for `findrefs`; results still stream per DEX as they
-  complete. `getclass` returns as soon as one worker finds the class; workers still
-  inflating another DEX finish in the background.
-* Global `--debug` / `--threads` flags can appear anywhere on the command line;
-  `--threads 0` runs one worker (Python's `listclass` rejects it).
-* Every root-level `*.dex` is a DEX entry (Python prefers `classes*` names), and a
-  duplicated entry name resolves to its last central-directory record (Python: the
-  first). This holds for `getclass`, `findrefs` and `listclass` alike.
-* `invoke-polymorphic` method and proto operands are remapped during rebuild
-  (the Python version leaves them dangling); `invoke-custom` / method handles are still not
-  rebuilt. A class that cannot be rebuilt (undefined opcode, `invoke-custom`) is still
-  shown, disassembled straight from the original DEX, with a warning on stderr;
-  `--dump-dex` is refused for it.
-* Regex details differ at the edges: a match that spans several string items is
-  attributed to the item where it *starts* (Python: where it ends); patterns use
-  `regex` Unicode semantics, so `.` does not cross MUTF-8-encoded NUL bytes or
-  surrogates the way Python's byte-`re` does; an empty `string` pattern matches nothing
-  (Python: every string).
-* `findrefs extends` compares each `class_def_item`'s superclass field directly; Python
-  scans the packed table with a non-overlapping regex, which could in principle hide an
-  aligned match behind an unaligned one (no row differs on the reference fixtures).
-  `findrefs string --literal` and the `classes` / `manifest` aliases are extensions with
-  no Python counterpart; `classes` keeps the `listclass` output (not rasc's
-  `dex | descriptor | java name | package= | class=` rows) and has no `-f/--filter`.
-* `getmanifest` names attributes from the resource id whenever it is a known framework
-  attribute (androguard only when the pool name is empty), so obfuscated manifests show
-  `android:name` instead of `android:a`; unknown ids print as `attr_0x........`.
-* `gui` runs in the foreground; the Python tool forks a detached process.
+* **`getclass` 输出的是 smali，而不是 Java。** Python 工具依赖 androguard 的反编译器，而 Rust 中没有
+  等价的库。作为替代，重建出的 DEX 是一个完全合法的单类 DEX（表按规范排序，checksum 和 signature
+  正确），因此可以用 `--dump-dex` 写出，再交给 jadx、baksmali、dexdump 或任何其他工具。已验证 jadx
+  能把这样的 DEX 文件反编译为 Java。`disassemble`（上游的 smali 命令）共用同一后端：输出为 baksmali
+  风格而非 dadguard 格式，`--debug` 会加上耗时信息，但不加逐指令的偏移注释。
+* **正确的字符串解码。** 非 ASCII 的类名和成员名（在混淆应用中很常见）按 MUTF-8 解码；Python 版本会
+  将其截断。
+* `findrefs` **使用线程而非进程**；结果仍按 DEX 完成顺序流式输出。`getclass` 在任一 worker 找到该类
+  后立即返回；仍在解压其他 DEX 的 worker 会在后台完成。
+* 全局的 `--debug` / `--threads` 参数可以出现在命令行的任意位置；`--threads 0` 以一个 worker 运行
+  （Python 的 `listclass` 会拒绝它）。
+* 根目录下的每个 `*.dex` 都是一个 DEX 条目（Python 优先选 `classes*` 名称），重名条目取 central
+  directory 中的最后一条记录（Python：第一条）。这一点对 `getclass`、`findrefs` 和 `listclass` 都成立。
+* 重建时会重映射 `invoke-polymorphic` 的方法和 proto 操作数（Python 版本让它们悬空）；
+  `invoke-custom` / method handle 仍不重建。无法重建的类（未定义的操作码、`invoke-custom`）仍会显示，
+  直接从原始 DEX 反汇编，并在 stderr 上给出警告；此时 `--dump-dex` 会被拒绝。
+* regex 的边界细节有所不同：跨越多个字符串项的匹配归属于它*开始*所在的项（Python：结束所在的项）；
+  模式使用 `regex` 的 Unicode 语义，因此 `.` 不会像 Python 的字节 `re` 那样跨过 MUTF-8 编码的 NUL
+  字节或代理项；空的 `string` 模式什么也不匹配（Python：匹配所有字符串）。
+* `findrefs extends` 直接比较每个 `class_def_item` 的 superclass 字段；Python 用非重叠 regex 扫描紧凑
+  排列的表，理论上可能让一个对齐的匹配被一个未对齐的匹配遮住（在参考 fixture 上没有任何一行不同）。
+  `findrefs string --literal` 以及 `classes` / `manifest` 别名是扩展功能，Python 中没有对应项；
+  `classes` 保持 `listclass` 的输出（而不是 rasc 的 `dex | descriptor | java name | package= | class=`
+  行），也没有 `-f/--filter`。
+* 只要资源 id 是已知的 framework 属性，`getmanifest` 就根据资源 id 为属性命名（androguard 只在池中名称
+  为空时才这么做），因此混淆过的 manifest 显示为 `android:name` 而不是 `android:a`；未知 id 打印为
+  `attr_0x........`。
+* `gui` 在前台运行；Python 工具会 fork 出一个分离的进程。
 
-## Performance
+## 性能
 
-Measured on Linux (this workstation, 8 threads, warm page cache, median of 5 fresh
-processes, output discarded) against a synthetic 14-DEX / 95 MB APK assembled from real
-apps, side by side with the upstream `rust` branch (`rasc`) and the Python reference
-(CPython 3, androguard 4.1.3):
+在 Linux 上测量（本工作站，8 线程，page cache 已预热，取 5 个全新进程的中位数，输出丢弃），测试对象
+是由真实应用拼装而成的合成 14-DEX / 95 MB APK，并与上游 `rust` 分支（`rasc`）和 Python 参考实现
+（CPython 3，androguard 4.1.3）并列对比：
 
-| scenario | rasc | asc-rs | Python | rows rasc / asc-rs / Python |
+| 场景 | rasc | asc-rs | Python | 行数 rasc / asc-rs / Python |
 |---|---:|---:|---:|---|
 | `findrefs string Authorization` | 64 ms | 64 ms | 208 ms | 44 / 44 / 44 |
 | `findrefs string okhttp` | 63 ms | 63 ms | 206 ms | 19 / 19 / 19 |
@@ -256,167 +237,145 @@ apps, side by side with the upstream `rust` branch (`rasc`) and the Python refer
 | `findrefs method onCreate` | 64 ms | 69 ms | 287 ms | 645 / 654 / 654 |
 | `findrefs method onCreate --class androidx --fuzzy-class` | 64 ms | 66 ms | 263 ms | 168 / 168 / 168 |
 | `findrefs field INSTANCE` | 64 ms | 65 ms | 267 ms | 530 / 531 / 531 |
-| `getclass` early class (`classes.dex`) | 251 ms | 36 ms | 2041 ms | Java / smali / Java |
-| `getclass` late class (`classes13.dex`) | 88 ms | 82 ms | 288 ms | |
-| `getclass` missing class | 30 ms | 20 ms | 258 ms | |
+| `getclass` 靠前的类（`classes.dex`） | 251 ms | 36 ms | 2041 ms | Java / smali / Java |
+| `getclass` 靠后的类（`classes13.dex`） | 88 ms | 82 ms | 288 ms | |
+| `getclass` 不存在的类 | 30 ms | 20 ms | 258 ms | |
 | `getmanifest` | 3 ms | 2 ms | 128 ms | |
-| **geometric mean speed-up vs Python** | **5.6×** | **7.3×** | | |
-| geometric mean, `findrefs` only | 3.8× | 3.7× | | |
+| **相对 Python 的几何平均加速比** | **5.6×** | **7.3×** | | |
+| 几何平均，仅 `findrefs` | 3.8× | 3.7× | | |
 
-asc-rs finds the same rows as the Python reference (its own line format); rasc uses literal, instruction-boundary
-matching and drops a few rows. `getclass` outputs differ in kind (rasc decompiles to
-Java, asc-rs disassembles), so that row measures different work. The upstream README's
-8.0× figure was taken on macOS, where the Python process pool is far slower to start; on
-Linux both Rust ports land at 3-4× for reference search, which is bounded by inflating the
-largest DEX.
+asc-rs 找到的行与 Python 参考实现相同（采用自己的行格式）；rasc 使用字面量、按指令边界的匹配，会漏掉
+少数几行。`getclass` 的输出性质不同（rasc 反编译为 Java，asc-rs 反汇编），因此这一行衡量的是不同的
+工作。上游 README 中的 8.0× 数据是在 macOS 上测得的，那里 Python 进程池的启动要慢得多；在 Linux 上，
+两个 Rust 移植版在引用搜索上都在 3-4×，其上限取决于解压最大的那个 DEX。
 
-What it took to get there, in order of impact:
+达到这一结果所做的工作，按影响大小排序：
 
-* the instruction→method bucket table is a dense `Vec<u32>` over the code region (range
-  fills instead of one hash insert per 16-byte bucket);
-* Deflate entries are inflated with libdeflate (`asc-apk` feature `libdeflate`, on by
-  default; `--no-default-features` keeps the pure-Rust zlib-rs path);
-* `findrefs` hands out the largest DEX first: its inflate is the critical path and must
-  not queue behind the small ones (the Python and rasc order is smallest-first);
-* `getclass` streams only the id tables and string data of each DEX (typically a third of
-  it) to decide whether the class is defined there, and fully inflates just the hit;
-* release profile with fat LTO and a single codegen unit.
+* 指令→方法 的分桶表是覆盖代码区的稠密 `Vec<u32>`（按区间填充，而不是每个 16 字节桶做一次哈希插入）；
+* Deflate 条目用 libdeflate 解压（`asc-apk` 的 `libdeflate` feature，默认开启；
+  `--no-default-features` 保留纯 Rust 的 zlib-rs 路径）；
+* `findrefs` 先分发最大的 DEX：它的解压是关键路径，不能排在小 DEX 后面（Python 和 rasc 的顺序是
+  从小到大）；
+* `getclass` 对每个 DEX 只流式读取 id 表和字符串数据（通常约为三分之一）来判断类是否定义在其中，只完整
+  解压命中的那个；
+* release profile 使用 fat LTO 和单个 codegen unit。
 
-## Caching for repeated queries
+## 重复查询的缓存
 
-Inflating the largest DEX is the critical path of every query and always yields the same
-bytes, so the engine caches inflated entries. Nothing is precomputed: the first query pays
-the normal cost and fills the cache as a side effect.
+解压最大的 DEX 是每次查询的关键路径，而且每次得到的字节都相同，所以引擎会缓存解压后的条目。不做任何
+预计算：第一次查询付出正常开销，并顺带填充 cache。
 
-* **On-disk cache** (`~/.cache/droidasc`, or `$DROIDASC_CACHE_DIR` / `$XDG_CACHE_HOME`),
-  on by default for the CLI and shared between processes. Entries are keyed by the APK's
-  size, mtime and central directory, written atomically and memory-mapped on the next run,
-  in three tiers under one budget (see below). Writes are not synced (the cache can always
-  be rebuilt); every file carries a CRC-32 that is checked the first time a file written
-  before the last reboot is read, so a file a crash cut short is a miss, never a wrong
-  answer:
+* **磁盘 cache**（`~/.cache/droidasc`，或 `$DROIDASC_CACHE_DIR` / `$XDG_CACHE_HOME`），CLI 默认开启，
+  在进程间共享。条目以 APK 的大小、mtime 和 central directory 为键，原子写入，下次运行时通过内存映射
+  读取，分为三层，共用一个预算（见下文）。写入不做 sync（cache 总能重建）；每个文件都带 CRC-32，对于在
+  上次重启之前写入的文件，会在第一次读取时校验，因此因崩溃而写了一半的文件只会是未命中，绝不会给出错误
+  答案：
 
-  | tier | holds | written when | evicted |
+  | 层 | 存放内容 | 写入时机 | 淘汰 |
   |---|---|---|---|
-  | L1 | inflated DEX entries | inflated, 4 MiB or larger (`$DROIDASC_CACHE_MIN_DEX_MB`): re-inflating a small DEX is cheaper than writing it | first, largest and oldest first |
-  | L2 | locator tables and call graphs per DEX, in a form the next process maps and reads in place (every process mapping them shares one copy) | built in 2 ms or more | last, least rebuild time saved per byte first |
-  | L3 | `findrefs` results, keyed by the query, its options and the build of the tool | the query ran without errors, result under 4 MiB | own budget: min(128 MiB, 1/8 of the total), oldest first |
+  | L1 | 解压后的 DEX 条目 | 解压后大小不小于 4 MiB（`$DROIDASC_CACHE_MIN_DEX_MB`）：重新解压小 DEX 比写盘更便宜 | 最先淘汰，按最大、最旧优先 |
+  | L2 | 每个 DEX 的定位表和调用图，格式可供下一个进程映射后原地读取（所有映射它们的进程共享同一份） | 构建耗时不少于 2 ms | 最后淘汰，按每字节节省的重建时间从少到多 |
+  | L3 | `findrefs` 结果，以查询、其选项和工具的构建版本为键 | 查询无错误完成且结果小于 4 MiB | 独立预算：min(128 MiB, 总量的 1/8)，最旧优先 |
 
-  Entries of APKs that were deleted or replaced since go before anything else.
-  `$DROIDASC_CACHE_TIERS=dex,derived,rendered` picks the tiers (all by default).
-  Writes are queued to a background thread, so a
-  query never waits for its own cache entry to be written (the process still lands queued
-  writes before exiting). The directory carries a `CACHEDIR.TAG`; a `--cache-dir` that
-  already holds other files (dot-files included) is refused outright with a warning and the
-  disk cache is disabled (nothing is written, tagged, evicted or cleared there), and eviction and `cache clear` only ever touch entry directories of the
-  cache's own naming shape. `--no-cache` bypasses it,
-  `--cache-dir` moves it, `droidasc cache path|stats|clear` manages it (`stats` prints
-  each tier's usage, the budget, where it comes from and the file system's free space).
-* **In-memory LRU** (GUI and embedders, `CacheConfig::resident` / `resident_auto`) that
-  also keeps the locator tables built for each DEX, so a second query only runs the
-  regex, the scan and the offset→method resolution. Its budget counts those tables too
-  (102 MB on top of Douyin's 437 MB of DEX after string and type queries), and the GUI sizes it
-  from the machine: a quarter of the available memory (`MemAvailable`, or the cgroup v2
-  headroom when lower), clamped to 64 MiB–2 GiB, so several open browsers do not each
-  claim 2 GiB. With the disk cache on, an entry inflated on the heap is swapped for a
-  mapping of its cache file as soon as that file is written (after a byte-for-byte
-  check), and locator tables for a view of their L2 file, so resident entries are
-  file-backed pages the OS can reclaim and share between processes rather than anonymous
-  memory. Entries an APK stores uncompressed (nearly every system app) are mapped from
-  the APK itself.
+  此后被删除或替换的 APK 的条目最先被清理。`$DROIDASC_CACHE_TIERS=dex,derived,rendered` 选择启用
+  哪些层（默认全部）。写入由后台线程排队执行，因此查询从不等待自己的 cache 条目写完（进程退出前仍会
+  完成已排队的写入）。目录中带有 `CACHEDIR.TAG`；如果 `--cache-dir` 中已有其他文件（包括点文件），会被
+  直接拒绝并给出警告，磁盘 cache 随之禁用（不在那里写入、打标记、淘汰或清理任何东西），而且淘汰和
+  `cache clear` 只会处理符合 cache 自身命名形式的条目目录。`--no-cache` 绕过它，`--cache-dir` 改变其
+  位置，`droidasc cache path|stats|clear` 管理它（`stats` 打印每层的用量、预算及其来源，以及文件系统的
+  剩余空间）。
+* **内存 LRU**（GUI 和嵌入方，`CacheConfig::resident` / `resident_auto`），还会保留为每个 DEX 构建的
+  定位表，因此第二次查询只需运行 regex、扫描以及 偏移→方法 解析。它的预算也把这些表计算在内（在字符串
+  和类型查询之后，抖音 437 MB 的 DEX 之外还有 102 MB），GUI 会根据机器来确定预算：可用内存
+  （`MemAvailable`，若 cgroup v2 余量更低则取后者）的四分之一，限制在 64 MiB–2 GiB 之间，这样同时打开
+  多个浏览器时不会各自占用 2 GiB。开启磁盘 cache 时，堆上解压的条目会在其 cache 文件写好后（经过逐字节
+  校验）立即替换为对该文件的映射，定位表也替换为其 L2 文件的视图，因此常驻条目是操作系统可以回收、并可
+  在进程间共享的文件页，而不是匿名内存。APK 中以未压缩方式存储的条目（几乎所有系统应用都是如此）直接从
+  APK 本身映射。
 
-Both caches size themselves from the machine unless given a number:
+除非指定具体数值，两种 cache 都会根据机器自动确定大小：
 
-| | automatic budget | explicit |
+| | 自动预算 | 显式指定 |
 |---|---|---|
-| disk | 20 % of what the cache could hold (its own bytes + the file system's free space), at most 4 GiB, and never so much that less than max(1 GiB, 5 % of the file system) stays free; 4 GiB where the free space cannot be read (Windows) | `--cache-max-mb MIB`, else `$DROIDASC_CACHE_MAX_MB` |
-| memory (gui, mcp) | one budget for all of the user's running `gui` / `mcp` processes, split evenly: a quarter of (available memory + what their caches hold), divided by the number of processes, 64 MiB–2 GiB each; 2 GiB where it cannot be read. Each process registers in `$XDG_RUNTIME_DIR/droidasc` and re-reads the registry at most once a second | `--memory-mb MIB` (fixed; still registered, so the others count it) |
+| 磁盘 | cache 可容纳量（自身字节数 + 文件系统剩余空间）的 20 %，最多 4 GiB，且绝不会使剩余空间少于 max(1 GiB, 文件系统的 5 %)；无法读取剩余空间时（Windows）为 4 GiB | `--cache-max-mb MIB`，否则 `$DROIDASC_CACHE_MAX_MB` |
+| 内存（gui、mcp） | 用户所有正在运行的 `gui` / `mcp` 进程共用一个预算，平均分配：(可用内存 + 它们的 cache 所占) 的四分之一，除以进程数，每个 64 MiB–2 GiB；无法读取时为 2 GiB。每个进程在 `$XDG_RUNTIME_DIR/droidasc` 中登记，并最多每秒重读一次登记表 | `--memory-mb MIB`（固定值；仍会登记，以便其他进程将其计入） |
 
-The disk budget is re-evaluated at every eviction pass (once per burst of writes, the
-same directory walk as before) and each automatic-budget write first checks the free
-space with one `statvfs`: an entry that would cut into the reserve is not written, and
-when another program has filled the disk the next eviction shrinks the cache below what
-it holds, oldest APKs first. One-shot CLI commands keep no memory cache, so
-`--memory-mb` only matters for `gui` and `mcp`.
+磁盘预算在每次淘汰时重新计算（每一批写入一次，与之前同样的目录遍历），每次按自动预算写入前先用一次
+`statvfs` 检查剩余空间：会侵占保留空间的条目不会写入；当其他程序把磁盘写满时，下一次淘汰会把 cache
+缩小到低于当前占用，最旧的 APK 优先。一次性 CLI 命令不保留内存 cache，所以 `--memory-mb` 只对 `gui`
+和 `mcp` 有意义。
 
-Resident memory of one process holding the GUI's engine state (16 threads, Douyin
-40.7.0 = 437 MB of DEX, then Kuaishou and Xiaohongshu opened in the same process; class
-scan plus three queries each):
+一个持有 GUI 引擎状态的进程的常驻内存（16 线程，抖音 40.7.0 = 437 MB 的 DEX，然后在同一进程中打开快手
+和小红书；每个都做类扫描加三次查询）：
 
-| | anonymous before | anonymous after | file-backed after |
+| | 之前的匿名内存 | 之后的匿名内存 | 之后的文件页 |
 |---|---:|---:|---:|
-| Douyin, first open (disk cache cold) | 549 MB | 111 MB | 439 MB |
-| three APKs, first open | 1150 MB | 224 MB | 910 MB |
-| three APKs, disk cache warm | 227 MB | 225 MB | 923 MB |
-| three APKs, `--no-cache` | 1148 MB | 1146 MB | 2 MB |
+| 抖音，首次打开（磁盘 cache 冷） | 549 MB | 111 MB | 439 MB |
+| 三个 APK，首次打开 | 1150 MB | 224 MB | 910 MB |
+| 三个 APK，磁盘 cache 已预热 | 227 MB | 225 MB | 923 MB |
+| 三个 APK，`--no-cache` | 1148 MB | 1146 MB | 2 MB |
 
-What stays anonymous is the locator tables. Without a disk cache the bytes have nowhere
-to be mapped from, so `--no-cache` keeps them on the heap as before.
+仍是匿名内存的部分是定位表。没有磁盘 cache 时这些字节无处可映射，所以 `--no-cache` 像以前一样把它们
+留在堆上。
 
-Same 14-DEX / 95 MB APK, 8 threads, median of 5 fresh processes:
+同一个 14-DEX / 95 MB APK，8 线程，取 5 个全新进程的中位数：
 
-| scenario | cold | disk cache warm |
+| 场景 | 冷 | 磁盘 cache 已预热 |
 |---|---:|---:|
 | `findrefs string Authorization` | 65 ms | 9 ms |
 | `findrefs string okhttp` | 63 ms | 9 ms |
 | `findrefs type Gson` | 64 ms | 12 ms |
 | `findrefs field INSTANCE` | 65 ms | 19 ms |
 | `findrefs method onCreate` | 65 ms | 21 ms |
-| `getclass` early class | 38 ms | 12 ms |
-| `getclass` late class | 80 ms | 3 ms |
-| `getclass` missing class | 25 ms | 2 ms |
+| `getclass` 靠前的类 | 38 ms | 12 ms |
+| `getclass` 靠后的类 | 80 ms | 3 ms |
+| `getclass` 不存在的类 | 25 ms | 2 ms |
 
-With a warm in-memory cache a reference search over the same archive is one scan per DEX
-(about 4 ms for a 4 MB code region) with no table builds at all.
+内存 cache 已预热时，对同一归档的引用搜索只是每个 DEX 一次扫描（4 MB 代码区约 4 ms），完全不需要构建表。
 
-The scan itself adapts to the query: up to eight target indexes are found with SIMD
-`memmem` over the operand bytes (0.2 ms per 4 MB instead of 3 ms), string queries use
-`memchr2` over their two opcodes, and clustered index sets are prefiltered with `memchr`
-on the shared high operand byte before the linear sweep.
+扫描本身会根据查询自适应：最多八个目标索引时，用 SIMD `memmem` 在操作数字节上查找（每 4 MB 0.2 ms，
+而不是 3 ms），字符串查询对其两个操作码使用 `memchr2`，而聚集的索引集合在线性扫描前先用 `memchr`
+按共同的高位操作数字节做预过滤。
 
-## Daemon: warm one-shot commands
+## Daemon：预热的一次性命令
 
-On Unix every one-shot command (`findrefs`, `getclass`, `callgraph`, `hierarchy`,
-`manifest-summary`, ...) answers through a per-user daemon that keeps the APKs it has
-opened resident, so a shell or an agent calling the CLI step by step gets MCP-like latency
-without an MCP client. Nothing changes in how commands are written or what they print:
-stdout, stderr and the exit status are byte for byte those of a run without the daemon.
+在 Unix 上，每个一次性命令（`findrefs`、`getclass`、`callgraph`、`hierarchy`、`manifest-summary`……）
+都通过一个按用户运行的 daemon 来应答，daemon 会让已打开的 APK 常驻内存，因此逐步调用 CLI 的 shell 或
+agent 无需 MCP 客户端也能获得接近 MCP 的延迟。命令的写法和输出都没有任何变化：stdout、stderr 和退出码
+与不使用 daemon 运行时逐字节一致。
 
-* The first command starts the daemon (`droidasc daemon serve`, detached) and hands itself
-  over once it is up; the daemon exits after 15 idle minutes.
-* `--debug` and `--no-cache` always run in the calling process, as do `gui`, `mcp`,
-  `cache` and `daemon`. `DROIDASC_DAEMON=off` turns the daemon off.
-* One daemon per build and cache configuration (`--cache-dir`, `--cache-max-mb`,
-  `DROIDASC_*`, umask): a rebuilt binary starts a fresh daemon, which retires the old one.
-* `droidasc daemon status` lists the running daemons, `daemon stop` stops them,
-  `daemon start` starts one ahead of time.
-* The socket is in a directory only the user can enter (`$DROIDASC_RUNTIME_DIR/daemon`,
-  `$XDG_RUNTIME_DIR/droidasc/daemon`, else `<temp dir>/droidasc-<uid>/daemon`) and both ends
-  check the peer's uid. A client killed with Ctrl-C cancels its search in the daemon.
+* 第一个命令会启动 daemon（`droidasc daemon serve`，分离运行），并在其就绪后把自己交给它处理；daemon
+  空闲 15 分钟后退出。
+* `--debug` 和 `--no-cache` 总是在调用进程中运行，`gui`、`mcp`、`cache` 和 `daemon` 也是如此。
+  `DROIDASC_DAEMON=off` 关闭 daemon。
+* 每种构建和 cache 配置（`--cache-dir`、`--cache-max-mb`、`DROIDASC_*`、umask）对应一个 daemon：重新
+  构建的二进制会启动新的 daemon，并让旧的退役。
+* `droidasc daemon status` 列出正在运行的 daemon，`daemon stop` 停止它们，`daemon start` 提前启动一个。
+* socket 位于只有该用户能进入的目录（`$DROIDASC_RUNTIME_DIR/daemon`、`$XDG_RUNTIME_DIR/droidasc/daemon`，
+  否则为 `<temp dir>/droidasc-<uid>/daemon`），两端都会校验对端的 uid。用 Ctrl-C 杀掉的客户端会取消它在
+  daemon 中的搜索。
 
-Douyin (360 MB, 55 DEX, 16 threads), one process per command, disk cache warm:
+抖音（360 MB，55 个 DEX，16 线程），每个命令一个进程，磁盘 cache 已预热：
 
-| | without daemon | with daemon |
+| | 不用 daemon | 使用 daemon |
 |---|---:|---:|
-| 47-step agent-audit replay | 176 ms | 135 ms (MCP session: 55 ms) |
-| first query, empty cache | 256 ms | 81 ms |
-| second query, other kind | 234 ms | 9 ms |
-| `hierarchy android.app.Activity` (1343 rows), repeated | 500 ms | 6 ms |
-| `callgraph WebView loadUrl --virtual`, repeated | 400 ms | 5 ms |
+| 47 步 agent-audit 回放 | 176 ms | 135 ms（MCP 会话：55 ms） |
+| 首次查询，cache 为空 | 256 ms | 81 ms |
+| 第二次查询，换一种类型 | 234 ms | 9 ms |
+| `hierarchy android.app.Activity`（1343 行），重复执行 | 500 ms | 6 ms |
+| `callgraph WebView loadUrl --virtual`，重复执行 | 400 ms | 5 ms |
 
-About 1.6 ms of each command is the process start itself, which the daemon cannot remove;
-a long session of many calls is still cheaper over MCP.
+每个命令约有 1.6 ms 是进程启动本身，daemon 无法消除；包含大量调用的长会话仍然是走 MCP 更划算。
 
-## MCP server
+## MCP 服务器
 
-`droidasc mcp` is a resident session for agents: an MCP server on stdio (JSON-RPC 2.0, one
-message per line). It keeps every APK it opens in one process, so the inflated DEX files
-and locator tables stay in memory between calls instead of being rebuilt by a new process
-per question. All opened APKs share one in-memory budget (`--memory-mb`, default a quarter of available memory, at most 2048 MiB; DEX and tables mapped from the disk cache or the APK count at 1/8 of their size, since they are shared, reclaimable file pages); `close_apk` releases that APK's share; the
-on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`). Tool calls run concurrently (a slow
-query does not block `ping` or other calls; replies carry their request id and may arrive
-out of order), and a panic inside one call is returned as an error result rather than
-ending the session.
+`droidasc mcp` 是面向 agent 的常驻会话：一个基于 stdio 的 MCP 服务器（JSON-RPC 2.0，每行一条消息）。它
+把打开的每个 APK 都保留在同一进程中，因此解压后的 DEX 文件和定位表在调用之间留在内存里，而不必每个问题
+都由新进程重新构建。所有已打开的 APK 共享一个内存预算（`--memory-mb`，默认为可用内存的四分之一，最多
+2048 MiB；从磁盘 cache 或 APK 映射的 DEX 和表按其大小的 1/8 计算，因为它们是共享的、可回收的文件页）；
+`close_apk` 释放该 APK 占用的份额；磁盘 cache 的用法与 CLI 相同（`--no-cache`、`--cache-dir`）。工具
+调用并发执行（慢查询不会阻塞 `ping` 或其他调用；回复带有其请求 id，可能乱序到达），单个调用内的 panic
+会作为错误结果返回，而不会终止会话。
 
 ```json
 {
@@ -426,64 +385,59 @@ ending the session.
 }
 ```
 
-| tool | arguments | result |
+| 工具 | 参数 | 结果 |
 |---|---|---|
-| `open_apk` | `apk`, `warm` (default true: inflate every DEX now), `prebuild` (default true: then build the search tables in the background, queries first); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
-| `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
-| `getclass` | `class`, `method` (a name: every overload; `name(params)ret`, or a prefix of it), `full`, `debug_info` (default false), `resource_names` (default true) | smali, as `droidasc getclass --res-names`: constants that are resource ids end in `# @type/name`. A class over the output budget comes as an outline (header, fields, every method's declaration with its instruction count and size) unless `full`; an unknown `method` is an error listing the class's signatures |
-| `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; `structuredContent` rows carry `dex`, `method`, `signature` (full) and `matched` (unquoted values); with `context` they also carry `sites` (`pc`, `line`, `matched`) and `context` |
-| `findrefs` (several conditions) | `all` / `none`: lists of condition objects (`kind`, `value` / `name`, `class`, ...) instead of `kind` | methods matching every `all` condition and no `none` one |
-| `findrefs` (rule set) | `rules`: list of queries (single or `all` / `none`); `limit` (100) per rule | per rule a `# r1 string "http://": 12 results` line and its `r1 \| ...` rows; `rules` in `structuredContent`, each with a complete follow-up call in `next` |
-| `callgraph` | `class`, `method` (name or `name(params)ret`), `direction` (`callers`/`callees`), `depth` (2), `max_nodes` (200), `virtual` | the `droidasc callgraph` tree; `rows` with `depth`, `parent`, `method`, `dex`, `repeated`, `via` |
-| `hierarchy` | `class`, `direction` (`subclasses`/`supers`), `depth` (16), `max_nodes` (500), `method` | the `droidasc hierarchy` tree and `override` lines; `rows` with `depth`, `parent`, `class`, `relation`, `dex`, `defines` |
-| `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
-| `getmanifest` | `resolve` | decoded XML (references by name with `resolve`) |
-| `manifest_summary` | `filter` (`all` / `exported`), `kind` (record kinds: `provider`, `activity`, `uses-permission`, `deeplink`, …; a string or a list), `name` (case-insensitive regex over the record), `offset`; or `apks` / `dir` | the `droidasc manifest-summary` records; `exported` (the default unless `kind` / `name` narrow the search) keeps what other apps can reach (exported components, deep links, non-signature permissions, cleartext domains). For many APKs: per APK `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`, then its records |
-| `resources` | `query` (+ `resolve`), `search` (+ `in`, `literal`), `limit`, or `xml` (a path in the APK); or `apks` / `dir` | `droidasc resources` rows (`0x7f0d0001 \| string/app_name [zh-rCN] \| "..."`), or the decoded XML file |
+| `open_apk` | `apk`、`warm`（默认 true：立即解压所有 DEX）、`prebuild`（默认 true：随后在后台构建搜索表，查询优先）；或 `apks` / `dir` | `apk_id`；同一路径返回同一 id。对于多个 APK：每个 APK 一行（id、DEX 数量和大小、路径），不做任何解压 |
+| `close_apk` | `apk_id` 或 `apk` | 释放该 APK 在内存 cache 中的份额 |
+| `getclass` | `class`、`method`（方法名：所有重载；`name(params)ret` 或其前缀）、`full`、`debug_info`（默认 false）、`resource_names`（默认 true） | smali，同 `droidasc getclass --res-names`：值为资源 id 的常量以 `# @type/name` 结尾。超出输出预算的类会以大纲形式给出（header、字段、每个方法的声明及其指令数和大小），除非指定 `full`；未知的 `method` 会报错并列出该类的签名 |
+| `findrefs` | `kind`（`string`/`type`/`method`/`field`/`extends`/`impl`）、`value` 或 `name`、`literal`、`class`、`fuzzy_class`、`exact`、`context`（N 行或 `"method"`）、`offset`、`limit`（500） | 按 DEX 顺序的 `findrefs` 行（每行后跟其上下文），然后是一行 `# N results`；`structuredContent` 的行包含 `dex`、`method`、`signature`（完整）和 `matched`（不带引号的值）；带 `context` 时还包含 `sites`（`pc`、`line`、`matched`）和 `context` |
+| `findrefs`（多个条件） | `all` / `none`：条件对象（`kind`、`value` / `name`、`class`……）的列表，代替 `kind` | 满足所有 `all` 条件且不满足任何 `none` 条件的方法 |
+| `findrefs`（规则集） | `rules`：查询列表（单个或 `all` / `none`）；每条规则的 `limit`（100） | 每条规则一行 `# r1 string "http://": 12 results` 及其 `r1 \| ...` 行；`structuredContent` 中的 `rules`，每条在 `next` 中带有完整的后续调用 |
+| `callgraph` | `class`、`method`（方法名或 `name(params)ret`）、`direction`（`callers`/`callees`）、`depth`（2）、`max_nodes`（200）、`virtual` | `droidasc callgraph` 的树；`rows` 包含 `depth`、`parent`、`method`、`dex`、`repeated`、`via` |
+| `hierarchy` | `class`、`direction`（`subclasses`/`supers`）、`depth`（16）、`max_nodes`（500）、`method` | `droidasc hierarchy` 的树和 `override` 行；`rows` 包含 `depth`、`parent`、`class`、`relation`、`dex`、`defines` |
+| `listclass` | `prefix`、`offset`、`limit`（1000） | 类描述符 |
+| `getmanifest` | `resolve` | 解码后的 XML（带 `resolve` 时引用以名称显示） |
+| `manifest_summary` | `filter`（`all` / `exported`）、`kind`（记录类型：`provider`、`activity`、`uses-permission`、`deeplink`……；字符串或列表）、`name`（对记录做不区分大小写的 regex）、`offset`；或 `apks` / `dir` | `droidasc manifest-summary` 的记录；`exported`（除非用 `kind` / `name` 缩小范围，否则为默认值）保留其他应用可触达的内容（导出组件、deep link、非 signature 级权限、明文流量域名）。对于多个 APK：每个 APK 一行 `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`，然后是它的记录 |
+| `resources` | `query`（+ `resolve`）、`search`（+ `in`、`literal`）、`limit`，或 `xml`（APK 内的路径）；或 `apks` / `dir` | `droidasc resources` 的行（`0x7f0d0001 \| string/app_name [zh-rCN] \| "..."`），或解码后的 XML 文件 |
 
-Every tool except `open_apk` takes `apk_id` or an `apk` path (opened on first use). Results
-carry the CLI text as `content` and the same data as `structuredContent` (`total` and
-`next_offset` for paged tools). Some clients (Grok Build, for one) show the model both, so
-`droidasc mcp` by default sends a compact `structuredContent` without the values longer than
-256 bytes the text already carries (rows, smali; `omitted` names them); `--structured full`
-keeps everything. Failures come back as `isError: true` results; the session keeps running.
-Integer arguments may be given as strings of digits and booleans as `"true"` / `"false"`.
+除 `open_apk` 外，每个工具都接受 `apk_id` 或 `apk` 路径（首次使用时打开）。结果以 `content` 携带 CLI
+文本，以 `structuredContent` 携带相同的数据（分页工具还有 `total` 和 `next_offset`）。有些客户端（例如
+Grok Build）会把两者都展示给模型，因此 `droidasc mcp` 默认发送精简的 `structuredContent`，省略文本中
+已包含的、长度超过 256 字节的值（行、smali；由 `omitted` 列出名称）；`--structured full` 保留全部内容。
+失败以 `isError: true` 结果返回；会话继续运行。整数参数可以用数字字符串给出，布尔值可以用 `"true"` /
+`"false"`。
 
-#### Output budget and spill files
+#### 输出预算与溢出文件
 
-Clients cut long tool results (Grok Build at about 20 KB), and every byte of a reply is read
-again on each later turn, so every reply stays within `max_bytes` (default 16384). What does
-not fit goes where `spill` says:
+客户端会截断过长的工具结果（Grok Build 约在 20 KB 处），而且回复的每个字节在之后的每一轮都会被重新读取，
+因此每条回复都控制在 `max_bytes`（默认 16384）之内。放不下的部分按 `spill` 的设置处理：
 
-| `spill` | reply | for |
+| `spill` | 回复 | 适用于 |
 |---|---|---|
-| `auto` (default) | the text if it fits, else its first lines; then `# full output (N lines, M bytes) in /abs/path.txt` and the call that pages through it instead. A class adds an index (`#   10-580 LJII(I)V`: each method's line range in that file). The file is also a `resource_link` content item, and `structuredContent` names `file`, `lines`, `bytes`, `index` | agents that can read files (Claude Code, Codex, Grok Build with its file tools): they grep or read the lines they need |
-| `always` | every reply goes to a file; inline only its head and the path | the same, when even mid-size replies should stay out of the context |
-| `never` | pages of whole records (a line with the indented lines under it: a findrefs row and its context, a smali method), each ending `# page 0 of 0..5 …; next page: tool {…}` with the complete arguments of the next call (`next` in `structuredContent`) | clients whose agent cannot read local files (a remote or sandboxed agent) |
+| `auto`（默认） | 放得下就给出文本，否则给出其前几行；然后是 `# full output (N lines, M bytes) in /abs/path.txt` 以及改为分页读取的调用。类会额外附带索引（`#   10-580 LJII(I)V`：每个方法在该文件中的行范围）。该文件同时作为一个 `resource_link` 内容项给出，`structuredContent` 中列出 `file`、`lines`、`bytes`、`index` | 能读文件的 agent（Claude Code、Codex、带文件工具的 Grok Build）：它们会 grep 或读取所需的行 |
+| `always` | 每条回复都写入文件；内联只给出开头部分和路径 | 同上，适合连中等大小的回复也不想放进上下文的场景 |
+| `never` | 由完整记录组成的页（一行及其下方缩进的行：一条 findrefs 结果及其上下文、一个 smali 方法），每页以 `# page 0 of 0..5 …; next page: tool {…}` 结尾，附带下一次调用的完整参数（`structuredContent` 中的 `next`） | agent 无法读取本地文件的客户端（远程或沙箱中的 agent） |
 
-Files are named by content (`out/<sha256>.txt`, mode 0600, directory 0700) in the cache
-directory, or `$XDG_RUNTIME_DIR/droidasc/out` without one; the same reply reuses its file, and
-the directory is kept under 64 MiB (`--spill-mb`, least recently used first; `--spill-mb 0`
-pages instead). `droidasc cache clear` removes it with the rest of the cache. A multi-APK
-report pages by `cursor` as before and, when it has more pages, spills the whole report next
-to the first one. A `more` / `next` hint passed back as the `cursor` (as a JSON object, or the
-`tool {…}` text of a hint) runs as the call it names.
+文件按内容命名（`out/<sha256>.txt`，权限 0600，目录 0700），位于 cache 目录中，没有 cache 目录时则位于
+`$XDG_RUNTIME_DIR/droidasc/out`；相同的回复复用同一文件，目录保持在 64 MiB 以内（`--spill-mb`，最近最少
+使用的优先清理；`--spill-mb 0` 改为分页）。`droidasc cache clear` 会将其与 cache 的其余部分一并删除。
+多 APK 报告仍按 `cursor` 分页，当它还有更多页时，会把整个报告溢出到第一个文件旁边。把 `more` / `next`
+提示作为 `cursor` 传回（作为 JSON 对象，或提示中的 `tool {…}` 文本），即会执行它所指向的调用。
 
-`notifications/cancelled` stops a running call (work not yet started is skipped and the call
-gets no reply). Every APK is treated as untrusted: an entry that would inflate past 1 GiB or
-expand more than 100:1 is refused (`--max-entry-mb`, `--max-ratio`), and only that APK fails.
+`notifications/cancelled` 会停止正在运行的调用（尚未开始的工作被跳过，该调用不会收到回复）。每个 APK 都
+被视为不可信：解压后会超过 1 GiB 或膨胀比超过 100:1 的条目会被拒绝（`--max-entry-mb`、`--max-ratio`），
+且只有该 APK 失败。
 
-#### Many APKs in one call
+#### 一次调用处理多个 APK
 
-`findrefs`, `listclass`, `open_apk`, `manifest_summary` and `resources` also take `apks` (paths) or `dir` (with `glob`,
-default `*.apk`, and `recursive`, default true) instead of one APK. Every DEX of every APK
-goes on one work queue (heaviest APK first), and the reply has one section per APK, every
-line prefixed with its `apk_id` (excerpt of a real reply; a section can also end with
-`apkN | more | 3 more: findrefs {"apk_id":"apkN","kind":…,"offset":10,…}` hints whose JSON is
-the complete arguments of the follow-up call (also in `structuredContent` as `next`), `apkN | sdk | Landroidx/ 23, …` folded counts and warnings).
-A findrefs sweep replays an APK's rows from the disk cache when the same query already ran on
-that APK version (one-APK and sweep calls share them), and searches a DEX that several APKs
-carry byte for byte only once (`structuredContent`: `apks_from_result_cache`, `dex_shared`):
+`findrefs`、`listclass`、`open_apk`、`manifest_summary` 和 `resources` 也接受 `apks`（路径列表）或 `dir`
+（配合 `glob`，默认 `*.apk`，以及 `recursive`，默认 true）来代替单个 APK。所有 APK 的所有 DEX 都放进同一个
+工作队列（最重的 APK 优先），回复中每个 APK 一节，每行都以其 `apk_id` 为前缀（以下摘自一次真实回复；一节
+还可能以 `apkN | more | 3 more: findrefs {"apk_id":"apkN","kind":…,"offset":10,…}` 提示结尾，其中的 JSON
+是后续调用的完整参数（也在 `structuredContent` 的 `next` 中），以及 `apkN | sdk | Landroidx/ 23, …` 折叠
+计数和警告）。当同一查询已在某个 APK 的同一版本上运行过时，findrefs 批量扫描会从磁盘 cache 回放该 APK 的
+结果行（单 APK 调用与批量调用共享这些结果），而多个 APK 中逐字节相同的 DEX 只搜索一次
+（`structuredContent`：`apks_from_result_cache`、`dex_shared`）：
 
 ```
 # findrefs method addJavascriptInterface over 312 APKs: 20 with hits, 103 hits, 0 errors, 193 ms
@@ -497,46 +451,44 @@ apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInte
 # APKs 0..4 of 20 shown (output budget 16384 bytes); call findrefs with cursor="1:4" for the rest
 ```
 
-| argument | effect |
+| 参数 | 作用 |
 |---|---|
-| `per_apk` (10) | rows shown per APK; the `more` line says how to page that APK |
-| `collapse_sdks` (true for many APKs) / `sdk_prefixes` | fold hits in common SDK packages (androidx, kotlin, gms, okhttp3, …; `--sdk-prefixes` replaces the list) into per-SDK counts |
-| `group: "package"`, `package_depth` (3) | one line per package with its hit count and an example, instead of rows |
-| `max_bytes` (16384) | output budget; whole APK sections that do not fit are left for `cursor` |
-| `cursor` | pass back alone to the same tool for the next page (the session keeps the last 16 reports) |
-| `release` | drop each APK's DEX from memory once searched (default: when the selected APKs' DEX would not fit the memory budget) |
+| `per_apk` (10) | 每个 APK 显示的行数；`more` 行说明如何对该 APK 分页 |
+| `collapse_sdks`（多个 APK 时为 true）/ `sdk_prefixes` | 把常见 SDK 包（androidx、kotlin、gms、okhttp3……；`--sdk-prefixes` 替换该列表）中的命中折叠为按 SDK 的计数 |
+| `group: "package"`、`package_depth` (3) | 每个包一行，给出命中数和一个示例，代替逐行结果 |
+| `max_bytes` (16384) | 输出预算；放不下的整个 APK 小节留给 `cursor` |
+| `cursor` | 单独传回给同一工具以获取下一页（会话保留最近 16 份报告） |
+| `release` | 每个 APK 搜索完后从内存中丢弃其 DEX（默认：当所选 APK 的 DEX 超出内存预算时） |
 
-Exposure audit with [`bench/multi-apk/audit.py`](bench/multi-apk/audit.py): the 8 rules of the
-multi-APK benchmark over the 312 system APKs of a Pixel 6 (3.8 GB, 405 DEX, 1.28 GB of DEX),
-one `droidasc --no-cache mcp`:
+用 [`bench/multi-apk/audit.py`](bench/multi-apk/audit.py) 做暴露面审计：在 Pixel 6 的 312 个系统 APK
+（3.8 GB，405 个 DEX，1.28 GB 的 DEX）上运行多 APK 基准的 8 条规则，使用一个 `droidasc --no-cache mcp`：
 
-| | tool calls | reply text | wall | peak RSS |
+| | 工具调用次数 | 回复文本 | 墙钟时间 | 峰值 RSS |
 |---|---:|---:|---:|---:|
-| one call per APK per rule, a rule's 312 calls pipelined | 2,496 | 762 KiB | 416 ms | 1,667 MB |
-| one `dir` call per rule, first page only | **8** | **166 KiB** | 480 ms | 1,695 MB |
-| one `dir` call per rule, every cursor page | 14 | 297 KiB | 480 ms | 1,691 MB |
-| one `dir` call per rule, `release: true` | 8 | 166 KiB | 1,573 ms | 565 MB |
+| 每条规则每个 APK 调用一次，一条规则的 312 次调用流水线化 | 2,496 | 762 KiB | 416 ms | 1,667 MB |
+| 每条规则一次 `dir` 调用，只取第一页 | **8** | **166 KiB** | 480 ms | 1,695 MB |
+| 每条规则一次 `dir` 调用，取所有 cursor 页 | 14 | 297 KiB | 480 ms | 1,691 MB |
+| 每条规则一次 `dir` 调用，`release: true` | 8 | 166 KiB | 1,573 ms | 565 MB |
 
-### Agent session benchmark
+### Agent 会话基准
 
-The 17 analysis goals (47 steps) of the [dexsql-release agent audit](https://github.com/LSPosed/dexsql-release/tree/main/benchmarks/agent-audit),
-replayed by [`bench/agent-audit/replay_mcp.py`](bench/agent-audit/replay_mcp.py) on
-Douyin 40.7.0 (343 MiB, 56 DEX, 551,080 classes). Same machine (Linux, 16 threads, 12 GB),
-dexsql 0.1.1 linux-amd64 measured with its own `dexsql_replay.py` / `whole_suite.py`; asc-rs
-with `--no-cache` unless noted. Medians of 7.
+[dexsql-release agent audit](https://github.com/LSPosed/dexsql-release/tree/main/benchmarks/agent-audit)
+的 17 个分析目标（47 步），由 [`bench/agent-audit/replay_mcp.py`](bench/agent-audit/replay_mcp.py) 在
+抖音 40.7.0（343 MiB，56 个 DEX，551,080 个类）上回放。同一台机器（Linux，16 线程，12 GB），dexsql 0.1.1
+linux-amd64 使用其自带的 `dexsql_replay.py` / `whole_suite.py` 测量；除非另有说明，asc-rs 使用
+`--no-cache`。取 7 次的中位数。
 
-| | asc-rs `mcp` | asc-rs `mcp`, disk cache warm | dexsql 0.1.1 MCP | rasc (process per step) |
+| | asc-rs `mcp` | asc-rs `mcp`，磁盘 cache 已预热 | dexsql 0.1.1 MCP | rasc（每步一个进程） |
 |---|---:|---:|---:|---:|
-| open the APK | 77 ms | 18 ms | 589 ms | — |
-| whole session: start, open, 17 goals, exit | **218 ms** | 153 ms | 1,112 ms | 3,819 ms |
-| per goal once open, geometric mean | **5.3 ms** | 5.3 ms | 22.6 ms | — |
-| peak RSS | 646 MB | 522 MB | ~1.35 GB (two processes) | ~350 MB per step |
+| 打开 APK | 77 ms | 18 ms | 589 ms | — |
+| 整个会话：启动、打开、17 个目标、退出 | **218 ms** | 153 ms | 1,112 ms | 3,819 ms |
+| 打开后每个目标，几何平均 | **5.3 ms** | 5.3 ms | 22.6 ms | — |
+| 峰值 RSS | 646 MB | 522 MB | ~1.35 GB（两个进程） | 每步 ~350 MB |
 
-Every goal finds its evidence; three of the expected tokens are Java spellings that read
-differently in smali (`new java.io.File` → `Ljava/io/File;-><init>`, `36865` → `0x9001`,
-`return true` → `const/4 v0, 0x1` / `return v0`). dexsql answers SQL, including multi-hop
-call-graph joins that `findrefs` cannot express; this compares only these goals.
+每个目标都能找到其证据；其中三个预期 token 是 Java 写法，在 smali 中的形式不同
+（`new java.io.File` → `Ljava/io/File;-><init>`，`36865` → `0x9001`，`return true` → `const/4 v0, 0x1` /
+`return v0`）。dexsql 回答的是 SQL，包括 `findrefs` 无法表达的多跳调用图 join；这里只比较这些目标。
 
-## License
+## 许可证
 
-Apache-2.0, same as the original project.
+Apache-2.0，与原项目相同。
