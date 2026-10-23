@@ -1,5 +1,7 @@
 # 失败调用回放
 
+> 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/` 和 ams `~/asc-eval/results/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
+
 把两轮 grok 评测里所有失败的 droidasc MCP 调用，原样在一个 MCP 会话里重放，比较 cli-native 改动（统一查询语法、宽松参数、可操作报错、零结果提示）前后的版本。结论见 [../README.md](../README.md#失败调用回放cli-native本地-linuxdouyin-4070)。
 
 ```

@@ -1,5 +1,7 @@
 # 确定性评测（第二轮）
 
+> 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/` 和 ams `~/asc-eval/results/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
+
 结论见 [../README.md](../README.md)。脚本都只用 Python 3.9 标准库（ams 上是 3.9），Linux 和 macOS 都能跑。
 
 - **内存**：峰值 RSS 用 `wait4` 取单个进程的值，或者每 50 ms 轮询一次 `ps -axo pid,ppid,rss` 汇总整棵进程树（`common.py` 的 `TreeSampler`）。注意 macOS 的 RSS 包含映射的文件页。
@@ -40,7 +42,7 @@
 
 `rust-asc/` 下的两个脚本写于第一轮。之后 droidasc 的文本格式和 MCP 默认值都变了（compact structuredContent、16 KiB 预算），所以 `cmp.py` 现在显式请求 `--structured full`、`max_bytes` 和 `spill: never`。改动之后**没有**再对 rust_ASC 跑过。
 
-## 结果（[`results/`](results/)）
+## 结果（`results/`）
 
 | 目录 | 内容 |
 |---|---|

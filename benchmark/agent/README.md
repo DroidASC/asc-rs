@@ -1,5 +1,7 @@
 # agent 评测（grok headless）
 
+> 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/` 和 ams `~/asc-eval/results/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
+
 结论见 [../README.md](../README.md)。这里记录当时的做法，便于复现或查验。2026-10-23 起不再做新的 agent 评测。
 
 ## 做法
@@ -57,7 +59,7 @@ python3 s2/run.py $R r2s2 1 4 droidasc dexsql
 python3 s2/score.py $R r2s2 s2/ref-k80.json -v
 ```
 
-## 每次运行的指标（[`results/`](results/)）
+## 每次运行的指标（`results/`）
 
 [`extract.py`](extract.py) 从原始 ndjson 中提取，一次运行一行：
 

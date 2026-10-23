@@ -9,11 +9,13 @@ asc-rs 的全部评测结论，以及复现它们所需的脚本和步骤。APK 
 
 数字均取自 `*/results/` 下的结果文件，或当时的运行日志；没有测的写「未测」。
 
+**结果文件不入库**：所有 `results/` 目录、语料清单 `*.tsv` 和 `agent/s2/ref-k80.json` 都保存在仓库之外，目录结构与这里相同：本地 `target/benchmark-data/benchmark/`，ams `~/asc-eval/results/benchmark-data/benchmark/`。下文提到的这些路径都相对于那里；脚本会把新结果写到同样的位置。
+
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| [corpus.md](corpus.md)、[corpus/](corpus/) | 语料与版本、设备信息、拉取脚本 `pull.sh`、清单生成脚本 `manifest.py`、各语料清单 `*.tsv` |
+| [corpus.md](corpus.md)、[corpus/](corpus/) | 语料与版本、设备信息、拉取脚本 `pull.sh`、清单生成脚本 `manifest.py`（清单本身不入库） |
 | [deterministic/](deterministic/) | 第二轮确定性评测（S1 回放、S2 多 APK、big-machine、prefix-skip、缓存一致性与 no-fsync、rust_ASC 对比），及结果汇总 |
 | [agent/](agent/) | grok agent 评测：S1、S2 的 runner 和打分脚本、每次运行的指标（CSV）、工作区配置 |
 | [cli-native/](cli-native/) | 失败调用回放：两轮 agent 评测里所有失败的 droidasc 调用，在 cli-native 改动前后的版本上重放 |
@@ -39,7 +41,7 @@ asc-rs 的全部评测结论，以及复现它们所需的脚本和步骤。APK 
 
 ### 确定性评测
 
-**S1：Douyin 40.7.0（56 个 DEX，55 万个类），dexsql-release 的 17 个目标（47 步）**。脚本 [`agent-audit/replay_mcp.py`](agent-audit/replay_mcp.py)。仓库里只留了最后一次的结果 [`agent-audit/results/asc_mcp_benchmark.json`](agent-audit/results/asc_mcp_benchmark.json)（`integrate/plan`，磁盘缓存命中，整轮 81 ms，7 次中位数）；下表其余数字取自当时的运行记录。
+**S1：Douyin 40.7.0（56 个 DEX，55 万个类），dexsql-release 的 17 个目标（47 步）**。脚本 [`agent-audit/replay_mcp.py`](agent-audit/replay_mcp.py)。仓库里只留了最后一次的结果 `agent-audit/results/asc_mcp_benchmark.json`（`integrate/plan`，磁盘缓存命中，整轮 81 ms，7 次中位数）；下表其余数字取自当时的运行记录。
 
 | | asc-rs mcp | asc-rs CLI，磁盘缓存命中 | dexsql 0.1.1 | rasc |
 |---|---:|---:|---:|---:|
@@ -70,7 +72,7 @@ asc-rs 的全部评测结论，以及复现它们所需的脚本和步骤。APK 
 
 ### agent 评测（grok，Douyin 40.7.0，17 个目标 × 2 次，只接 MCP）
 
-每次运行的指标在 [`agent/results/round1-s1.csv`](agent/results/round1-s1.csv)。
+每次运行的指标在 `agent/results/round1-s1.csv`。
 
 | 工具 | MCP 调用/目标（中位数） | 失败调用 | token/目标 | $/目标 | 耗时 | 证据 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -85,7 +87,7 @@ asc-rs 的全部评测结论，以及复现它们所需的脚本和步骤。APK 
 
 ## 第二轮：确定性评测（ams，Douyin 40.8.0 与 836 个小米设备 APK）
 
-驱动脚本与结果见 [deterministic/README.md](deterministic/README.md)。全部汇总表：[`results/round2/summary.md`](deterministic/results/round2/summary.md)、[`results/round2-bm/summary.md`](deterministic/results/round2-bm/summary.md)。
+驱动脚本与结果见 [deterministic/README.md](deterministic/README.md)。全部汇总表：`results/round2/summary.md`、`results/round2-bm/summary.md`。
 
 ### S1：Douyin 40.8.0，47 步，5 次中位数
 
@@ -121,7 +123,7 @@ asc-rs 的全部评测结论，以及复现它们所需的脚本和步骤。APK 
 | 问题 | 现象 | 修复 | 实测 |
 |---|---|---|---|
 | 写盘队列不限长（旧 bug，r1 同样存在） | 一个 MCP 进程冷扫 416 个 APK，4 s 内涨到 28–44 GB，缓存目录 8.6 GB，是预算的两倍 | `4d701d8`：排队写入超过 512 MiB 就丢弃新写入；写入期间也淘汰 | 836 个 APK 每条规则调用一次：从超过 30 GB 被强制终止，变为 6.5 s / 5.2 GB；规则集 1.4 s / 3.2 GB |
-| aarch64 上 sha2 走软件实现 | 跨 APK 去重的 SHA-256 成为采样热点，两台手机的系统 APK 大量重复 | `a23650e`：aarch64 上开启 `asm` feature | 836 个 APK 规则集冷跑：修复前 2055 ms，修复后 1713 ms，r1 1732 ms（交替 5 轮）。修复前的数据在 [`results/round2/pre-sha/`](deterministic/results/round2/pre-sha/) |
+| aarch64 上 sha2 走软件实现 | 跨 APK 去重的 SHA-256 成为采样热点，两台手机的系统 APK 大量重复 | `a23650e`：aarch64 上开启 `asm` feature | 836 个 APK 规则集冷跑：修复前 2055 ms，修复后 1713 ms，r1 1732 ms（交替 5 轮）。修复前的数据在 `results/round2/pre-sha/` |
 | macOS 上 `sync_data` 等于 `F_FULLFSYNC` | 每个 8 MiB 文件 9.8 ms，普通 fsync 2.0 ms | no-fsync：去掉 fsync，文件带 CRC，重启前写入的文件读取时校验一次 | ams 上用临时去掉同步的构建：每条规则一个进程冷跑 52.7 → 21.1 s，规则集冷跑 8.0 → 4.0 s。合入版本在 macOS 上的正式前后对比**未测**。本地 Linux 见下 |
 
 ### prefix-skip（本地 Linux，Douyin 40.7.0，`--no-cache` 冷查询中位数）
@@ -153,7 +155,7 @@ MCP 会话不触发（常驻缓存），不压缩存放的 APK（GMS）和字符
 
 ### big-machine（ams，旧 `36ab1e2` 对新 `c1fc2da`，交替 3 次中位数）
 
-驱动 [`deterministic/bm.sh`](deterministic/bm.sh)，结果 [`results/round2-bm/`](deterministic/results/round2-bm/)。
+驱动 [`deterministic/bm.sh`](deterministic/bm.sh)，结果 `results/round2-bm/`。
 
 | 规则集，自动线程 | 冷：旧 → 新 | 热：旧 → 新 |
 |---|---:|---:|
@@ -183,7 +185,7 @@ MCP 会话不触发（常驻缓存），不压缩存放的 APK（GMS）和字符
 
 ## 第二轮：agent 评测（ams，grok-4.7）
 
-做法见 [agent/README.md](agent/README.md)。每次运行的指标在 [`agent/results/`](agent/results/)；原始记录（含 Douyin 反编译代码片段，体积约 80 MB）不提交，位置见 agent/README.md。
+做法见 [agent/README.md](agent/README.md)。每次运行的指标在 `agent/results/`；原始记录（含 Douyin 反编译代码片段，体积约 80 MB）不提交，位置见 agent/README.md。
 
 ### S1：Douyin 40.8.0，17 个目标 × 2 次，每组只接一个工具
 
