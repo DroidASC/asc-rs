@@ -481,3 +481,53 @@ fn mcp_serves_line_delimited_json_rpc_until_stdin_closes() {
     let text = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("classes.dex | Lexample/Test;->first | matched=(token)\n"), "{text}");
 }
+
+#[test]
+fn cache_stats_reports_the_disk_budget() {
+    let f = temp_apk();
+    let dir = tempfile::tempdir().unwrap();
+    let run = |env: Option<&str>, args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_droidasc"));
+        match env {
+            Some(v) => cmd.env("DROIDASC_CACHE_MAX_MB", v),
+            None => cmd.env_remove("DROIDASC_CACHE_MAX_MB"),
+        };
+        cmd.args(["--cache-dir", path(dir.path())]).args(args).output().expect("run droidasc")
+    };
+    let out = run(None, &["findrefs", path(f.path()), "string", "token"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(None, &["cache", "stats"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("\n1 APKs, "), "{text}");
+    assert!(text.contains(" (auto), used "), "{text}");
+    if cfg!(unix) {
+        assert!(text.contains("file system: ") && text.contains(" free of "), "{text}");
+    }
+    // An explicit budget wins over the automatic one; the flag over the environment.
+    assert!(stdout(&run(None, &["--cache-max-mb", "3", "cache", "stats"])).contains("budget: 3.0 MiB (explicit)"));
+    assert!(stdout(&run(Some("5"), &["cache", "stats"])).contains("budget: 5.0 MiB (explicit)"));
+    assert!(stdout(&run(Some("5"), &["--cache-max-mb", "7", "cache", "stats"])).contains("budget: 7.0 MiB (explicit)"));
+}
+
+#[test]
+fn zero_disk_budget_evicts_after_the_query() {
+    let f = temp_apk();
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_droidasc")).args(["--cache-dir", path(dir.path())]).args(args).output().expect("run droidasc")
+    };
+    let out = run(&["--cache-max-mb", "0", "findrefs", path(f.path()), "string", "token"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&run(&["cache", "stats"])).contains("0 APKs, 0 files"));
+}
+
+#[test]
+fn memory_budget_is_a_global_flag() {
+    // Before the subcommand as well as after it; one-shot commands accept and ignore it.
+    let apk = temp_apk();
+    let out = droidasc(&["--memory-mb", "64", "findrefs", path(apk.path()), "string", "token"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = droidasc(&["listclass", path(apk.path()), "--memory-mb", "64"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
