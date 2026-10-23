@@ -622,6 +622,9 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 CacheAction::Stats => {
                     let (apks, files, bytes) = cache.stats();
                     println!("{}\n{apks} APKs, {files} files, {}", cache.dir().display(), mib(bytes));
+                    for (tier, t) in asc_engine::asc_cache::Tier::ALL.into_iter().zip(cache.tier_stats()) {
+                        println!("  {:12} {} APKs, {} files, {}", tier.label(), t.apks, t.files, mib(t.bytes));
+                    }
                     let budget = cache.budget();
                     let source = match budget.capacity {
                         DiskCapacity::Auto => "auto",

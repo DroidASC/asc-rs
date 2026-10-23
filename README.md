@@ -217,15 +217,25 @@ the normal cost and fills the cache as a side effect.
 
 * **On-disk cache** (`~/.cache/droidasc`, or `$DROIDASC_CACHE_DIR` / `$XDG_CACHE_HOME`),
   on by default for the CLI and shared between processes. Entries are keyed by the APK's
-  size, mtime and central directory, written atomically, memory-mapped on the next run and
-  evicted least-recently-used above its budget (see below). Writes are queued to a background thread, so a
+  size, mtime and central directory, written atomically and memory-mapped on the next run,
+  in three tiers under one budget (see below):
+
+  | tier | holds | written when | evicted |
+  |---|---|---|---|
+  | L1 | inflated DEX entries | inflated, 4 MiB or larger (`$DROIDASC_CACHE_MIN_DEX_MB`): re-inflating a small DEX is cheaper than writing it | first, largest and oldest first |
+  | L2 | locator tables and call graphs per DEX, in a form the next process maps and reads in place (every process mapping them shares one copy) | built in 2 ms or more | last, least rebuild time saved per byte first |
+  | L3 | `findrefs` results, keyed by the query, its options and the build of the tool | the query ran without errors, result under 4 MiB | own budget: min(128 MiB, 1/8 of the total), oldest first |
+
+  Entries of APKs that were deleted or replaced since go before anything else.
+  `$DROIDASC_CACHE_TIERS=dex,derived,rendered` picks the tiers (all by default).
+  Writes are queued to a background thread, so a
   query never waits for its own cache entry to be written (the process still lands queued
   writes before exiting). The directory carries a `CACHEDIR.TAG`; a `--cache-dir` that
   already holds other files (dot-files included) is refused outright with a warning and the
   disk cache is disabled (nothing is written, tagged, evicted or cleared there), and eviction and `cache clear` only ever touch entry directories of the
   cache's own naming shape. `--no-cache` bypasses it,
   `--cache-dir` moves it, `droidasc cache path|stats|clear` manages it (`stats` prints
-  the budget, where it comes from and the file system's free space).
+  each tier's usage, the budget, where it comes from and the file system's free space).
 * **In-memory LRU** (GUI and embedders, `CacheConfig::resident` / `resident_auto`) that
   also keeps the locator tables built for each DEX, so a second query only runs the
   regex, the scan and the offset→method resolution. Its budget counts those tables too
@@ -234,15 +244,17 @@ the normal cost and fills the cache as a side effect.
   headroom when lower), clamped to 64 MiB–2 GiB, so several open browsers do not each
   claim 2 GiB. With the disk cache on, an entry inflated on the heap is swapped for a
   mapping of its cache file as soon as that file is written (after a byte-for-byte
-  check), so resident entries are file-backed pages the OS can reclaim and share between
-  processes rather than anonymous memory.
+  check), and locator tables for a view of their L2 file, so resident entries are
+  file-backed pages the OS can reclaim and share between processes rather than anonymous
+  memory. Entries an APK stores uncompressed (nearly every system app) are mapped from
+  the APK itself.
 
 Both caches size themselves from the machine unless given a number:
 
 | | automatic budget | explicit |
 |---|---|---|
 | disk | 20 % of what the cache could hold (its own bytes + the file system's free space), at most 4 GiB, and never so much that less than max(1 GiB, 5 % of the file system) stays free; 4 GiB where the free space cannot be read (Windows) | `--cache-max-mb MIB`, else `$DROIDASC_CACHE_MAX_MB` |
-| memory (gui, mcp) | a quarter of available memory (`MemAvailable`, or the cgroup v2 headroom when lower), 64 MiB–2 GiB; 2 GiB where it cannot be read | `--memory-mb MIB` |
+| memory (gui, mcp) | one budget for all of the user's running `gui` / `mcp` processes, split evenly: a quarter of (available memory + what their caches hold), divided by the number of processes, 64 MiB–2 GiB each; 2 GiB where it cannot be read. Each process registers in `$XDG_RUNTIME_DIR/droidasc` and re-reads the registry at most once a second | `--memory-mb MIB` (fixed; still registered, so the others count it) |
 
 The disk budget is re-evaluated at every eviction pass (once per burst of writes, the
 same directory walk as before) and each automatic-budget write first checks the free
