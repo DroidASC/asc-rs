@@ -341,6 +341,29 @@ fn method_flag_renders_one_exact_signature() {
     assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
 }
 
+#[test]
+fn rasc_aliases_and_version_flags() {
+    let apk = temp_apk();
+    let a = droidasc(&["classes", path(apk.path()), "--thread", "1"]);
+    assert!(a.status.success(), "{}", stderr(&a));
+    assert_eq!(stdout(&a), stdout(&droidasc(&["listclass", path(apk.path())])));
+    // No AndroidManifest.xml in the fixture: both names reach the same error.
+    let m = droidasc(&["manifest", path(apk.path())]);
+    let g = droidasc(&["getmanifest", path(apk.path())]);
+    assert_eq!(m.status.code(), Some(1));
+    assert_eq!(stderr(&m), stderr(&g));
+    assert!(stderr(&m).starts_with("Error:"), "{}", stderr(&m));
+    for flag in ["-v", "-V", "--version"] {
+        let out = droidasc(&[flag]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(stdout(&out).starts_with("droidasc "), "{}", stdout(&out));
+    }
+    // The legacy `app.apk --gui` rewrite leaves the aliases alone.
+    let out = droidasc(&["classes", path(apk.path()), "--gui"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("--gui"), "{}", stderr(&out));
+}
+
 // ---- listclass (ported from the Python `test_listclass.py`) -------------
 
 #[test]

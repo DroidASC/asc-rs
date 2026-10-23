@@ -10,7 +10,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const EXAMPLES: &str = "examples:
+const EXAMPLES: &str = "common:
+  Class names accept both com.poc.Main and Lcom/poc/Main;.
+  Commands with -o/--output write to stdout when the option is omitted.
+  --threads N controls parallel APK scanning; --debug enables timing output.
+
+examples:
   droidasc app.apk --gui
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16
@@ -42,15 +47,19 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
 
-const SUBCOMMANDS: [&str; 7] = ["getclass", "disassemble", "listclass", "getmanifest", "findrefs", "gui", "cache"];
+/// Subcommand names and aliases (`classes` / `manifest` as in rasc).
+const SUBCOMMANDS: [&str; 9] = ["getclass", "disassemble", "listclass", "classes", "getmanifest", "manifest", "findrefs", "gui", "cache"];
 
 fn default_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8)
 }
 
 #[derive(Parser)]
-#[command(name = "droidasc", about = "ASC tooling entry.", after_help = EXAMPLES, version)]
+#[command(name = "droidasc", about = "ASC tooling entry.", after_help = EXAMPLES, version, disable_version_flag = true)]
 struct Cli {
+    /// Print version.
+    #[arg(short = 'V', visible_short_alias = 'v', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
     #[command(flatten)]
     common: Common,
     #[command(subcommand)]
@@ -133,6 +142,7 @@ enum Command {
         dalvik_class: String,
     },
     /// List classes across all DEX entries; use --prefix to filter by package/class prefix.
+    #[command(visible_alias = "classes")]
     Listclass {
         /// Only list classes with this package/class prefix (e.g., com.poc or Lcom/poc).
         #[arg(long)]
@@ -144,6 +154,7 @@ enum Command {
         apk_path: PathBuf,
     },
     /// Decode AndroidManifest.xml from APK and print it as XML.
+    #[command(visible_alias = "manifest")]
     Getmanifest {
         /// Also write the decoded manifest to this file.
         #[arg(short, long)]
