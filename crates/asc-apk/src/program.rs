@@ -16,6 +16,27 @@ const MAX_DEPTH: usize = 8;
 pub(crate) struct Source {
     pub path: PathBuf,
     pub label: String,
+    /// Read while listing it, so a [`Version`] needs no second `stat`.
+    meta: fs::Metadata,
+}
+
+/// What tells two spellings of one file from two files: device and inode.
+#[cfg(unix)]
+type FileId = (u64, u64);
+#[cfg(not(unix))]
+type FileId = PathBuf;
+
+impl Source {
+    #[cfg(unix)]
+    fn identity(&self) -> FileId {
+        use std::os::unix::fs::MetadataExt;
+        (self.meta.dev(), self.meta.ino())
+    }
+
+    #[cfg(not(unix))]
+    fn identity(&self) -> FileId {
+        fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone())
+    }
 }
 
 /// Which files an [`Apk`](crate::Apk) was opened from, with their sizes
@@ -24,12 +45,8 @@ pub(crate) struct Source {
 pub struct Version(Vec<(PathBuf, u64, Option<SystemTime>)>);
 
 impl Version {
-    pub(crate) fn of_sources(sources: &[Source]) -> Result<Version> {
-        let stat = |s: &Source| {
-            let meta = fs::metadata(&s.path).map_err(|source| ApkError::Io { path: s.path.clone(), source })?;
-            Ok((s.path.clone(), meta.len(), meta.modified().ok()))
-        };
-        Ok(Version(sources.iter().map(stat).collect::<Result<_>>()?))
+    pub(crate) fn of_sources(sources: &[Source]) -> Version {
+        Version(sources.iter().map(|s| (s.path.clone(), s.meta.len(), s.meta.modified().ok())).collect())
     }
 }
 
@@ -63,24 +80,27 @@ pub(crate) fn sources(spec: &Path) -> Result<Vec<Source>> {
     let mut out = Vec::new();
     for part in parts {
         let io = |source| ApkError::Io { path: part.clone(), source };
-        if !fs::metadata(&part).map_err(io)?.is_dir() {
+        let meta = fs::metadata(&part).map_err(io)?;
+        if !meta.is_dir() {
             let label = if several { name_of(&part) } else { String::new() };
-            out.push(Source { path: part, label });
+            out.push(Source { path: part, label, meta });
             continue;
         }
         let mut files = Vec::new();
         walk(&part, MAX_DEPTH, &mut files).map_err(io)?;
-        files.sort();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
         let top = if several { Some(name_of(&part)) } else { None };
-        for path in files {
+        for (path, meta) in files {
             let below = path.strip_prefix(&part).unwrap_or(&path);
             let rel = below.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
             let label = top.as_ref().map_or_else(|| rel.clone(), |t| format!("{t}/{rel}"));
-            out.push(Source { path, label });
+            out.push(Source { path, label, meta });
         }
     }
-    let mut seen_paths = HashSet::new();
-    out.retain(|s| seen_paths.insert(fs::canonicalize(&s.path).unwrap_or_else(|_| s.path.clone())));
+    // By file identity, not by canonical path: a program walks its
+    // directories on every open, and resolving each path is ten syscalls.
+    let mut seen = HashSet::new();
+    out.retain(|s| seen.insert(s.identity()));
     let mut seen_labels = HashSet::new();
     for s in &mut out {
         let base = s.label.clone();
@@ -101,7 +121,7 @@ fn name_of(path: &Path) -> String {
 }
 
 /// Files of `dir` with one of [`EXTENSIONS`], `depth` levels down.
-fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, fs::Metadata)>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         // Follows links: a pulled system image often links its partitions.
@@ -111,7 +131,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::io::Result<()>
                 walk(&path, depth - 1, out)?;
             }
         } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x))) {
-            out.push(path);
+            out.push((path, meta));
         }
     }
     Ok(())
@@ -151,6 +171,14 @@ mod tests {
         // Listed with others: the directory's name leads, duplicates go.
         let spec = format!("{},{}", root.display(), lone.display());
         assert_eq!(labels(Path::new(&spec)), ["framework/app/Tele/Tele.apk", "framework/framework.jar", "framework/services.jar"]);
+        // A link to a listed file is that file.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.jar");
+            std::os::unix::fs::symlink(&lone, &link).unwrap();
+            let spec = format!("{},{}", lone.display(), link.display());
+            assert_eq!(labels(Path::new(&spec)), ["services.jar"]);
+        }
         let other = dir.path().join("other");
         fs::create_dir_all(&other).unwrap();
         fs::write(other.join("services.jar"), b"y").unwrap();

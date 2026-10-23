@@ -1239,10 +1239,13 @@ impl Engine {
     /// Open the APK, or reuse the one opened last while [`Apk::version_of`]
     /// finds the same files, sizes and times.
     pub fn open(&self) -> Result<Apk> {
-        let version = Apk::version_of(&self.apk_path)?;
         let mut opened = self.opened.lock().unwrap();
-        if let Some(apk) = opened.as_ref().filter(|a| *a.version() == version) {
-            return Ok(apk.clone().with_limits(self.limits));
+        // Nothing to compare with on the first open: opening reads the
+        // version anyway, so do not walk a program's directories twice.
+        if let Some(apk) = opened.as_ref() {
+            if *apk.version() == Apk::version_of(&self.apk_path)? {
+                return Ok(apk.clone().with_limits(self.limits));
+            }
         }
         let apk = Apk::open(&self.apk_path)?.with_limits(self.limits);
         *opened = Some(apk.clone());
