@@ -459,6 +459,7 @@ impl AscApp {
             Query::StringLiteral(v) => format!("string (literal): {v}"),
             Query::Extends(v) => format!("extends: {v}"),
             Query::Implements(v) => format!("impl: {v}"),
+            Query::All { all, none } => format!("all of {}, none of {}", all.len(), none.len()),
             Query::Method(MemberQuery { class, name, exact_name }) | Query::Field(MemberQuery { class, name, exact_name }) => format!(
                 "{}: {}{}{}",
                 kind.as_str(),

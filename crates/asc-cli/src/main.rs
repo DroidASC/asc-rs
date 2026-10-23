@@ -1,7 +1,7 @@
 //! `droidasc` command line entry.
 
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
-use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, RefContext};
+use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand};
 use std::fs::File;
@@ -62,7 +62,7 @@ Debug output (--debug) goes to stderr so stdout can be redirected.";
 const EXIT_PARTIAL: u8 = 2;
 
 /// Subcommand names and aliases (`classes` / `manifest` as in rasc).
-const SUBCOMMANDS: [&str; 14] = [
+const SUBCOMMANDS: [&str; 15] = [
     "getclass",
     "disassemble",
     "listclass",
@@ -74,6 +74,7 @@ const SUBCOMMANDS: [&str; 14] = [
     "xml",
     "findrefs",
     "callgraph",
+    "hierarchy",
     "gui",
     "mcp",
     "cache",
@@ -299,7 +300,8 @@ enum Command {
     /// One line per call: depth, `<-` (caller) or `->` (callee), signature.
     /// `[no body]` marks methods no DEX of the APK defines (framework / SDK),
     /// `(repeated)` methods expanded elsewhere in the tree. References are
-    /// static: a call through a subclass is not a call of the base method.
+    /// static: a call through a subclass is not a call of the base method
+    /// (unless --virtual).
     Callgraph {
         /// Write the tree to this file instead of stdout.
         #[arg(short, long)]
@@ -313,12 +315,45 @@ enum Command {
         /// Stop after discovering this many methods.
         #[arg(long, value_name = "N", default_value_t = 500)]
         max_nodes: usize,
+        /// Follow virtual dispatch: callers also through the same signature on
+        /// each supertype (`(via Lbase;)`), callees also the overrides in
+        /// subclasses (`(override of Lbase;)`).
+        #[arg(long = "virtual")]
+        virtual_calls: bool,
         /// Path to the input APK file.
         apk_path: PathBuf,
         /// Declaring class (com.poc.Main or Lcom/poc/Main;).
         class: String,
         /// Method name (every overload) or exact signature, e.g. run(I)V.
         method: String,
+    },
+    /// Class hierarchy across all DEX entries: transitive subclasses and
+    /// implementers (default) or supertypes, as an indented tree.
+    ///
+    /// One line per class: depth, `subclass` / `implementer` (or `extends` /
+    /// `implements` with --supers), descriptor, defining DEX or `[not in APK]`.
+    /// With --method, classes defining it are marked `[defines m(..)V]` and
+    /// listed as `override Lsub;->m(..)V dex` lines (`inherited` with --supers).
+    Hierarchy {
+        /// Write the tree to this file instead of stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Walk superclasses and interfaces instead of subclasses.
+        #[arg(long)]
+        supers: bool,
+        /// Levels to walk.
+        #[arg(long, default_value_t = 16)]
+        depth: usize,
+        /// Stop after discovering this many classes.
+        #[arg(long, value_name = "N", default_value_t = 2000)]
+        max_nodes: usize,
+        /// Mark the classes defining this method: a name or name(params)ret.
+        #[arg(long)]
+        method: Option<String>,
+        /// Path to the input APK file.
+        apk_path: PathBuf,
+        /// Class in dotted or Dalvik form.
+        class: String,
     },
     /// Launch the graphical browser.
     Gui {
@@ -406,6 +441,37 @@ enum Find {
         #[arg(long)]
         exact: bool,
     },
+    /// Find methods whose code matches every condition (and none of --none),
+    /// e.g. `all string:http:// method:android.webkit.WebView->loadUrl`.
+    ///
+    /// Conditions are KIND:VALUE: string:REGEX, literal:TEXT, type:PATTERN,
+    /// method:[CLASS->]NAME, field:[CLASS->]NAME (CLASS exact, or `~CLASS`
+    /// fuzzy; NAME a regex / substring, or `=NAME` exact). `matched=(...)`
+    /// lists what each condition matched, in order.
+    All {
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Drop methods that also match this condition (repeatable).
+        #[arg(long, value_name = "CONDITION")]
+        none: Vec<String>,
+        /// Conditions that must all match in one method.
+        #[arg(required = true)]
+        conditions: Vec<String>,
+    },
+    /// Run several queries in one pass over each DEX, rows prefixed by rule
+    /// (`r1 | dex | ...`), after a `# r1 ...` header per rule.
+    ///
+    /// Each rule is a condition as for `all` (also extends:CLASS,
+    /// impl:CLASS), or several joined with `&` for a compound rule.
+    Rules {
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Read more rules from this file, one per line (`#` comments).
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// The rules.
+        rules: Vec<String>,
+    },
     /// Find references to fields.
     Field {
         #[arg(short, long)]
@@ -422,6 +488,74 @@ enum Find {
         #[arg(long)]
         exact: bool,
     },
+}
+
+/// `findrefs rules`: every rule in one pass, rows prefixed `rN | `.
+fn findrefs_rules(
+    common: &Common,
+    apk_path: &Path,
+    context: RefContext,
+    output: Option<PathBuf>,
+    file: Option<PathBuf>,
+    mut specs: Vec<String>,
+    t_start: Instant,
+) -> Result<ExitCode, String> {
+    if let Some(f) = &file {
+        let text = std::fs::read_to_string(f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
+        specs.extend(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from));
+    }
+    if specs.is_empty() {
+        return Err("findrefs rules needs at least one rule".into());
+    }
+    let rules = specs
+        .iter()
+        .map(|spec| {
+            let parts: Vec<&str> = spec.split('&').map(str::trim).collect();
+            if parts.len() == 1 {
+                return names::parse_condition(parts[0]);
+            }
+            let all = parts.iter().map(|p| names::parse_condition(p)).collect::<Result<Vec<_>, _>>()?;
+            Ok(Query::All { all, none: Vec::new() })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let engine = common.engine(apk_path);
+    let stdout = std::io::stdout();
+    let mut sink = LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())?;
+    for (i, spec) in specs.iter().enumerate() {
+        sink.line(&format!("# r{} {spec}", i + 1));
+    }
+    let mut errors = Vec::new();
+    let mut totals = vec![0usize; rules.len()];
+    let opts = FindOptions { aggregate: true, context };
+    engine
+        .find_refs_rules(&rules, opts, &std::sync::atomic::AtomicBool::new(false), &mut |i, batch| {
+            if let Some(e) = batch.error {
+                errors.push(format!("{}: {e}", batch.entry_name));
+            }
+            totals[i] += batch.results.len();
+            for r in &batch.results {
+                for (j, line) in r.text().lines().enumerate() {
+                    sink.line(&if j == 0 { format!("r{} | {line}", i + 1) } else { format!("r{} |{line}", i + 1) });
+                }
+            }
+            sink.flush_stdout();
+        })
+        .map_err(|e| e.to_string())?;
+    for (i, n) in totals.iter().enumerate() {
+        sink.line(&format!("# r{} {n} results", i + 1));
+    }
+    let io_result = sink.finish();
+    errors.sort();
+    errors.dedup();
+    for e in &errors {
+        eprintln!("Warning: {e}");
+    }
+    if common.debug {
+        eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+    }
+    io_result?;
+    Ok(if errors.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(EXIT_PARTIAL) })
 }
 
 fn create_file(path: &Path) -> Result<File, String> {
@@ -660,7 +794,16 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 (Some(n), false) => RefContext::Lines(n),
                 (None, false) => RefContext::None,
             };
+            if let Find::Rules { output, file, rules } = find {
+                return findrefs_rules(&common, &apk_path, context, output, file, rules, t_start);
+            }
             let (query, output) = match find {
+                Find::Rules { .. } => unreachable!("handled above"),
+                Find::All { output, none, conditions } => {
+                    let parse = |c: &[String]| c.iter().map(|c| names::parse_condition(c)).collect::<Result<Vec<_>, _>>();
+                    let all = parse(&conditions).map_err(|e| e.to_string())?;
+                    (Query::All { all, none: parse(&none).map_err(|e| e.to_string())? }, output)
+                }
                 Find::String { output, literal: false, value } => (Query::String(value), output),
                 Find::String { output, literal: true, value } => (Query::StringLiteral(value), output),
                 Find::Type { output, value } => (Query::Type(value), output),
@@ -713,11 +856,12 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 return Ok(ExitCode::from(EXIT_PARTIAL));
             }
         }
-        Command::Callgraph { output, callees, depth, max_nodes, apk_path, class, method } => {
+        Command::Callgraph { output, callees, depth, max_nodes, virtual_calls, apk_path, class, method } => {
             let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
             let direction = if callees { Direction::Callees } else { Direction::Callers };
             let engine = common.engine(&apk_path);
-            let tree = engine.call_graph(&CallQuery { class, method, direction, depth, max_nodes }).map_err(|e| e.to_string())?;
+            let q = CallQuery { class, method, direction, depth, max_nodes, virtual_calls };
+            let tree = engine.call_graph(&q).map_err(|e| e.to_string())?;
             let mut text = tree.lines().join("\n");
             text.push('\n');
             text.push_str(&tree.footer());
@@ -731,6 +875,27 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             }
             if common.debug {
                 eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+            }
+            if !tree.errors.is_empty() {
+                return Ok(ExitCode::from(EXIT_PARTIAL));
+            }
+        }
+        Command::Hierarchy { output, supers, depth, max_nodes, method, apk_path, class } => {
+            let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
+            let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
+            let tree = common
+                .engine(&apk_path)
+                .hierarchy(&HierarchyQuery { class, direction, depth, max_nodes, method })
+                .map_err(|e| e.to_string())?;
+            let mut text: String = tree.lines().into_iter().chain(tree.definition_lines()).map(|l| l + "\n").collect();
+            text.push_str(&tree.footer());
+            text.push('\n');
+            match &output {
+                Some(p) => std::fs::write(p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?,
+                None => emit(&text)?,
+            }
+            for e in &tree.errors {
+                eprintln!("Warning: {e}");
             }
             if !tree.errors.is_empty() {
                 return Ok(ExitCode::from(EXIT_PARTIAL));

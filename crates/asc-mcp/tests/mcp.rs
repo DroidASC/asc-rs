@@ -73,7 +73,18 @@ fn full_session() {
     let tools: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         tools,
-        ["open_apk", "close_apk", "getclass", "findrefs", "callgraph", "listclass", "getmanifest", "manifest_summary", "resources"]
+        [
+            "open_apk",
+            "close_apk",
+            "getclass",
+            "findrefs",
+            "callgraph",
+            "hierarchy",
+            "listclass",
+            "getmanifest",
+            "manifest_summary",
+            "resources"
+        ]
     );
 
     let open = ok(&replies[2]);
@@ -616,4 +627,119 @@ fn a_sweep_reuses_rendered_results_of_earlier_runs() {
     let b = dir.path().join("sub/c.apk");
     let one = session_with(opts(), &[call(1, "findrefs", json!({"apk": b.to_str().unwrap(), "kind": "string", "value": "token"}))]);
     assert_eq!(ok(&one[0])["total"], 2, "{}", one[0]);
+}
+
+#[test]
+fn findrefs_combines_conditions_in_one_method() {
+    let apk = temp_apk();
+    let a = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(
+            1,
+            "findrefs",
+            json!({"apk": a, "all": [{"kind": "string", "value": "tok"}, {"kind": "string", "value": "token", "literal": true}]}),
+        ),
+        call(2, "findrefs", json!({"apk": a, "all": [{"kind": "string", "value": "token"}], "none": [{"kind": "string", "value": "oke"}]})),
+        call(3, "findrefs", json!({"apk": a, "kind": "string", "value": "x", "all": [{"kind": "string", "value": "x"}]})),
+        call(4, "findrefs", json!({"apk": a, "none": [{"kind": "string", "value": "x"}]})),
+        call(5, "findrefs", json!({"apk": a, "all": [{"kind": "extends", "value": "java.lang.Object"}]})),
+    ]);
+    let both = ok(&replies[0]);
+    assert_eq!(both["total"], 4);
+    assert_eq!(both["results"][0]["matched"], json!(["token", "token"]));
+    assert!(text(&replies[0]).starts_with("classes.dex | Lexample/Test;->first | matched=(token; token)\n"), "{}", text(&replies[0]));
+    assert_eq!(ok(&replies[1])["total"], 0);
+    for r in &replies[2..] {
+        assert_eq!(r["result"]["isError"], true, "{r}");
+    }
+    assert!(text(&replies[2]).contains("not both"));
+    assert!(text(&replies[3]).contains("at least one"));
+    assert!(text(&replies[4]).contains("cannot be combined"));
+}
+
+#[test]
+fn findrefs_rules_answer_every_rule_in_one_call() {
+    let apk = temp_apk();
+    let a = apk.path().to_str().unwrap();
+    let rules = json!([
+        {"kind": "string", "value": "token"},
+        {"kind": "string", "value": "absent"},
+        {"kind": "extends", "value": "java.lang.Object"},
+        {"all": [{"kind": "string", "value": "tok"}]},
+    ]);
+    // In order: the follow-up names this session's apk_id.
+    let server = asc_mcp::Server::new(opts());
+    let send = |m: Value| server.handle_line(&m.to_string()).unwrap();
+    let reply = send(call(1, "findrefs", json!({"apk": a, "rules": rules, "limit": 1})));
+    let s = ok(&reply);
+    let totals: Vec<u64> = s["rules"].as_array().unwrap().iter().map(|r| r["total"].as_u64().unwrap()).collect();
+    assert_eq!(totals, [4, 0, 2, 4]);
+    let body = text(&reply);
+    assert!(body.starts_with("# r1 string \"token\": 4 results\nr1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(body.contains("# r2 string \"absent\": 0 results\n# r3 extends \"java.lang.Object\": 2 results\nr3 | classes.dex | Lexample/Test; extends Ljava/lang/Object;\n"), "{body}");
+    assert!(body.contains("# r4 all(string \"tok\"): 4 results\n"), "{body}");
+    // The `more` hint is a complete single-rule call.
+    let line = body.lines().find(|l| l.starts_with("r1 | more | 3 more: findrefs ")).expect(body);
+    let next: Value = serde_json::from_str(line.split_once("findrefs ").unwrap().1).unwrap();
+    assert_eq!(next, s["rules"][0]["next"]);
+    assert_eq!(next["offset"], 1);
+    let rest = send(call(2, "findrefs", next));
+    assert_eq!((ok(&rest)["total"].as_u64(), ok(&rest)["returned"].as_u64()), (Some(4), Some(3)));
+
+    let bad = send(call(3, "findrefs", json!({"apk": a, "rules": [{"kind": "string", "value": "("}]})));
+    assert_eq!(bad["result"]["isError"], true);
+    let bad = send(call(4, "findrefs", json!({"apk": a, "rules": [], "kind": "string"})));
+    assert!(text(&bad).contains("empty"), "{bad}");
+}
+
+#[test]
+fn findrefs_rules_over_a_directory_group_rows_per_apk_and_rule() {
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let rules = json!([{"kind": "string", "value": "token"}, {"kind": "extends", "value": "java.lang.Object"}]);
+    let replies = session(&[
+        call(1, "findrefs", json!({"dir": d, "rules": rules, "per_apk": 1})),
+        call(2, "findrefs", json!({"dir": d, "kind": "string", "value": "token"})),
+        call(3, "findrefs", json!({"dir": d, "kind": "extends", "value": "java.lang.Object"})),
+    ]);
+    let s = ok(&replies[0]);
+    let per_rule: Vec<u64> = s["rules"].as_array().unwrap().iter().map(|r| r["total"].as_u64().unwrap()).collect();
+    assert_eq!(per_rule, [ok(&replies[1])["total"].as_u64().unwrap(), ok(&replies[2])["total"].as_u64().unwrap()]);
+    let body = text(&replies[0]);
+    assert!(body.starts_with("# findrefs 2 rules over 5 APKs: "), "{body}");
+    assert!(body.contains("\n# r1 string \"token\": 6 hits in 2 APKs\n"), "{body}");
+    let head = body.lines().find(|l| l.starts_with("apk1 | ")).unwrap();
+    assert!(head.starts_with("apk1 | 6 hits (r1 4, r2 2) | "), "{head}");
+    assert!(body.contains("apk1 | r1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(body.contains("apk1 | r2 | classes.dex | Lexample/Test; extends Ljava/lang/Object;\n"), "{body}");
+    assert!(
+        body.contains(
+            r#"apk1 | r1 | more | 3 more: findrefs {"apk_id":"apk1","collapse_sdks":true,"kind":"string","offset":1,"value":"token"}"#
+        ),
+        "{body}"
+    );
+    assert!(body.contains("\napk3 | error | "), "{body}");
+}
+
+#[test]
+fn hierarchy_lists_subclasses_and_overrides() {
+    let apk = temp_apk();
+    let a = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "hierarchy", json!({"apk": a, "class": "java.lang.Object", "method": "first"})),
+        call(2, "hierarchy", json!({"apk": a, "class": "Lexample/Test;", "direction": "supers"})),
+        call(3, "hierarchy", json!({"apk": a, "class": "Lnone/Such;"})),
+        call(4, "callgraph", json!({"apk": a, "class": "Lexample/Test;", "method": "first", "virtual": true})),
+    ]);
+    assert_eq!(
+        text(&replies[0]),
+        "0 Ljava/lang/Object; [not in APK]\n  1 subclass Lexample/Test; classes.dex [defines first()V]\n\
+         override Lexample/Test;->first()V classes.dex\n# 2 rows, 2 distinct classes (subclasses, depth 16); 1 define first\n"
+    );
+    let s = ok(&replies[0]);
+    assert_eq!(s["rows"][1]["relation"], "extends");
+    assert_eq!(s["definitions"], json!(["override Lexample/Test;->first()V classes.dex"]));
+    assert!(text(&replies[1]).starts_with("0 Lexample/Test; classes.dex\n  1 extends Ljava/lang/Object; [not in APK]\n"));
+    assert_eq!(replies[2]["result"]["isError"], true);
+    assert_eq!(ok(&replies[3])["rows"][0]["via"], Value::Null);
 }

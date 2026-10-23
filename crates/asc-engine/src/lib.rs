@@ -21,10 +21,12 @@
 
 mod callgraph;
 mod classes;
+mod hierarchy;
 mod manifest;
 pub mod names;
 mod prebuild;
 mod resources;
+mod rules;
 mod sweep;
 mod tiers;
 
@@ -49,9 +51,11 @@ pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
+pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
 pub use prebuild::PrebuildReport;
 pub use resources::{parse_id, ResourceField, ResourceRow};
+pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
 pub use tiers::auto_memory_share;
 
@@ -206,7 +210,7 @@ impl RefBatch {
     /// several, so failures accumulate instead of overwriting each other.
     /// Consumers prefix `entry_name`; only a container's logical DEX (whose
     /// name differs) adds its own.
-    fn note_error(&mut self, name: &str, e: EngineError) {
+    fn note_error(&mut self, name: &str, e: &str) {
         let msg = if name == self.entry_name { e.to_string() } else { format!("{name}: {e}") };
         self.error = Some(match self.error.take() {
             Some(prev) => format!("{prev}; {msg}"),
@@ -801,6 +805,8 @@ pub struct Engine {
     /// Background table builds ([`Engine::prebuild`]) and the searches they
     /// give way to.
     prebuild: prebuild::Prebuild,
+    /// The class hierarchy, for the APK version it was built from.
+    class_graph: Mutex<Option<hierarchy::CachedGraph>>,
 }
 
 /// An APK opened for a search whose DEX entries are scheduled by the caller,
@@ -839,6 +845,7 @@ impl Engine {
             limits: Limits::default(),
             resources: Mutex::new(None),
             prebuild: prebuild::Prebuild::default(),
+            class_graph: Mutex::new(None),
         }
     }
 
@@ -930,6 +937,7 @@ impl Engine {
     /// still holding them keep them alive.
     pub fn release_memory_cache(&self) -> usize {
         self.release_resources();
+        self.class_graph.lock().unwrap().take();
         let Some(memory) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
         let key = self.key_cache.lock().unwrap().as_ref().map(|(_, _, key)| key.clone());
         let Some(key) = key.or_else(|| self.open().ok().and_then(|apk| self.apk_key(&apk))) else { return 0 };
@@ -1639,19 +1647,54 @@ fn search_entry(
     cache: Option<&EngineCache>,
     stats: &Stats,
 ) -> RefBatch {
+    let run = |fr: &FindRefs<'_, '_, '_>| rows_compiled(fr, query, opts).map(|rows| vec![rows]);
+    search_entry_with(apk, key, entry, 1, &run, cancel, cache, stats).pop().expect("one batch per query")
+}
+
+/// Rows of `n` queries over one logical DEX, one list per query.
+pub(crate) type RunRows<'q> = dyn Fn(&FindRefs<'_, '_, '_>) -> Result<Vec<Vec<RefResult>>> + Sync + 'q;
+
+/// Load one entry (through the caches) and run `run` over each of its
+/// logical DEX files: one batch per query, all sharing the load.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_entry_with(
+    apk: &Apk,
+    key: Option<&ApkKey>,
+    entry: &Entry,
+    n: usize,
+    run: &RunRows<'_>,
+    cancel: &AtomicBool,
+    cache: Option<&EngineCache>,
+    stats: &Stats,
+) -> Vec<RefBatch> {
     let t0 = Instant::now();
-    let mut batch =
+    let empty =
         RefBatch { entry_name: entry.name.clone(), results: Vec::new(), inflate_us: 0, search_us: 0, source: "inflate", error: None };
+    let mut batches = vec![empty; n];
     let (loaded, source) = match load_entry(apk, key, entry, cache, stats, Some(cancel)) {
         Ok(l) => l,
         Err(e) => {
-            batch.error = Some(e.to_string());
-            return batch;
+            let msg = e.to_string();
+            for b in &mut batches {
+                b.error = Some(msg.clone());
+            }
+            return batches;
         }
     };
-    batch.source = source.as_str();
     let t1 = Instant::now();
-    batch.inflate_us = (t1 - t0).as_micros();
+    let mut add = |name: &str, r: Result<Vec<Vec<RefResult>>>| match r {
+        Ok(rows) => {
+            for (b, mut rows) in batches.iter_mut().zip(rows) {
+                b.results.append(&mut rows);
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            for b in batches.iter_mut() {
+                b.note_error(name, &msg);
+            }
+        }
+    };
     match &loaded {
         Loaded::Cached(e) => {
             let l2 = cache.and_then(|c| c.disk.as_deref().filter(|d| d.uses(Tier::Derived)).map(|d| (c, d))).zip(key);
@@ -1663,7 +1706,7 @@ fn search_entry(
                         }
                     }
                     let (mask, t) = (l.state.table_mask(), Instant::now());
-                    let rows = rows_compiled(&FindRefs::with_state(&dex, &l.state), query, opts);
+                    let rows = run(&FindRefs::with_state(&dex, &l.state));
                     if let Some(((c, disk), k)) = l2 {
                         if let Some(job) = tiers::derived_job(disk, e, i, mask, t.elapsed()) {
                             c.put_async(WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Derived(job) });
@@ -1671,24 +1714,22 @@ fn search_entry(
                     }
                     rows
                 });
-                match r {
-                    Ok(mut rows) => batch.results.append(&mut rows),
-                    Err(e) => batch.note_error(&l.name, e),
-                }
+                add(&l.name, r);
             }
             recharge(cache, key, e);
         }
         Loaded::Borrowed(_) => {
             for (name, buf) in logical_dex_iter(&entry.name, loaded.bytes()) {
-                match find_refs_in_dex_compiled(&name, &buf, query, opts) {
-                    Ok(mut r) => batch.results.append(&mut r),
-                    Err(e) => batch.note_error(&name, e),
-                }
+                let r = Dex::with_name(&buf, &name).map_err(EngineError::from).and_then(|dex| run(&FindRefs::new(&dex)));
+                add(&name, r);
             }
         }
     }
-    batch.search_us = t1.elapsed().as_micros();
-    batch
+    let (inflate_us, search_us) = ((t1 - t0).as_micros(), t1.elapsed().as_micros());
+    for b in &mut batches {
+        (b.source, b.inflate_us, b.search_us) = (source.as_str(), inflate_us, search_us);
+    }
+    batches
 }
 
 /// Charge the in-memory cache for the locator tables a search just built for
@@ -1736,6 +1777,9 @@ fn find_refs_in_dex_compiled(dex_name: &str, buf: &[u8], query: &CompiledQuery, 
 /// straight from the class definitions, otherwise the code scan's hits.
 fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOptions) -> Result<Vec<RefResult>> {
     let dex = fr.dex();
+    if let Some(c) = query.compound() {
+        return rules::compound_rows(fr, c, opts);
+    }
     let Some(classes) = fr.class_relation(query)? else {
         let hits = fr.find_ref_compiled(query)?;
         let mut rows = results_from_hits(dex, query.kind(), &hits, opts.aggregate)?;

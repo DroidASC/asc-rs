@@ -4,7 +4,7 @@
 //! regexes it needs are compiled once here and reused by every
 //! [`FindRefs`](crate::FindRefs) through `find_ref_compiled`.
 
-use crate::{ClassQuery, ClassRelation, MemberQuery, Query, RefKind, Result};
+use crate::{ClassQuery, ClassRelation, FindError, MemberQuery, Query, RefKind, Result};
 use memchr::memmem::Finder;
 use regex::bytes::Regex;
 
@@ -41,6 +41,15 @@ pub(crate) enum Parts {
     Member(CompiledMember),
     /// Class-definition query: the MUTF-8 encoded target descriptor.
     Relation(ClassRelation, Vec<u8>),
+    Compound(Compound),
+}
+
+/// The compiled parts of a [`Query::All`].
+pub struct Compound {
+    /// Every one must match in a method.
+    pub all: Vec<CompiledQuery>,
+    /// None may match in it.
+    pub none: Vec<CompiledQuery>,
 }
 
 /// A [`Query`] with every regular expression it needs compiled up front.
@@ -67,6 +76,22 @@ impl CompiledQuery {
             Query::Method(m) | Query::Field(m) => Parts::Member(compile_member(m)?),
             Query::Extends(d) => Parts::Relation(ClassRelation::Extends, asc_dex::mutf8::encode(d)),
             Query::Implements(d) => Parts::Relation(ClassRelation::Implements, asc_dex::mutf8::encode(d)),
+            Query::All { all, none } => {
+                if all.is_empty() {
+                    return Err(FindError::Invalid("a compound query needs at least one condition in `all`".into()));
+                }
+                let part = |q: &Query| match q {
+                    Query::All { .. } => Err(FindError::Invalid("compound queries do not nest".into())),
+                    Query::Extends(_) | Query::Implements(_) => {
+                        Err(FindError::Invalid("extends / impl name classes, not code: they cannot be combined".into()))
+                    }
+                    q => CompiledQuery::new(q),
+                };
+                Parts::Compound(Compound {
+                    all: all.iter().map(part).collect::<Result<_>>()?,
+                    none: none.iter().map(part).collect::<Result<_>>()?,
+                })
+            }
         };
         Ok(CompiledQuery { query: q.clone(), kind: q.kind(), parts })
     }
@@ -85,6 +110,15 @@ impl CompiledQuery {
     #[inline]
     pub fn relation(&self) -> Option<ClassRelation> {
         self.query.relation()
+    }
+
+    /// The parts of a compound query ([`Query::All`]).
+    #[inline]
+    pub fn compound(&self) -> Option<&Compound> {
+        match &self.parts {
+            Parts::Compound(c) => Some(c),
+            _ => None,
+        }
     }
 
     #[inline]

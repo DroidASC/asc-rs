@@ -87,6 +87,53 @@ fn findrefs_prints_python_format_lines() {
 }
 
 #[test]
+fn findrefs_all_rules_and_hierarchy() {
+    let apk = temp_apk();
+    let a = path(apk.path());
+    let sorted = |o: &Output| {
+        let mut l: Vec<String> = stdout(o).lines().map(String::from).collect();
+        l.sort();
+        l
+    };
+    let out = droidasc(&["findrefs", a, "all", "string:tok", "literal:token", "--threads", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        sorted(&out),
+        [
+            "classes.dex | Lexample/Test;->first | matched=(token; token)",
+            "classes.dex | Lexample/Test;->second | matched=(token; token)",
+            "classes2.dex | Lexample/Test;->first | matched=(token; token)",
+            "classes2.dex | Lexample/Test;->second | matched=(token; token)",
+        ]
+    );
+    let out = droidasc(&["findrefs", a, "all", "string:token", "--none", "string:oke"]);
+    assert!(out.status.success() && stdout(&out).is_empty(), "{}", stderr(&out));
+    let out = droidasc(&["findrefs", a, "all", "nonsense"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("KIND:VALUE"), "{}", stderr(&out));
+
+    let rules = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(rules.path(), "# comment\nextends:java.lang.Object\n").unwrap();
+    let out = droidasc(&["findrefs", a, "rules", "string:token", "string:nothing & literal:token", "--file", path(rules.path())]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.starts_with("# r1 string:token\n# r2 string:nothing & literal:token\n# r3 extends:java.lang.Object\n"), "{text}");
+    assert!(text.ends_with("# r1 4 results\n# r2 0 results\n# r3 2 results\n"), "{text}");
+    assert_eq!(text.lines().filter(|l| l.starts_with("r1 | ")).count(), 4);
+    assert!(text.contains("r3 | classes2.dex | Lexample/Test; extends Ljava/lang/Object;\n"), "{text}");
+
+    let out = droidasc(&["hierarchy", a, "java.lang.Object", "--method", "second"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "0 Ljava/lang/Object; [not in APK]\n  1 subclass Lexample/Test; classes.dex [defines second()V]\n\
+         override Lexample/Test;->second()V classes.dex\n# 2 rows, 2 distinct classes (subclasses, depth 16); 1 define second\n"
+    );
+    let out = droidasc(&["callgraph", a, "example.Test", "first", "--virtual"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
 fn global_flags_are_accepted_anywhere() {
     let apk = temp_apk();
     let a = droidasc(&["--threads", "2", "--debug", "findrefs", path(apk.path()), "string", "token"]);

@@ -6,8 +6,13 @@
 //! (`Lcls;->name(params)ret`) and, level by level, looks each frontier method
 //! up in every DEX (binary search over the sorted `method_id` table), then
 //! follows that DEX's edges. Calls are static references: a call through
-//! `Lsub;->m()V` does not count as a call of `Lbase;->m()V`.
+//! `Lsub;->m()V` does not count as a call of `Lbase;->m()V`, unless the query
+//! asks for virtual dispatch ([`CallQuery::virtual_calls`]): then the callers
+//! of a method also include the callers of the same signature on each of its
+//! supertypes (marked `via`), and the callees of a method also include the
+//! overrides of each callee in its subclasses (marked `override of`).
 
+use crate::hierarchy::{ClassGraph, Lineage};
 use crate::{DexView, Engine, EngineError, Result};
 use asc_dex::Dex;
 use asc_findrefs::FindRefs;
@@ -52,6 +57,8 @@ pub struct CallQuery {
     pub depth: usize,
     /// Stop discovering methods beyond this many (roots included).
     pub max_nodes: usize,
+    /// Follow virtual dispatch through the class hierarchy (see the module docs).
+    pub virtual_calls: bool,
 }
 
 /// One line of the tree, in depth-first order.
@@ -67,6 +74,9 @@ pub struct CallRow {
     pub dex: Vec<String>,
     /// Shown again: expanded at another row.
     pub repeated: bool,
+    /// Reached through virtual dispatch: the supertype whose method this
+    /// caller invokes, or (callees) the class of the callee this overrides.
+    pub via: Option<String>,
 }
 
 /// Result of [`Engine::call_graph`].
@@ -100,6 +110,12 @@ impl CallTree {
                 }
                 if r.dex.is_empty() {
                     s.push_str(" [no body]");
+                }
+                if let Some(v) = &r.via {
+                    match self.direction {
+                        Direction::Callers => s.push_str(&format!(" (via {v})")),
+                        Direction::Callees => s.push_str(&format!(" (override of {v})")),
+                    }
                 }
                 if r.repeated {
                     s.push_str(" (repeated)");
@@ -162,6 +178,11 @@ fn method_ids(dex: &Dex<'_>, class: &str, name: &str, proto: Option<&str>) -> Re
     Ok(out)
 }
 
+/// Subclasses checked for overrides of one callee (`virtual_calls`).
+const MAX_OVERRIDE_SCAN: usize = 4096;
+/// Supertypes whose signature stands for a frontier method (`virtual_calls`).
+const MAX_SUPERS: usize = 256;
+
 /// What one DEX says about one frontier method.
 #[derive(Default)]
 struct Found {
@@ -190,6 +211,7 @@ impl Engine {
         let t0 = std::time::Instant::now();
         let _query = self.prebuild.query();
         let (views, mut errors) = self.load_views(None)?;
+        let graph = if q.virtual_calls { Some(self.class_graph(&views, &mut errors)?) } else { None };
         let load_us = t0.elapsed().as_micros();
         // Roots: every matching signature any DEX knows.
         let mut roots = BTreeSet::new();
@@ -208,6 +230,8 @@ impl Engine {
         let mut depth_of: HashMap<String, usize> = roots.iter().map(|r| (r.clone(), 0)).collect();
         let mut next: HashMap<String, Vec<String>> = HashMap::new();
         let mut bodies: HashMap<String, Vec<String>> = HashMap::new();
+        // (parent, child) -> the class virtual dispatch went through
+        let mut via: HashMap<(String, String), String> = HashMap::new();
         let mut frontier: Vec<String> = roots.iter().cloned().collect();
         let mut truncated = false;
         for level in 0..=q.depth {
@@ -216,7 +240,16 @@ impl Engine {
             }
             // The last level is only looked up (for `bodies`), not expanded.
             let expand = level < q.depth;
-            let found = self.expand(&views, &frontier, q.direction, expand, &mut errors);
+            // Callers through a supertype: look its signatures up too.
+            let aliases = match (&graph, q.direction) {
+                (Some(g), Direction::Callers) if expand => super_aliases(g, &frontier),
+                _ => HashMap::new(),
+            };
+            let mut lookup = frontier.clone();
+            lookup.extend(aliases.values().flatten().map(|(alias, _)| alias.clone()));
+            lookup.sort();
+            lookup.dedup();
+            let found = self.expand(&views, &lookup, q.direction, expand, &mut errors);
             let mut following = Vec::new();
             for sig in &frontier {
                 let f = found.get(sig);
@@ -224,8 +257,30 @@ impl Engine {
                 if !expand {
                     continue;
                 }
+                let mut neighbours: Vec<(String, Option<String>)> =
+                    f.map(|f| f.next.iter()).into_iter().flatten().map(|n| (n.clone(), None)).collect();
+                for (alias, class) in aliases.get(sig).into_iter().flatten() {
+                    for n in found.get(alias).map(|f| f.next.iter()).into_iter().flatten() {
+                        neighbours.push((n.clone(), Some(class.clone())));
+                    }
+                }
+                if let (Some(g), Direction::Callees) = (&graph, q.direction) {
+                    let direct: Vec<String> = neighbours.iter().map(|(n, _)| n.clone()).collect();
+                    for n in direct {
+                        let (overrides, cut) = overrides_of(g, &views, &n, &mut errors);
+                        truncated |= cut;
+                        neighbours.extend(overrides.into_iter().map(|o| (o, split_signature(&n).map(|p| p.class.to_string()))));
+                    }
+                }
+                // A direct edge wins over the same edge through dispatch.
+                let mut seen = HashSet::new();
+                neighbours.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.is_some().cmp(&b.1.is_some())));
+                neighbours.retain(|(n, _)| seen.insert(n.clone()));
                 let mut kept = Vec::new();
-                for n in f.map(|f| f.next.iter()).into_iter().flatten() {
+                for (n, through) in &neighbours {
+                    if let Some(c) = through {
+                        via.insert((sig.clone(), n.clone()), c.clone());
+                    }
                     if depth_of.contains_key(n) {
                         kept.push(n.clone());
                     } else if depth_of.len() < max_nodes {
@@ -254,7 +309,7 @@ impl Engine {
         }
 
         // Depth-first rendering, expanding each method once at its BFS depth.
-        let mut rows = Vec::new();
+        let mut rows: Vec<CallRow> = Vec::new();
         let mut expanded = HashSet::new();
         let mut stack: Vec<(String, usize, Option<usize>)> = roots.iter().rev().map(|r| (r.clone(), 0, None)).collect();
         while let Some((sig, depth, parent)) = stack.pop() {
@@ -266,6 +321,7 @@ impl Engine {
                 method: sig.clone(),
                 dex: bodies.get(&sig).cloned().unwrap_or_default(),
                 repeated: !expand_here && has_children,
+                via: parent.and_then(|p| via.get(&(rows[p].method.clone(), sig.clone())).cloned()),
             });
             if expand_here {
                 expanded.insert(sig.clone());
@@ -316,6 +372,44 @@ impl Engine {
         errors.extend(errs.into_inner().unwrap());
         merged.into_inner().unwrap()
     }
+}
+
+/// For each frontier method (not a constructor / initializer), the same
+/// signature on each supertype of its class: `sig -> [(alias, supertype)]`.
+fn super_aliases(g: &ClassGraph, frontier: &[String]) -> HashMap<String, Vec<(String, String)>> {
+    let mut out = HashMap::new();
+    for sig in frontier {
+        let Some(p) = split_signature(sig) else { continue };
+        if p.name.starts_with('<') {
+            continue;
+        }
+        let aliases: Vec<(String, String)> =
+            g.reachable(p.class, Lineage::Supers, MAX_SUPERS).into_iter().map(|s| (format!("{s}->{}{}", p.name, p.proto), s)).collect();
+        if !aliases.is_empty() {
+            out.insert(sig.clone(), aliases);
+        }
+    }
+    out
+}
+
+/// Methods overriding `sig` in subclasses of its class (a constructor /
+/// initializer has none), and whether the subclass scan was cut short.
+fn overrides_of(g: &ClassGraph, views: &[DexView], sig: &str, errors: &mut Vec<String>) -> (Vec<String>, bool) {
+    let Some(p) = split_signature(sig) else { return (Vec::new(), false) };
+    if p.name.starts_with('<') {
+        return (Vec::new(), false);
+    }
+    let subs = g.reachable(p.class, Lineage::Subclasses, MAX_OVERRIDE_SCAN);
+    let cut = subs.len() >= MAX_OVERRIDE_SCAN;
+    let mut out = Vec::new();
+    for s in subs {
+        match g.defines(views, &s, p.name, Some(p.proto)) {
+            Ok(d) if !d.is_empty() => out.push(format!("{s}->{}{}", p.name, p.proto)),
+            Ok(_) => {}
+            Err(e) => errors.push(format!("{s}: {e}")),
+        }
+    }
+    (out, cut)
 }
 
 fn view_neighbours(v: &DexView, frontier: &[String], dir: Direction, expand: bool) -> Result<HashMap<String, Found>> {
