@@ -1,0 +1,46 @@
+--- dexsql_replay.py
++++ dexsql_replay.py
+@@ -13,13 +13,14 @@
+ from pathlib import Path
+ 
+ 
+-ROOT = Path(__file__).resolve().parent
++ROOT = Path(os.environ.get("OUT_ROOT", Path(__file__).resolve().parent))
+ BIN = Path(os.environ.get("DEXSQL", ROOT / "dexsql"))
+ APK = os.environ.get("APK", "douyin-40.7.0.apk")
+ OUT = ROOT / "results/dexsql_outputs"
+-THREAD_CANDIDATES = (0, 1, 2, 4, 8, 12, 16)
++THREAD_CANDIDATES = tuple(int(x) for x in os.environ.get("DEXSQL_THREADS", "0,8,16").split(","))
+ THREAD_TRIALS = 3
+-TRIALS = 7
++TRIALS = int(os.environ.get("TRIALS", "5"))
++ERRORS = []
+ 
+ 
+ class McpClient:
+@@ -70,7 +71,7 @@
+     def tool(self, name: str, arguments: dict) -> dict:
+         result = self.request("tools/call", {"name": name, "arguments": arguments})
+         if result.get("isError"):
+-            raise RuntimeError(f"tool {name} failed: {result}")
++            ERRORS.append(name)  # 40.7.0 method ids on another build: keep the work, note the miss
+         return result
+ 
+     def close(self) -> None:
+@@ -250,7 +251,7 @@
+ def startup_bench(threads: int):
+     cli = []
+     mcp = []
+-    for _ in range(30):
++    for _ in range(5):
+         start = time.perf_counter()
+         subprocess.run([str(BIN), "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+         cli.append((time.perf_counter() - start) * 1000)
+@@ -311,6 +312,7 @@
+         "compact": True,
+         "scenarios": {},
+         "validation": validation,
++        "tool_errors": len(ERRORS),
+     }
+     for name, values in samples.items():
+         values.sort()

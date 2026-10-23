@@ -93,7 +93,7 @@ classes8.dex | Lcgjc;->apply(Ljava/lang/Object;)Ljava/lang/Object; | Landroid/os
 classes4.dex | Ldxbs; | extends Landroid/webkit/WebViewClient;
 ```
 
-找到的行与 Python 工具相同（`bench/parity/semantic.py` 按 dex、方法和匹配集合对两者做比较）。
+找到的行与 Python 工具相同（`benchmark/parity/semantic.py` 按 dex、方法和匹配集合对两者做比较）。
 
 `getclass` 和 `disassemble` 支持 `--method`，只输出部分方法：可以是方法名（所有重载）、精确签名
 （`'run(I)V'`）、签名前缀或 Java 风格的签名（`'run(int)'`）；若类中没有该方法，命令会失败并列出它
@@ -183,7 +183,7 @@ cargo test --workspace
 | `asc-apk` | 内存映射的 zip 访问：central directory（含 zip64）、根目录 DEX 枚举、Deflate 解压（libdeflate，或用于前缀 / 取消的流式 zlib-rs；一次性 `findrefs` 先流式解压前缀，跳过据此可判定不可能匹配的条目）。 |
 | `asc-cache` | 解压后 DEX 的缓存：跨进程共享的磁盘 cache，以及供常驻宿主使用、按字节限额的内存 LRU。 |
 | `asc-axml` | Android 二进制 XML：文本 XML、元素树、通过 resolver 将引用解析为名称；惰性字符串池。 |
-| `asc-arsc` | `resources.arsc` 读取器：只索引 chunk，按需解码名称和值（u32 / 16 位 / 稀疏 entry 表、紧凑 entry、bag、library / overlayable / staged-alias chunk）；按配置取值、AOSP 配置匹配和引用解析。已与 `aapt2 dump resources` 对照验证（`bench/arsc-compare`）。 |
+| `asc-arsc` | `resources.arsc` 读取器：只索引 chunk，按需解码名称和值（u32 / 16 位 / 稀疏 entry 表、紧凑 entry、bag、library / overlayable / staged-alias chunk）；按配置取值、AOSP 配置匹配和引用解析。已与 `aapt2 dump resources` 对照验证（`benchmark/arsc-compare`）。 |
 | `asc-engine` | 编排层：带提前终止的并行类查找、流式多 DEX 引用搜索、类重建 + 反汇编、manifest 解码与摘要、资源查询。 |
 | `asc-mcp` | 基于 stdio 的 MCP 服务器（`droidasc mcp`）：一个常驻会话，多个 APK 共享同一内存预算，CLI 格式的文本加结构化结果，分页。 |
 | `asc-cli` | `droidasc` 可执行文件（clap）。 |
@@ -461,7 +461,7 @@ apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInte
 | `cursor` | 单独传回给同一工具以获取下一页（会话保留最近 16 份报告） |
 | `release` | 每个 APK 搜索完后从内存中丢弃其 DEX（默认：当所选 APK 的 DEX 超出内存预算时） |
 
-用 [`bench/multi-apk/audit.py`](bench/multi-apk/audit.py) 做暴露面审计：在 Pixel 6 的 312 个系统 APK
+用 [`benchmark/multi-apk/audit.py`](benchmark/multi-apk/audit.py) 做暴露面审计：在 Pixel 6 的 312 个系统 APK
 （3.8 GB，405 个 DEX，1.28 GB 的 DEX）上运行多 APK 基准的 8 条规则，使用一个 `droidasc --no-cache mcp`：
 
 | | 工具调用次数 | 回复文本 | 墙钟时间 | 峰值 RSS |
@@ -474,7 +474,7 @@ apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInte
 ### Agent 会话基准
 
 [dexsql-release agent audit](https://github.com/LSPosed/dexsql-release/tree/main/benchmarks/agent-audit)
-的 17 个分析目标（47 步），由 [`bench/agent-audit/replay_mcp.py`](bench/agent-audit/replay_mcp.py) 在
+的 17 个分析目标（47 步），由 [`benchmark/agent-audit/replay_mcp.py`](benchmark/agent-audit/replay_mcp.py) 在
 抖音 40.7.0（343 MiB，56 个 DEX，551,080 个类）上回放。同一台机器（Linux，16 线程，12 GB），dexsql 0.1.1
 linux-amd64 使用其自带的 `dexsql_replay.py` / `whole_suite.py` 测量；除非另有说明，asc-rs 使用
 `--no-cache`。取 7 次的中位数。

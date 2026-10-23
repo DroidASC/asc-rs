@@ -96,7 +96,7 @@ classes8.dex | Lcgjc;->apply(Ljava/lang/Object;)Ljava/lang/Object; | Landroid/os
 classes4.dex | Ldxbs; | extends Landroid/webkit/WebViewClient;
 ```
 
-The rows found are the Python tool's (`bench/parity/semantic.py` compares the two by dex,
+The rows found are the Python tool's (`benchmark/parity/semantic.py` compares the two by dex,
 method and matched set).
 
 `getclass` and `disassemble` take `--method` to render only some methods: a name (every
@@ -193,7 +193,7 @@ Rust 1.85 or newer. The GUI (egui/eframe, OpenGL) needs a display; the CLI is he
 | `asc-apk` | Memory-mapped zip access: central directory (incl. zip64), root-level DEX enumeration, Deflate inflation (libdeflate, or streaming zlib-rs for prefixes / cancellation; a one-shot `findrefs` streams a prefix first and skips entries it shows cannot match). |
 | `asc-cache` | Inflated-DEX caches: an on-disk cache shared across processes and a byte-bounded in-memory LRU for resident hosts. |
 | `asc-axml` | Android binary XML: text XML, an element tree, names for references through a resolver; lazy string pools. |
-| `asc-arsc` | `resources.arsc` reader: indexes chunks only and decodes names and values on demand (u32 / 16-bit / sparse entry tables, compact entries, bags, library / overlayable / staged-alias chunks); per-config values, AOSP config matching and reference resolution. Checked against `aapt2 dump resources` (`bench/arsc-compare`). |
+| `asc-arsc` | `resources.arsc` reader: indexes chunks only and decodes names and values on demand (u32 / 16-bit / sparse entry tables, compact entries, bags, library / overlayable / staged-alias chunks); per-config values, AOSP config matching and reference resolution. Checked against `aapt2 dump resources` (`benchmark/arsc-compare`). |
 | `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding and summary, resource queries. |
 | `asc-mcp` | MCP server over stdio (`droidasc mcp`): one resident session, several APKs sharing one memory budget, CLI-format text plus structured results, paging. |
 | `asc-cli` | `droidasc` binary (clap). |
@@ -509,7 +509,7 @@ apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInte
 | `cursor` | pass back alone to the same tool for the next page (the session keeps the last 16 reports) |
 | `release` | drop each APK's DEX from memory once searched (default: when the selected APKs' DEX would not fit the memory budget) |
 
-Exposure audit with [`bench/multi-apk/audit.py`](bench/multi-apk/audit.py): the 8 rules of the
+Exposure audit with [`benchmark/multi-apk/audit.py`](benchmark/multi-apk/audit.py): the 8 rules of the
 multi-APK benchmark over the 312 system APKs of a Pixel 6 (3.8 GB, 405 DEX, 1.28 GB of DEX),
 one `droidasc --no-cache mcp`:
 
@@ -523,7 +523,7 @@ one `droidasc --no-cache mcp`:
 ### Agent session benchmark
 
 The 17 analysis goals (47 steps) of the [dexsql-release agent audit](https://github.com/LSPosed/dexsql-release/tree/main/benchmarks/agent-audit),
-replayed by [`bench/agent-audit/replay_mcp.py`](bench/agent-audit/replay_mcp.py) on
+replayed by [`benchmark/agent-audit/replay_mcp.py`](benchmark/agent-audit/replay_mcp.py) on
 Douyin 40.7.0 (343 MiB, 56 DEX, 551,080 classes). Same machine (Linux, 16 threads, 12 GB),
 dexsql 0.1.1 linux-amd64 measured with its own `dexsql_replay.py` / `whole_suite.py`; asc-rs
 with `--no-cache` unless noted. Medians of 7.

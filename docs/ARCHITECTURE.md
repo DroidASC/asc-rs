@@ -129,7 +129,7 @@ rows are `0x7f0d0001 | type/name [config] | value`. `RefResult::method` keeps th
 `Lcls;->name` the multi-APK SDK folding and the GUI key on; `structuredContent` carries
 both (`method`, `signature`) and the matched values unquoted.
 
-The rows themselves are still the Python tool's: `bench/parity/semantic.py` runs both
+The rows themselves are still the Python tool's: `benchmark/parity/semantic.py` runs both
 on an APK and compares (dex, `Lcls;->name`, set of matched values) per query, dropping
 the signature and field type our side adds.
 
@@ -586,7 +586,7 @@ computed on demand. Details that the format leaves implicit:
   config ([`Config::any_device`]: newest SDK, no locale), follows references with a depth
   limit and cycle detection, and falls back to the first configuration when none matches.
 
-`bench/arsc-compare/compare.py` diffs `droidasc resources` against `aapt2 dump resources`
+`benchmark/arsc-compare/compare.py` diffs `droidasc resources` against `aapt2 dump resources`
 per id: name, configuration set, and every value after normalizing the notations. On the
 312 system APKs of a Pixel 6, Douyin, Kuaishou, Meituan, Pinduoduo, Taobao, Xiaohongshu and
 the 100-APK corpus (1.6 M ids, 10.9 M values) the only differences are aapt2's: it prints a
