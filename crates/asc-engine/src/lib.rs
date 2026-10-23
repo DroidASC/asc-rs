@@ -540,7 +540,8 @@ struct WriteJob {
 /// bytes ([`WriteJob::defer`]). A cold multi-APK sweep inflates far faster
 /// than the writers persist, and each queued job keeps its DEX bytes or
 /// tables alive until written; without a bound the heap grows with the
-/// backlog (tens of GB over a phone's APKs).
+/// backlog (tens of GB over a phone's APKs). A memory cache's budget lowers
+/// it further ([`EngineCache::queue_cap`]).
 const MAX_PENDING_WRITE_BYTES: usize = 512 << 20;
 
 /// Most writer threads per process: writing is I/O, but a deferred L1 write
@@ -640,26 +641,38 @@ struct EngineCache {
     /// L2 writes queued and not yet written: their tables stay on the heap
     /// until written and mapped, so a prebuild waits while this is high.
     derived_pending: Arc<AtomicUsize>,
-    /// Heap held by queued writes, bounded by `queue_cap`.
+    /// Heap held by queued writes, bounded by [`EngineCache::queue_cap`].
     pending_bytes: Arc<AtomicUsize>,
     /// [`MAX_PENDING_WRITE_BYTES`]; lowered by tests.
     queue_cap: usize,
 }
 
 impl EngineCache {
+    /// Heap the queued writes may hold: [`MAX_PENDING_WRITE_BYTES`], or the
+    /// memory cache's budget when smaller. The budget is this process's share
+    /// of the user's (`--memory-mb`, or split over the registered processes):
+    /// sixteen servers sweeping at once would otherwise each queue 512 MiB
+    /// whatever their caches may hold.
+    fn queue_cap(&self) -> usize {
+        let budget = self.memory.as_ref().map_or(usize::MAX, |m| m.lock().unwrap().capacity_bytes());
+        self.queue_cap.min(budget)
+    }
+
     /// Queue a disk write; falls back to a synchronous write only when no
     /// writer thread can be started. A write that would take the queued heap
-    /// past [`MAX_PENDING_WRITE_BYTES`] is queued without its bytes instead
+    /// past [`EngineCache::queue_cap`] is queued without its bytes instead
     /// ([`WriteJob::defer`]): the query never waits for the disk, the heap
     /// stays bounded, and L1 still ends up complete.
     fn put_async(&self, job: WriteJob) {
         let Some(disk) = &self.disk else { return };
+        // Before the writer lock: never hold it while waiting for the memory cache's.
+        let cap = self.queue_cap();
         let mut writer = self.writer.lock().unwrap();
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
         let pending = self.pending_bytes.load(Ordering::Relaxed);
-        let job = if pending > 0 && pending + job.held_bytes() > self.queue_cap {
+        let job = if pending > 0 && pending + job.held_bytes() > cap {
             match job.defer() {
                 Some(job) => job,
                 None => return,
@@ -2284,6 +2297,18 @@ mod tests {
         for name in &names {
             assert!(cache.disk.as_ref().unwrap().get(&key, name, len).is_some(), "{name} missing from L1");
         }
+    }
+
+    #[test]
+    fn the_write_queue_stays_within_the_memory_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = || Some(DiskCache::open(dir.path().join("cache")));
+        let cap = |engine: &Engine| engine.cache.as_deref().unwrap().queue_cap();
+        assert_eq!(cap(&Engine::new("x.apk").with_cache(CacheConfig { disk: disk(), ..CacheConfig::default() })), MAX_PENDING_WRITE_BYTES);
+        let small = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 64 << 20, disk: disk(), memory_auto: false });
+        assert_eq!(cap(&small), 64 << 20);
+        let large = Engine::new("x.apk").with_cache(CacheConfig { memory_bytes: 4 << 30, disk: disk(), memory_auto: false });
+        assert_eq!(cap(&large), MAX_PENDING_WRITE_BYTES);
     }
 
     #[test]
