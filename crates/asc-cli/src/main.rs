@@ -73,6 +73,7 @@ examples:
   droidasc findrefs app.apk string token --no-cache
   droidasc findrefs app.apk string token --context 3
   droidasc findrefs app.apk method loadUrl --context-method
+  droidasc findrefs app.apk method 'android.provider.Settings$Secure->getString[arg1==\"android_id\"]'
   droidasc findrefs app.apk method '{literal:device_id}'
   droidasc findrefs app.apk rules 'method:{string:^https?://} & !type:Lcom/a/test/'
   droidasc findrefs app.apk method @methods.txt
@@ -1025,8 +1026,10 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 // The class-def lookups need the precise Dalvik form.
                 Find::Extends { output, value } => (Query::Extends(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
                 Find::Impl { output, value } => (Query::Implements(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
-                // `method '{RULE}'` / `method @FILE`, as in a condition.
-                Find::Method { output, name: Some(name), class_name: None, .. } if name.starts_with(['{', '@']) => {
+                // `method '{RULE}'` / `method @FILE` / `method 'X[arg0=1]'`, as in a condition.
+                Find::Method { output, name: Some(name), class_name: None, .. }
+                    if name.starts_with(['{', '@']) || asc_engine::condition::has_constraints(&name) =>
+                {
                     (io.condition(&format!("method:{name}"))?, output)
                 }
                 Find::Method { output, name, class_name, fuzzy_class, exact } => (

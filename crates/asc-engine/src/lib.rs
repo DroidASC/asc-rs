@@ -2056,6 +2056,16 @@ fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEnt
     }
 }
 
+/// The constant a hit matched, with the note of a call-site constraint
+/// (`Lc;->m(I)V [arg0=1]`) when it has one.
+fn hit_matched(dex: &Dex<'_>, kind: RefKind, idx: u32, note: Option<&str>) -> Result<Matched> {
+    let m = matched_name(dex, kind, idx)?;
+    Ok(match note {
+        Some(note) => Matched::Symbol(format!("{} {note}", m.as_str())),
+        None => m,
+    })
+}
+
 fn matched_name(dex: &Dex<'_>, kind: RefKind, idx: u32) -> Result<Matched> {
     Ok(match kind {
         RefKind::String => Matched::String(dex.string(idx)?),
@@ -2140,7 +2150,7 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
         let mut out = Vec::new();
         for hit in hits {
             let Some(methods) = &hit.methods else { continue };
-            let matched = matched_name(dex, kind, hit.matched_idx)?;
+            let matched = hit_matched(dex, kind, hit.matched_idx, hit.note.as_deref())?;
             for &m in methods.ids() {
                 let site = RefSite { offset: hit.offset, matched: 0, pc: None, line: None };
                 out.push(RefResult::method_row(dex, m, vec![matched.clone()], vec![site])?);
@@ -2148,21 +2158,23 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
         }
         return Ok(out);
     }
-    // method -> (matched indexes, (offset, matched index) per hit)
-    type Group = (std::collections::BTreeSet<u32>, Vec<(u32, u32)>);
-    let mut grouped: BTreeMap<u32, Group> = BTreeMap::new();
+    // method -> (matched (index, note)s, (offset, matched (index, note)) per hit)
+    type Key<'h> = (u32, Option<&'h str>);
+    type Group<'h> = (std::collections::BTreeSet<Key<'h>>, Vec<(u32, Key<'h>)>);
+    let mut grouped: BTreeMap<u32, Group<'_>> = BTreeMap::new();
     for hit in hits {
         let Some(methods) = &hit.methods else { continue };
+        let key = (hit.matched_idx, hit.note.as_deref());
         for &m in methods.ids() {
             let g = grouped.entry(m).or_default();
-            g.0.insert(hit.matched_idx);
-            g.1.push((hit.offset, hit.matched_idx));
+            g.0.insert(key);
+            g.1.push((hit.offset, key));
         }
     }
     let mut out = Vec::with_capacity(grouped.len());
     for (m, (idxs, offsets)) in grouped {
-        let idxs: Vec<u32> = idxs.into_iter().collect();
-        let matched = idxs.iter().map(|&i| matched_name(dex, kind, i)).collect::<Result<Vec<_>>>()?;
+        let idxs: Vec<Key<'_>> = idxs.into_iter().collect();
+        let matched = idxs.iter().map(|&(i, note)| hit_matched(dex, kind, i, note)).collect::<Result<Vec<_>>>()?;
         let sites = offsets
             .into_iter()
             .map(|(offset, idx)| RefSite { offset, matched: idxs.binary_search(&idx).unwrap_or(0), pc: None, line: None })

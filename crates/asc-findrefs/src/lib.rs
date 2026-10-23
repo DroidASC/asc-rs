@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 mod callgraph;
+mod calls;
 mod classdefs;
 mod insn_locator;
 mod locators;
@@ -32,6 +33,7 @@ mod scanner;
 mod table;
 
 pub use callgraph::CallGraph;
+pub use calls::{CallConstraint, Certainty, ResultWant, Slot, Want};
 pub use insn_locator::{InsnLocator, MethodRef};
 pub use locators::{FieldLocator, MethodLocator, StringLocator, TypeLocator};
 pub use persist::FORMAT_VERSION as PERSIST_FORMAT_VERSION;
@@ -157,6 +159,13 @@ pub enum Query {
     /// first; compiling it as it is fails.
     Nested(Box<Query>),
     Field(MemberQuery),
+    /// The calls of a method query (`Method`, `MethodSet` or `Nested`) that
+    /// every constraint keeps (`method:X[arg1="id", ret=unused]`); see
+    /// [`CallConstraint`]. Its hits carry a note of the values judged.
+    Call {
+        target: Box<Query>,
+        constraints: Vec<CallConstraint>,
+    },
     /// Classes whose superclass is exactly this descriptor (`Lcom/poc/Base;`).
     /// Answered from `class_def_item`s, not by a code scan.
     Extends(String),
@@ -178,7 +187,7 @@ impl Query {
         match self {
             Query::String(_) | Query::StringLiteral(_) => RefKind::String,
             Query::Type(_) | Query::Extends(_) | Query::Implements(_) => RefKind::Type,
-            Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) => RefKind::Method,
+            Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) | Query::Call { .. } => RefKind::Method,
             Query::Field(_) => RefKind::Field,
             // Rows of a compound query list constants of several kinds.
             Query::All { all, .. } => all.first().map_or(RefKind::String, Query::kind),
@@ -223,6 +232,9 @@ pub struct Hit {
     pub matched_idx: u32,
     /// Owning method(s); `None` when the offset failed instruction verification.
     pub methods: Option<MethodRef>,
+    /// What the constraints of a [`Query::Call`] judged at this call site:
+    /// `[arg1="id", ret=unused]`, `?` first when one is undetermined.
+    pub note: Option<String>,
 }
 
 /// Lazily-built locator tables for one DEX buffer.
@@ -373,6 +385,7 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             (RefKind::String, Parts::Literal(Some(f))) => Ok(self.string_locator()?.locate_literal(buf, f)),
             (_, Parts::Relation(..)) => Ok(self.class_relation(query)?.unwrap_or_default().into_iter().collect()),
             (RefKind::Type, Parts::Pattern(Some(re))) => Ok(self.type_locator()?.locate(buf, self.string_locator()?, re)),
+            (_, Parts::Call(c)) => self.locate_compiled(&c.target),
             (RefKind::Method, Parts::Member(_) | Parts::MemberSet(_)) => {
                 self.method_locator()?.locate_compiled(self.dex, self.string_locator()?, self.type_locator()?, query)
             }
@@ -403,6 +416,7 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             return Ok(false);
         }
         match query.parts() {
+            Parts::Call(c) => self.cannot_match(&c.target),
             // A class nobody references cannot be extended or implemented.
             Parts::Relation(_, descriptor) => Ok(self.dex.find_type_idx(descriptor)?.is_none()),
             // Nor can its members be: one binary search, before the member
@@ -435,7 +449,11 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         if idxs.is_empty() {
             return Ok(Vec::new());
         }
-        self.scan_idxs(query.kind(), &idxs)
+        let hits = self.scan_idxs(query.kind(), &idxs)?;
+        match query.parts() {
+            Parts::Call(c) => self.constrain(c, hits),
+            _ => Ok(hits),
+        }
     }
 
     /// Hits of several queries with one code scan per index kind: the
@@ -465,6 +483,11 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
                 }
             }
         }
+        for (q, hits) in queries.iter().zip(out.iter_mut()) {
+            if let Parts::Call(c) = q.parts() {
+                *hits = self.constrain(c, std::mem::take(hits))?;
+            }
+        }
         Ok(out)
     }
 
@@ -492,6 +515,10 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         let matches = scanner.scan(buf, kind, &set);
         let offsets: Vec<u32> = matches.iter().map(|m| m.0).collect();
         let methods = insn.locate(buf, &offsets);
-        Ok(matches.into_iter().zip(methods).map(|((offset, matched_idx), methods)| Hit { offset, matched_idx, methods }).collect())
+        Ok(matches
+            .into_iter()
+            .zip(methods)
+            .map(|((offset, matched_idx), methods)| Hit { offset, matched_idx, methods, note: None })
+            .collect())
     }
 }

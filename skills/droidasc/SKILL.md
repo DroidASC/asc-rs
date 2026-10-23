@@ -96,6 +96,31 @@ droidasc callgraph app.apk --to 'method:java.lang.Runtime->exec' \
 the caller paths that start at a matching method (marked `[from]`), or alone walks its callees;
 `--unless RULE` (repeatable) leaves out methods whose code matches it and what only they reach.
 
+### Call-site values: `method:X[...]`
+
+Brackets after any method condition (`X`, `{RULE}`, `@FILE`) keep only the calls whose values
+match, all of them: `[arg1="android_id", ret=unused]` or `[arg1="android_id"][ret=unused]`.
+
+- `argN` = Nth declared parameter of the called method (from 0, a long counts once); `this`
+  = the receiver. Values: `*` (show only), numbers (`0x10`, `-1`, `true`, `null`), `"text"`,
+  `~regex` (quote it, `~"a,b"`, if it holds `,` or `]`), `param` / `paramK` (the caller's own
+  `pK`, smali numbering), `ret:METHOD` (result of that call), `field:FIELD`, `new:TYPE`,
+  `class:TYPE`. `ret=used` / `ret=unused`: whether the call's result is read.
+- Values come from the calling method alone (constants, moves, casts, joins). The row shows
+  what the site may hold: `[arg1="a"|"b"]`, `arg0=param1`, `?` for computed values. `=` keeps
+  sites it cannot decide, marked `?[...]`; `==` keeps only sites shown to match. Check `?` rows
+  with `--context`.
+- `findrefs APK method 'X[...]'` takes them directly; they work in rules, `{}` and callgraph.
+
+```sh
+droidasc findrefs fw/ method 'android.provider.Settings$Secure->getString[arg1=="android_id"]'
+droidasc findrefs fw/ method 'android.os.SystemProperties->get[arg0==~^ro\.serial]'
+# permission checks whose answer is ignored
+droidasc findrefs fw/ method 'android.content.Context->checkCallingOrSelfPermission[ret==unused]'
+# what is passed: show the values of every call
+droidasc findrefs app.apk method 'android.content.Intent->putExtra[arg0=*, arg1=*]'
+```
+
 ## Audit workflow
 
 1. `droidasc manifest-summary app.apk | grep exported=true`: exported components, providers
