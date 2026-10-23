@@ -363,13 +363,16 @@ pub fn query_hint(query: &Query) -> Option<String> {
         }
         Query::All { .. } => "every `all` condition must match inside the same method".into(),
         Query::Nested(_) => {
-            "method:{RULE} lists calls naming exactly the methods whose code matches RULE: run RULE alone to see those methods".into()
+            "method:={RULE} lists calls naming exactly the methods whose code matches RULE: run RULE alone to see those methods".into()
+        }
+        Query::Virtual { .. } => {
+            "lists the calls of the methods (or of their supertypes / inheriting subclasses) whose code matches: run RULE alone to see them, a method only reached through reflection, a callback or a framework class outside the program has no call".into()
         }
         Query::Call { .. } => {
             "only the calls whose values the [...] constraints accept are listed: drop them, or use [argN=*] to see the values".into()
         }
         Query::MethodSet(_) => {
-            "calls match the class the call site names: a call through a subclass or an interface names another one".into()
+            "method:=@FILE matches the class the call site names: without = a call through a supertype or inheriting subclass counts too".into()
         }
         Query::Defined(_) => {
             "this lists method definitions (no call site); override:/in: need the class to be defined in the program".into()

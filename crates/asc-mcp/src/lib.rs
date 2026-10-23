@@ -425,7 +425,8 @@ impl Server {
 
     /// A reply about a program some of whose archives were left out (no
     /// `classes*.dex`, not a zip) says so first, in the text and as `notes`:
-    /// an empty answer must not read as "nothing there".
+    /// an empty answer must not read as "nothing there". The tool's own
+    /// notes (e.g. dispatch not followed) stay after them.
     fn with_program_notes(&self, mut text: String, mut structured: Value) -> (String, Value) {
         let Some(id) = structured.get("apk_id").and_then(Value::as_str) else { return (text, structured) };
         let Some(apk) = lock(&self.sessions).apks.iter().find(|a| a.id == id).cloned() else { return (text, structured) };
@@ -435,7 +436,7 @@ impl Server {
         }
         let head: String = notes.iter().map(|n| format!("# warning: {n}\n")).collect();
         text.insert_str(0, &head);
-        structured["notes"] = json!(notes);
+        prepend_notes(&mut structured, notes);
         (text, structured)
     }
 
@@ -708,7 +709,7 @@ impl Server {
         let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
         let context = context_arg(args)?;
         let mut batches = Vec::new();
-        apk.engine.find_refs_with(&query, true, &call.cancel, &mut |b| batches.push(b))?;
+        let summary = apk.engine.find_refs_with(&query, true, &call.cancel, &mut |b| batches.push(b))?;
         call.check()?;
         let entries = batches.len();
         let mut found = Found::new(batches, sdks.as_deref());
@@ -729,6 +730,9 @@ impl Server {
         for e in &found.errors {
             text.push_str(&format!("# Warning: {e}\n"));
         }
+        for n in &summary.notes {
+            text.push_str(&format!("# {n}\n"));
+        }
         let hints = if total == 0 && found.sdk_hits == 0 { apk.engine.no_results_hints(&query, entries) } else { Vec::new() };
         for h in &hints {
             text.push_str(&format!("# hint: {h}\n"));
@@ -743,6 +747,7 @@ impl Server {
             "results": page.iter().map(|r| ref_json(r, context)).collect::<Vec<_>>(),
             "sdk_hits": found.sdk_hits,
             "errors": found.errors,
+            "notes": summary.notes,
         });
         Ok((text, structured))
     }
@@ -818,6 +823,7 @@ impl Server {
             "reached": tree.reached,
             "rows": rows,
             "errors": tree.errors,
+            "notes": tree.notes,
         });
         Ok((text, structured))
     }
@@ -1598,7 +1604,7 @@ pub mod defs {
             }), crate::rules::defs::findrefs_props(), page_props(super::FINDREFS_LIMIT), many()])},
             "outputSchema": shape_many(&[
                 ("apk_id", "string"), ("total", "integer"), ("returned", "integer"), ("next_offset", "integer?"),
-                ("results", "array"), ("hints", "array"), ("rules", "array"),
+                ("results", "array"), ("hints", "array"), ("rules", "array"), ("notes", "array"),
             ]),
         })
     }
@@ -1623,7 +1629,7 @@ pub mod defs {
             })])},
             "outputSchema": shape(&[
                 ("apk_id", "string"), ("direction", "string"), ("depth", "integer"), ("methods", "integer"), ("truncated", "boolean"),
-                ("rows", "array"),
+                ("rows", "array"), ("notes", "array"),
             ]),
         })
     }
@@ -1649,9 +1655,28 @@ pub mod defs {
     }
 }
 
+/// `structured`'s `notes` with `first` ahead of the ones the tool gave.
+fn prepend_notes(structured: &mut Value, first: Vec<String>) {
+    let own = match structured.get_mut("notes").map(Value::take) {
+        Some(Value::Array(own)) => own,
+        _ => Vec::new(),
+    };
+    structured["notes"] = Value::Array(first.into_iter().map(Value::String).chain(own).collect());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn program_notes_go_ahead_of_a_tools_own() {
+        let mut s = json!({"apk_id": "a", "notes": ["dispatch not followed via Lx;->m()V (20 implementers)"]});
+        prepend_notes(&mut s, vec!["odexed.jar: no classes*.dex".into()]);
+        assert_eq!(s["notes"], json!(["odexed.jar: no classes*.dex", "dispatch not followed via Lx;->m()V (20 implementers)"]));
+        let mut s = json!({"apk_id": "a"});
+        prepend_notes(&mut s, vec!["n".into()]);
+        assert_eq!(s["notes"], json!(["n"]));
+    }
 
     #[test]
     fn apks_beyond_their_memory_share_close_and_reopen_by_id() {

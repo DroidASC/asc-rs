@@ -160,7 +160,7 @@ impl Server {
         let limit = usize_arg(args, "limit")?.unwrap_or(RULE_LIMIT).max(1);
         let context = context_arg(args)?;
         let mut batches: Vec<Vec<RefBatch>> = (0..queries.len()).map(|_| Vec::new()).collect();
-        apk.engine.find_refs_rules(&queries, FindOptions::default(), &call.cancel, &mut |i, b| batches[i].push(b))?;
+        let summary = apk.engine.find_refs_rules(&queries, FindOptions::default(), &call.cancel, &mut |i, b| batches[i].push(b))?;
         call.check()?;
         let mut text = String::new();
         let mut out = Vec::new();
@@ -207,7 +207,10 @@ impl Server {
         for e in &errors {
             text.push_str(&format!("# Warning: {e}\n"));
         }
-        Ok((text, json!({"apk_id": apk.id, "rules": out, "errors": errors})))
+        for n in &summary.notes {
+            text.push_str(&format!("# {n}\n"));
+        }
+        Ok((text, json!({"apk_id": apk.id, "rules": out, "errors": errors, "notes": summary.notes})))
     }
 
     /// Rules over many APKs: one queue of DEX entries, each searched once for

@@ -3,8 +3,8 @@
 //! ```text
 //! rule  := part ( '&' part )*
 //! part  := [ '!' ] KIND ':' value
-//! value := '{' rule '}' calls  method only: calls of the methods whose code matches the rule
-//!        | '@' PATH calls    method only: calls of the methods listed in a file
+//! value := ['=' | '*'] '{' rule '}' calls  method only: calls of the methods whose code matches the rule
+//!        | ['=' | '*'] '@' PATH calls    method only: calls of the methods listed in a file
 //!        | TEXT calls        method: a method target, e.g. Lc;->m(I)V
 //!        | TEXT              the other KINDs' own syntax, e.g. a regex
 //! calls := ( '[' constraint ( ',' constraint )* ']' )*
@@ -19,6 +19,13 @@
 //! to the next `&` outside `{}` / `()`, or to the `}` closing the enclosing
 //! body; `\` keeps the next character from ending it (`string:a\&b` is the
 //! regex `a\&b`).
+//!
+//! A `{rule}` or `@PATH` set also takes the calls that may dispatch to its
+//! methods ([`Query::Virtual`]): those naming a method on a supertype of its
+//! class, or on a subclass inheriting it. A supertype method more than
+//! [`DEFAULT_FAN_OUT`](crate::compose::DEFAULT_FAN_OUT) classes define is
+//! not followed (the search notes it); `*` in front follows every one, `=`
+//! keeps only the calls naming the set's methods themselves.
 //!
 //! Constraints keep the calls whose values they accept ([`Query::Call`]):
 //! `argN` is the Nth declared parameter of the called method (from 0),
@@ -166,15 +173,26 @@ impl<'a> Parser<'a> {
     /// The value of a `method:` condition: `{RULE}`, `@PATH` or a target,
     /// then its constraints.
     fn method(&mut self, nested: bool) -> Result<Query> {
+        // `={...}` / `=@PATH`: the set's own methods, without dispatch;
+        // `*{...}` / `*@PATH`: dispatch through every supertype.
+        let mode = ["={", "=@", "*{", "*@"].iter().find(|p| self.rest().starts_with(**p)).map(|p| p.as_bytes()[0]);
+        if let Some(m) = mode {
+            self.eat(char::from(m));
+        }
+        let dispatch = |set| match mode {
+            Some(b'=') => set,
+            Some(_) => Query::Virtual { target: Box::new(set), via: Default::default(), fan_out: None },
+            None => Query::Virtual { target: Box::new(set), via: Default::default(), fan_out: Some(crate::compose::DEFAULT_FAN_OUT) },
+        };
         let target = if self.eat('{') {
             let inner = self.rule(true)?;
             if !self.eat('}') {
                 return Err(self.error("expected `}`"));
             }
-            Query::Nested(Box::new(inner))
+            dispatch(Query::Nested(Box::new(inner)))
         } else if self.eat('@') {
             let path = self.text_until(nested, Stop::Constraint)?.trim();
-            self.method_file(path)?
+            dispatch(self.method_file(path)?)
         } else {
             let target = self.text_until(nested, Stop::Constraint)?.trim();
             Query::Method(member_query("method", None, false, Some(target), false)?)
@@ -430,6 +448,11 @@ mod tests {
         Query::Method(method_query(spec))
     }
 
+    /// A method set wrapped in its default (unresolved) dispatch query.
+    fn vq(target: Query) -> Query {
+        Query::Virtual { target: Box::new(target), via: Default::default(), fan_out: Some(crate::compose::DEFAULT_FAN_OUT) }
+    }
+
     #[test]
     fn parts_split_at_top_level_ampersands_only() {
         let q = parse_rule(" string:a & !literal:b&method:Lc;->m(I)V ").unwrap();
@@ -454,14 +477,18 @@ mod tests {
     #[test]
     fn method_bodies_nest_whole_rules() {
         let inner = Query::All { all: vec![Query::StringLiteral("imei".into())], none: vec![Query::Type("Lx;".into())] };
-        assert_eq!(parse_rule("method:{literal:imei & !type:Lx;}").unwrap(), Query::Nested(Box::new(inner.clone())));
+        // A `{...}` body nests the rule and, by default, follows dispatch.
+        assert_eq!(parse_rule("method:{literal:imei & !type:Lx;}").unwrap(), vq(Query::Nested(Box::new(inner.clone()))));
         let q = parse_rule("method:{ method:{literal:imei & !type:Lx;} } & string:http").unwrap();
         assert_eq!(
             q,
-            Query::All { all: vec![Query::Nested(Box::new(Query::Nested(Box::new(inner)))), Query::String("http".into())], none: vec![] }
+            Query::All {
+                all: vec![vq(Query::Nested(Box::new(vq(Query::Nested(Box::new(inner)))))), Query::String("http".into())],
+                none: vec![]
+            }
         );
         // A regex brace inside the body stays in its value.
-        assert_eq!(parse_rule("method:{string:a{2}}").unwrap(), Query::Nested(Box::new(Query::String("a{2}".into()))));
+        assert_eq!(parse_rule("method:{string:a{2}}").unwrap(), vq(Query::Nested(Box::new(Query::String("a{2}".into())))));
     }
 
     fn call(target: Query, constraints: Vec<CallConstraint>) -> Query {
@@ -512,13 +539,13 @@ mod tests {
                 none: vec![]
             }
         );
-        // Nested bodies and method sets take them too.
+        // Nested bodies and method sets take them too, under the dispatch wrapper.
         let q = parse_rule("method:{literal:imei}[arg0=*]").unwrap();
-        assert_eq!(q, call(Query::Nested(Box::new(Query::StringLiteral("imei".into()))), vec![arg(0, Want::Any, May)]));
+        assert_eq!(q, call(vq(Query::Nested(Box::new(Query::StringLiteral("imei".into())))), vec![arg(0, Want::Any, May)]));
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("set.txt"), "Lc;->m()V\n").unwrap();
         let q = parse_rule_in("method:@set.txt[ret==used]", Some(dir.path())).unwrap();
-        assert!(matches!(&q, Query::Call { target, .. } if matches!(**target, Query::MethodSet(_))), "{q:?}");
+        assert!(matches!(&q, Query::Call { target, .. } if matches!(**target, Query::Virtual { .. })), "{q:?}");
         // Array descriptors and regex classes are not constraints.
         assert!(!has_constraints("Lc;->m([B[Ljava/lang/String;)V") && has_constraints("x[ret=used]"));
         assert_eq!(parse_rule("string:[arg0]").unwrap(), Query::String("[arg0]".into()));
@@ -546,6 +573,26 @@ mod tests {
 
     fn format_extends(c: &str) -> Query {
         Query::Extends(format_class_name(c).unwrap())
+    }
+
+    #[test]
+    fn method_sets_follow_dispatch_unless_prefixed_with_eq() {
+        // `{...}` / `@` wrap the set in a dispatch query with the default
+        // fan-out; `*` lifts it; `=` keeps the set exact.
+        use crate::compose::DEFAULT_FAN_OUT;
+        let Query::Virtual { target, via, fan_out } = parse_rule("method:{literal:x}").unwrap() else { panic!("a dispatch set") };
+        assert!(matches!(*target, Query::Nested(_)) && via.is_empty() && fan_out == Some(DEFAULT_FAN_OUT));
+        let Query::Virtual { fan_out, .. } = parse_rule("method:*{literal:x}").unwrap() else { panic!("a dispatch set") };
+        assert_eq!(fan_out, None);
+        assert!(matches!(parse_rule("method:={literal:x}").unwrap(), Query::Nested(_)));
+        // A constraint applies to the dispatched calls.
+        let Query::Call { target, .. } = parse_rule("method:{literal:x}[arg0=1]").unwrap() else { panic!("constrained") };
+        assert!(matches!(*target, Query::Virtual { .. }));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("s.txt"), "La/B;->m()V\n").unwrap();
+        assert!(matches!(parse_rule_in("method:@s.txt", Some(dir.path())).unwrap(), Query::Virtual { .. }));
+        assert!(matches!(parse_rule_in("method:=@s.txt", Some(dir.path())).unwrap(), Query::MethodSet(_)));
+        assert!(matches!(parse_rule_in("method:*@s.txt", Some(dir.path())).unwrap(), Query::Virtual { fan_out: None, .. }));
     }
 
     #[test]
@@ -587,7 +634,8 @@ mod tests {
             \x20 2 <- La/A;->run(I)V (via Lx;)\n\
             com.a.B.go\n";
         std::fs::write(dir.path().join("set.txt"), text).unwrap();
-        let Query::MethodSet(set) = parse_rule_in("method:@set.txt", Some(dir.path())).unwrap() else { panic!("a method set") };
+        let Query::Virtual { target, .. } = parse_rule_in("method:@set.txt", Some(dir.path())).unwrap() else { panic!("a dispatch set") };
+        let Query::MethodSet(set) = *target else { panic!("a method set") };
         let want = [exact_method("La/A;->run(I)V").unwrap(), exact_method("Lb/Lib;->sink()V").unwrap(), method_query("com.a.B.go")];
         assert_eq!(set, want);
         // Obfuscated names go by the arrow, not as identifiers.

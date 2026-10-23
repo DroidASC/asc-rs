@@ -43,7 +43,7 @@ pub use table::Backing;
 
 use asc_dex::Dex;
 use query::Parts;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// Errors from reference search.
@@ -158,6 +158,23 @@ pub enum Query {
     /// holds them all (the engine) resolves this into a [`Query::MethodSet`]
     /// first; compiling it as it is fails.
     Nested(Box<Query>),
+    /// The calls that may dispatch to a method of `target` (a `MethodSet` or
+    /// `Nested`): those naming it, and those naming the same method on a
+    /// supertype of its class or on a subclass inheriting it
+    /// (`method:{RULE}` and `method:@FILE` by default). The engine resolves
+    /// it over the class hierarchy into `target` plus those methods, `via`
+    /// mapping each added one (`Lcls;->name(params)ret`, or `Lcls;->name`
+    /// for every overload) to the classes of `target` it stands for; a hit on
+    /// one carries the note `(dispatch LIST)`.
+    Virtual {
+        target: Box<Query>,
+        via: BTreeMap<String, String>,
+        /// Most classes of the program that may define a supertype's method
+        /// for the calls naming it to be followed (`None`: no limit). A
+        /// method every lambda or callback implements says nothing about
+        /// which one runs.
+        fan_out: Option<usize>,
+    },
     Field(MemberQuery),
     /// The calls of a method query (`Method`, `MethodSet` or `Nested`) that
     /// every constraint keeps (`method:X[arg1="id", ret=unused]`); see
@@ -191,7 +208,9 @@ impl Query {
         match self {
             Query::String(_) | Query::StringLiteral(_) => RefKind::String,
             Query::Type(_) | Query::Extends(_) | Query::Implements(_) => RefKind::Type,
-            Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) | Query::Call { .. } | Query::Defined(_) => RefKind::Method,
+            Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) | Query::Virtual { .. } | Query::Call { .. } | Query::Defined(_) => {
+                RefKind::Method
+            }
             Query::Field(_) => RefKind::Field,
             // Rows of a compound query list constants of several kinds.
             Query::All { all, .. } => all.first().map_or(RefKind::String, Query::kind),
@@ -275,8 +294,10 @@ pub struct Hit {
     pub matched_idx: u32,
     /// Owning method(s); `None` when the offset failed instruction verification.
     pub methods: Option<MethodRef>,
-    /// What the constraints of a [`Query::Call`] judged at this call site:
-    /// `[arg1="id", ret=unused]`, `?` first when one is undetermined.
+    /// What the constraints of a [`Query::Call`] judged at this call site
+    /// (`[arg1="id", ret=unused]`, `?` first when one is undetermined),
+    /// and for a [`Query::Virtual`] alias, the methods it may dispatch to
+    /// (`(dispatch Lcls;)`).
     pub note: Option<String>,
 }
 
@@ -429,6 +450,7 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             (_, Parts::Relation(..)) => Ok(self.class_relation(query)?.unwrap_or_default().into_iter().collect()),
             (RefKind::Type, Parts::Pattern(Some(re))) => Ok(self.type_locator()?.locate(buf, self.string_locator()?, re)),
             (_, Parts::Call(c)) => self.locate_compiled(&c.target),
+            (_, Parts::Virtual(target, _)) => self.locate_compiled(target),
             (RefKind::Method, Parts::Member(_) | Parts::MemberSet(_)) => {
                 self.method_locator()?.locate_compiled(self.dex, self.string_locator()?, self.type_locator()?, query)
             }
@@ -460,6 +482,7 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         }
         match query.parts() {
             Parts::Call(c) => self.cannot_match(&c.target),
+            Parts::Virtual(target, _) => self.cannot_match(target),
             // A class nobody references cannot be extended or implemented.
             Parts::Relation(_, descriptor) => Ok(self.dex.find_type_idx(descriptor)?.is_none()),
             // A definition predicate reads no code, so locating it yields
@@ -508,10 +531,53 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             return Ok(Vec::new());
         }
         let hits = self.scan_idxs(query.kind(), &idxs)?;
+        self.refine(query, hits)
+    }
+
+    /// The hits of `query`'s located indexes that it keeps, with their notes:
+    /// a [`Query::Virtual`] labels the calls it reached by dispatch, a
+    /// [`Query::Call`] judges the values of its target's calls.
+    fn refine(&self, query: &CompiledQuery, hits: Vec<Hit>) -> Result<Vec<Hit>> {
         match query.parts() {
-            Parts::Call(c) => self.constrain(c, hits),
+            Parts::Call(c) => {
+                let hits = self.refine(&c.target, hits)?;
+                self.constrain(c, hits)
+            }
+            Parts::Virtual(_, via) => self.label_dispatch(via, hits),
             _ => Ok(hits),
         }
+    }
+
+    /// `hits` with a `(dispatch LIST)` note on each call [`Query::Virtual`]
+    /// added for dispatch.
+    fn label_dispatch(&self, via: &BTreeMap<String, String>, mut hits: Vec<Hit>) -> Result<Vec<Hit>> {
+        if via.is_empty() {
+            return Ok(hits);
+        }
+        let mut labels: HashMap<u32, Option<&str>> = HashMap::new();
+        for hit in &mut hits {
+            let label = match labels.get(&hit.matched_idx) {
+                Some(&l) => l,
+                None => {
+                    let m = self.dex.method_id(hit.matched_idx)?;
+                    let name = self.dex.method_display(hit.matched_idx)?;
+                    let proto = self.dex.proto_id(u32::from(m.proto_idx))?;
+                    let mut sig = format!("{name}(");
+                    for p in self.dex.type_list(proto.parameters_off)? {
+                        sig.push_str(&self.dex.type_descriptor(u32::from(p))?);
+                    }
+                    sig.push(')');
+                    sig.push_str(&self.dex.type_descriptor(proto.return_type_idx)?);
+                    let l = via.get(&sig).or_else(|| via.get(&name)).map(String::as_str);
+                    labels.insert(hit.matched_idx, l);
+                    l
+                }
+            };
+            if let Some(label) = label {
+                hit.note = Some(format!("(dispatch {label})"));
+            }
+        }
+        Ok(hits)
     }
 
     /// Hits of several queries with one code scan per index kind: the
@@ -542,9 +608,7 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             }
         }
         for (q, hits) in queries.iter().zip(out.iter_mut()) {
-            if let Parts::Call(c) = q.parts() {
-                *hits = self.constrain(c, std::mem::take(hits))?;
-            }
+            *hits = self.refine(q, std::mem::take(hits))?;
         }
         Ok(out)
     }

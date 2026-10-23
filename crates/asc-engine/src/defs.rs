@@ -266,7 +266,7 @@ fn resolve_override(target: &asc_findrefs::MemberQuery, graph: &ClassGraph) -> R
 /// signature, but only when every part is a concrete descriptor and the
 /// return type is given — otherwise the override matches on the name alone
 /// (every overload), since a bare `String` names a type in any package.
-fn descriptor_proto(sig: &asc_findrefs::MemberSignature) -> Option<String> {
+pub(crate) fn descriptor_proto(sig: &asc_findrefs::MemberSignature) -> Option<String> {
     use asc_findrefs::{MemberSignature, TypeMatch};
     let MemberSignature::Method { params, ret: Some(ret) } = sig else { return None };
     fn descriptor(t: &TypeMatch) -> Option<&str> {

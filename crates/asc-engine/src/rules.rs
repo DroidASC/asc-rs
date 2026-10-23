@@ -170,6 +170,9 @@ impl Engine {
         for rule in rules {
             crate::compose::check_patterns(rule)?;
         }
+        if let Some(engine) = self.transient(rules.iter().any(crate::compose::needs_program))? {
+            return engine.find_refs_rules(rules, opts, cancel, sink);
+        }
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
         // Largest first, as in `find_refs_opts`.
@@ -186,16 +189,18 @@ impl Engine {
             let replay =
                 rendered.and_then(|(d, k)| d.get_rendered(k, &tiers::findrefs_key(rule, opts))).and_then(|b| tiers::decode_batches(&b));
             match replay {
-                Some(batches) => {
-                    for batch in batches {
+                Some(recorded) => {
+                    for batch in recorded.batches {
                         summary.total_results += batch.results.len();
                         sink(i, batch);
                     }
+                    summary.notes.extend(recorded.notes);
                 }
                 None => missing.push(i),
             }
         }
         if missing.is_empty() {
+            summary.notes = crate::compose::merge_notes(std::mem::take(&mut summary.notes));
             summary.total_us = t0.elapsed().as_micros();
             self.log(format!("[APK] for_each_findrefs_rules total={} us rules={} source=result", summary.total_us, rules.len()));
             return Ok(summary);
@@ -204,8 +209,11 @@ impl Engine {
         // pass first. L3 keys on the rules as given, so replays skip this.
         let todo: Vec<Query> = missing.iter().map(|&i| rules[i].clone()).collect();
         let resolved = self.resolve(&todo, cancel)?;
+        let rule_notes = resolved.notes;
+        summary.notes.extend(rule_notes.iter().flatten().cloned());
+        summary.notes = crate::compose::merge_notes(std::mem::take(&mut summary.notes));
         let _query = self.prebuild.query();
-        let compiled = compile_rules(resolved.as_deref().unwrap_or(&todo))?;
+        let compiled = compile_rules(resolved.queries.as_deref().unwrap_or(&todo))?;
         let mut recorders: Vec<_> = missing.iter().map(|_| rendered.map(|_| tiers::ResultRecorder::new())).collect();
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<Vec<RefBatch>>();
@@ -245,8 +253,8 @@ impl Engine {
         });
         // A cancelled run may be missing entries.
         if let Some((_, k)) = rendered.filter(|_| !cancel.load(Ordering::Relaxed)) {
-            for (&i, recorder) in missing.iter().zip(recorders) {
-                if let Some(payload) = recorder.and_then(tiers::ResultRecorder::finish) {
+            for ((&i, recorder), notes) in missing.iter().zip(recorders).zip(&rule_notes) {
+                if let Some(payload) = recorder.and_then(|r| r.finish(notes)) {
                     let query = tiers::findrefs_key(&rules[i], opts);
                     let job = WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Rendered { query, payload } };
                     self.cache.as_ref().expect("rendered implies a cache").put_async(job);

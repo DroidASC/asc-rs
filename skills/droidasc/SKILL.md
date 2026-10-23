@@ -80,8 +80,18 @@ in one method), `!` before a part to drop methods matching it. `rules`, `all`,
   it to looping `findrefs` over a list of methods.
 - `method:@FILE`: calls of the methods FILE lists, one per line; earlier findrefs / callgraph
   output works as it is (the first `Lcls;->m(..)` on each line is taken), as do other spellings.
-- Calls are matched by the signature the call site names: a call through a subclass or an
-  interface names that class. Use `callgraph --virtual` to follow dispatch.
+- `method:{RULE}` and `method:@FILE` follow virtual dispatch by default: a call naming the same
+  method on a supertype of the matched class (an interface it implements) or on a subclass that
+  inherits it is listed too, with a `(dispatch Lcls;)` note. This is what catches an AIDL or
+  base-class call to a method the program implements (`Build.getSerial` ->
+  `IDeviceIdentifiersPolicyService->getSerialForPackage (dispatch ...DeviceIdentifiersPolicy)`).
+  It over-approximates: the call may run another implementer.
+- A supertype's method is not followed when more than 16 classes of the program implement it,
+  or its type has over 1024 subclasses (`Runnable.run`, Kotlin `FunctionN.invoke`, OkHttp
+  `Interceptor.intercept`): its calls say nothing about which one runs. Each one left out is a
+  `# dispatch not followed via Lsup;->m(..) (N implementers)` line (MCP: `notes`); to include
+  one, add `method:Lsup;->m` as its own rule, or write `method:*{RULE}` to follow every
+  supertype. `method:={RULE}` / `method:=@FILE` match only the set's own methods.
 - `string:` regexes match each string on its own: `^abc$` is the whole string. Write `\&` for
   a literal `&` in a regex.
 
