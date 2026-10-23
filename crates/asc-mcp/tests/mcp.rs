@@ -672,10 +672,10 @@ fn rules_search_identical_dex_across_apks_once() {
     assert_eq!(s["rules"][0]["total"], 6, "{s}");
     let body = text(&r[0]);
     for apk in ["apk1", "apk2"] {
-        assert!(body.contains(&format!("{apk} | r1 | classes.dex | Lexample/Test;->first | matched=(token)\n")), "{body}");
+        assert!(body.contains(&format!("{apk} | r1 | classes.dex | Lexample/Test;->first()V | \"token\"\n")), "{body}");
     }
     // The follower's rows carry its own entry name.
-    assert!(body.contains("apk3 | r1 | classes2.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(body.contains("apk3 | r1 | classes2.dex | Lexample/Test;->first()V | \"token\"\n"), "{body}");
     assert!(!body.contains("apk3 | r1 | classes.dex |"), "{body}");
 }
 
