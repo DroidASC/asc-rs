@@ -7,6 +7,7 @@
 
 pub mod decode;
 mod table;
+pub mod values;
 pub mod verify;
 pub mod walk;
 
