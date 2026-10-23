@@ -16,9 +16,12 @@
 //! ids. Callers align DEX files by method signature.
 //!
 //! [`CallGraph::to_bytes`] / [`CallGraph::from_bytes`] give a flat
-//! little-endian form suited to an on-disk cache (layout in `to_bytes`).
+//! little-endian form suited to an on-disk cache (layout in `to_bytes`);
+//! [`CallGraph::view`] reads that form in place from a mapping instead of
+//! copying it.
 
 use crate::insn_locator::InsnLocator;
+use crate::table::{Backing, Table};
 use asc_dalvik::walk::walk_insns;
 
 /// Invoke opcodes whose operand at `pc + 2` is a `method_id` index.
@@ -31,13 +34,13 @@ fn is_method_invoke(op: u8) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallGraph {
     /// `callees[callee_start[m]..callee_start[m + 1]]` are the ids `m` invokes.
-    callee_start: Vec<u32>,
-    callees: Vec<u16>,
+    callee_start: Table<u32>,
+    callees: Table<u16>,
     /// `callers[caller_start[m]..caller_start[m + 1]]` are the ids invoking `m`.
-    caller_start: Vec<u32>,
-    callers: Vec<u16>,
+    caller_start: Table<u32>,
+    callers: Table<u16>,
     /// Bit per method id: the method has a body in this DEX.
-    has_body: Vec<u64>,
+    has_body: Table<u64>,
 }
 
 const MAGIC: &[u8; 4] = b"ACG1";
@@ -93,7 +96,13 @@ impl CallGraph {
         let mut rev: Vec<(u16, u16)> = edges.iter().map(|&(a, b)| (b, a)).collect();
         rev.sort_unstable();
         let (caller_start, callers) = csr(n, rev.into_iter());
-        CallGraph { callee_start, callees, caller_start, callers, has_body }
+        CallGraph {
+            callee_start: callee_start.into(),
+            callees: callees.into(),
+            caller_start: caller_start.into(),
+            callers: callers.into(),
+            has_body: has_body.into(),
+        }
     }
 
     /// Number of method ids covered.
@@ -121,14 +130,22 @@ impl CallGraph {
         self.has_body.get(method as usize >> 6).is_some_and(|w| w & (1 << (method & 63)) != 0)
     }
 
-    /// Heap bytes held by the tables.
+    /// Heap bytes held by the tables (0 for a [`CallGraph::view`]).
     pub fn heap_bytes(&self) -> usize {
-        use crate::locators::vec_bytes;
-        vec_bytes(&self.callee_start)
-            + vec_bytes(&self.callees)
-            + vec_bytes(&self.caller_start)
-            + vec_bytes(&self.callers)
-            + vec_bytes(&self.has_body)
+        self.callee_start.heap_bytes()
+            + self.callees.heap_bytes()
+            + self.caller_start.heap_bytes()
+            + self.callers.heap_bytes()
+            + self.has_body.heap_bytes()
+    }
+
+    /// Bytes viewed in place in a mapping ([`CallGraph::view`]).
+    pub fn mapped_bytes(&self) -> usize {
+        self.callee_start.mapped_bytes()
+            + self.callees.mapped_bytes()
+            + self.caller_start.mapped_bytes()
+            + self.callers.mapped_bytes()
+            + self.has_body.mapped_bytes()
     }
 
     /// Flat little-endian form:
@@ -149,17 +166,17 @@ impl CallGraph {
         for v in [n, self.callees.len() as u32, 0] {
             out.extend_from_slice(&v.to_le_bytes());
         }
-        for v in self.callee_start.iter().chain(&self.caller_start) {
+        for v in self.callee_start.iter().chain(self.caller_start.iter()) {
             out.extend_from_slice(&v.to_le_bytes());
         }
         while out.len() % 8 != 0 {
             out.push(0);
         }
-        for w in &self.has_body {
+        for w in self.has_body.iter() {
             out.extend_from_slice(&w.to_le_bytes());
         }
         for table in [&self.callees, &self.callers] {
-            for v in table {
+            for v in table.iter() {
                 out.extend_from_slice(&v.to_le_bytes());
             }
             while out.len() % 4 != 0 {
@@ -172,6 +189,72 @@ impl CallGraph {
     /// Parse [`CallGraph::to_bytes`] output; `None` when it is malformed
     /// (wrong magic, truncated, or offsets out of order / out of range).
     pub fn from_bytes(b: &[u8]) -> Option<CallGraph> {
+        let l = Layout::parse(b)?;
+        let u32s = |off: usize, len: usize| -> Vec<u32> {
+            b[off..off + 4 * len].chunks_exact(4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])).collect()
+        };
+        let u16s = |off: usize| -> Vec<u16> { b[off..off + 2 * l.e].chunks_exact(2).map(|s| u16::from_le_bytes([s[0], s[1]])).collect() };
+        let has_body = b[l.has_body..l.has_body + 8 * l.words].chunks_exact(8).map(|s| u64::from_le_bytes(s.try_into().unwrap())).collect();
+        let g = CallGraph {
+            callee_start: u32s(l.callee_start, l.n + 1).into(),
+            callees: u16s(l.callees).into(),
+            caller_start: u32s(l.caller_start, l.n + 1).into(),
+            callers: u16s(l.callers).into(),
+            has_body: Vec::into(has_body),
+        };
+        g.is_consistent().then_some(g)
+    }
+
+    /// The [`CallGraph::to_bytes`] form at `off..off + len` of `backing`,
+    /// read in place: the tables stay in the (typically mapped) backing and
+    /// every process mapping the file shares one copy. The bytes must start
+    /// 8-byte aligned. `None` when malformed or misaligned, and on a
+    /// big-endian target (the form is little-endian; use `from_bytes`).
+    pub fn view(backing: &Backing, off: usize, len: usize) -> Option<CallGraph> {
+        if cfg!(target_endian = "big") {
+            return None;
+        }
+        let b = (**backing).as_ref().get(off..off.checked_add(len)?)?;
+        let l = Layout::parse(b)?;
+        let g = CallGraph {
+            callee_start: Table::view(backing, off + l.callee_start, l.n + 1)?,
+            callees: Table::view(backing, off + l.callees, l.e)?,
+            caller_start: Table::view(backing, off + l.caller_start, l.n + 1)?,
+            callers: Table::view(backing, off + l.callers, l.e)?,
+            has_body: Table::view(backing, off + l.has_body, l.words)?,
+        };
+        g.is_consistent().then_some(g)
+    }
+
+    /// The offset tables start at 0, never decrease and end at the edge
+    /// count, and every target names a covered method: what lookups rely on
+    /// to stay in bounds.
+    fn is_consistent(&self) -> bool {
+        let n = self.method_count();
+        let starts_ok = |s: &[u32], values: usize| {
+            s.first() == Some(&0) && s.last().is_some_and(|&l| l as usize == values) && s.windows(2).all(|w| w[0] <= w[1])
+        };
+        starts_ok(&self.callee_start, self.callees.len())
+            && starts_ok(&self.caller_start, self.callers.len())
+            && self.callees.iter().chain(self.callers.iter()).all(|&t| (t as usize) < n)
+    }
+}
+
+/// Byte offsets of the tables in the [`CallGraph::to_bytes`] form.
+struct Layout {
+    n: usize,
+    e: usize,
+    words: usize,
+    callee_start: usize,
+    caller_start: usize,
+    has_body: usize,
+    callees: usize,
+    callers: usize,
+}
+
+impl Layout {
+    /// The layout of `b`, if its header is valid and every table fits.
+    fn parse(b: &[u8]) -> Option<Layout> {
         let u32_at = |o: usize| b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
         if b.get(..4)? != MAGIC {
             return None;
@@ -180,29 +263,14 @@ impl CallGraph {
         if n > 1 << 16 {
             return None;
         }
-        let mut pos = 16;
-        let starts = |pos: &mut usize| -> Option<Vec<u32>> {
-            let v: Vec<u32> = (0..=n).map(|i| u32_at(*pos + 4 * i)).collect::<Option<_>>()?;
-            *pos += 4 * (n + 1);
-            (v[0] == 0 && v[n] as usize == e && v.windows(2).all(|w| w[0] <= w[1])).then_some(v)
-        };
-        let callee_start = starts(&mut pos)?;
-        let caller_start = starts(&mut pos)?;
-        pos = pos.next_multiple_of(8);
         let words = n.div_ceil(64);
-        let has_body: Vec<u64> = (0..words)
-            .map(|i| b.get(pos + 8 * i..pos + 8 * i + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap())))
-            .collect::<Option<_>>()?;
-        pos += 8 * words;
-        let targets = |pos: &mut usize| -> Option<Vec<u16>> {
-            let v: Vec<u16> =
-                (0..e).map(|i| b.get(*pos + 2 * i..*pos + 2 * i + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))).collect::<Option<_>>()?;
-            *pos = (*pos + 2 * e).next_multiple_of(4);
-            v.iter().all(|&t| (t as usize) < n).then_some(v)
-        };
-        let callees = targets(&mut pos)?;
-        let callers = targets(&mut pos)?;
-        Some(CallGraph { callee_start, callees, caller_start, callers, has_body })
+        let callee_start = 16;
+        let caller_start = callee_start + 4 * (n + 1);
+        let has_body = (caller_start + 4 * (n + 1)).next_multiple_of(8);
+        let callees = has_body + 8 * words;
+        let callers = (callees + 2 * e).next_multiple_of(4);
+        let end = callers.checked_add(2 * e)?;
+        (end <= b.len()).then_some(Layout { n, e, words, callee_start, caller_start, has_body, callees, callers })
     }
 }
 
@@ -243,7 +311,13 @@ mod tests {
         for &m in bodies {
             has_body[m as usize >> 6] |= 1 << (m & 63);
         }
-        CallGraph { callee_start, callees, caller_start, callers, has_body }
+        CallGraph {
+            callee_start: callee_start.into(),
+            callees: callees.into(),
+            caller_start: caller_start.into(),
+            callers: callers.into(),
+            has_body: has_body.into(),
+        }
     }
 
     #[test]
@@ -271,5 +345,37 @@ mod tests {
         assert_eq!(CallGraph::from_bytes(&CallGraph::default().to_bytes()), None, "n + 1 starts are required");
         let empty = graph(0, &[], &[]);
         assert_eq!(CallGraph::from_bytes(&empty.to_bytes()), Some(empty));
+    }
+
+    /// `bytes` at byte `at` of 8-byte aligned storage.
+    fn aligned(bytes: &[u8], at: usize) -> Backing {
+        struct Words(Vec<u64>, usize);
+        impl AsRef<[u8]> for Words {
+            fn as_ref(&self) -> &[u8] {
+                &bytemuck::cast_slice(&self.0)[..self.1]
+            }
+        }
+        let len = at + bytes.len();
+        let mut words = vec![0u64; len.div_ceil(8)];
+        bytemuck::cast_slice_mut::<u64, u8>(&mut words)[at..len].copy_from_slice(bytes);
+        std::sync::Arc::new(Words(words, len))
+    }
+
+    #[test]
+    fn views_read_the_flat_form_in_place() {
+        let g = graph(70, &[(0, 1), (0, 69), (2, 1), (69, 0)], &[0, 2, 69]);
+        let bytes = g.to_bytes();
+        let v = CallGraph::view(&aligned(&bytes, 8), 8, bytes.len()).expect("views");
+        assert_eq!(v, g);
+        assert_eq!((v.heap_bytes(), v.mapped_bytes() > 0), (0, true));
+        assert_eq!(v.callers(1), &[0, 2]);
+        // Out of range, misaligned for the u64 bit set, or damaged: refused.
+        assert!(CallGraph::view(&aligned(&bytes, 8), 8, bytes.len() - 1).is_none());
+        assert!(CallGraph::view(&aligned(&bytes, 8), 8, bytes.len() + 1).is_none());
+        assert!(CallGraph::view(&aligned(&bytes, 4), 4, bytes.len()).is_none());
+        let mut bad = bytes.clone();
+        let last = bad.len() - 4;
+        bad[last..last + 2].copy_from_slice(&70u16.to_le_bytes());
+        assert!(CallGraph::view(&aligned(&bad, 0), 0, bad.len()).is_none());
     }
 }

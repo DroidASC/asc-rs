@@ -42,7 +42,7 @@ pub use table::Backing;
 use asc_dex::Dex;
 use query::Parts;
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// Errors from reference search.
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +150,11 @@ pub struct Hit {
 /// references or pointers), so a `SearchState` must only ever be used
 /// together with that same buffer or lookups will silently return nonsense.
 /// The engine caches one per inflated DEX so repeated queries skip the builds.
+///
+/// Each table is built once: a second caller asking for a table under
+/// construction waits for it rather than building its own copy (a query
+/// arriving while a background prebuild is half way through a table gets
+/// that table sooner than by starting over).
 #[derive(Default)]
 pub struct SearchState {
     strings: OnceLock<StringLocator>,
@@ -158,6 +163,21 @@ pub struct SearchState {
     fields: OnceLock<FieldLocator>,
     insns: OnceLock<InsnLocator>,
     calls: OnceLock<CallGraph>,
+    /// One lock per table, held while that table is built.
+    building: [Mutex<()>; 6],
+}
+
+/// `cell`'s value, built by `build` under `lock` the first time.
+fn built<'c, T>(cell: &'c OnceLock<T>, lock: &Mutex<()>, build: impl FnOnce() -> Result<T>) -> Result<&'c T> {
+    if let Some(v) = cell.get() {
+        return Ok(v);
+    }
+    let _building = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(v) = cell.get() {
+        return Ok(v);
+    }
+    let v = build()?;
+    Ok(cell.get_or_init(|| v))
 }
 
 impl SearchState {
@@ -229,57 +249,33 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
 
     pub fn string_locator(&self) -> Result<&StringLocator> {
         let st = self.state();
-        if let Some(l) = st.strings.get() {
-            return Ok(l);
-        }
-        let l = StringLocator::build(self.dex)?;
-        Ok(st.strings.get_or_init(|| l))
+        built(&st.strings, &st.building[0], || StringLocator::build(self.dex))
     }
 
     pub fn type_locator(&self) -> Result<&TypeLocator> {
         let st = self.state();
-        if let Some(l) = st.types.get() {
-            return Ok(l);
-        }
-        let l = TypeLocator::build(self.dex)?;
-        Ok(st.types.get_or_init(|| l))
+        built(&st.types, &st.building[1], || TypeLocator::build(self.dex))
     }
 
     pub fn method_locator(&self) -> Result<&MethodLocator> {
         let st = self.state();
-        if let Some(l) = st.methods.get() {
-            return Ok(l);
-        }
-        let l = MethodLocator::build(self.dex)?;
-        Ok(st.methods.get_or_init(|| l))
+        built(&st.methods, &st.building[2], || MethodLocator::build(self.dex))
     }
 
     pub fn field_locator(&self) -> Result<&FieldLocator> {
         let st = self.state();
-        if let Some(l) = st.fields.get() {
-            return Ok(l);
-        }
-        let l = FieldLocator::build(self.dex)?;
-        Ok(st.fields.get_or_init(|| l))
+        built(&st.fields, &st.building[3], || FieldLocator::build(self.dex))
     }
 
     pub fn insn_locator(&self) -> Result<&InsnLocator> {
         let st = self.state();
-        if let Some(l) = st.insns.get() {
-            return Ok(l);
-        }
-        let l = InsnLocator::build(self.dex)?;
-        Ok(st.insns.get_or_init(|| l))
+        built(&st.insns, &st.building[4], || Ok(InsnLocator::build(self.dex)?))
     }
 
     /// The DEX's call graph, built on first use (the instruction table too).
     pub fn call_graph(&self) -> Result<&CallGraph> {
         let st = self.state();
-        if let Some(g) = st.calls.get() {
-            return Ok(g);
-        }
-        let g = CallGraph::build(self.dex.buf(), self.insn_locator()?);
-        Ok(st.calls.get_or_init(|| g))
+        built(&st.calls, &st.building[5], || Ok(CallGraph::build(self.dex.buf(), self.insn_locator()?)))
     }
 
     /// Resolve the query to constant-pool indexes (compiling its patterns).
