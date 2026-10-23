@@ -20,8 +20,8 @@
 //! fixed `name` such as `apk`.
 
 use crate::{
-    auto_memory_bytes_for, available_memory, CachedEntry, DexBytes, FindOptions, LogicalDex, RefBatch, RefResult, RefSite, SharedMemory,
-    AUTO_MEMORY_MAX, AUTO_MEMORY_MIN,
+    auto_memory_bytes_for, available_memory, CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, RefBatch, RefResult, RefSite,
+    SharedMemory, AUTO_MEMORY_MAX, AUTO_MEMORY_MIN,
 };
 use asc_cache::{ApkKey, DiskCache, ProcessRegistry, ProcessUsage};
 use asc_dex::Dex;
@@ -35,7 +35,7 @@ pub(crate) const LOCATORS_KIND: &str = "locators";
 /// `find_refs` results larger than this (encoded) are not kept in L3.
 pub(crate) const L3_MAX_RESULT: usize = 4 << 20;
 /// Layout version of the encoded `find_refs` results.
-const RESULT_FORMAT: u32 = 2;
+const RESULT_FORMAT: u32 = 3;
 /// Ends the encoded results (where an entry name's length would be), so a
 /// truncated file is told from a complete one.
 const RESULT_END: u32 = u32::MAX;
@@ -190,9 +190,14 @@ impl ResultRecorder {
             put_str(&mut self.out, &r.dex_name);
             put_u32(&mut self.out, r.method_idx);
             put_str(&mut self.out, &r.method);
+            put_str(&mut self.out, &r.signature);
             put_u32(&mut self.out, r.matched.len() as u32);
             for m in &r.matched {
-                put_str(&mut self.out, m);
+                self.out.push(match m {
+                    Matched::String(_) => 0,
+                    Matched::Symbol(_) => 1,
+                });
+                put_str(&mut self.out, m.as_str());
             }
             self.out.push(match r.relation {
                 None => 0,
@@ -264,8 +269,15 @@ pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Vec<RefBatch>> {
             let dex_name = r.str()?;
             let method_idx = r.u32()?;
             let method = r.str()?;
+            let signature = r.str()?;
             let m = r.u32()? as usize;
-            let matched = (0..m).map(|_| r.str()).collect::<Option<Vec<_>>>()?;
+            let matched = (0..m)
+                .map(|_| match r.u8()? {
+                    0 => Some(Matched::String(r.str()?)),
+                    1 => Some(Matched::Symbol(r.str()?)),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
             let relation = match r.u8()? {
                 0 => None,
                 1 => Some(ClassRelation::Extends),
@@ -280,7 +292,7 @@ pub(crate) fn decode_batches(bytes: &[u8]) -> Option<Vec<RefBatch>> {
                 1 => Some(r.str()?),
                 _ => return None,
             };
-            results.push(RefResult { dex_name, method_idx, method, matched, relation, sites, context });
+            results.push(RefResult { dex_name, method_idx, method, signature, matched, relation, sites, context });
         }
         out.push(RefBatch { entry_name, results, inflate_us: 0, search_us: 0, source: "result", error: None });
     }
@@ -431,7 +443,8 @@ mod tests {
             dex_name: "classes.dex".into(),
             method_idx: 7,
             method: "La;->b".into(),
-            matched: vec!["x\ny".into(), "".into()],
+            signature: "La;->b()V".into(),
+            matched: vec![Matched::String("x\ny".into()), Matched::Symbol("La;->c:I".into())],
             relation: rel,
             sites: vec![RefSite { offset: 9, matched: 1, pc: Some(3), line: None }],
             context: rel.map(|_| "    const-string v0, \"x\"".to_string()),

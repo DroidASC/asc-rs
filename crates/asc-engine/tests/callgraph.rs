@@ -190,7 +190,7 @@ fn findrefs_context_marks_the_referencing_instructions() {
     assert_eq!((rows[0].sites[0].pc, rows[0].sites[0].line), (Some(0), Some(7)));
     assert_eq!(
         rows[0].text(),
-        "classes.dex | La/Entry;->start | matched=(secret)\n  @ pc 0x0 line 7\n        .line 7\n  >     const-string v0, \"secret\"\n        .line 9"
+        "classes.dex | La/Entry;->start()V | \"secret\"\n  @ pc 0x0 line 7\n        .line 7\n  >     const-string v0, \"secret\"\n        .line 9"
     );
     let rows = run(&q, RefContext::Method);
     let ctx = rows[0].context.as_deref().unwrap();

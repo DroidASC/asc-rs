@@ -65,7 +65,7 @@ fn getclass_debug_keeps_stdout_clean() {
 }
 
 #[test]
-fn findrefs_prints_python_format_lines() {
+fn findrefs_prints_one_line_per_method() {
     let apk = temp_apk();
     let out = droidasc(&["findrefs", path(apk.path()), "string", "token"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -75,15 +75,15 @@ fn findrefs_prints_python_format_lines() {
     assert_eq!(
         lines,
         [
-            "classes.dex | Lexample/Test;->first | matched=(token)",
-            "classes.dex | Lexample/Test;->second | matched=(token)",
-            "classes2.dex | Lexample/Test;->first | matched=(token)",
-            "classes2.dex | Lexample/Test;->second | matched=(token)",
+            "classes.dex | Lexample/Test;->first()V | \"token\"",
+            "classes.dex | Lexample/Test;->second()V | \"token\"",
+            "classes2.dex | Lexample/Test;->first()V | \"token\"",
+            "classes2.dex | Lexample/Test;->second()V | \"token\"",
         ]
     );
     let out = droidasc(&["findrefs", path(apk.path()), "type", "example.Test"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).lines().all(|l| l.contains(" | Lexample/Test;->") && l.contains("| matched=(")));
+    assert!(stdout(&out).lines().all(|l| l.contains(" | Lexample/Test;->") && l.split(" | ").count() == 3));
 }
 
 #[test]
@@ -100,10 +100,10 @@ fn findrefs_all_rules_and_hierarchy() {
     assert_eq!(
         sorted(&out),
         [
-            "classes.dex | Lexample/Test;->first | matched=(token; token)",
-            "classes.dex | Lexample/Test;->second | matched=(token; token)",
-            "classes2.dex | Lexample/Test;->first | matched=(token; token)",
-            "classes2.dex | Lexample/Test;->second | matched=(token; token)",
+            "classes.dex | Lexample/Test;->first()V | \"token\", \"token\"",
+            "classes.dex | Lexample/Test;->second()V | \"token\", \"token\"",
+            "classes2.dex | Lexample/Test;->first()V | \"token\", \"token\"",
+            "classes2.dex | Lexample/Test;->second()V | \"token\", \"token\"",
         ]
     );
     let out = droidasc(&["findrefs", a, "all", "string:token", "--none", "string:oke"]);
@@ -120,7 +120,7 @@ fn findrefs_all_rules_and_hierarchy() {
     assert!(text.starts_with("# r1 string:token\n# r2 string:nothing & literal:token\n# r3 extends:java.lang.Object\n"), "{text}");
     assert!(text.ends_with("# r1 4 results\n# r2 0 results\n# r3 2 results\n"), "{text}");
     assert_eq!(text.lines().filter(|l| l.starts_with("r1 | ")).count(), 4);
-    assert!(text.contains("r3 | classes2.dex | Lexample/Test; extends Ljava/lang/Object;\n"), "{text}");
+    assert!(text.contains("r3 | classes2.dex | Lexample/Test; | extends Ljava/lang/Object;\n"), "{text}");
 
     let out = droidasc(&["hierarchy", a, "java.lang.Object", "--method", "second"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -169,7 +169,7 @@ fn exact_flag_matches_whole_member_names() {
         assert!(out.status.success(), "{}", stderr(&out));
         stdout(&out)
     };
-    let hit = "classes.dex | Lexample/Statics;->getSecond | matched=(Lexample/Statics;->SECOND)\n";
+    let hit = "classes.dex | Lexample/Statics;->getSecond()I | Lexample/Statics;->SECOND:I\n";
     assert_eq!(run(&["SECON"]), hit);
     assert_eq!(run(&["SECOND", "--exact"]), hit);
     assert_eq!(run(&["SECOND", "--exact", "--class", "example.Statics"]), hit);
@@ -300,7 +300,7 @@ fn findrefs_context_and_callgraph() {
     let text = stdout(&out);
     // first / second share one code item: both rows show the same instruction.
     assert!(
-        text.contains("classes.dex | Lexample/Test;->first | matched=(token)\n  @ pc 0x0\n  >     const-string v0, \"token\"\n"),
+        text.contains("classes.dex | Lexample/Test;->first()V | \"token\"\n  @ pc 0x0\n  >     const-string v0, \"token\"\n"),
         "{text}"
     );
     assert_eq!(text.matches("  >     const-string").count(), 4, "{text}");
@@ -321,7 +321,7 @@ fn findrefs_context_and_callgraph() {
 }
 
 #[test]
-fn findrefs_extends_and_impl_print_python_lines() {
+fn findrefs_extends_and_impl_print_class_rows() {
     let apk = rich_apk();
     for target in ["java.lang.Object", "Ljava/lang/Object;", "java/lang/Object"] {
         let out = droidasc(&["findrefs", path(apk.path()), "extends", target]);
@@ -329,11 +329,11 @@ fn findrefs_extends_and_impl_print_python_lines() {
         assert_eq!(
             sorted_lines(&out),
             [
-                "classes.dex | Lexample/Broken; extends Ljava/lang/Object;",
-                "classes.dex | Lexample/Custom; extends Ljava/lang/Object;",
-                "classes.dex | Lexample/Iface; extends Ljava/lang/Object;",
-                "classes.dex | Lexample/Rich; extends Ljava/lang/Object;",
-                "classes2.dex | Lexample/Test; extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Broken; | extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Custom; | extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Iface; | extends Ljava/lang/Object;",
+                "classes.dex | Lexample/Rich; | extends Ljava/lang/Object;",
+                "classes2.dex | Lexample/Test; | extends Ljava/lang/Object;",
             ]
         );
     }
@@ -341,7 +341,7 @@ fn findrefs_extends_and_impl_print_python_lines() {
     let file = dir.path().join("impls.txt");
     let out = droidasc(&["findrefs", path(apk.path()), "impl", "example.Iface", "-o", path(&file)]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "classes.dex | Lexample/Rich; implements Lexample/Iface;\n");
+    assert_eq!(stdout(&out), "classes.dex | Lexample/Rich; | implements Lexample/Iface;\n");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), stdout(&out));
     // Direct relations only; unknown targets give no rows and no error.
     for args in [["extends", "example.Iface"], ["impl", "java.lang.Object"], ["extends", "no.such.Clazz"]] {
@@ -556,7 +556,7 @@ fn mcp_serves_line_delimited_json_rpc_until_stdin_closes() {
     assert_eq!(replies[0]["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(replies[1]["result"]["structuredContent"]["total"], 4);
     let text = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("classes.dex | Lexample/Test;->first | matched=(token)\n"), "{text}");
+    assert!(text.contains("classes.dex | Lexample/Test;->first()V | \"token\"\n"), "{text}");
 }
 
 #[test]
@@ -633,9 +633,9 @@ fn manifest_summary_resources_and_xml() {
     assert_eq!(json["package"], "com.demo");
 
     let out = droidasc(&["resources", p, "bool/exported_flag"]);
-    assert_eq!(stdout(&out), "0x7f020000 bool/exported_flag false\n0x7f020000 bool/exported_flag [v31] true\n");
+    assert_eq!(stdout(&out), "0x7f020000 | bool/exported_flag | false\n0x7f020000 | bool/exported_flag [v31] | true\n");
     let out = droidasc(&["resources", p, "0x7f010000", "--resolve"]);
-    assert_eq!(stdout(&out), "chain @string/app_name\n0x7f010000 string/app_name \"Demo\"\n");
+    assert_eq!(stdout(&out), "chain @string/app_name\n0x7f010000 | string/app_name | \"Demo\"\n");
     let out = droidasc(&["resources", p, "--search", "XML/", "--in", "name", "--limit", "1"]);
     assert_eq!(stdout(&out), "", "the regex is case-sensitive");
     let out = droidasc(&["resources", p, "--search", "xml/", "--in", "name", "--limit", "1"]);

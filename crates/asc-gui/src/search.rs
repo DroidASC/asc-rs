@@ -107,7 +107,8 @@ impl SearchState {
         }
         let start = self.lines.len();
         for r in &rows {
-            let line = format!("{}  {}  ({})", r.dex_name, r.method, r.matched.join("; "));
+            let matched = r.matched.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            let line = format!("{}  {}  ({matched})", r.dex_name, r.method);
             self.lower.push(line.to_lowercase());
             self.lines.push(line);
         }
@@ -242,7 +243,8 @@ mod tests {
             dex_name: "classes.dex".into(),
             method_idx: 0,
             method: m.into(),
-            matched: vec!["x".into()],
+            signature: format!("{m}()V"),
+            matched: vec![asc_engine::Matched::String("x".into())],
             relation: None,
             sites: Vec::new(),
             context: None,

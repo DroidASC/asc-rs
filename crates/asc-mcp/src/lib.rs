@@ -31,8 +31,8 @@ mod res;
 mod rules;
 
 use asc_engine::{
-    names, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, RefBatch, RefContext, RefResult,
-    SharedCache, SmaliOptions,
+    names, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch, RefContext,
+    RefResult, SharedCache, SmaliOptions,
 };
 use asc_findrefs::Query;
 use multi::{Report, Reports, Section};
@@ -1080,7 +1080,7 @@ impl Found {
 }
 
 fn result_json(r: &RefResult) -> Value {
-    json!({"dex": r.dex_name, "method": r.method, "matched": r.matched})
+    ref_json(r, RefContext::None)
 }
 
 /// The findrefs query `args` describe.
@@ -1204,9 +1204,10 @@ fn context_arg(args: &Value) -> Result<RefContext, ToolError> {
 /// A findrefs row as JSON; with a context, also where the references are
 /// (`pc` in code units, source `line`) and the smali around them.
 fn ref_json(r: &RefResult, context: RefContext) -> Value {
-    let mut v = json!({"dex": r.dex_name, "method": r.method, "matched": r.matched});
+    let matched: Vec<&str> = r.matched.iter().map(Matched::as_str).collect();
+    let mut v = json!({"dex": r.dex_name, "method": r.method, "signature": r.signature, "matched": matched});
     if context != RefContext::None {
-        v["sites"] = r.sites.iter().map(|s| json!({"pc": s.pc, "line": s.line, "matched": r.matched.get(s.matched)})).collect();
+        v["sites"] = r.sites.iter().map(|s| json!({"pc": s.pc, "line": s.line, "matched": matched.get(s.matched)})).collect();
         v["context"] = json!(r.context);
     }
     v
@@ -1331,8 +1332,9 @@ pub mod defs {
     pub fn findrefs() -> Value {
         json!({
             "description": "Find code references to a string, type, method or field across every DEX (one line per \
-                referencing method: `dex | Lcls;->method | matched=(...)`), or the classes that extend / implement a \
-                type (`dex | Lsub; extends Lbase;`). Paged; the last line says how many there are. With apks / dir: \
+                referencing method: `dex | Lcls;->method(params)ret | \"a string\", Lcls;->m(I)V, Lcls;->f:I`, strings \
+                quoted and escaped as JSON), or the classes that extend / implement a type (`dex | Lsub; | extends \
+                Lbase;`). Paged; the last line says how many there are. With apks / dir: \
                 one section per APK (`apkN | 12 hits (+3 in SDKs) | path`, then its first per_apk rows, each line \
                 prefixed `apkN | `), hits in common SDK packages folded into a count, APKs without hits listed by id. \
                 Give `kind` for one query, `all` / `none` for methods matching several conditions at once, or `rules` \

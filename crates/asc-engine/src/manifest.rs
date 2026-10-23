@@ -9,6 +9,7 @@
 //! override) every variant is reported next to the value.
 
 use crate::resources::{plain_value, resolve_simple};
+use crate::text::value;
 use crate::{Engine, Result};
 use asc_arsc::{EntryValue, ResTable, TYPE_INT_BOOLEAN, TYPE_STRING};
 use asc_axml::{Attribute, Element};
@@ -149,29 +150,30 @@ impl IntentFilter {
     }
 
     fn line(&self) -> String {
+        let list = |vs: &[String]| vs.iter().map(|v| value(v)).collect::<Vec<_>>().join(",");
         let mut parts = Vec::new();
         if !self.actions.is_empty() {
-            parts.push(format!("action={}", self.actions.join(",")));
+            parts.push(format!("action={}", list(&self.actions)));
         }
         if !self.categories.is_empty() {
-            parts.push(format!("category={}", self.categories.join(",")));
+            parts.push(format!("category={}", list(&self.categories)));
         }
         for d in &self.data {
             let mut s = String::new();
             if let Some(v) = &d.scheme {
-                s.push_str(&format!("scheme={v} "));
+                s.push_str(&format!("scheme={} ", value(v)));
             }
             if let Some(v) = &d.host {
-                s.push_str(&format!("host={v} "));
+                s.push_str(&format!("host={} ", value(v)));
             }
             if let Some(v) = &d.port {
-                s.push_str(&format!("port={v} "));
+                s.push_str(&format!("port={} ", value(v)));
             }
             if let Some((k, v)) = &d.path {
-                s.push_str(&format!("{k}={v} "));
+                s.push_str(&format!("{k}={} ", value(v)));
             }
             if let Some(v) = &d.mime_type {
-                s.push_str(&format!("mimeType={v} "));
+                s.push_str(&format!("mimeType={} ", value(v)));
             }
             parts.push(format!("data({})", s.trim_end()));
         }
@@ -555,7 +557,7 @@ fn provider_paths(doc: &Element) -> Vec<String> {
     doc.children
         .iter()
         .map(|p| {
-            let attr = |n: &str| p.plain(n).map_or("-".to_string(), |a| a.value.clone());
+            let attr = |n: &str| p.plain(n).map_or("-".to_string(), |a| value(&a.value).into_owned());
             format!("{} name={} path={}", p.name, attr("name"), attr("path"))
         })
         .collect()
@@ -563,29 +565,34 @@ fn provider_paths(doc: &Element) -> Vec<String> {
 
 impl Component {
     fn line(&self) -> String {
-        let mut s = format!("{} {} exported={} ({})", self.kind, self.class, self.exported, self.exported_reason);
+        let mut s = format!("{} {} exported={} ({})", self.kind, value(&self.class), self.exported, self.exported_reason);
         if !self.enabled {
             s.push_str(" enabled=false");
         }
         if let Some(t) = &self.target {
-            s.push_str(&format!(" target={t}"));
+            s.push_str(&format!(" target={}", value(t)));
         }
         if let Some(p) = &self.permission {
-            s.push_str(&format!(" permission={p}{}", if self.permission_from_app { "(application)" } else { "" }));
+            s.push_str(&format!(" permission={}{}", value(p), if self.permission_from_app { "(application)" } else { "" }));
         }
         if self.kind == "provider" {
-            s.push_str(&format!(" authorities={} grantUriPermissions={}", self.authorities.join(";"), self.grant_uri_permissions));
+            s.push_str(&format!(" authorities={} grantUriPermissions={}", self.authorities(), self.grant_uri_permissions));
             if let Some(p) = &self.read_permission {
-                s.push_str(&format!(" readPermission={p}"));
+                s.push_str(&format!(" readPermission={}", value(p)));
             }
             if let Some(p) = &self.write_permission {
-                s.push_str(&format!(" writePermission={p}"));
+                s.push_str(&format!(" writePermission={}", value(p)));
             }
         }
         if let Some(p) = &self.process {
-            s.push_str(&format!(" process={p}"));
+            s.push_str(&format!(" process={}", value(p)));
         }
         s
+    }
+
+    /// The provider's authorities, `;`-separated as the manifest writes them.
+    fn authorities(&self) -> String {
+        self.authorities.iter().map(|a| value(a)).collect::<Vec<_>>().join(";")
     }
 
     pub fn json(&self) -> Json {
@@ -624,11 +631,11 @@ impl ManifestSummary {
     /// Component lines carry the class so `grep exported=true` lists the
     /// attack surface directly.
     pub fn lines(&self) -> Vec<String> {
-        let opt = |o: &Option<String>| o.clone().unwrap_or_else(|| "-".into());
+        let opt = |o: &Option<String>| o.as_deref().map_or("-".to_string(), |v| value(v).into_owned());
         let opt_i = |o: Option<i64>| o.map_or("-".to_string(), |v| v.to_string());
         let mut out = vec![format!(
             "package {} versionCode={} versionName={} minSdk={} targetSdk={} sharedUserId={}",
-            self.package,
+            value(&self.package),
             opt(&self.version_code),
             opt(&self.version_name),
             opt_i(self.min_sdk),
@@ -650,18 +657,21 @@ impl ManifestSummary {
             opt(&a.full_backup_content),
             opt(&a.data_extraction_rules),
         ));
-        out.extend(self.uses_permissions.iter().map(|p| format!("uses-permission {p}")));
-        out.extend(self.permissions.iter().map(|p| format!("permission {} protectionLevel={}", p.name, p.protection_level)));
+        out.extend(self.uses_permissions.iter().map(|p| format!("uses-permission {}", value(p))));
+        out.extend(
+            self.permissions.iter().map(|p| format!("permission {} protectionLevel={}", value(&p.name), value(&p.protection_level))),
+        );
         for c in &self.components {
             out.push(c.line());
+            let class = value(&c.class);
             for f in &c.intent_filters {
-                out.push(format!("intent-filter {} {}", c.class, f.line()));
+                out.push(format!("intent-filter {class} {}", f.line()));
             }
             for l in c.deep_links() {
-                out.push(format!("deeplink {} {l}", c.class));
+                out.push(format!("deeplink {class} {}", value(&l)));
             }
             for p in &c.provider_paths {
-                out.push(format!("provider-path {} {p}", c.authorities.join(";")));
+                out.push(format!("provider-path {} {p}", c.authorities()));
             }
         }
         out.extend(self.network_security.iter().map(|l| format!("nsc {l}")));

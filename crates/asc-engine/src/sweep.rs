@@ -251,6 +251,7 @@ mod tests {
             dex_name: dex.into(),
             method_idx: 0,
             method: "La;->m".into(),
+            signature: "La;->m()V".into(),
             matched: vec![],
             relation: None,
             sites: vec![],

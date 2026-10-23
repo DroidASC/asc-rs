@@ -20,7 +20,7 @@ STAGED = re.compile(r"STAGED_ID=(0x[0-9a-f]{8})")
 # Attr definition metadata, which aapt2 leaves out of an attr's `size`.
 ATTR_META = {"^type", "^min", "^max", "^l10n"}
 VAL_LINE = re.compile(r"^      \(([^)]*)\) (.*)$")
-OURS_LINE = re.compile(r"^(0x[0-9a-f]{8}) (\S+) (?:\[([^\]]*)\] )?(.*)$")
+OURS_LINE = re.compile(r"^(0x[0-9a-f]{8}) \| (\S+) (?:\[([^\]]*)\] )?\| (.*)$")
 NUM = re.compile(r"^(-?[0-9.]+(?:e[-+]?\d+)?)(dp|sp|px|pt|in|mm|%p|%)?$")
 
 
@@ -74,7 +74,10 @@ def unescape(s):
     out, i = [], 0
     while i < len(s):
         c = s[i]
-        if c == "\\" and i + 1 < len(s):
+        if c == "\\" and s[i + 1 : i + 2] == "u" and re.fullmatch(r"[0-9a-f]{4}", s[i + 2 : i + 6]):
+            out.append(chr(int(s[i + 2 : i + 6], 16)))
+            i += 6
+        elif c == "\\" and i + 1 < len(s):
             out.append({"n": "\n", "t": "\t", "r": "\r"}.get(s[i + 1], s[i + 1]))
             i += 2
         else:

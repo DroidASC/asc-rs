@@ -26,7 +26,7 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
 |---|---|
 | `asc_client/apk_handler.py` (EOCD / central directory scan, chunked inflate with stop event, thread pool with early exit, process pool for findrefs, `list_classes`) | `asc-apk` (zip + inflate) and `asc-engine` (`get_class_dex`, `find_refs`, `list_classes` / `scan_classes`) |
 | `asc_client/dex_container.py` (DEX 041 logical DEX split) | `asc_dex::container` |
-| `asc_client/asc_handler.py` (`getclass`, `findrefs` line formatting) | `asc_engine::{decompile_dex_class, find_refs_in_dex, RefResult::line}` |
+| `asc_client/asc_handler.py` (`getclass`, `findrefs` line formatting) | `asc_engine::{decompile_dex_class, find_refs_in_dex, RefResult::line}` (own line format, see Output format) |
 | `asc_client/manifest_handler.py` (androguard AXMLPrinter) | `asc-axml` (plus `asc-arsc` and `asc_engine::manifest_summary`, which have no Python counterpart) |
 | `asc_core/utils/tinydex.py` (lazy DEX model) | `asc_dex::Dex` (every accessor computes from header offsets; nothing is cached) |
 | `asc_core/utils/leb128.py`, `dex_parser.py` (encoded values, debug info, annotations) | `asc_dex::{leb128, encoded, debug_info, annotations}` |
@@ -98,6 +98,31 @@ rather than copying dadguard's format (`# CLASS:` / `## METHOD:` comments, `.loc
 (both commands) is normalised as in Python (whitespace dropped from the descriptors, a
 bare name rejected) and keeps the class header, interfaces and class annotations, no
 fields, and only that method; the rebuilt DEX (`--dump-dex`) still holds the whole class.
+
+### Output format
+
+The text output is asc-rs's own, not the Python tool's: one record per line, columns
+separated by ` | `, so an agent can grep a reply and cut a column. `asc_engine::text` holds
+the two rules every tool uses:
+
+* `quoted`: a string value in double quotes, escaped as JSON escapes it (`\"`, `\\`, `\n`,
+  `\t`, `\r`, `\u00XX` for every other control character, DEL and the C1 range included),
+  so a string with a newline stays on its line and reads back with any JSON parser. It
+  is `asc_arsc::quote`, which renders string resources the same way.
+* `value`: the value of a `key=value` pair, quoted only when it is empty or holds
+  whitespace, a quote, a backslash, `=` or a control character (the manifest summary).
+
+`RefResult::line` is `dex | Lcls;->name(params)ret | matched`, `Matched` items joined by
+`, `: `Matched::String` quoted, `Matched::Symbol` (a type descriptor,
+`Lcls;->name(params)ret` or `Lcls;->name:type`) as it is, since descriptors never hold
+`, ` or a line break. A class relation row is `dex | Lsub; | extends Lbase;`. Resource
+rows are `0x7f0d0001 | type/name [config] | value`. `RefResult::method` keeps the bare
+`Lcls;->name` the multi-APK SDK folding and the GUI key on; `structuredContent` carries
+both (`method`, `signature`) and the matched values unquoted.
+
+The rows themselves are still the Python tool's: `bench/parity/semantic.py` runs both
+on an APK and compares (dex, `Lcls;->name`, set of matched values) per query, dropping
+the signature and field type our side adds.
 
 ### Search semantics kept from Python
 

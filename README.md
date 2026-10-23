@@ -77,9 +77,24 @@ examples:
 Exit status is 0 on success, 1 on error and 2 when `findrefs` or `callgraph` finished but
 some DEX entries could not be searched (a warning per entry is printed on stderr).
 
-The command line, query semantics and `findrefs` output format
-(`classes2.dex | Lcom/x/Y;->m | matched=(token)`, and `classes.dex | Lcom/x/Sub; extends
-Lcom/x/Base;` for `extends` / `impl`) are the same as the Python tool.
+The command line and query semantics are the Python tool's; the output is asc-rs's own, one
+record per line in `|` columns so it greps and cuts. A `findrefs` row is `dex | method |
+matched`: the method with its full signature (ready for `getclass --method` or
+`callgraph`), then what it references, `, `-separated: strings quoted and escaped as JSON
+(a multi-line string stays on its line), types as descriptors, methods as
+`Lcls;->name(params)ret`, fields as `Lcls;->name:type`. `extends` / `impl` rows are
+`dex | class | extends Lbase;`:
+
+```
+classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
+classes.dex | LWV/Sh;->onClick(Landroid/content/DialogInterface;I)V | "\n* If this app is available on Google Play, please include a URL:\n\nSteps to reproduce:\n…"
+classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
+classes8.dex | Lcgjc;->apply(Ljava/lang/Object;)Ljava/lang/Object; | Landroid/os/Build$VERSION;->SDK_INT:I
+classes4.dex | Ldxbs; | extends Landroid/webkit/WebViewClient;
+```
+
+The rows found are the Python tool's (`bench/parity/semantic.py` compares the two by dex,
+method and matched set).
 
 `getclass` and `disassemble` take `--method 'run(I)V'` to render a single method given its
 exact signature (a bare name is rejected). `findrefs extends` / `impl` list the classes
@@ -91,7 +106,7 @@ around them, so the next step rarely needs a `getclass`; `--context-method` prin
 whole method (a method over 150 lines shows 10 lines around each reference instead):
 
 ```
-classes.dex | Lcom/poc/Main;->run | matched=(token)
+classes.dex | Lcom/poc/Main;->run()V | "token"
   @ pc 0x4 line 12
         .line 12
   >     const-string v0, "token"
@@ -119,8 +134,8 @@ its subclasses (`(override of Lcom/poc/Base;)`).
 `findrefs APK all COND...` finds methods whose code matches every condition, `--none COND`
 drops those matching another. A condition is `KIND:VALUE`: `string:REGEX`, `literal:TEXT`,
 `type:PATTERN`, `method:[CLASS->]NAME`, `field:[CLASS->]NAME` (CLASS exact, `~CLASS` fuzzy;
-NAME a regex / substring, `=NAME` exact). `matched=(...)` lists what each condition matched,
-in order. `findrefs APK rules RULE...` (and `--file`, one rule per line) answers several
+NAME a regex / substring, `=NAME` exact). The matched column lists what each condition
+matched, in order. `findrefs APK rules RULE...` (and `--file`, one rule per line) answers several
 queries in one pass over each DEX, rows prefixed `r1 | `, `r2 | `...; a rule is a condition,
 `extends:CLASS` / `impl:CLASS`, or conditions joined with `&`. On Douyin, eight audit rules
 take 114 ms in one `rules` call against 700 ms as eight `findrefs` processes.
@@ -236,7 +251,7 @@ apps, side by side with the upstream `rust` branch (`rasc`) and the Python refer
 | **geometric mean speed-up vs Python** | **5.6×** | **7.3×** | | |
 | geometric mean, `findrefs` only | 3.8× | 3.7× | | |
 
-asc-rs reproduces the Python reference row-for-row; rasc uses literal, instruction-boundary
+asc-rs finds the same rows as the Python reference (its own line format); rasc uses literal, instruction-boundary
 matching and drops a few rows. `getclass` outputs differ in kind (rasc decompiles to
 Java, asc-rs disassembles), so that row measures different work. The upstream README's
 8.0× figure was taken on macOS, where the Python process pool is far slower to start; on
@@ -368,7 +383,7 @@ ending the session.
 | `open_apk` | `apk`, `warm` (default true: inflate every DEX now), `prebuild` (default true: then build the search tables in the background, queries first); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
 | `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
 | `getclass` | `class`, `debug_info`, `method` (exact signature), `resource_names` (default true) | smali, as `droidasc getclass [--method] --res-names`: constants that are resource ids end in `# @type/name` |
-| `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; with `context`, `structuredContent` rows carry `sites` (`pc`, `line`, `matched`) and `context` |
+| `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; `structuredContent` rows carry `dex`, `method`, `signature` (full) and `matched` (unquoted values); with `context` they also carry `sites` (`pc`, `line`, `matched`) and `context` |
 | `findrefs` (several conditions) | `all` / `none`: lists of condition objects (`kind`, `value` / `name`, `class`, ...) instead of `kind` | methods matching every `all` condition and no `none` one |
 | `findrefs` (rule set) | `rules`: list of queries (single or `all` / `none`); `limit` (100) per rule | per rule a `# r1 string "http://": 12 results` line and its `r1 \| ...` rows; `rules` in `structuredContent`, each with a complete follow-up call in `next` |
 | `callgraph` | `class`, `method` (name or `name(params)ret`), `direction` (`callers`/`callees`), `depth` (2), `max_nodes` (200), `virtual` | the `droidasc callgraph` tree; `rows` with `depth`, `parent`, `method`, `dex`, `repeated`, `via` |
@@ -376,7 +391,7 @@ ending the session.
 | `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
 | `getmanifest` | `resolve` | decoded XML (references by name with `resolve`) |
 | `manifest_summary` | `filter` (`all` / `exported`); or `apks` / `dir` | the `droidasc manifest-summary` records; `exported` keeps what other apps can reach (exported components, deep links, non-signature permissions, cleartext domains). For many APKs (default `exported`): per APK `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`, then its records |
-| `resources` | `query` (+ `resolve`), `search` (+ `in`, `literal`), `limit`, or `xml` (a path in the APK); or `apks` / `dir` | `droidasc resources` rows (`0x7f0d0001 string/app_name [zh-rCN] "..."`), or the decoded XML file |
+| `resources` | `query` (+ `resolve`), `search` (+ `in`, `literal`), `limit`, or `xml` (a path in the APK); or `apks` / `dir` | `droidasc resources` rows (`0x7f0d0001 \| string/app_name [zh-rCN] \| "..."`), or the decoded XML file |
 
 Every tool except `open_apk` takes `apk_id` or an `apk` path (opened on first use). Results
 carry the CLI text as `content` and the same data as `structuredContent` (`total` and
@@ -402,10 +417,10 @@ carry byte for byte only once (`structuredContent`: `apks_from_result_cache`, `d
 ```
 # findrefs method addJavascriptInterface over 312 APKs: 20 with hits, 103 hits, 0 errors, 193 ms
 apk15 | 1 hits | /data/apks/com.android.carrierdefaultapp.apk
-apk15 | classes.dex | Lcom/android/carrierdefaultapp/SlicePurchaseActivity;->setupWebView | matched=(Landroid/webkit/WebView;->addJavascriptInterface)
+apk15 | classes.dex | Lcom/android/carrierdefaultapp/SlicePurchaseActivity;->setupWebView()V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
 apk124 | 6 hits | /data/apks/com.android.vending.apk
-apk124 | classes3.dex | Lzlc;->c | matched=(Landroid/webkit/WebView;->addJavascriptInterface)
-apk124 | classes3.dex | Lzln;-><init> | matched=(Lzlm;->addJavascriptInterface)
+apk124 | classes3.dex | Lzlc;->c(Ljava/lang/String;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
+apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
 ...
 # nothing in the other 292 APKs
 # APKs 0..4 of 20 shown (output budget 32768 bytes); call findrefs with cursor="1:4" for the rest

@@ -45,7 +45,6 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
             methods.remove(&m);
         }
     }
-    let dex_name = dex.name().to_string();
     let mut rows = Vec::with_capacity(methods.len());
     for (m, per_part) in methods {
         let mut matched = Vec::new();
@@ -63,15 +62,7 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
             }
         }
         sites.sort_by_key(|s| s.offset);
-        rows.push(RefResult {
-            dex_name: dex_name.clone(),
-            method_idx: m,
-            method: dex.method_display(m)?,
-            matched,
-            relation: None,
-            sites,
-            context: None,
-        });
+        rows.push(RefResult::method_row(dex, m, matched, sites)?);
     }
     if opts.context != RefContext::None {
         attach_context(fr, &mut rows, opts.context)?;

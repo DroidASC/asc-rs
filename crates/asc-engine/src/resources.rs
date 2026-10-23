@@ -44,13 +44,14 @@ pub struct ResourceRow {
 }
 
 impl ResourceRow {
-    /// `0x7f0d0001 string/app_name [zh-rCN] "应用"` (no brackets for the
-    /// default configuration).
+    /// `0x7f0d0001 | string/app_name [zh-rCN] | "应用"` (no brackets for the
+    /// default configuration): the configuration names which value it is,
+    /// so it stays with the name and the columns stay three.
     pub fn line(&self) -> String {
         if self.config.is_empty() {
-            format!("0x{:08x} {} {}", self.id, self.name, self.value)
+            format!("0x{:08x} | {} | {}", self.id, self.name, self.value)
         } else {
-            format!("0x{:08x} {} [{}] {}", self.id, self.name, self.config, self.value)
+            format!("0x{:08x} | {} [{}] | {}", self.id, self.name, self.config, self.value)
         }
     }
 

@@ -103,7 +103,7 @@ fn full_session() {
     assert_eq!(lines.len(), 5);
     assert!(lines[..2].iter().all(|l| l.starts_with("classes.dex | Lexample/Test;->")), "{lines:?}");
     assert!(lines[2..4].iter().all(|l| l.starts_with("classes2.dex | ")), "{lines:?}");
-    assert!(lines.contains(&"classes.dex | Lexample/Test;->first | matched=(token)"));
+    assert!(lines.contains(&"classes.dex | Lexample/Test;->first()V | \"token\""));
     assert_eq!(lines[4], "# 4 results");
 
     let page = ok(&replies[4]);
@@ -198,7 +198,7 @@ fn findrefs_literal_and_class_relations_and_method_filter() {
     assert!(ok(&replies[0])["total"].as_u64().unwrap() > 0);
     assert_eq!(ok(&replies[1])["total"], 0);
     assert_eq!(ok(&replies[2])["total"], ok(&replies[0])["total"]);
-    assert!(text(&replies[3]).contains("Lexample/Test; extends Ljava/lang/Object;"), "{}", text(&replies[3]));
+    assert!(text(&replies[3]).contains("Lexample/Test; | extends Ljava/lang/Object;"), "{}", text(&replies[3]));
     assert_eq!(ok(&replies[4])["total"], 0);
     assert_eq!(replies[5]["result"]["isError"], true, "{}", replies[5]);
 }
@@ -221,7 +221,7 @@ fn findrefs_context_and_callgraph() {
     assert_eq!(compute["sites"], json!([{"pc": 16, "line": 14, "matched": asc_fixture::RICH_STRING}]));
     let ctx = compute["context"].as_str().unwrap();
     assert!(ctx.starts_with("  @ pc 0x10 line 14\n  >     const-string v0, "), "{ctx}");
-    assert!(text(&replies[0]).contains("Lexample/Rich;->compute | matched=("), "{}", text(&replies[0]));
+    assert!(text(&replies[0]).contains("Lexample/Rich;->compute("), "{}", text(&replies[0]));
     let r = ok(&replies[1]);
     assert_eq!(r["returned"], 1);
     assert!(r["results"][0]["context"].as_str().unwrap().contains(".end method"));
@@ -306,7 +306,7 @@ fn findrefs_over_a_directory_reports_per_apk() {
     // apk ids follow path order: a, b, bomb, (broken fails to open), sub/c.
     let a = body.lines().find(|l| l.starts_with("apk1 | 4 hits | ")).expect(body);
     assert!(a.ends_with("a.apk"), "{a}");
-    assert!(body.contains("apk1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(body.contains("apk1 | classes.dex | Lexample/Test;->first()V | \"token\"\n"), "{body}");
     assert!(body.contains("\napk3 | error | ") && body.contains("ratio limit 100"), "{body}");
     assert!(body.contains("\n- | error | ") && body.contains("broken.apk"), "{body}");
     assert!(body.contains("\napk4 | 2 hits | "), "{body}");
@@ -488,8 +488,8 @@ fn manifest_summary_and_resources_for_one_apk() {
     );
     assert!(!exported.contains("com.demo.Sync") && exported.contains("deeplink com.demo.Main https://demo.com/open*"), "{exported}");
     assert_eq!(ok(&replies[1])["components"].as_array().unwrap().len(), 3);
-    assert_eq!(text(&replies[2]), "0x7f020000 bool/exported_flag false\n0x7f020000 bool/exported_flag [v31] true\n# 2 rows\n");
-    assert!(text(&replies[3]).starts_with("chain @string/app_name\n0x7f010000 string/app_name \"Demo\"\n"), "{}", text(&replies[3]));
+    assert_eq!(text(&replies[2]), "0x7f020000 | bool/exported_flag | false\n0x7f020000 | bool/exported_flag [v31] | true\n# 2 rows\n");
+    assert!(text(&replies[3]).starts_with("chain @string/app_name\n0x7f010000 | string/app_name | \"Demo\"\n"), "{}", text(&replies[3]));
     let search = ok(&replies[4]);
     assert_eq!((search["total"].as_u64(), search["rows"].as_array().unwrap().len()), (Some(2), 1));
     assert!(text(&replies[5]).contains("<root-path name=\"root\" path=\"\"/>"), "{}", text(&replies[5]));
@@ -522,7 +522,7 @@ fn manifest_summary_and_resources_over_many_apks() {
     assert!(body.contains("\napk3 | error | ") && body.contains("AndroidManifest.xml"), "{body}");
     let names = text(&replies[1]);
     assert!(
-        names.contains("apk1 | 0x7f010000 string/app_name \"Demo\"\n") && names.contains("apk2 | 0x7f010000 string/app_name"),
+        names.contains("apk1 | 0x7f010000 | string/app_name | \"Demo\"\n") && names.contains("apk2 | 0x7f010000 | string/app_name"),
         "{names}"
     );
     assert!(names.contains("\napk3 | error | ") && names.contains("no resources.arsc"), "{names}");
@@ -581,10 +581,10 @@ fn identical_dex_across_apks_is_searched_once() {
     assert_eq!(all["total"], 6, "{all}");
     let body = text(&r[0]);
     for apk in ["apk1", "apk2"] {
-        assert!(body.contains(&format!("{apk} | classes.dex | Lexample/Test;->first | matched=(token)\n")), "{body}");
+        assert!(body.contains(&format!("{apk} | classes.dex | Lexample/Test;->first()V | \"token\"\n")), "{body}");
     }
     // The follower's rows carry its own entry name.
-    assert!(body.contains("apk3 | classes2.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(body.contains("apk3 | classes2.dex | Lexample/Test;->first()V | \"token\"\n"), "{body}");
     assert!(!body.contains("apk3 | classes.dex |"), "{body}");
 }
 
@@ -602,8 +602,8 @@ fn a_forged_crc_does_not_borrow_another_apks_rows() {
     let all = ok(&r[0]);
     assert_eq!(all["dex_shared"], 0, "{all}");
     let body = text(&r[0]);
-    assert!(body.contains("apk1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
-    assert!(body.contains("apk2 | classes.dex | Lexample/Test;->first | matched=(tokex)\n"), "{body}");
+    assert!(body.contains("apk1 | classes.dex | Lexample/Test;->first()V | \"token\"\n"), "{body}");
+    assert!(body.contains("apk2 | classes.dex | Lexample/Test;->first()V | \"tokex\"\n"), "{body}");
 }
 
 #[test]
@@ -647,7 +647,7 @@ fn findrefs_combines_conditions_in_one_method() {
     let both = ok(&replies[0]);
     assert_eq!(both["total"], 4);
     assert_eq!(both["results"][0]["matched"], json!(["token", "token"]));
-    assert!(text(&replies[0]).starts_with("classes.dex | Lexample/Test;->first | matched=(token; token)\n"), "{}", text(&replies[0]));
+    assert!(text(&replies[0]).starts_with("classes.dex | Lexample/Test;->first()V | \"token\", \"token\"\n"), "{}", text(&replies[0]));
     assert_eq!(ok(&replies[1])["total"], 0);
     for r in &replies[2..] {
         assert_eq!(r["result"]["isError"], true, "{r}");
@@ -675,8 +675,8 @@ fn findrefs_rules_answer_every_rule_in_one_call() {
     let totals: Vec<u64> = s["rules"].as_array().unwrap().iter().map(|r| r["total"].as_u64().unwrap()).collect();
     assert_eq!(totals, [4, 0, 2, 4]);
     let body = text(&reply);
-    assert!(body.starts_with("# r1 string \"token\": 4 results\nr1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
-    assert!(body.contains("# r2 string \"absent\": 0 results\n# r3 extends \"java.lang.Object\": 2 results\nr3 | classes.dex | Lexample/Test; extends Ljava/lang/Object;\n"), "{body}");
+    assert!(body.starts_with("# r1 string \"token\": 4 results\nr1 | classes.dex | Lexample/Test;->first()V | \"token\"\n"), "{body}");
+    assert!(body.contains("# r2 string \"absent\": 0 results\n# r3 extends \"java.lang.Object\": 2 results\nr3 | classes.dex | Lexample/Test; | extends Ljava/lang/Object;\n"), "{body}");
     assert!(body.contains("# r4 all(string \"tok\"): 4 results\n"), "{body}");
     // The `more` hint is a complete single-rule call.
     let line = body.lines().find(|l| l.starts_with("r1 | more | 3 more: findrefs ")).expect(body);
@@ -710,8 +710,8 @@ fn findrefs_rules_over_a_directory_group_rows_per_apk_and_rule() {
     assert!(body.contains("\n# r1 string \"token\": 6 hits in 2 APKs\n"), "{body}");
     let head = body.lines().find(|l| l.starts_with("apk1 | ")).unwrap();
     assert!(head.starts_with("apk1 | 6 hits (r1 4, r2 2) | "), "{head}");
-    assert!(body.contains("apk1 | r1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
-    assert!(body.contains("apk1 | r2 | classes.dex | Lexample/Test; extends Ljava/lang/Object;\n"), "{body}");
+    assert!(body.contains("apk1 | r1 | classes.dex | Lexample/Test;->first()V | \"token\"\n"), "{body}");
+    assert!(body.contains("apk1 | r2 | classes.dex | Lexample/Test; | extends Ljava/lang/Object;\n"), "{body}");
     assert!(
         body.contains(
             r#"apk1 | r1 | more | 3 more: findrefs {"apk_id":"apk1","collapse_sdks":true,"kind":"string","offset":1,"value":"token"}"#
