@@ -863,7 +863,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             }
             if common.debug {
                 let st = engine.cache_stats();
-                eprintln!("[DEBUG] Cache: {} inflated, {} disk hits", st.inflates, st.disk_hits);
+                eprintln!("[DEBUG] Cache: {} inflated, {} disk hits, {} skipped", st.inflates, st.disk_hits, st.skipped);
                 eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
             }
             io_result?;

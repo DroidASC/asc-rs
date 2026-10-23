@@ -504,3 +504,47 @@ fn find_many_matches_one_search_per_query() {
     }
     assert!(!many[0].is_empty() && !many[3].is_empty() && !many[5].is_empty());
 }
+
+#[test]
+fn cannot_match_agrees_with_the_search_and_never_guesses_on_a_short_prefix() {
+    let data = asc_fixture::make_rich_dex();
+    let member = |name: &str| MemberQuery { class: None, name: Some(name.into()), exact_name: false };
+    let queries = [
+        Query::String("l".into()),
+        Query::String("no such string".into()),
+        Query::StringLiteral("wörld".into()),
+        Query::Type("Exception".into()),
+        Query::Type("Lno/Such;".into()),
+        Query::Method(member("compute")),
+        Query::Method(member("nothing")),
+        Query::Field(member("COUNT")),
+        Query::Implements("Lexample/Iface;".into()),
+        Query::Extends("Lno/Such;".into()),
+        Query::All { all: vec![Query::String("l".into()), Query::String("no such string".into())], none: vec![] },
+    ];
+    let compiled: Vec<CompiledQuery> = queries.iter().map(|q| CompiledQuery::new(q).unwrap()).collect();
+    let dex = Dex::with_name(&data, "rich.dex").unwrap();
+    let whole: Vec<bool> = compiled.iter().map(|q| FindRefs::new(&dex).cannot_match(q).unwrap()).collect();
+    for (q, &ruled_out) in compiled.iter().zip(&whole) {
+        if ruled_out {
+            assert!(FindRefs::new(&dex).find_ref_compiled(q).unwrap().is_empty(), "{q:?}");
+        }
+    }
+    assert!(whole[1] && whole[4] && whole[6] && whole[9] && whole[10]);
+    assert!(!whole[0] && !whole[5] && !whole[8]);
+
+    // The id tables plus the string data are enough for the same answers;
+    // anything shorter either still agrees or fails, never flips to "ruled out".
+    let needed = asc_dex::quick::id_tables_needed_len(&data).unwrap();
+    for cut in (0x70..data.len()).step_by(7) {
+        let prefix = &data[..cut];
+        let Ok(dex) = Dex::with_name(prefix, "rich.dex") else { continue };
+        for (q, &ruled_out) in compiled.iter().zip(&whole) {
+            match FindRefs::new(&dex).cannot_match(q) {
+                Ok(answer) if cut > needed + 64 => assert_eq!(answer, ruled_out, "{q:?} at {cut}"),
+                Ok(true) => assert!(ruled_out, "{q:?} ruled out from a {cut}-byte prefix"),
+                _ => {}
+            }
+        }
+    }
+}

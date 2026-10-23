@@ -27,6 +27,7 @@ pub mod names;
 mod prebuild;
 mod resources;
 mod rules;
+mod skip;
 mod sweep;
 pub mod text;
 mod tiers;
@@ -759,6 +760,9 @@ pub struct CacheStats {
     /// Logical DEX files whose locator tables were mapped from L2.
     pub derived_hits: u64,
     pub inflates: u64,
+    /// Deflate entries a search left out: a streamed prefix showed it could
+    /// not match them, so they were never inflated whole.
+    pub skipped: u64,
 }
 
 type Logger = Arc<dyn Fn(&str) + Send + Sync>;
@@ -770,6 +774,8 @@ enum Source {
     Disk,
     Stored,
     Inflate,
+    /// Not loaded: a prefix showed the search cannot match it.
+    Skipped,
 }
 
 impl Source {
@@ -779,6 +785,7 @@ impl Source {
             Source::Disk => "disk",
             Source::Stored => "stored",
             Source::Inflate => "inflate",
+            Source::Skipped => "skipped",
         }
     }
 }
@@ -857,6 +864,7 @@ struct Stats {
     disk_hits: AtomicUsize,
     derived_hits: AtomicUsize,
     inflates: AtomicUsize,
+    skipped: AtomicUsize,
 }
 
 /// Worker threads to use when the caller does not say.
@@ -956,6 +964,7 @@ impl Engine {
             disk_hits: self.stats.disk_hits.load(Ordering::Relaxed) as u64,
             derived_hits: self.stats.derived_hits.load(Ordering::Relaxed) as u64,
             inflates: self.stats.inflates.load(Ordering::Relaxed) as u64,
+            skipped: self.stats.skipped.load(Ordering::Relaxed) as u64,
         }
     }
 
@@ -1043,6 +1052,7 @@ impl Engine {
             entry,
             query,
             FindOptions { aggregate, context: RefContext::None },
+            None,
             cancel,
             self.cache.as_deref(),
             &self.stats,
@@ -1338,7 +1348,8 @@ impl Engine {
         let workers = self.threads.min(entries.len()).max(1);
         let cache = self.cache.as_deref();
         let stats = &self.stats;
-        let compiled = &compiled;
+        let probe = skip::Probe::new(vec![&compiled]);
+        let (compiled, probe) = (&compiled, &probe);
         std::thread::scope(|s| {
             for _ in 0..workers {
                 let tx = tx.clone();
@@ -1349,7 +1360,7 @@ impl Engine {
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
-                    let batch = search_entry(apk, key, entry, compiled, opts, cancel, cache, stats);
+                    let batch = search_entry(apk, key, entry, compiled, opts, Some(probe), cancel, cache, stats);
                     if tx.send(batch).is_err() {
                         break;
                     }
@@ -1676,19 +1687,22 @@ fn search_entry(
     entry: &Entry,
     query: &CompiledQuery,
     opts: FindOptions,
+    probe: Option<&skip::Probe<'_>>,
     cancel: &AtomicBool,
     cache: Option<&EngineCache>,
     stats: &Stats,
 ) -> RefBatch {
     let run = |fr: &FindRefs<'_, '_, '_>| rows_compiled(fr, query, opts).map(|rows| vec![rows]);
-    search_entry_with(apk, key, entry, 1, &run, cancel, cache, stats).pop().expect("one batch per query")
+    search_entry_with(apk, key, entry, 1, &run, probe, cancel, cache, stats).pop().expect("one batch per query")
 }
 
 /// Rows of `n` queries over one logical DEX, one list per query.
 pub(crate) type RunRows<'q> = dyn Fn(&FindRefs<'_, '_, '_>) -> Result<Vec<Vec<RefResult>>> + Sync + 'q;
 
 /// Load one entry (through the caches) and run `run` over each of its
-/// logical DEX files: one batch per query, all sharing the load.
+/// logical DEX files: one batch per query, all sharing the load. With a
+/// `probe`, an entry no cache keeps may first be shown not to match from a
+/// prefix, and then is not loaded at all.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_entry_with(
     apk: &Apk,
@@ -1696,6 +1710,7 @@ pub(crate) fn search_entry_with(
     entry: &Entry,
     n: usize,
     run: &RunRows<'_>,
+    probe: Option<&skip::Probe<'_>>,
     cancel: &AtomicBool,
     cache: Option<&EngineCache>,
     stats: &Stats,
@@ -1704,6 +1719,13 @@ pub(crate) fn search_entry_with(
     let empty =
         RefBatch { entry_name: entry.name.clone(), results: Vec::new(), inflate_us: 0, search_us: 0, source: "inflate", error: None };
     let mut batches = vec![empty; n];
+    if probe.is_some_and(|p| p.skips(apk, entry, cache, stats)) {
+        let inflate_us = t0.elapsed().as_micros();
+        for b in &mut batches {
+            (b.source, b.inflate_us) = (Source::Skipped.as_str(), inflate_us);
+        }
+        return batches;
+    }
     let (loaded, source) = match load_entry(apk, key, entry, cache, stats, Some(cancel)) {
         Ok(l) => l,
         Err(e) => {

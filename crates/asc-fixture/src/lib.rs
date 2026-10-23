@@ -127,6 +127,14 @@ fn code_item(regs: u16, insns: &[u8]) -> Vec<u8> {
 /// A DEX with class `Lexample/Test;` whose two static methods `first` and
 /// `second` share one `code_item` (`const-string v0, "token"; return-void`).
 pub fn make_dex() -> Vec<u8> {
+    make_padded_dex(0, 0)
+}
+
+/// [`make_dex`] with `before_strings` zero bytes between the id tables and
+/// the string data, and `before_map` more before the map list: the same
+/// classes, with the string data near the front or near the end of a large
+/// file (as R8 and d8 lay them out).
+pub fn make_padded_dex(before_strings: usize, before_map: usize) -> Vec<u8> {
     let strings: [&[u8]; 6] = [b"Lexample/Test;", b"Ljava/lang/Object;", b"V", b"first", b"second", b"token"];
     let mut b = Builder::new();
     let string_ids = b.section(1, 6, &[0u8; 24], 4);
@@ -135,6 +143,7 @@ pub fn make_dex() -> Vec<u8> {
     let method_ids = b.section(5, 2, &pack_hhi(&[(0, 0, 3), (0, 0, 4)]), 4);
     let class_defs = b.section(6, 1, &[0u8; 32], 4);
     let data_off = b.buf.len() as u32;
+    b.buf.resize(b.buf.len() + before_strings, 0);
     let sd = string_data(&strings);
     let off = b.section(0x2002, 6, &sd, 1);
     fill_string_ids(&mut b, string_ids, &strings, off);
@@ -146,6 +155,7 @@ pub fn make_dex() -> Vec<u8> {
     let class_data = b.section(0x2000, 1, &cd, 1);
     let cdef = pack_u32s(&[0, 1, 1, 0, 0xffff_ffff, 0, class_data, 0]);
     b.buf[class_defs as usize..class_defs as usize + 32].copy_from_slice(&cdef);
+    b.buf.resize(b.buf.len() + before_map, 0);
     b.finish([(6, string_ids), (3, type_ids), (1, proto_ids), (0, 0), (2, method_ids), (1, class_defs)], data_off)
 }
 

@@ -6,7 +6,7 @@
 //! per kind, then splits the hits back per part.
 
 use crate::{
-    attach_context, matched_name, results_from_hits, rows_compiled, search_entry_with, tiers, Engine, FindOptions, Job, RefBatch,
+    attach_context, matched_name, results_from_hits, rows_compiled, search_entry_with, skip, tiers, Engine, FindOptions, Job, RefBatch,
     RefContext, RefResult, RefSite, RefSummary, Result, SearchTarget, WriteJob,
 };
 use asc_apk::Entry;
@@ -153,6 +153,9 @@ impl Engine {
         let searched: Vec<&CompiledQuery> = missing.iter().map(|&i| &compiled[i]).collect();
         let (cache, stats, searched) = (self.cache.as_deref(), &self.stats, &searched);
         let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, searched, opts);
+        // An entry is left out only when no rule can match it.
+        let probe = skip::Probe::new(searched.clone());
+        let probe = &probe;
         std::thread::scope(|s| {
             for _ in 0..workers {
                 let tx = tx.clone();
@@ -163,7 +166,7 @@ impl Engine {
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
-                    let batches = search_entry_with(apk, key, entry, searched.len(), run, cancel, cache, stats);
+                    let batches = search_entry_with(apk, key, entry, searched.len(), run, Some(probe), cancel, cache, stats);
                     if tx.send(batches).is_err() {
                         break;
                     }
@@ -212,6 +215,6 @@ impl Engine {
     ) -> Vec<RefBatch> {
         let opts = FindOptions { aggregate, context: RefContext::None };
         let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, rules, opts);
-        search_entry_with(&target.apk, target.key.as_ref(), entry, rules.len(), &run, cancel, self.cache.as_deref(), &self.stats)
+        search_entry_with(&target.apk, target.key.as_ref(), entry, rules.len(), &run, None, cancel, self.cache.as_deref(), &self.stats)
     }
 }

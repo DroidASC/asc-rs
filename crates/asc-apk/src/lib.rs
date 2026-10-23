@@ -464,7 +464,10 @@ impl Apk {
     /// leading bytes after every chunk to say how much of the entry is
     /// actually needed. Stored entries are returned whole.
     pub fn inflate_until(&self, entry: &Entry, mut decide: impl FnMut(&[u8]) -> PrefixStep) -> Result<Prefix> {
+        // Small first chunks so a quick "not useful" costs little; then up to CHUNK.
+        const FIRST_CHUNK: usize = 1 << 14;
         const CHUNK: usize = 1 << 18;
+        let mut chunk = FIRST_CHUNK;
         if entry.method != METHOD_DEFLATE {
             return Ok(Prefix::Complete(self.read_entry(entry)?.into_owned()));
         }
@@ -478,7 +481,8 @@ impl Apk {
                 return Err(self.past_bound(entry, bound));
             }
             let base = out.len();
-            out.resize(base + CHUNK, 0);
+            out.resize(base + chunk, 0);
+            chunk = (chunk * 2).min(CHUNK);
             let consumed = d.total_in() as usize;
             let status = d
                 .decompress(&compressed[consumed.min(compressed.len())..], &mut out[base..], flate2::FlushDecompress::None)

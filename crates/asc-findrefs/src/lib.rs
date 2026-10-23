@@ -314,6 +314,38 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         }
     }
 
+    /// Whether `query` certainly has no hit in this DEX, judged from the id
+    /// tables and the string data alone: no code is read, so this also works
+    /// on a DEX prefix that holds those (an error then means the prefix was
+    /// not enough, and the caller has to search the whole DEX).
+    ///
+    /// `true` exactly when [`FindRefs::find_ref_compiled`] (or, for a class
+    /// relation, [`FindRefs::class_relation`]; for a compound query, its rows)
+    /// could only come out empty.
+    pub fn cannot_match(&self, query: &CompiledQuery) -> Result<bool> {
+        if let Some(c) = query.compound() {
+            // Rows need a hit of every `all` part in one method.
+            for part in &c.all {
+                if self.cannot_match(part)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        match query.parts() {
+            // A class nobody references cannot be extended or implemented.
+            Parts::Relation(_, descriptor) => Ok(self.dex.find_type_idx(descriptor)?.is_none()),
+            // Nor can its members be: one binary search, before the member
+            // tables are built (most DEX files do not reference the class).
+            Parts::Member(query::CompiledMember { class: Some(query::CompiledClass::Precise(descriptor)), .. })
+                if self.dex.find_type_idx(descriptor)?.is_none() =>
+            {
+                Ok(true)
+            }
+            _ => Ok(self.locate_compiled(query)?.is_empty()),
+        }
+    }
+
     /// Full search: locate indexes, scan code, resolve owning methods.
     pub fn find_ref(&self, query: &Query) -> Result<Vec<Hit>> {
         self.find_ref_compiled(&CompiledQuery::new(query)?)
