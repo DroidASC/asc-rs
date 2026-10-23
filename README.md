@@ -23,6 +23,7 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
   findrefs     Find code references for string/type/method/field, or subclasses / implementors
                (extends / impl), across all DEX entries in APK.
   callgraph    Callers (default) or callees of a method across all DEX entries, as a tree.
+  hierarchy    Transitive subclasses / implementers (or --supers) of a class, and overrides.
   gui          Launch the graphical browser.
   mcp          Serve MCP tools over stdio, keeping opened APKs resident.
   cache        Inspect or clear the on-disk cache (path | stats | clear).
@@ -64,6 +65,11 @@ examples:
   droidasc findrefs app.apk method loadUrl --context-method
   droidasc callgraph app.apk com.poc.Main onCreate --depth 3
   droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
+  droidasc callgraph app.apk com.poc.Base run --virtual
+  droidasc findrefs app.apk all 'string:https?://' 'method:android.webkit.WebView->loadUrl'
+  droidasc findrefs app.apk all 'method:getDeviceId' --none 'method:~Log->d'
+  droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec' --file rules.txt
+  droidasc hierarchy app.apk android.webkit.WebViewClient --method shouldOverrideUrlLoading
   droidasc mcp --memory-mb 4096
   droidasc cache stats
 ```
@@ -105,7 +111,32 @@ DEX of the APK defines (framework / SDK), `(repeated)` methods expanded elsewher
 ```
 
 The graph is the static references in the bytecode: a call through `Lcom/poc/Sub;->m()V`
-is not a call of `Lcom/poc/Base;->m()V`.
+is not a call of `Lcom/poc/Base;->m()V`. With `--virtual` it follows dispatch through the
+class hierarchy: the callers of a method also include the callers of the same signature on
+each supertype (`(via Lcom/poc/Base;)`), the callees also the overrides of each callee in
+its subclasses (`(override of Lcom/poc/Base;)`).
+
+`findrefs APK all COND...` finds methods whose code matches every condition, `--none COND`
+drops those matching another. A condition is `KIND:VALUE`: `string:REGEX`, `literal:TEXT`,
+`type:PATTERN`, `method:[CLASS->]NAME`, `field:[CLASS->]NAME` (CLASS exact, `~CLASS` fuzzy;
+NAME a regex / substring, `=NAME` exact). `matched=(...)` lists what each condition matched,
+in order. `findrefs APK rules RULE...` (and `--file`, one rule per line) answers several
+queries in one pass over each DEX, rows prefixed `r1 | `, `r2 | `...; a rule is a condition,
+`extends:CLASS` / `impl:CLASS`, or conditions joined with `&`. On Douyin, eight audit rules
+take 114 ms in one `rules` call against 700 ms as eight `findrefs` processes.
+
+`hierarchy APK CLASS` prints the transitive subclasses and implementers (`--supers`: the
+superclasses and interfaces) across DEX files, one line per class with its DEX or
+`[not in APK]`; `--method NAME` marks the classes defining it and adds one
+`override Lcom/poc/Sub;->m(...)V classes2.dex` line per definition:
+
+```
+0 Landroid/webkit/WebViewClient; [not in APK]
+  1 subclass Lcom/poc/WebClient; classes.dex [defines shouldOverrideUrlLoading(Landroid/webkit/WebView;Ljava/lang/String;)Z]
+    2 subclass Lcom/poc/StrictClient; classes2.dex
+override Lcom/poc/WebClient;->shouldOverrideUrlLoading(Landroid/webkit/WebView;Ljava/lang/String;)Z classes.dex
+# 3 rows, 3 distinct classes (subclasses, depth 16); 1 define shouldOverrideUrlLoading
+```
 
 Scripts written for the other Rust ports keep working: `classes` and `manifest` are
 aliases of `listclass` and `getmanifest` (as in rasc), `--thread` of `--threads` (as in
@@ -338,7 +369,10 @@ ending the session.
 | `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
 | `getclass` | `class`, `debug_info`, `method` (exact signature), `resource_names` (default true) | smali, as `droidasc getclass [--method] --res-names`: constants that are resource ids end in `# @type/name` |
 | `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; with `context`, `structuredContent` rows carry `sites` (`pc`, `line`, `matched`) and `context` |
-| `callgraph` | `class`, `method` (name or `name(params)ret`), `direction` (`callers`/`callees`), `depth` (2), `max_nodes` (200) | the `droidasc callgraph` tree; `rows` with `depth`, `parent`, `method`, `dex`, `repeated` |
+| `findrefs` (several conditions) | `all` / `none`: lists of condition objects (`kind`, `value` / `name`, `class`, ...) instead of `kind` | methods matching every `all` condition and no `none` one |
+| `findrefs` (rule set) | `rules`: list of queries (single or `all` / `none`); `limit` (100) per rule | per rule a `# r1 string "http://": 12 results` line and its `r1 \| ...` rows; `rules` in `structuredContent`, each with a complete follow-up call in `next` |
+| `callgraph` | `class`, `method` (name or `name(params)ret`), `direction` (`callers`/`callees`), `depth` (2), `max_nodes` (200), `virtual` | the `droidasc callgraph` tree; `rows` with `depth`, `parent`, `method`, `dex`, `repeated`, `via` |
+| `hierarchy` | `class`, `direction` (`subclasses`/`supers`), `depth` (16), `max_nodes` (500), `method` | the `droidasc hierarchy` tree and `override` lines; `rows` with `depth`, `parent`, `class`, `relation`, `dex`, `defines` |
 | `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
 | `getmanifest` | `resolve` | decoded XML (references by name with `resolve`) |
 | `manifest_summary` | `filter` (`all` / `exported`); or `apks` / `dir` | the `droidasc manifest-summary` records; `exported` keeps what other apps can reach (exported components, deep links, non-signature permissions, cleartext domains). For many APKs (default `exported`): per APK `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`, then its records |

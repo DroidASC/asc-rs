@@ -28,6 +28,7 @@
 
 pub mod multi;
 mod res;
+mod rules;
 
 use asc_engine::{
     names, CacheConfig, CallQuery, CompiledQuery, Direction, Engine, InflateLimits, RefBatch, RefContext, RefResult, SharedCache,
@@ -212,6 +213,7 @@ const TOOLS: &[Tool] = &[
     Tool { name: "getclass", run: Server::getclass, definition: defs::getclass },
     Tool { name: "findrefs", run: Server::findrefs, definition: defs::findrefs },
     Tool { name: "callgraph", run: Server::callgraph, definition: defs::callgraph },
+    Tool { name: "hierarchy", run: Server::hierarchy, definition: rules::defs::hierarchy },
     Tool { name: "listclass", run: Server::listclass, definition: defs::listclass },
     Tool { name: "getmanifest", run: Server::getmanifest, definition: defs::getmanifest },
     Tool { name: "manifest_summary", run: Server::manifest_summary, definition: res::defs::manifest_summary },
@@ -637,6 +639,9 @@ impl Server {
     }
 
     fn findrefs(&self, args: &Value, call: &Call) -> ToolResult {
+        if args.get("rules").is_some() {
+            return self.findrefs_rules(args, call);
+        }
         let query = parse_query(args)?;
         if let Some(paths) = multi::targets(args)? {
             return self.findrefs_many(args, call, &paths, &query);
@@ -694,6 +699,7 @@ impl Server {
             direction,
             depth: usize_arg(args, "depth")?.unwrap_or(CALLGRAPH_DEPTH),
             max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES),
+            virtual_calls: bool_arg(args, "virtual")?.unwrap_or(false),
         };
         let tree = apk.engine.call_graph(&q)?;
         let mut text = String::new();
@@ -709,7 +715,7 @@ impl Server {
         let rows: Vec<Value> = tree
             .rows
             .iter()
-            .map(|r| json!({"depth": r.depth, "parent": r.parent, "method": r.method, "dex": r.dex, "repeated": r.repeated}))
+            .map(|r| json!({"depth": r.depth, "parent": r.parent, "method": r.method, "dex": r.dex, "repeated": r.repeated, "via": r.via}))
             .collect();
         let structured = json!({
             "apk_id": apk.id,
@@ -759,7 +765,7 @@ impl Server {
         let ms = t.elapsed().as_secs_f64() * 1e3;
         let header = format!(
             "# findrefs {} over {} APKs: {} with hits, {} hits, {} errors, {ms:.0} ms",
-            describe_query(args),
+            rules::describe(args),
             paths.len(),
             stats.with_hits,
             stats.hits,
@@ -1033,6 +1039,9 @@ fn result_json(r: &RefResult) -> Value {
 
 /// The findrefs query `args` describe.
 fn parse_query(args: &Value) -> Result<Query, ToolError> {
+    if let Some(q) = rules::compound(args)? {
+        return Ok(q);
+    }
     let kind =
         str_arg(args, "kind")?.ok_or_else(|| ToolError("findrefs needs `kind` (string, type, method, field, extends or impl)".into()))?;
     Ok(match kind {
@@ -1065,7 +1074,7 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
 }
 
 /// The findrefs arguments that define the query (not the APKs, paging or view).
-const FINDREFS_QUERY_KEYS: &[&str] = &["kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "sdk_prefixes"];
+const FINDREFS_QUERY_KEYS: &[&str] = &["kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "all", "none", "sdk_prefixes"];
 
 /// The `keys` present in `args`, for the arguments of a follow-up call.
 fn query_args(args: &Value, keys: &[&str]) -> Map<String, Value> {
@@ -1277,7 +1286,9 @@ pub mod defs {
                 referencing method: `dex | Lcls;->method | matched=(...)`), or the classes that extend / implement a \
                 type (`dex | Lsub; extends Lbase;`). Paged; the last line says how many there are. With apks / dir: \
                 one section per APK (`apkN | 12 hits (+3 in SDKs) | path`, then its first per_apk rows, each line \
-                prefixed `apkN | `), hits in common SDK packages folded into a count, APKs without hits listed by id.",
+                prefixed `apkN | `), hits in common SDK packages folded into a count, APKs without hits listed by id. \
+                Give `kind` for one query, `all` / `none` for methods matching several conditions at once, or `rules` \
+                for several queries in one pass.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "kind": {"type": "string", "enum": ["string", "type", "method", "field", "extends", "impl"]},
                 "value": {"type": "string", "description": "string: regex over string constants (plain text with `literal`); \
@@ -1294,7 +1305,7 @@ pub mod defs {
                 "group": {"type": "string", "enum": ["none", "package"], "description": "Many APKs: merge each APK's hits \
                     by package (count + one example) instead of listing them."},
                 "package_depth": {"type": "integer", "minimum": 1, "description": "group=package: package segments (default 3)."},
-            }), page_props(), many()]), "required": ["kind"]},
+            }), crate::rules::defs::findrefs_props(), page_props(), many()])},
         })
     }
 
@@ -1303,13 +1314,15 @@ pub mod defs {
             "description": "Callers (default) or callees of a method across every DEX, as an indented tree: one line per \
                 call, `depth <- caller` or `depth -> callee`. `[no body]` marks methods the APK does not define \
                 (framework / SDK), `(repeated)` methods expanded elsewhere. Static references only: a call through \
-                a subclass is not a call of the base method.",
+                a subclass is not a call of the base method, unless `virtual`.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string", "description": "Declaring class: Lcom/poc/Main; or com.poc.Main."},
                 "method": {"type": "string", "description": "Method name (every overload) or exact name(params)ret."},
                 "direction": {"type": "string", "enum": ["callers", "callees"], "description": "Default callers."},
                 "depth": {"type": "integer", "minimum": 1, "description": "Levels to expand (default 2)."},
                 "max_nodes": {"type": "integer", "minimum": 1, "description": "Stop after this many methods (default 200)."},
+                "virtual": {"type": "boolean", "description": "Follow virtual dispatch: callers also through each \
+                    supertype's signature (`(via Lbase;)`), callees also the overrides in subclasses (`(override of Lbase;)`)."},
             })]), "required": ["class", "method"]},
         })
     }

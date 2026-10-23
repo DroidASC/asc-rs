@@ -360,6 +360,26 @@ which also maps each instruction's pc to its line) and the hit lines are marked.
 renders it in the search workers; MCP renders only the returned page afterwards
 (`Engine::fill_context`), from the DEX files the search left in the memory cache.
 
+### Compound queries, rule sets and the class hierarchy
+
+`FindRefs::find_many` answers several queries with one code scan per index kind: each
+query is located on its own (string regexes keep Python's whole-region `find_iter`
+semantics, so they are not merged into one automaton), the located sets of each kind are
+unioned and scanned once, and every hit goes to each query whose set holds its index. A
+compound query (`Query::All { all, none }`) runs its parts through it and keeps, per
+method, those hit by every `all` part and no `none` part; a rule set
+(`Engine::find_refs_rules`, `search_target_entry_rules` for the multi-APK queue) loads each
+entry once (`search_entry_with`) and returns one batch per rule. Rule sets skip the L3
+result cache.
+
+`Engine::hierarchy` builds a `ClassGraph` from every DEX's `class_def_item`s (interned
+descriptors, `(child, parent, relation)` edges sorted both ways, first definition per
+class) and keeps it on the engine until the APK file changes or `release_memory_cache`
+drops it; it is not charged to the memory budget (Douyin: 0.4 s to build). Overrides are
+read from the class data of the classes the walk reaches. `CallQuery::virtual_calls` uses
+the same graph: callers through up to 256 supertypes' signatures, callees' overrides among
+up to 4096 subclasses each.
+
 ### Scan strategy
 
 `CodeScanner::scan` picks a strategy from the query: ≤ 8 targets → `memmem` over each
