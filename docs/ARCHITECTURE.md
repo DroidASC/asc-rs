@@ -335,6 +335,22 @@ one LRU's worth. Each APK becomes a `Section` of pre-rendered lines; the `Report
 (last 16 per session) and paged by whole sections up to `max_bytes`, `cursor` naming
 report and section. New multi-APK tools add a `TOOLS` entry and call `sweep` + `report`.
 
+A findrefs sweep (`asc-engine/src/sweep.rs`) first asks L3 for the APK's rows
+(`Engine::cached_refs`, the key the one-APK path uses too) and plans a single unit that
+replays them; completed APKs are written back (`store_refs`). Otherwise every entry claims
+its central-directory CRC-32 and size in a `DexDedup`; the first claimant of a key leads
+and searches, later ones are planned with weight 1 (after the real work) and wait for the
+leader's batch. All of CRC, size and DEX header are author-controlled, so an APK could
+claim a benign DEX to hide its own code: a follower takes the leader's rows (renamed to
+its entry) only if the SHA-256 of its inflated bytes equals the leader's, and searches
+itself otherwise. The hash is memoized per APK file version and entry, so after the first
+query of a session a verified follower is neither read nor inflated, and never enters the
+memory cache. A leader that unwinds or is cancelled publishes nothing; followers then
+search themselves.
+
+On the Pixel 6 system image (312 APKs, 405 DEX) only 2 tiny DEX repeat, so dedup is idle
+there; the 100-APK corpus (10 apps × copies) repeats 157 of 174 DEX (344 of 391 MiB).
+
 ### Call graph and findrefs context
 
 `asc_findrefs::CallGraph` is built per DEX on first use, next to the other locator

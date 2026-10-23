@@ -70,6 +70,8 @@ pub struct Entry {
     pub comp_size: u64,
     pub uncomp_size: u64,
     pub local_header_off: u64,
+    /// CRC-32 of the uncompressed data, as the central directory records it.
+    pub crc32: u32,
 }
 
 impl Entry {
@@ -246,6 +248,7 @@ impl Apk {
                     comp_size,
                     uncomp_size,
                     local_header_off,
+                    crc32: u32_at(data, p + 16).unwrap_or(0),
                 });
             }
             p = name_end + extra_len + comment_len;

@@ -30,8 +30,8 @@ pub mod multi;
 mod res;
 
 use asc_engine::{
-    names, CacheConfig, CallQuery, CompiledQuery, Direction, Engine, InflateLimits, RefBatch, RefContext, RefResult, SharedCache,
-    SmaliOptions,
+    names, CacheConfig, CallQuery, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, RefBatch, RefContext, RefResult,
+    SharedCache, SmaliOptions,
 };
 use asc_findrefs::Query;
 use multi::{Report, Reports, Section};
@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Instant;
@@ -259,6 +259,14 @@ impl<E: std::fmt::Display> From<E> for ToolError {
 pub type ToolResult = Result<(String, Value), ToolError>;
 
 /// Counts over the APKs of a sweep.
+/// One APK of a findrefs sweep: its entries and their dedup claims, or the
+/// batches L3 already holds (`claims` empty).
+struct SweepTarget {
+    target: asc_engine::SearchTarget,
+    claims: Vec<Claim>,
+    cached: Mutex<Option<Vec<RefBatch>>>,
+}
+
 #[derive(Default)]
 pub struct SweepStats {
     pub with_hits: usize,
@@ -740,17 +748,39 @@ impl Server {
             query: query_args(args, FINDREFS_QUERY_KEYS),
         };
         let release = bool_arg(args, "release")?;
+        // Identical DEX in several APKs is searched once.
+        let dedup = DexDedup::new();
+        let cached = AtomicUsize::new(0);
         let (sections, empty, stats) = self.sweep(
             paths,
             call,
             release,
             |apk| {
                 let target = apk.engine.search_target().map_err(|e| e.to_string())?;
-                let units = target.entries.iter().enumerate().map(|(i, e)| (e.uncomp_size.max(e.comp_size), i)).collect();
-                Ok((target, units))
+                // L3: this query already ran on this APK version.
+                if let Some(batches) = apk.engine.cached_refs(&target, query, true) {
+                    cached.fetch_add(1, Ordering::Relaxed);
+                    return Ok((SweepTarget { target, claims: Vec::new(), cached: Mutex::new(Some(batches)) }, vec![(0, None)]));
+                }
+                let claims: Vec<Claim> = target.entries.iter().map(|e| dedup.claim(e)).collect();
+                // A follower waits for its leader: run it after the real work.
+                let units = (claims.iter().zip(&target.entries).enumerate())
+                    .map(|(i, (c, e))| (if DexDedup::follows(c) { 1 } else { e.uncomp_size.max(e.comp_size) }, Some(i)))
+                    .collect();
+                Ok((SweepTarget { target, claims, cached: Mutex::new(None) }, units))
             },
-            |apk, target, &i| apk.engine.search_target_entry(target, &target.entries[i], &compiled, true, &call.cancel),
+            |apk, t, unit| match *unit {
+                None => lock(&t.cached).take().unwrap_or_default(),
+                Some(i) => {
+                    let (entry, claim) = (&t.target.entries[i], &t.claims[i]);
+                    vec![apk.engine.search_target_entry_dedup(&t.target, entry, &compiled, true, &call.cancel, claim)]
+                }
+            },
             |apk, batches| {
+                let batches: Vec<RefBatch> = batches.into_iter().flatten().collect();
+                if batches.iter().all(|b| b.source != "result") {
+                    apk.engine.store_refs(query, true, &batches);
+                }
                 let found = Found::new(batches, sdks.as_deref());
                 (found.rows.len() + found.sdk_hits, found.section(apk, &view))
             },
@@ -773,6 +803,8 @@ impl Server {
             "elapsed_ms": ms,
             "released": stats.released,
             "memory_cache_bytes": self.cache.memory_bytes(),
+            "apks_from_result_cache": cached.load(Ordering::Relaxed),
+            "dex_shared": dedup.shared(),
         });
         self.report(Report { tool: "findrefs", header, summary, sections, empty, max_bytes: max_bytes(args)? })
     }

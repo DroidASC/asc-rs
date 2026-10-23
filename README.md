@@ -360,7 +360,10 @@ default `*.apk`, and `recursive`, default true) instead of one APK. Every DEX of
 goes on one work queue (heaviest APK first), and the reply has one section per APK, every
 line prefixed with its `apk_id` (excerpt of a real reply; a section can also end with
 `apkN | more | 3 more: findrefs {"apk_id":"apkN","kind":…,"offset":10,…}` hints whose JSON is
-the complete arguments of the follow-up call (also in `structuredContent` as `next`), `apkN | sdk | Landroidx/ 23, …` folded counts and warnings):
+the complete arguments of the follow-up call (also in `structuredContent` as `next`), `apkN | sdk | Landroidx/ 23, …` folded counts and warnings).
+A findrefs sweep replays an APK's rows from the disk cache when the same query already ran on
+that APK version (one-APK and sweep calls share them), and searches a DEX that several APKs
+carry byte for byte only once (`structuredContent`: `apks_from_result_cache`, `dex_shared`):
 
 ```
 # findrefs method addJavascriptInterface over 312 APKs: 20 with hits, 103 hits, 0 errors, 193 ms

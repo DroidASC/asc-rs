@@ -521,3 +521,97 @@ fn manifest_summary_and_resources_over_many_apks() {
     );
     assert_eq!(replies[3]["result"]["isError"], true);
 }
+
+/// `make_dex` with its `token` string changed to `tokex`: the same size and
+/// the same header, different content.
+fn tampered_dex() -> Vec<u8> {
+    let mut dex = make_dex();
+    let at = dex.windows(5).position(|w| w == b"token").unwrap();
+    dex[at + 4] = b'x';
+    dex
+}
+
+/// Offsets of the central directory records of `apk`.
+fn central_records(apk: &[u8]) -> Vec<usize> {
+    apk.windows(4).enumerate().filter(|(_, w)| *w == b"PK\x01\x02").map(|(i, _)| i).collect()
+}
+
+/// `apk` with the CRC-32 of every central directory record set to `crc`.
+fn forge_crc(mut apk: Vec<u8>, crc: u32) -> Vec<u8> {
+    for p in central_records(&apk) {
+        apk[p + 16..p + 20].copy_from_slice(&crc.to_le_bytes());
+    }
+    apk
+}
+
+fn session_with(opts: asc_mcp::Options, messages: &[Value]) -> Vec<Value> {
+    let input: String = messages.iter().map(|m| m.to_string() + "\n").collect();
+    let mut out = Vec::new();
+    asc_mcp::serve(input.as_bytes(), &mut out, opts).unwrap();
+    let mut replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    replies.sort_by_key(|r| r["id"].as_u64().unwrap_or(0));
+    replies
+}
+
+#[test]
+fn identical_dex_across_apks_is_searched_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let dex = make_dex();
+    let other = make_class_only_dex(&["Lother/Only;"], 0, false);
+    std::fs::write(dir.path().join("x1.apk"), make_apk(&[("classes.dex", &dex)], true)).unwrap();
+    std::fs::write(dir.path().join("x2.apk"), make_apk(&[("classes.dex", &dex)], false)).unwrap();
+    std::fs::write(dir.path().join("x3.apk"), make_apk(&[("classes.dex", &other), ("classes2.dex", &dex)], true)).unwrap();
+    let d = dir.path().to_str().unwrap();
+    let r = session(&[call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "token", "collapse_sdks": false}))]);
+    let all = ok(&r[0]);
+    assert_eq!(all["dex_shared"], 2, "{all}");
+    assert_eq!(all["total"], 6, "{all}");
+    let body = text(&r[0]);
+    for apk in ["apk1", "apk2"] {
+        assert!(body.contains(&format!("{apk} | classes.dex | Lexample/Test;->first | matched=(token)\n")), "{body}");
+    }
+    // The follower's rows carry its own entry name.
+    assert!(body.contains("apk3 | classes2.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(!body.contains("apk3 | classes.dex |"), "{body}");
+}
+
+#[test]
+fn a_forged_crc_does_not_borrow_another_apks_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = make_apk(&[("classes.dex", &make_dex())], true);
+    let p = central_records(&real)[0];
+    let crc = u32::from_le_bytes(real[p + 16..p + 20].try_into().unwrap());
+    std::fs::write(dir.path().join("a.apk"), &real).unwrap();
+    // Same size, same header, same claimed CRC-32: only the bytes differ.
+    std::fs::write(dir.path().join("b.apk"), forge_crc(make_apk(&[("classes.dex", &tampered_dex())], true), crc)).unwrap();
+    let d = dir.path().to_str().unwrap();
+    let r = session(&[call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "tok", "collapse_sdks": false}))]);
+    let all = ok(&r[0]);
+    assert_eq!(all["dex_shared"], 0, "{all}");
+    let body = text(&r[0]);
+    assert!(body.contains("apk1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(body.contains("apk2 | classes.dex | Lexample/Test;->first | matched=(tokex)\n"), "{body}");
+}
+
+#[test]
+fn a_sweep_reuses_rendered_results_of_earlier_runs() {
+    let cache = tempfile::tempdir().unwrap();
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let opts = || {
+        let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
+        asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..CacheConfig::default() })
+    };
+    let q = json!({"dir": d, "kind": "string", "value": "token"});
+    let first = session_with(opts(), &[call(1, "findrefs", q.clone())]);
+    assert_eq!(ok(&first[0])["apks_from_result_cache"], 0);
+    let second = session_with(opts(), &[call(1, "findrefs", q)]);
+    // a, b and sub/c are kept; bomb and broken fail and never are.
+    assert_eq!(ok(&second[0])["apks_from_result_cache"], 3, "{}", second[0]);
+    let rows = |r: &Value| text(r).lines().skip(1).map(String::from).collect::<Vec<_>>();
+    assert_eq!(rows(&first[0]), rows(&second[0]));
+    // A one-APK findrefs replays what the sweep stored.
+    let b = dir.path().join("sub/c.apk");
+    let one = session_with(opts(), &[call(1, "findrefs", json!({"apk": b.to_str().unwrap(), "kind": "string", "value": "token"}))]);
+    assert_eq!(ok(&one[0])["total"], 2, "{}", one[0]);
+}
