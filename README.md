@@ -25,20 +25,18 @@ usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-
                (extends / impl), across all DEX entries in APK.
   callgraph    Callers (default) or callees of a method across all DEX entries, as a tree.
   hierarchy    Transitive subclasses / implementers (or --supers) of a class, and overrides.
-  gui          Launch the graphical browser.
   mcp          Serve MCP tools over stdio, keeping opened APKs resident.
   cache        Inspect or clear the on-disk cache (path | stats | clear).
 
-  --threads N      worker threads (default: logical CPUs split with your other busy mcp/gui processes); --thread N also works
+  --threads N      worker threads (default: logical CPUs split with your other busy mcp / daemon processes); --thread N also works
   --no-cache       bypass the on-disk cache of inflated DEX files
   --cache-dir DIR  use DIR instead of the default cache directory
   --cache-max-mb MIB  on-disk cache budget (default: automatic, see "Caching")
-  --memory-mb MIB  in-memory budget of gui / mcp (default: automatic)
+  --memory-mb MIB  in-memory budget of mcp / the daemon (default: automatic)
   --debug          profiling output on stderr
   -v, -V, --version
 
 examples:
-  droidasc app.apk --gui
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16 --dump-dex Main.dex
   droidasc disassemble app.apk com.poc.Main --debuginfo
@@ -164,12 +162,11 @@ override Lcom/poc/WebClient;->shouldOverrideUrlLoading(Landroid/webkit/WebView;L
 ## 构建
 
 ```sh
-cargo build --release                       # CLI + GUI  -> target/release/droidasc
-cargo build --release --no-default-features # CLI only (no egui/winit dependencies)
+cargo build --release                       # -> target/release/droidasc
 cargo test --workspace
 ```
 
-需要 Rust 1.85 或更高版本。GUI（egui/eframe，OpenGL）需要显示环境；CLI 可无头运行。
+需要 Rust 1.85 或更高版本。
 
 ## Workspace 结构
 
@@ -187,7 +184,6 @@ cargo test --workspace
 | `asc-engine` | 编排层：带提前终止的并行类查找、流式多 DEX 引用搜索、类重建 + 反汇编、manifest 解码与摘要、资源查询。 |
 | `asc-mcp` | 基于 stdio 的 MCP 服务器（`droidasc mcp`）：一个常驻会话，多个 APK 共享同一内存预算，CLI 格式的文本加结构化结果，分页。 |
 | `asc-cli` | `droidasc` 可执行文件（clap）。 |
-| `asc-gui` | egui 浏览器：带右键菜单的包树、带查找和跳转到方法的标签页式反汇编视图、`X` 查找光标所在成员的引用、Ctrl+单击跳转到声明、以历史面板保存的流式引用搜索、类名提示、manifest 视图；面板尺寸、主题和搜索偏好在多次运行间保留。 |
 | `asc-fixture` | 测试共用的合成 DEX/APK fixture。 |
 
 各部分如何对应 Python 模块、移植在哪些地方有意与之不同，见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
@@ -221,7 +217,7 @@ cargo test --workspace
 * 只要资源 id 是已知的 framework 属性，`getmanifest` 就根据资源 id 为属性命名（androguard 只在池中名称
   为空时才这么做），因此混淆过的 manifest 显示为 `android:name` 而不是 `android:a`；未知 id 打印为
   `attr_0x........`。
-* `gui` 在前台运行；Python 工具会 fork 出一个分离的进程。
+* 没有 GUI：Python 工具的 Tk 浏览器没有移植（egui 浏览器在 2026-10 前存在过；agent 使用 CLI 和 MCP）。
 
 ## 性能
 
@@ -284,11 +280,11 @@ asc-rs 找到的行与 Python 参考实现相同（采用自己的行格式）�
   `cache clear` 只会处理符合 cache 自身命名形式的条目目录。`--no-cache` 绕过它，`--cache-dir` 改变其
   位置，`droidasc cache path|stats|clear` 管理它（`stats` 打印每层的用量、预算及其来源，以及文件系统的
   剩余空间）。
-* **内存 LRU**（GUI 和嵌入方，`CacheConfig::resident` / `resident_auto`），还会保留为每个 DEX 构建的
+* **内存 LRU**（`mcp`、daemon 和嵌入方，`CacheConfig::resident`），还会保留为每个 DEX 构建的
   定位表，因此第二次查询只需运行 regex、扫描以及 偏移→方法 解析。它的预算也把这些表计算在内（在字符串
-  和类型查询之后，抖音 437 MB 的 DEX 之外还有 102 MB），GUI 会根据机器来确定预算：可用内存
-  （`MemAvailable`，若 cgroup v2 余量更低则取后者）的四分之一，限制在 64 MiB–2 GiB 之间，这样同时打开
-  多个浏览器时不会各自占用 2 GiB。开启磁盘 cache 时，堆上解压的条目会在其 cache 文件写好后（经过逐字节
+  和类型查询之后，抖音 437 MB 的 DEX 之外还有 102 MB），常驻进程会根据机器来确定预算：可用内存
+  （`MemAvailable`，若 cgroup v2 余量更低则取后者）的四分之一，限制在 64 MiB–2 GiB 之间，这样同时运行
+  多个常驻进程时不会各自占用 2 GiB。开启磁盘 cache 时，堆上解压的条目会在其 cache 文件写好后（经过逐字节
   校验）立即替换为对该文件的映射，定位表也替换为其 L2 文件的视图，因此常驻条目是操作系统可以回收、并可
   在进程间共享的文件页，而不是匿名内存。APK 中以未压缩方式存储的条目（几乎所有系统应用都是如此）直接从
   APK 本身映射。
@@ -298,15 +294,15 @@ asc-rs 找到的行与 Python 参考实现相同（采用自己的行格式）�
 | | 自动预算 | 显式指定 |
 |---|---|---|
 | 磁盘 | cache 可容纳量（自身字节数 + 文件系统剩余空间）的 20 %，最多 32 GiB，且绝不会使剩余空间少于 max(1 GiB, 文件系统的 5 %)；无法读取剩余空间时（Windows）为 4 GiB | `--cache-max-mb MIB`，否则 `$DROIDASC_CACHE_MAX_MB` |
-| 内存（gui、mcp） | 用户所有正在运行的 `gui` / `mcp` 进程共用一个预算，平均分配：(可用内存 + 它们的 cache 所占) 的四分之一，除以进程数，每个 64 MiB–2 GiB；无法读取时为 2 GiB。每个进程在 `$XDG_RUNTIME_DIR/droidasc` 中登记，并最多每秒重读一次登记表 | `--memory-mb MIB`（固定值；仍会登记，以便其他进程将其计入） |
-| 线程 | 逻辑 CPU 在本进程与该用户其他已登记、且最近 5 秒内加载过条目的 `gui` / `mcp` 进程之间平均分配（agent 两次调用之间空闲的服务器不计入），总数最多每个 CPU 4 个 worker：忙碌进程不超过 4 个时每个进程都用满全部 CPU，最少 2 个；每次搜索都会重新读取，注册表最多每秒读一次。一次性命令会计入常驻进程，但自己不登记 | `--threads N` |
+| 内存（mcp、daemon） | 用户所有正在运行的 `mcp` / daemon 进程共用一个预算，平均分配：(可用内存 + 它们的 cache 所占) 的四分之一，除以进程数，每个 64 MiB–2 GiB；无法读取时为 2 GiB。每个进程在 `$XDG_RUNTIME_DIR/droidasc` 中登记，并最多每秒重读一次登记表 | `--memory-mb MIB`（固定值；仍会登记，以便其他进程将其计入） |
+| 线程 | 逻辑 CPU 在本进程与该用户其他已登记、且最近 5 秒内加载过条目的 `mcp` / daemon 进程之间平均分配（agent 两次调用之间空闲的服务器不计入），总数最多每个 CPU 4 个 worker：忙碌进程不超过 4 个时每个进程都用满全部 CPU，最少 2 个；每次搜索都会重新读取，注册表最多每秒读一次。一次性命令会计入常驻进程，但自己不登记 | `--threads N` |
 
 磁盘预算在每次淘汰时重新计算（每一批写入一次，与之前同样的目录遍历），每次按自动预算写入前先用一次
 `statvfs` 检查剩余空间：会侵占保留空间的条目不会写入；当其他程序把磁盘写满时，下一次淘汰会把 cache
-缩小到低于当前占用，最旧的 APK 优先。一次性 CLI 命令不保留内存 cache，所以 `--memory-mb` 只对 `gui`
-和 `mcp` 有意义。
+缩小到低于当前占用，最旧的 APK 优先。一次性 CLI 命令不保留内存 cache，所以 `--memory-mb` 只对 `mcp`
+和 daemon 有意义。
 
-一个持有 GUI 引擎状态的进程的常驻内存（16 线程，抖音 40.7.0 = 437 MB 的 DEX，然后在同一进程中打开快手
+一个持有常驻引擎的进程的常驻内存（16 线程，抖音 40.7.0 = 437 MB 的 DEX，然后在同一进程中打开快手
 和小红书；每个都做类扫描加三次查询）：
 
 | | 之前的匿名内存 | 之后的匿名内存 | 之后的文件页 |
@@ -347,7 +343,7 @@ agent 无需 MCP 客户端也能获得接近 MCP 的延迟。命令的写法和�
 
 * 第一个命令会启动 daemon（`droidasc daemon serve`，分离运行），并在其就绪后把自己交给它处理；daemon
   空闲 15 分钟后退出。
-* `--debug` 和 `--no-cache` 总是在调用进程中运行，`gui`、`mcp`、`cache` 和 `daemon` 也是如此。
+* `--debug` 和 `--no-cache` 总是在调用进程中运行，`mcp`、`cache` 和 `daemon` 也是如此。
   `DROIDASC_DAEMON=off` 关闭 daemon。
 * 每种构建和 cache 配置（`--cache-dir`、`--cache-max-mb`、`DROIDASC_*`、umask）对应一个 daemon：重新
   构建的二进制会启动新的 daemon，并让旧的退役。

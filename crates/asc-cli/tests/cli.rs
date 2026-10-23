@@ -234,22 +234,11 @@ fn broken_dex_entry_gives_partial_exit_status() {
 }
 
 #[test]
-fn legacy_gui_rewrite_does_not_touch_normal_invocations() {
-    let apk = temp_apk();
-    // `--gui` inside a real subcommand is rejected by clap, not rewritten into `gui`.
-    let out = droidasc(&["findrefs", path(apk.path()), "string", "token", "--gui"]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("--gui"), "{}", stderr(&out));
-    let out = droidasc(&["findrefs", path(apk.path()), "string", "token"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-}
-
-#[test]
 fn help_explains_thread_default() {
     let out = droidasc(&["--help"]);
     assert!(out.status.success());
     let text = stdout(&out);
-    assert!(text.contains("other busy `mcp` / `gui` processes"), "{text}");
+    assert!(text.contains("other busy `mcp` / daemon processes"), "{text}");
     assert!(text.contains("exit status"), "{text}");
 }
 
@@ -438,10 +427,6 @@ fn rasc_aliases_and_version_flags() {
         assert!(out.status.success(), "{}", stderr(&out));
         assert!(stdout(&out).starts_with("droidasc "), "{}", stdout(&out));
     }
-    // The legacy `app.apk --gui` rewrite leaves the aliases alone.
-    let out = droidasc(&["classes", path(apk.path()), "--gui"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("--gui"), "{}", stderr(&out));
 }
 
 // ---- listclass (ported from the Python `test_listclass.py`) -------------

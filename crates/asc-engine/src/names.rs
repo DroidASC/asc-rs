@@ -1,4 +1,4 @@
-//! Class-name normalisation shared by the CLI and GUI.
+//! Class-name normalisation shared by the CLI and MCP.
 
 use crate::{EngineError, Result};
 use asc_findrefs::{ClassQuery, MemberQuery, Query};

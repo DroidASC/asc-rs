@@ -16,8 +16,8 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
                  │                               │                          │
                  └──────────────► asc-engine ◄───┴──────────────────────────┘
                                      │     (+ asc-axml, asc-arsc for manifest / resources)
-                          ┌──────────┼──────────┐
-                       asc-cli ── asc-mcp    asc-gui
+                          ┌──────────┤
+                       asc-cli ── asc-mcp
 ```
 
 ## Mapping to the Python modules
@@ -44,7 +44,7 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
 | `asc_core/core/dex/dex_remapper.py` (DexIndexMapper) | `asc_rebuild::{collect, tables}` |
 | `asc_core/core/dex/dex_builder.py` (DexBuilder) | `asc_rebuild::writer` |
 | `asc_core/utils/decompiler.py` (androguard DAD) | `asc-smali` (disassembly) — see below |
-| `asc_client/gui/*` (Tk) | `asc-gui` (egui) |
+| `asc_client/gui/*` (Tk) | — (not ported; an egui browser existed until 2026-10) |
 | — (no equivalent) | `asc-cache` (disk + memory caches of inflated entries), `asc_findrefs::SearchState` (reusable locator tables) |
 | — (no equivalent) | `asc-mcp` (`droidasc mcp`: resident MCP session over stdio; one `Engine` per opened APK, all attached to one `asc_engine::SharedCache`) |
 | `tests/dex_fixture.py` | `asc-fixture` |
@@ -126,7 +126,7 @@ the two rules every tool uses:
 `Lcls;->name(params)ret` or `Lcls;->name:type`) as it is, since descriptors never hold
 `, ` or a line break. A class relation row is `dex | Lsub; | extends Lbase;`. Resource
 rows are `0x7f0d0001 | type/name [config] | value`. `RefResult::method` keeps the bare
-`Lcls;->name` the multi-APK SDK folding and the GUI key on; `structuredContent` carries
+`Lcls;->name` the multi-APK SDK folding keys on; `structuredContent` carries
 both (`method`, `signature`) and the matched values unquoted.
 
 The rows themselves are still the Python tool's: `benchmark/parity/semantic.py` runs both
@@ -165,7 +165,7 @@ the signature and field type our side adds.
   query) is not ported: no CLI path builds a multi-key query.
 * Member queries: with a precise class, the member name is a **substring** match; with a
   fuzzy or absent class the member name is a regex against the string table.
-  `MemberQuery::exact_name` (`--exact`, and the GUI's "references to this member") makes
+  `MemberQuery::exact_name` (`--exact`, MCP `exact`) makes
   it a whole-name equality under any class constraint, as the Python GUI's exact-member
   xref does. Without a class the name string is one binary search over the sorted string
   table; within a class's members names are compared as MUTF-8 bytes (decoded only for
@@ -203,20 +203,11 @@ be abandoned mid-way, so a worker that is already inflating finishes in the back
 the zlib-rs fallback path polls the flag every 512 KiB). `find_refs` uses scoped threads
 and an mpsc channel and hands out the largest entries first (every entry must be searched,
 so the longest inflate should start immediately); batches reach the caller in completion
-order, exactly like the Python process pool. `scan_classes` (behind `listclass` and the GUI
-package tree) also runs largest first, but puts each entry's classes back in its
+order, exactly like the Python process pool. `scan_classes` (behind MCP `listclass` and the
+multi-APK class counts) also runs largest first, but puts each entry's classes back in its
 central-directory slot, so the listing is in DEX order like the Python `list_classes`.
-`list_classes` fails on the first unreadable entry or bad `class_def`; the GUI keeps the
-classes of the other entries and reports the broken ones.
-
-The GUI turns that listing into a `ClassIndex` that stores each descriptor once: sorted and
-deduplicated in one string arena with end offsets, the DEX label as a `u16` into a name
-table, and the package tree as a flat node table whose children and classes are ranges
-into two `u32` arrays (children by name, as the old `BTreeMap` had them; classes in
-descriptor order). `contains` is a binary search; the class filter searches the whole arena
-at once ignoring ASCII case and lower-cases (Unicode rules) only the non-ASCII
-descriptors, so it returns exactly what `to_lowercase().contains(..)` would. On a
-551,080-class APK the index builds in about 70 ms and holds about 22 MB.
+`list_classes` fails on the first unreadable entry or bad `class_def`; `scan_classes` keeps
+the classes of the other entries and reports the broken ones.
 
 A DEX 041 container is split lazily (`asc_dex::container::logical_dex_iter`): every
 logical DEX after the first is a full copy of the container with its header moved to
@@ -236,9 +227,8 @@ These differ from the Python CLI on purpose and apply to `getclass`, `findrefs` 
   both).
 * `--threads 0` is accepted and runs one worker (the flag is global); Python's
   `listclass` rejects it.
-* The GUI package tree labels a class defined by several DEX files with the first one in
-  central-directory order; `getclass` opens whichever entry answers its parallel probe
-  first (smallest entries are probed first), which can be another of them.
+* For a class defined by several DEX files, `getclass` opens whichever entry answers its
+  parallel probe first (smallest entries are probed first), which can be any of them.
 
 ### Caches
 
@@ -290,8 +280,8 @@ lazily by the queries themselves):
   to one background thread (writing a 30 MiB entry costs as much as the whole
   query it came from) and evicts once per burst rather than after every entry;
   `Engine::flush_cache_writes` / `Drop` wait for the queue. Concurrent queries that need
-  the same entry share a single inflate, so a burst of GUI requests cannot replace each
-  other's locator tables.
+  the same entry share a single inflate, so a burst of MCP or daemon requests cannot replace
+  each other's locator tables.
 * `MemoryCache<T>`: byte-bounded LRU keyed by `(apk key, entry name)`; the engine stores a
   `CachedEntry` per entry, which owns the bytes and, per logical DEX, an
   `Arc<SearchState>` (`OnceLock`s for the string/type/member/instruction locators).
@@ -563,7 +553,7 @@ probes it continues only while at most half of them found a possible match. On D
 java.lang.Runtime` leaves out 37 of 55 entries: 77 → 57 ms, peak RSS 328 → 201 MB; the
 47-step replay as one CLI process per step goes 2724 → 2212 ms. Broad queries
 (`field SDK_INT`, `string http://`) and late-string APKs (Chrome) are unchanged. Resident
-hosts (`mcp`, `gui`) never probe: their memory cache keeps the inflated entry for the next
+hosts (`mcp`, the daemon) never probe: their memory cache keeps the inflated entry for the next
 query.
 
 ### Resources and the manifest summary (not in Python)

@@ -5,7 +5,7 @@ mod daemon;
 mod output;
 
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
-use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext, Threads};
+use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use output::{Io, LocalEngines};
@@ -20,7 +20,6 @@ const EXAMPLES: &str = "common:
   --threads N controls parallel APK scanning; --debug enables timing output.
 
 examples:
-  droidasc app.apk --gui
   droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
   droidasc getclass app.apk com.poc.Main --threads 16
   droidasc getclass app.apk com.poc.Main --dump-dex Main.dex
@@ -69,26 +68,6 @@ const EXIT_OK: u8 = 0;
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
 
-/// Subcommand names and aliases (`classes` / `manifest` as in rasc).
-const SUBCOMMANDS: [&str; 16] = [
-    "getclass",
-    "disassemble",
-    "listclass",
-    "classes",
-    "getmanifest",
-    "manifest",
-    "manifest-summary",
-    "resources",
-    "xml",
-    "findrefs",
-    "callgraph",
-    "hierarchy",
-    "gui",
-    "mcp",
-    "cache",
-    "daemon",
-];
-
 #[derive(Parser)]
 #[command(name = "droidasc", about = "ASC tooling entry.", after_help = EXAMPLES, version, disable_version_flag = true)]
 struct Cli {
@@ -108,7 +87,7 @@ struct Common {
     debug: bool,
     /// Worker thread count (default: the logical CPUs; once more than 4 of
     /// this user's processes are busy, 4 per CPU split between them and the
-    /// other busy `mcp` / `gui` processes, at least 2. Resident hosts follow
+    /// other busy `mcp` / daemon processes, at least 2. Resident hosts follow
     /// them as they start and stop).
     #[arg(long, alias = "thread", global = true, value_name = "N")]
     threads: Option<usize>,
@@ -123,7 +102,7 @@ struct Common {
     /// below a 1 GiB / 5% free-space reserve).
     #[arg(long, global = true, value_name = "MIB")]
     cache_max_mb: Option<u64>,
-    /// In-memory cache budget of `gui` and `mcp`, in MiB (default: a quarter
+    /// In-memory cache budget of `mcp` and the daemon, in MiB (default: a quarter
     /// of available memory, at most 2048). One-shot commands keep no memory cache.
     #[arg(long, global = true, value_name = "MIB")]
     memory_mb: Option<usize>,
@@ -151,7 +130,7 @@ impl Common {
         })
     }
 
-    /// Cache of the resident hosts (`gui`, `mcp`): the memory budget plus
+    /// Cache of the resident hosts (`mcp`, the daemon): the memory budget plus
     /// the disk cache unless disabled.
     fn resident_cache(&self) -> CacheConfig {
         CacheConfig {
@@ -367,11 +346,6 @@ enum Command {
         /// Class in dotted or Dalvik form.
         class: String,
     },
-    /// Launch the graphical browser.
-    Gui {
-        /// Path to the input APK file.
-        apk_path: PathBuf,
-    },
     /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
     /// opened APKs resident across calls.
     /// Every opened APK shares one `--memory-mb` budget.
@@ -427,7 +401,7 @@ impl Command {
             | Command::Findrefs { apk_path, .. }
             | Command::Callgraph { apk_path, .. }
             | Command::Hierarchy { apk_path, .. } => Some(apk_path),
-            Command::Gui { .. } | Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => None,
+            Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => None,
         }
     }
 }
@@ -717,8 +691,8 @@ fn emit_or_write(io: &mut Io<'_>, output: Option<&PathBuf>, text: &str) -> Resul
     }
 }
 
-/// Run a one-shot command (everything but `gui`, `mcp`, `cache` and
-/// `daemon`, which [`run`] handles itself) against `io`: the exit status.
+/// Run a one-shot command (everything but `mcp`, `cache` and `daemon`,
+/// which [`run`] handles itself) against `io`: the exit status.
 fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instant) -> Result<u8, String> {
     match command {
         Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
@@ -915,7 +889,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 return Ok(EXIT_PARTIAL);
             }
         }
-        Command::Gui { .. } | Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => {
+        Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => {
             unreachable!("run handles the resident and maintenance commands")
         }
     }
@@ -925,9 +899,6 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
 fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
     let common = cli.common;
     match cli.command {
-        Command::Gui { apk_path } => {
-            launch_gui(apk_path, common.threads.into(), common.debug, common.resident_cache())?;
-        }
         Command::Mcp { max_entry_mb, max_ratio, sdk_prefixes, structured, spill_mb } => {
             let mut opts = asc_mcp::Options::new(common.threads, common.debug, common.resident_cache());
             opts.limits.max_entry_bytes = max_entry_mb.saturating_mul(1 << 20);
@@ -994,41 +965,13 @@ fn daemon_command(_common: &Common, _action: DaemonAction) -> Result<u8, String>
     Err("the daemon needs Unix sockets; commands run in their own process".into())
 }
 
-#[cfg(feature = "gui")]
-fn launch_gui(apk_path: PathBuf, threads: Threads, debug: bool, cache: CacheConfig) -> Result<(), String> {
-    asc_gui::launch(apk_path, threads, debug, cache).map_err(|e| e.to_string())
-}
-
 fn mib(bytes: u64) -> String {
     format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
-#[cfg(not(feature = "gui"))]
-fn launch_gui(_apk_path: PathBuf, _threads: Threads, _debug: bool, _cache: CacheConfig) -> Result<(), String> {
-    Err("this build was compiled without the `gui` feature".into())
-}
-
-/// Accept the legacy `droidasc app.apk --gui [--threads N] [--debug]` form.
-///
-/// Only rewrites when `--gui` is present and no subcommand name is, so a
-/// normal invocation is never touched even if it mentions `--gui` somewhere.
-fn legacy_gui_args(args: &[String]) -> Option<Vec<String>> {
-    let (program, rest) = args.split_first()?;
-    if !rest.iter().any(|a| a == "--gui") || rest.iter().any(|a| SUBCOMMANDS.contains(&a.as_str())) {
-        return None;
-    }
-    let mut out = vec![program.clone(), "gui".to_string()];
-    out.extend(rest.iter().filter(|a| *a != "--gui" && *a != "--gui-foreground").cloned());
-    Some(out)
-}
-
 fn main() -> ExitCode {
     let t_start = Instant::now();
-    let args: Vec<String> = std::env::args().collect();
-    let parsed = match legacy_gui_args(&args) {
-        Some(rewritten) => Cli::try_parse_from(rewritten),
-        None => Cli::try_parse(),
-    };
+    let parsed = Cli::try_parse();
     // clap exits 2 on usage errors, which would collide with `EXIT_PARTIAL`;
     // usage errors are ordinary errors (1), help/version are not errors (0).
     let cli = match parsed {
@@ -1048,31 +991,5 @@ fn main() -> ExitCode {
             eprintln!("Error: {e}");
             ExitCode::from(1)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn argv(s: &str) -> Vec<String> {
-        s.split_whitespace().map(str::to_string).collect()
-    }
-
-    #[test]
-    fn legacy_gui_form_is_rewritten() {
-        let out = legacy_gui_args(&argv("droidasc app.apk --gui --threads 4 --debug")).unwrap();
-        assert_eq!(out, argv("droidasc gui app.apk --threads 4 --debug"));
-        let out = legacy_gui_args(&argv("droidasc --gui-foreground --gui app.apk")).unwrap();
-        assert_eq!(out, argv("droidasc gui app.apk"));
-    }
-
-    #[test]
-    fn legacy_rewrite_leaves_subcommands_and_empty_argv_alone() {
-        assert!(legacy_gui_args(&[]).is_none());
-        assert!(legacy_gui_args(&argv("droidasc")).is_none());
-        assert!(legacy_gui_args(&argv("droidasc findrefs app.apk string --gui")).is_none());
-        assert!(legacy_gui_args(&argv("droidasc gui app.apk --gui")).is_none());
-        assert!(legacy_gui_args(&argv("droidasc getclass app.apk com.poc.Main")).is_none());
     }
 }

@@ -286,14 +286,6 @@ impl CacheConfig {
     pub fn resident(memory_bytes: usize) -> CacheConfig {
         CacheConfig { memory_bytes, disk: DiskCache::open_default(), memory_auto: false }
     }
-
-    /// Disk cache plus an in-memory LRU sized automatically (GUI / server
-    /// default): [`auto_memory_bytes`] to start with, then this process's
-    /// share once other resident hosts run, so several of them on one
-    /// machine do not each claim 2 GiB.
-    pub fn resident_auto() -> CacheConfig {
-        CacheConfig { memory_auto: true, ..CacheConfig::resident(auto_memory_bytes()) }
-    }
 }
 
 /// Upper bound of [`auto_memory_bytes`].

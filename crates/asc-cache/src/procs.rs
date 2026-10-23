@@ -1,4 +1,4 @@
-//! Registry of the resident hosts (MCP servers, GUIs) one user runs, so each
+//! Registry of the resident hosts (MCP servers, daemons) one user runs, so each
 //! can size its memory budget as a share of one machine-wide budget instead
 //! of every process claiming a quarter of the free memory for itself, and
 //! split the CPUs with the others that are busy.
