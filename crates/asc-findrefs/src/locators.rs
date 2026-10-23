@@ -160,6 +160,13 @@ impl StringLocator {
             while offset_pos + 1 < self.offsets.len() && self.offsets[offset_pos + 1][0] as usize <= abs {
                 offset_pos += 1;
             }
+            // An occurrence starting in the length prefix is not in the
+            // string (a length of 97 reads as `a`): look again past it.
+            let off = self.offsets[offset_pos][0] as usize;
+            if asc_dex::leb128::uleb128_len(buf, off).map_or(true, |n| abs < off + n) {
+                at = start + 1;
+                continue;
+            }
             out.push(self.offsets[offset_pos][1]);
             if skip_rest {
                 if let Some(&[next, _]) = self.offsets.get(offset_pos + 1) {
@@ -630,5 +637,24 @@ mod tests {
         // A dense regex also matches those bytes, so this verifies the same
         // physical-region attribution as the production path.
         assert_eq!(loc.locate(b"\x02aa\0\x02bb\0\x02cc\0", &re), [3, 7, 9].into_iter().collect());
+    }
+
+    #[test]
+    fn a_length_prefix_is_not_part_of_its_string() {
+        // 65 bytes: the prefix byte reads as `A`.
+        let mut buf = vec![0x41];
+        buf.extend([b'x'; 65]);
+        buf.push(0);
+        let second = buf.len();
+        buf.push(0x41);
+        buf.push(b'A');
+        buf.extend([b'x'; 64]);
+        buf.push(0);
+        let offsets = vec![[0, 4], [second as u32, 5]];
+        let loc = StringLocator { offsets: offsets.into(), strdata_start: 0, strdata_end: buf.len() };
+        let finder = memchr::memmem::Finder::new(b"A");
+        assert_eq!(loc.locate_literal(&buf, &finder), [5].into_iter().collect());
+        assert_eq!(loc.locate(&buf, &Regex::new("A").unwrap()), [5].into_iter().collect());
+        assert_eq!(loc.locate_literal(&buf, &memchr::memmem::Finder::new(b"Ax")), [5].into_iter().collect());
     }
 }
