@@ -12,7 +12,9 @@ asc-dex.workspace = true
 asc-dalvik.workspace = true
 regex.workspace = true
 memchr.workspace = true
+bytemuck.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 asc-fixture.workspace = true
+bytemuck.workspace = true
