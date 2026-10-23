@@ -54,6 +54,8 @@ pub enum ApkError {
     NotFound(String),
     #[error("entry {name} declares an implausible size (compressed {comp_size}, uncompressed {uncomp_size})")]
     ImplausibleSize { name: String, comp_size: u64, uncomp_size: u64 },
+    #[error("entry {name} exceeds the inflate limit: {reason}")]
+    LimitExceeded { name: String, reason: String },
     #[error("cancelled")]
     Cancelled,
 }
@@ -77,10 +79,37 @@ impl Entry {
     }
 }
 
+/// Caps on what reading an APK may inflate, against zip bombs. The default
+/// only rejects what Deflate cannot produce; [`Limits::guarded`] is for
+/// sweeping untrusted APKs in bulk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Most bytes one entry may inflate to.
+    pub max_entry_bytes: u64,
+    /// Most an entry may expand over its compressed payload.
+    pub max_ratio: u64,
+    /// Most bytes all root DEX entries together may declare.
+    pub max_dex_total_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits { max_entry_bytes: u64::MAX, max_ratio: MAX_DEFLATE_RATIO, max_dex_total_bytes: u64::MAX }
+    }
+}
+
+impl Limits {
+    /// Real DEX files are at most a few hundred MiB and compress 2-5:1.
+    pub fn guarded() -> Limits {
+        Limits { max_entry_bytes: 1 << 30, max_ratio: 100, max_dex_total_bytes: 4 << 30 }
+    }
+}
+
 /// A memory-mapped APK.
 pub struct Apk {
     path: PathBuf,
     map: Mmap,
+    limits: Limits,
 }
 
 /// `n` bytes at `o`, or `None` if they are not all inside `b` (offsets come
@@ -116,7 +145,13 @@ impl Apk {
         // SAFETY: the mapping is read-only and the file is not expected to be
         // modified while it is mapped (same contract as the Python mmap use).
         let map = unsafe { Mmap::map(&file) }.map_err(|source| ApkError::Io { path: path.clone(), source })?;
-        Ok(Apk { path, map })
+        Ok(Apk { path, map, limits: Limits::default() })
+    }
+
+    /// Enforce `limits` on every later read.
+    pub fn with_limits(mut self, limits: Limits) -> Apk {
+        self.limits = limits;
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -228,6 +263,7 @@ impl Apk {
     /// last occurrence, like [`Apk::find_entry`] (and `zipfile`).
     pub fn dex_entries(&self) -> Result<Vec<Entry>> {
         let mut entries = self.dex_entries_in_order()?;
+        self.check_dex_total(&entries)?;
         entries.sort_by_key(|e| e.comp_size);
         Ok(entries)
     }
@@ -241,6 +277,17 @@ impl Apk {
         entries.retain(|e| seen.insert(e.name.clone()));
         entries.reverse();
         Ok(entries)
+    }
+
+    fn check_dex_total(&self, entries: &[Entry]) -> Result<()> {
+        let total = entries.iter().fold(0u64, |t, e| t.saturating_add(e.uncomp_size));
+        if total > self.limits.max_dex_total_bytes {
+            return Err(ApkError::LimitExceeded {
+                name: "classes*.dex".into(),
+                reason: format!("DEX entries declare {total} bytes in all, limit {}", self.limits.max_dex_total_bytes),
+            });
+        }
+        Ok(())
     }
 
     /// Find an entry by exact name.
@@ -324,7 +371,7 @@ impl Apk {
                     Err(e) => return Err(ApkError::Inflate { name: entry.name.clone(), source: e }),
                 }
                 if out.len() as u64 > bound {
-                    return Err(self.implausible(entry));
+                    return Err(self.past_bound(entry, bound));
                 }
                 out
             }
@@ -350,7 +397,31 @@ impl Apk {
         if entry.method == METHOD_DEFLATE && entry.uncomp_size > bound {
             return Err(self.implausible(entry));
         }
-        Ok(bound)
+        let Limits { max_entry_bytes, max_ratio, .. } = self.limits;
+        if entry.uncomp_size > max_entry_bytes {
+            return Err(self.over_limit(entry, format!("declares {} bytes, limit {max_entry_bytes}", entry.uncomp_size)));
+        }
+        let ratio_bound = entry.comp_size.saturating_mul(max_ratio).saturating_add(1024);
+        if entry.method == METHOD_DEFLATE && entry.uncomp_size > ratio_bound {
+            return Err(self.over_limit(
+                entry,
+                format!("declares {} bytes from {} compressed, ratio limit {max_ratio}", entry.uncomp_size, entry.comp_size),
+            ));
+        }
+        Ok(bound.min(ratio_bound).min(max_entry_bytes))
+    }
+
+    /// An entry whose stream ran past `bound` (from [`Apk::check_declared_size`]).
+    fn past_bound(&self, entry: &Entry, bound: u64) -> ApkError {
+        if bound < entry.comp_size.saturating_mul(MAX_DEFLATE_RATIO).saturating_add(1024) {
+            self.over_limit(entry, format!("inflates past {bound} bytes"))
+        } else {
+            self.implausible(entry)
+        }
+    }
+
+    fn over_limit(&self, entry: &Entry, reason: String) -> ApkError {
+        ApkError::LimitExceeded { name: entry.name.clone(), reason }
     }
 
     fn implausible(&self, entry: &Entry) -> ApkError {
@@ -401,7 +472,7 @@ impl Apk {
         let mut target: Option<usize> = None;
         loop {
             if out.len() as u64 > bound {
-                return Err(self.implausible(entry));
+                return Err(self.past_bound(entry, bound));
             }
             let base = out.len();
             out.resize(base + CHUNK, 0);
@@ -468,6 +539,29 @@ mod tests {
         f.write_all(bytes).unwrap();
         f.flush().unwrap();
         f
+    }
+
+    #[test]
+    fn limits_reject_bombs_before_inflating() {
+        // Zeros compress far beyond any real DEX.
+        let bomb = vec![0u8; 4 << 20];
+        let f = write_temp(&asc_fixture::make_apk(&[("classes.dex", &bomb)], true));
+        let apk = Apk::open(f.path()).unwrap();
+        let entry = apk.dex_entries().unwrap().remove(0);
+        assert_eq!(apk.read_entry(&entry).unwrap().len(), bomb.len());
+        let apk = Apk::open(f.path()).unwrap().with_limits(Limits::guarded());
+        let err = apk.read_entry(&entry).unwrap_err();
+        assert!(matches!(&err, ApkError::LimitExceeded { reason, .. } if reason.contains("ratio limit 100")), "{err}");
+        // An entry with no declared size is cut off by the same bound while streaming.
+        let mut undeclared = entry.clone();
+        undeclared.uncomp_size = 0;
+        assert!(matches!(apk.read_entry(&undeclared), Err(ApkError::LimitExceeded { .. })));
+        let small = Limits { max_entry_bytes: 1 << 20, ..Limits::default() };
+        let apk = Apk::open(f.path()).unwrap().with_limits(small);
+        assert!(matches!(apk.read_entry(&entry), Err(ApkError::LimitExceeded { .. })));
+        let total = Limits { max_dex_total_bytes: 1 << 20, ..Limits::default() };
+        let apk = Apk::open(f.path()).unwrap().with_limits(total);
+        assert!(matches!(apk.dex_entries(), Err(ApkError::LimitExceeded { .. })));
     }
 
     #[test]
