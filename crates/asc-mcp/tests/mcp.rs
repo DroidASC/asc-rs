@@ -162,3 +162,24 @@ fn errors_keep_the_session_alive() {
     assert_eq!(replies[9]["error"]["code"], -32601);
     assert_eq!(ok(&replies[10])["total"], 4);
 }
+
+#[test]
+fn findrefs_literal_and_class_relations_and_method_filter() {
+    let apk = temp_apk();
+    let path = apk.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "findrefs", json!({"apk": path, "kind": "string", "value": "tok.n"})),
+        call(2, "findrefs", json!({"apk": path, "kind": "string", "value": "tok.n", "literal": true})),
+        call(3, "findrefs", json!({"apk": path, "kind": "string", "value": "oke", "literal": true})),
+        call(4, "findrefs", json!({"apk": path, "kind": "extends", "value": "java.lang.Object"})),
+        call(5, "findrefs", json!({"apk": path, "kind": "impl", "value": "java.lang.Runnable"})),
+        call(6, "getclass", json!({"apk": path, "class": "example.Test", "method": "nope()V"})),
+    ]);
+    // A regex dot matches; the same text taken literally does not.
+    assert!(ok(&replies[0])["total"].as_u64().unwrap() > 0);
+    assert_eq!(ok(&replies[1])["total"], 0);
+    assert_eq!(ok(&replies[2])["total"], ok(&replies[0])["total"]);
+    assert!(text(&replies[3]).contains("Lexample/Test; extends Ljava/lang/Object;"), "{}", text(&replies[3]));
+    assert_eq!(ok(&replies[4])["total"], 0);
+    assert_eq!(replies[5]["result"]["isError"], true, "{}", replies[5]);
+}

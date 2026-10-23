@@ -250,7 +250,8 @@ impl Server {
         let debug_info = bool_arg(args, "debug_info")?.unwrap_or(true);
         let descriptor = names::format_class_name(class)?;
         let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
-        let src = self.apks[i].engine.get_class_with(&descriptor, opts)?;
+        let method = str_arg(args, "method")?;
+        let src = self.apks[i].engine.get_class_method(&descriptor, opts, method)?;
         let mut text = String::new();
         if let Some(w) = &src.warning {
             // A smali comment, so the text still assembles.
@@ -270,14 +271,17 @@ impl Server {
 
     fn findrefs(&mut self, args: &Value) -> ToolResult {
         let i = self.resolve(args)?;
-        let kind = str_arg(args, "kind")?.ok_or_else(|| ToolError("findrefs needs `kind` (string, type, method or field)".into()))?;
+        let kind = str_arg(args, "kind")?
+            .ok_or_else(|| ToolError("findrefs needs `kind` (string, type, method, field, extends or impl)".into()))?;
         let query = match kind {
-            "string" | "type" => {
+            "string" | "type" | "extends" | "impl" => {
                 let value = str_arg(args, "value")?.ok_or_else(|| ToolError(format!("a {kind} query needs `value`")))?;
-                if kind == "string" {
-                    Query::String(value.to_string())
-                } else {
-                    Query::Type(value.to_string())
+                match kind {
+                    "string" if bool_arg(args, "literal")?.unwrap_or(false) => Query::StringLiteral(value.to_string()),
+                    "string" => Query::String(value.to_string()),
+                    "type" => Query::Type(value.to_string()),
+                    "extends" => Query::Extends(names::format_class_name(value)?),
+                    _ => Query::Implements(names::format_class_name(value)?),
                 }
             }
             "method" | "field" => {
@@ -294,7 +298,7 @@ impl Server {
                     Query::Field(m)
                 }
             }
-            _ => return Err(ToolError(format!("unknown kind {kind:?}: use string, type, method or field"))),
+            _ => return Err(ToolError(format!("unknown kind {kind:?}: use string, type, method, field, extends or impl"))),
         };
         let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
         let mut batches = Vec::new();
@@ -444,8 +448,10 @@ fn page_props() -> Value {
 
 fn tool_definitions() -> Value {
     let mut findrefs_props = with_props(json!({
-        "kind": {"type": "string", "enum": ["string", "type", "method", "field"]},
-        "value": {"type": "string", "description": "string: regex over string constants; type: fuzzy type descriptor / name."},
+        "kind": {"type": "string", "enum": ["string", "type", "method", "field", "extends", "impl"]},
+        "value": {"type": "string", "description": "string: regex over string constants (plain text with `literal`); \
+            type: fuzzy type descriptor / name; extends / impl: the superclass / interface (Lcom/poc/Base; or com.poc.Base)."},
+        "literal": {"type": "boolean", "description": "string: match `value` as plain text instead of a regex."},
         "name": {"type": "string", "description": "method / field: name (regex or substring; exact with `exact`)."},
         "class": {"type": "string", "description": "method / field: declaring class (Lcom/poc/Main; or com.poc.Main)."},
         "fuzzy_class": {"type": "boolean", "description": "Treat `class` as a fuzzy pattern."},
@@ -480,12 +486,14 @@ fn tool_definitions() -> Value {
             "inputSchema": {"type": "object", "properties": with_props(json!({
                 "class": {"type": "string", "description": "Lcom/poc/Main; or com.poc.Main."},
                 "debug_info": {"type": "boolean", "description": "Emit .line / .param directives (default true)."},
+                "method": {"type": "string", "description": "Only this method, by exact signature: name(params)ret, e.g. onCreate(Landroid/os/Bundle;)V."},
             })), "required": ["class"]},
         },
         {
             "name": "findrefs",
-            "description": "Find code references to a string, type, method or field across every DEX. One line per \
-                referencing method: `dex | Lcls;->method | matched=(...)`. Paged; the last line says how many there are.",
+            "description": "Find code references to a string, type, method or field across every DEX (one line per \
+                referencing method: `dex | Lcls;->method | matched=(...)`), or the classes that extend / implement a \
+                type (`dex | Lsub; extends Lbase;`). Paged; the last line says how many there are.",
             "inputSchema": {"type": "object", "properties": findrefs_props, "required": ["kind"]},
         },
         {

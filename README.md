@@ -255,9 +255,9 @@ on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`).
 | tool | arguments | result |
 |---|---|---|
 | `open_apk` | `apk`, `warm` (default true: inflate every DEX now) | `apk_id`; the same path returns the same id |
-| `close_apk` | `apk_id` or `apk` | |
-| `getclass` | `class`, `debug_info` | smali, as `droidasc getclass` |
-| `findrefs` | `kind` (`string`/`type`/`method`/`field`), `value` or `name`, `class`, `fuzzy_class`, `exact`, `offset`, `limit` (500) | `findrefs` lines in DEX order, then a `# N results` line |
+| `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
+| `getclass` | `class`, `debug_info`, `method` (exact signature) | smali, as `droidasc getclass [--method]` |
+| `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `offset`, `limit` (500) | `findrefs` lines in DEX order, then a `# N results` line |
 | `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
 | `getmanifest` | | decoded XML |
 
