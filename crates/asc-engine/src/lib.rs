@@ -20,11 +20,12 @@ mod callgraph;
 mod classes;
 pub mod names;
 
-use asc_apk::{Apk, Entry};
+use asc_apk::{Apk, Entry, Limits};
 use asc_cache::{ApkKey, DexData, DiskCache, MemoryCache};
 use asc_dex::container::{dex041_logical_offsets, logical_dex_buffers, logical_dex_iter};
 use asc_dex::Dex;
-use asc_findrefs::{CompiledQuery, FindRefs, Hit, Query, RefKind, SearchState};
+pub use asc_findrefs::CompiledQuery;
+use asc_findrefs::{FindRefs, Hit, Query, RefKind, SearchState};
 use asc_rebuild::Rebuilt;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -33,6 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Instant, SystemTime};
 
+pub use asc_apk::Limits as InflateLimits;
 pub use asc_cache;
 pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
@@ -306,6 +308,11 @@ impl SharedCache {
     /// Bytes currently held by the shared in-memory cache.
     pub fn memory_bytes(&self) -> usize {
         self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
+    }
+
+    /// Budget of the shared in-memory cache (0 when it is disabled).
+    pub fn memory_capacity(&self) -> usize {
+        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().capacity_bytes()).unwrap_or(0)
     }
 
     /// Block until every queued disk-cache write has landed.
@@ -654,6 +661,16 @@ pub struct Engine {
     stats: Arc<Stats>,
     /// `(size, mtime, key)` of the APK the key was last computed for.
     key_cache: Mutex<Option<(u64, Option<SystemTime>, ApkKey)>>,
+    limits: Limits,
+}
+
+/// An APK opened for a search whose DEX entries are scheduled by the caller,
+/// e.g. across many APKs at once ([`Engine::search_target`]).
+pub struct SearchTarget {
+    apk: Apk,
+    key: Option<ApkKey>,
+    /// Root DEX entries, smallest compressed first.
+    pub entries: Vec<Entry>,
 }
 
 #[derive(Default)]
@@ -679,7 +696,14 @@ impl Engine {
             shared_cache: false,
             stats: Arc::new(Stats::default()),
             key_cache: Mutex::new(None),
+            limits: Limits::default(),
         }
+    }
+
+    /// Refuse entries that inflate past `limits` (zip bombs).
+    pub fn with_limits(mut self, limits: Limits) -> Engine {
+        self.limits = limits;
+        self
     }
 
     pub fn with_threads(mut self, threads: usize) -> Engine {
@@ -792,7 +816,37 @@ impl Engine {
     }
 
     pub fn open(&self) -> Result<Apk> {
-        Ok(Apk::open(&self.apk_path)?)
+        Ok(Apk::open(&self.apk_path)?.with_limits(self.limits))
+    }
+
+    /// Open the APK for [`Engine::search_target`].
+    pub fn search_target(&self) -> Result<SearchTarget> {
+        let apk = self.open()?;
+        let entries = apk.dex_entries()?;
+        let key = self.apk_key(&apk);
+        Ok(SearchTarget { apk, key, entries })
+    }
+
+    /// Search one entry of `target` (what [`Engine::find_refs_with`] runs per
+    /// entry), through this engine's caches.
+    pub fn search_target_entry(
+        &self,
+        target: &SearchTarget,
+        entry: &Entry,
+        query: &CompiledQuery,
+        aggregate: bool,
+        cancel: &AtomicBool,
+    ) -> RefBatch {
+        search_entry(
+            &target.apk,
+            target.key.as_ref(),
+            entry,
+            query,
+            FindOptions { aggregate, context: RefContext::None },
+            cancel,
+            self.cache.as_deref(),
+            &self.stats,
+        )
     }
 
     /// Root-level DEX entries, smallest compressed first.

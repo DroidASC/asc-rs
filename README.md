@@ -307,7 +307,7 @@ ending the session.
 
 | tool | arguments | result |
 |---|---|---|
-| `open_apk` | `apk`, `warm` (default true: inflate every DEX now) | `apk_id`; the same path returns the same id |
+| `open_apk` | `apk`, `warm` (default true: inflate every DEX now); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
 | `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
 | `getclass` | `class`, `debug_info`, `method` (exact signature) | smali, as `droidasc getclass [--method]` |
 | `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; with `context`, `structuredContent` rows carry `sites` (`pc`, `line`, `matched`) and `context` |
@@ -319,6 +319,50 @@ Every tool except `open_apk` takes `apk_id` or an `apk` path (opened on first us
 carry the CLI text as `content` and the same data as `structuredContent` (`total` and
 `next_offset` for paged tools). Failures come back as `isError: true` results; the session
 keeps running.
+
+`notifications/cancelled` stops a running call (work not yet started is skipped and the call
+gets no reply). Every APK is treated as untrusted: an entry that would inflate past 1 GiB or
+expand more than 100:1 is refused (`--max-entry-mb`, `--max-ratio`), and only that APK fails.
+
+#### Many APKs in one call
+
+`findrefs`, `listclass` and `open_apk` also take `apks` (paths) or `dir` (with `glob`,
+default `*.apk`, and `recursive`, default true) instead of one APK. Every DEX of every APK
+goes on one work queue (heaviest APK first), and the reply has one section per APK, every
+line prefixed with its `apk_id` (excerpt of a real reply; a section can also end with
+`apkN | more | …` paging hints, `apkN | sdk | Landroidx/ 23, …` folded counts and warnings):
+
+```
+# findrefs method addJavascriptInterface over 312 APKs: 20 with hits, 103 hits, 0 errors, 193 ms
+apk15 | 1 hits | /data/apks/com.android.carrierdefaultapp.apk
+apk15 | classes.dex | Lcom/android/carrierdefaultapp/SlicePurchaseActivity;->setupWebView | matched=(Landroid/webkit/WebView;->addJavascriptInterface)
+apk124 | 6 hits | /data/apks/com.android.vending.apk
+apk124 | classes3.dex | Lzlc;->c | matched=(Landroid/webkit/WebView;->addJavascriptInterface)
+apk124 | classes3.dex | Lzln;-><init> | matched=(Lzlm;->addJavascriptInterface)
+...
+# nothing in the other 292 APKs
+# APKs 0..4 of 20 shown (output budget 32768 bytes); call findrefs with cursor="1:4" for the rest
+```
+
+| argument | effect |
+|---|---|
+| `per_apk` (10) | rows shown per APK; the `more` line says how to page that APK |
+| `collapse_sdks` (true for many APKs) / `sdk_prefixes` | fold hits in common SDK packages (androidx, kotlin, gms, okhttp3, …; `--sdk-prefixes` replaces the list) into per-SDK counts |
+| `group: "package"`, `package_depth` (3) | one line per package with its hit count and an example, instead of rows |
+| `max_bytes` (32768) | output budget; whole APK sections that do not fit are left for `cursor` |
+| `cursor` | pass back alone to the same tool for the next page (the session keeps the last 16 reports) |
+| `release` | drop each APK's DEX from memory once searched (default: when the selected APKs' DEX would not fit the memory budget) |
+
+Exposure audit with [`bench/multi-apk/audit.py`](bench/multi-apk/audit.py): the 8 rules of the
+multi-APK benchmark over the 312 system APKs of a Pixel 6 (3.8 GB, 405 DEX, 1.28 GB of DEX),
+one `droidasc --no-cache mcp`:
+
+| | tool calls | reply text | wall | peak RSS |
+|---|---:|---:|---:|---:|
+| one call per APK per rule, a rule's 312 calls pipelined | 2,496 | 762 KiB | 416 ms | 1,667 MB |
+| one `dir` call per rule, first page only | **8** | **166 KiB** | 480 ms | 1,695 MB |
+| one `dir` call per rule, every cursor page | 14 | 297 KiB | 480 ms | 1,691 MB |
+| one `dir` call per rule, `release: true` | 8 | 166 KiB | 1,573 ms | 565 MB |
 
 ### Agent session benchmark
 

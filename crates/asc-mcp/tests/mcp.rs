@@ -19,7 +19,7 @@ fn temp_apk() -> tempfile::NamedTempFile {
 }
 
 fn opts() -> asc_mcp::Options {
-    asc_mcp::Options { threads: 2, debug: false, cache: CacheConfig { memory_bytes: 64 << 20, disk: None } }
+    asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, disk: None })
 }
 
 /// Run one session: `messages` in, one parsed reply per request out.
@@ -250,4 +250,163 @@ fn concurrent_calls_all_answer_and_close_waits_for_running_ones() {
     }
     assert_eq!(ok(&replies[39])["closed"], true);
     assert_eq!(replies[40]["result"]["isError"], true);
+}
+
+/// A directory of APKs: two with hits, one without, one bomb, one not a zip,
+/// one nested, plus a file the glob skips.
+fn apk_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let dex = make_dex();
+    let write = |name: &str, bytes: &[u8]| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    };
+    write("a.apk", &make_apk(&[("classes.dex", &dex), ("classes2.dex", &dex)], true));
+    write("b.apk", &make_apk(&[("classes.dex", &make_class_only_dex(&["Lother/Only;"], 0, false))], true));
+    write("bomb.apk", &make_apk(&[("classes.dex", &vec![0u8; 4 << 20])], true));
+    write("broken.apk", b"not a zip");
+    write("sub/c.apk", &make_apk(&[("classes.dex", &dex)], true));
+    write("notes.txt", b"skip me");
+    dir
+}
+
+#[test]
+fn findrefs_over_a_directory_reports_per_apk() {
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let replies = session(&[
+        call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "token"})),
+        call(2, "findrefs", json!({"dir": d, "kind": "string", "value": "token", "per_apk": 1, "max_bytes": 256})),
+        call(3, "findrefs", json!({"dir": d, "kind": "string", "value": "token", "group": "package", "collapse_sdks": false})),
+        call(4, "findrefs", json!({"dir": d, "kind": "string", "value": "token", "sdk_prefixes": ["example"]})),
+        call(5, "findrefs", json!({"dir": d, "recursive": false, "glob": "a*", "kind": "string", "value": "token"})),
+    ]);
+    let all = ok(&replies[0]);
+    assert_eq!((all["apks_total"].as_u64(), all["apks_with_hits"].as_u64(), all["total"].as_u64()), (Some(5), Some(2), Some(6)));
+    assert_eq!(all["errors"], 2, "{all}");
+    let body = text(&replies[0]);
+    assert!(body.starts_with("# findrefs string \"token\" over 5 APKs: 2 with hits, 6 hits, 2 errors"), "{body}");
+    // apk ids follow path order: a, b, bomb, (broken fails to open), sub/c.
+    let a = body.lines().find(|l| l.starts_with("apk1 | 4 hits | ")).expect(body);
+    assert!(a.ends_with("a.apk"), "{a}");
+    assert!(body.contains("apk1 | classes.dex | Lexample/Test;->first | matched=(token)\n"), "{body}");
+    assert!(body.contains("\napk3 | error | ") && body.contains("ratio limit 100"), "{body}");
+    assert!(body.contains("\n- | error | ") && body.contains("broken.apk"), "{body}");
+    assert!(body.contains("\napk4 | 2 hits | "), "{body}");
+    assert!(body.contains("# nothing in 1 APKs: apk2\n"), "{body}");
+    assert_eq!(all["cursor"], Value::Null);
+    assert!(!body.contains("notes.txt"));
+
+    // A tiny budget: one section per page and a cursor for the rest.
+    let first = ok(&replies[1]);
+    assert_eq!(first["shown"], json!([0, 1]));
+    assert!(text(&replies[1]).contains("apk1 | more | 3 more: findrefs apk_id=apk1 offset=1 collapse_sdks=true"));
+    // Cursors live in the session that made them.
+    let other = session(&[call(1, "findrefs", json!({"cursor": first["cursor"]}))]);
+    assert!(text(&other[0]).contains("expired"), "{}", other[0]);
+
+    let grouped = text(&replies[2]);
+    assert!(grouped.contains("apk1 | Lexample/ | 4 hits | e.g. Lexample/Test;->"), "{grouped}");
+
+    // Every hit is inside the folded package.
+    let folded = text(&replies[3]);
+    assert!(folded.contains("apk1 | 0 hits (+4 in SDKs) | ") && folded.contains("apk1 | sdk | Lexample/ 4"), "{folded}");
+
+    assert_eq!(ok(&replies[4])["apks_total"], 1);
+}
+
+#[test]
+fn cursors_page_through_a_report_in_one_session() {
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let mut msgs = vec![call(1, "findrefs", json!({"dir": d, "kind": "string", "value": "token", "max_bytes": 256}))];
+    for (i, c) in ["1:1", "1:2", "1:3", "1:4", "1:9"].iter().enumerate() {
+        msgs.push(call(2 + i as u64, "findrefs", json!({"cursor": c})));
+    }
+    msgs.push(call(7, "listclass", json!({"cursor": "1:1"})));
+    msgs.push(call(8, "findrefs", json!({"cursor": "nope"})));
+    // In order: a client pages only after the first reply arrives.
+    let server = asc_mcp::Server::new(opts());
+    let replies: Vec<Value> = msgs.iter().map(|m| server.handle_line(&m.to_string()).unwrap()).collect();
+    let shown: Vec<Value> = replies[..6].iter().map(|r| ok(r)["shown"].clone()).collect();
+    // a, bomb (error), broken (error), sub/c; b has no hits.
+    assert_eq!(shown, [json!([0, 1]), json!([1, 2]), json!([2, 3]), json!([3, 4]), json!([4, 4]), json!([4, 4])]);
+    assert_eq!(ok(&replies[2])["cursor"], "1:3");
+    assert_eq!(ok(&replies[3])["cursor"], Value::Null);
+    assert!(text(&replies[6]).contains("belongs to findrefs"));
+    assert!(text(&replies[7]).contains("bad cursor"));
+}
+
+#[test]
+fn listclass_and_open_apk_over_many_apks() {
+    let dir = apk_dir();
+    let d = dir.path().to_str().unwrap();
+    let b = dir.path().join("b.apk");
+    // In order: apk_ids of a sweep are assigned as it runs, so a client that
+    // reuses them waits for the reply first.
+    let server = asc_mcp::Server::new(opts());
+    let replies: Vec<Value> = [
+        call(1, "open_apk", json!({"dir": d})),
+        call(2, "listclass", json!({"dir": d, "prefix": "other"})),
+        call(3, "listclass", json!({"apks": [b.to_str().unwrap()]})),
+        call(4, "open_apk", json!({"apks": [], "dir": d})),
+    ]
+    .iter()
+    .map(|m| server.handle_line(&m.to_string()).unwrap())
+    .collect();
+    let open = ok(&replies[0]);
+    assert_eq!((open["opened"].as_u64(), open["errors"].as_u64()), (Some(4), Some(1)));
+    let body = text(&replies[0]);
+    assert!(body.lines().any(|l| l.starts_with("apk1 | 2 dex | ") && l.ends_with("a.apk")), "{body}");
+    let classes = ok(&replies[1]);
+    assert_eq!(classes["apks_with_hits"], 1);
+    assert!(text(&replies[1]).contains("apk2 | 1 classes | ") && text(&replies[1]).contains("apk2 | Lother/Only;\n"));
+    // The bomb cannot be listed either.
+    assert_eq!(classes["errors"], 2);
+    // Same path, same session as the directory sweep.
+    assert_eq!(ok(&replies[2])["apks"][0]["apk_id"], "apk2");
+    assert!(text(&replies[3]).contains("not both"));
+}
+
+#[test]
+fn cancelled_calls_stop_and_get_no_reply() {
+    let apk = temp_apk();
+    let path = apk.path().to_str().unwrap();
+    let server = asc_mcp::Server::new(opts());
+    let line = call(1, "findrefs", json!({"apk": path, "kind": "string", "value": "token"})).to_string();
+    let cancel = asc_mcp::Call { cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)) };
+    let reply = server.handle_call(&line, &cancel).unwrap();
+    assert_eq!(reply["result"]["content"][0]["text"], "Error: cancelled");
+    let many = call(2, "findrefs", json!({"apks": [path], "kind": "string", "value": "token"})).to_string();
+    assert_eq!(server.handle_call(&many, &cancel).unwrap()["result"]["content"][0]["text"], "Error: cancelled");
+
+    // Through serve: a cancel for a finished or unknown request changes nothing.
+    let replies = session(&[
+        call(1, "findrefs", json!({"apk": path, "kind": "string", "value": "token"})),
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 99, "reason": "x"}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+    ]);
+    assert_eq!(replies.len(), 2);
+    assert_eq!(ok(&replies[0])["total"], 4);
+}
+
+#[test]
+fn single_apk_findrefs_can_fold_sdks_and_bombs_fail_cleanly() {
+    let dir = apk_dir();
+    let a = dir.path().join("a.apk");
+    let bomb = dir.path().join("bomb.apk");
+    let replies = session(&[
+        call(
+            1,
+            "findrefs",
+            json!({"apk": a.to_str().unwrap(), "kind": "string", "value": "token", "collapse_sdks": true, "sdk_prefixes": ["example"]}),
+        ),
+        call(2, "getclass", json!({"apk": bomb.to_str().unwrap(), "class": "a.B"})),
+    ]);
+    let r = ok(&replies[0]);
+    assert_eq!((r["total"].as_u64(), r["sdk_hits"].as_u64()), (Some(0), Some(4)));
+    assert!(text(&replies[0]).contains("# 4 more in SDK packages (collapse_sdks=false shows them): Lexample/ 4"));
+    assert_eq!(replies[1]["result"]["isError"], true);
+    assert!(text(&replies[1]).contains("inflate limit"), "{}", text(&replies[1]));
 }
