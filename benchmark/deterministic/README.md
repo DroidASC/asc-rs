@@ -1,4 +1,4 @@
-# 确定性评测（第二轮）
+# 确定性评测
 
 > 结果文件（`results/`、`*.tsv`、`s2/ref-k80.json`）不入库，保存在本地 `target/benchmark-data/benchmark/` 和 ams `~/asc-eval/results/benchmark-data/benchmark/`，见 [benchmark/README.md](../README.md)。
 
@@ -31,16 +31,16 @@
 | `aggregate.py` | 结果目录 → 每个配置的中位数表 | `aggregate.py RESULTS_DIR` |
 | `guard.sh` | 任意 droidasc 进程超过内存上限就终止整棵进程树（写盘队列 bug 曾让单进程涨到 40 GB 以上） | `guard.sh LIMIT_MB CMD…` |
 | `rsswrap.py` | 记录一个命令整棵进程树的峰值 RSS | `rsswrap.py OUT.txt CMD…` |
-| `s1_all.sh`、`s2_all.sh`、`s2_rules.sh`、`s2_rest.sh` | 第二轮的完整矩阵（S1；S2 每条规则一次；S2 规则集；rust_ASC 与 dexsql） | 在 ams 布局下 `zsh s2_rules.sh` |
+| `s1_all.sh`、`s2_all.sh`、`s2_rules.sh`、`s2_rest.sh` | ams 上的完整矩阵（S1；S2 每条规则一次；S2 规则集；rust_ASC 与 dexsql） | 在 ams 布局下 `zsh s2_rules.sh` |
 | `bm.sh` | big-machine 验证：自动线程 N=1/4/8/16 冷热、N=16 固定线程、磁盘上限、S1 回归，新旧版交替 | 需要 `src-r2/`、`src-bm/` 两个编译好的版本 |
 | `prefix_skip.py` | prefix-skip：一次性冷查询的墙钟中位数和峰值 RSS | `prefix_skip.py APK N BIN… -- QUERY ; QUERY …` |
 | `cache/consistency.py` | 缓存一致性：40 个随机 APK × 9 条查询，冷缓存、热缓存与 `--no-cache` 逐块比较 | `consistency.py DROIDASC CORPUS_DIR CACHE_DIR` |
 | `cache/nofsync_bench.py` | no-fsync 计时：冷、热、模拟重启后 | `nofsync_bench.py BASE NEW DOUYIN CORPUS_DIR CACHE_ROOT TRIALS` |
 | `cache/nofsync_check.sh` | no-fsync 正确性：新鲜、重启前写入、L1 文件被损坏三种情况下，结果都与 `--no-cache` 相同 | `nofsync_check.sh BASE NEW APK CACHE_DIR` |
-| `rust-asc/cmp.py` | 第一轮 rust_ASC 对比：findrefs 行的语义比较（rust_ASC CLI 文本 vs droidasc MCP JSON） | `cmp.py RUST_ASC DROIDASC APK [kind…]` |
-| `rust-asc/s2diff.py` | 第一轮 rust_ASC 对比：8 条规则在一个语料目录上的 APK 级差异（发现上游字符串索引 bug 的脚本） | `s2diff.py RUST_ASC DROIDASC CORPUS_DIR` |
+| `rust-asc/cmp.py` | rust_ASC 对比：findrefs 行的语义比较（rust_ASC CLI 文本 vs droidasc MCP JSON） | `cmp.py RUST_ASC DROIDASC APK [kind…]` |
+| `rust-asc/s2diff.py` | rust_ASC 对比：8 条规则在一个语料目录上的 APK 级差异（发现上游字符串索引 bug 的脚本） | `s2diff.py RUST_ASC DROIDASC CORPUS_DIR` |
 
-`rust-asc/` 下的两个脚本写于第一轮。之后 droidasc 的文本格式和 MCP 默认值都变了（compact structuredContent、16 KiB 预算），所以 `cmp.py` 现在显式请求 `--structured full`、`max_bytes` 和 `spill: never`。改动之后**没有**再对 rust_ASC 跑过。
+`rust-asc/` 下的两个脚本写于输出格式改动之前。之后 droidasc 的文本格式和 MCP 默认值都变了（compact structuredContent、16 KiB 预算），所以 `cmp.py` 现在显式请求 `--structured full`、`max_bytes` 和 `spill: never`。改动之后**没有**再对 rust_ASC 跑过。
 
 ## 结果（`results/`）
 

@@ -1,6 +1,6 @@
 # asc-rs 改进计划
 
-更新：2026-10-22。基线：main `3a1e5cd`；A–D 四条线的第一轮已合到 `integrate/plan`（见第 6 节）。
+更新：2026-10-23。最初的基线是 main `3a1e5cd`；A–D 四条线及之后的工作都已合入 main（见第 6 节）。
 
 ## 0. 目标场景
 
@@ -153,7 +153,7 @@
 
 > 全部评测结论、版本与复现方法统一记录在 [benchmark/README.md](benchmark/README.md)；本文只保留简短结论。
 
-所有评测都是**脚本回放**（固定的步骤或规则），不跑真实 agent。"调用次数"和"上下文体积"是脚本里两种调用方式之间的对比，不是 agent 实测。
+下表是计划时定的验收方式，以**脚本回放**（固定的步骤或规则）为主；后来又补了真实 agent（grok）评测，结果同样在 benchmark/README.md。
 
 | 场景 | 方法 | 指标 |
 |---|---|---|
@@ -170,34 +170,29 @@
 3. 已定：S2 真实数据集先用测试机（Pixel 6）上安装的全部系统 APK（`adb shell pm list packages -f -s`，约 320 个、3.8 GB），拉到 `target/device-apks/`（不入库）。C、D 线的 S2 评测以它为准，100 个 APK 的合成集只作对照。
 4. 暂定：资源对比以 aapt2 为准；aapt2 拒绝或丢弃而我们能恢复的条目（apktool 式），单独标记为“恢复”，不算差异。
 
-## 6. 第一轮结果（`integrate/plan`）
+## 6. 完成情况
 
-| 线 | 完成 | 未做 |
-|---|---|---|
-| A | `asc-arsc`（全部条目编码、复合条目、Library/Overlayable/StagedAlias）；res/xml；`@0x7f…` 解析；manifest 摘要（含隐式导出）；CLI `resources`/`manifest-summary`/`xml`；MCP `resources`/`manifest_summary`（单个或多个 APK）；getclass 资源名注释 | — |
-| B | findrefs 上下文（`--context N`/`--context-method`，MCP `context`）；调用图 `callgraph`（CLI + MCP） | 组合条件、继承递归、多规则一次扫描 |
-| C | MCP 多 APK（`apks`/`dir`）、按 APK 分节、SDK 折叠、按包合并、字节预算 + cursor、续页提示是完整参数、取消、防解压炸弹 | 跨 APK 去重 |
-| D | L1/L2/L3 分层，共用预算；小 DEX 不写 L1；不压缩的 DEX 直接映射 APK；索引表与调用图进 L2；findrefs 结果进 L3；按进程登记分配内存预算 | 后台预建索引；多 APK 路径用 L3；调用图原地映射；共享映射页的预算计费 |
+四条工作线（A 资源与 manifest、B 调用图与查询表达、C MCP 多 APK、D 缓存分层与多进程内存）的计划项都已合入 main，包括后来补上的组合条件、继承递归、多规则一次扫描、跨 APK 去重、后台预建、调用图原地映射和映射页计费。此后合入的工作：
 
-**结论**（数字见 [benchmark/README.md](benchmark/README.md#第一轮本地-linux2026-10-22)）：资源与 aapt2 只差 4 处（带样式字符串）；S1 Douyin 47 步 MCP 整轮约 0.2 s，是 dexsql 的约 1/5；S2 312 个系统 APK 单 MCP 进程空缓存约 0.4 s；与 Python 上游语义对比差异为 0，开关缓存输出一致；上游（Python ASC、rust_ASC）在 string_data 乱序的 DEX 上有字符串索引 bug。
+- 输出：asc-rs 自己的文本格式（完整签名、字符串转义、固定 `|` 列）；MCP 输出预算与超长写文件、getclass 大纲；CLI `--limit` / `--max-bytes` / `--offset`（超出时写文件并给出续读提示），findrefs 按 DEX 自然序输出，子命令 help 不再重复全局选项，`skills/droidasc/SKILL.md`。
+- 接口：CLI、MCP、rules 共用一套成员写法；参数宽松化；可操作的报错与零结果提示；CLI 透明 daemon（无会话状态，有无 daemon 输出逐字节相同）。
+- 性能与资源：prefix-skip；写盘队列有界，超限时延后重新解压而不是丢弃；写盘线程与预建降优先级；aarch64 硬件 SHA-256；缓存写入去掉 fsync、文件带 CRC、跨重启才校验；线程按忙碌进程分摊、磁盘自动上限 32 GiB、macOS 进程注册表。
+- 删除 GUI（asc-gui 与 egui 依赖）。
+- 上游字符串下标问题已报：MG1937/ASC#54、MG1937/rust_ASC#8。
 
-**还没处理的问题**：CLI 文本输出里，命中的字符串如果本身带换行，一条记录会跨多行。已定：改成转义并统一文本格式，见第 5 节第 2 条。
+## 7. 评测结论
 
-## 7. 第二轮结果（`integrate/round2`，ams：M3 Ultra 32 核 / 96 GB，macOS）
+全部数字、版本、语料与局限见 [benchmark/README.md](benchmark/README.md)。最关键的几条：
 
-**合入的工作**：文本格式（完整签名、字符串转义、固定列）；输出预算 + 超长写文件（spill）、getclass 大纲；prefix-skip（一次性冷查询跳过不可能命中的 DEX）；写盘队列限长与持续淘汰；aarch64 硬件 SHA-256；缓存写入去掉 fsync、文件带 CRC、跨重启才校验；统一查询语法、参数宽松化、可操作报错与零结果提示；CLI 透明 daemon（无会话状态，有无 daemon 输出逐字节相同）。测试：Linux 384、macOS 382 全过。
-
-**结论**（数字、版本、局限见 [benchmark/README.md](benchmark/README.md)）：
-- 确定性：S1 CLI 冷查询比 r1 快约 22%（prefix-skip），MCP 热缓存约 60 ms；S2 836 个 APK 规则集模式单 MCP 进程热缓存约 0.5 s、4–8 个进程约 0.23 s，dexsql 约 2.4 s；修复写盘队列不限长（旧 bug，冷扫可涨到 40 GB 以上）、aarch64 软件 SHA-256、macOS 的 F_FULLFSYNC。
-- big-machine：macOS 进程注册表从不生效变为生效；冷跑持平，S1 无退化。
-- agent（grok-4.7，单一模型）：S1 新版 + 写文件组每目标 207k token、$0.071，是 r1 的约 1/3、dexsql 的约 1/4，证据持平（已饱和）；S2 416 个 APK 两边答案都完全正确，droidasc 每目标 104k token，dexsql 4.8M。
-- 失败调用回放：92 次失败调用中，改后 49 次成功、其余 43 次都给出可操作提示（改前 46 / 31 / 15 次无提示）。
+- 正确性：与 Python 上游语义一致、与 dexdump 一致；资源与 aapt2 在 1094 万个取值上只差 4 处；开关缓存、开关 daemon 输出一致。
+- 单 APK（Douyin 47 步）：MCP 热缓存约 60 ms；CLI 冷查询比 r1 快约 22%（prefix-skip）。
+- 多 APK（836 个 APK × 8 条规则）：规则集模式单 MCP 进程热缓存约 0.5 s、4–8 个进程约 0.23 s；dexsql 约 2.4 s，rust_ASC 约 10.7 s。
+- agent（grok-4.7，单一模型）：超长写文件的组每目标 207k token，约为 dexsql 的 1/4、r1 的 1/3，证据持平；416 个 APK 的 S2 两边都全对，droidasc 每目标 104k token，dexsql 4.8M。
 
 **方向（2026-10-23）**：CLI 是一等的 agent 接口，MCP 保留为另一种接入；参考 pi 的工具设计（统一截断、可操作的续页与报错、参数修复），预算交给客户端决定，不按单一模型调参。不再做新的 agent 评测。
 
-**之后合入（2026-10-23）**：写盘队列满时延后重新解压而不是丢弃（ams 836 个 APK 冷扫后 L1 从 86 个文件增至 866 个，冷扫后单 APK 查询约快 2 倍；冷扫回答 +6%，退出前写盘 +1.4 s）；写盘线程与预建降优先级（Linux nice 19、Apple utility QoS）；删除 GUI（asc-gui 与 egui 依赖）；CLI `--limit` / `--max-bytes` / `--offset`（超出时写文件并给出续读提示）、findrefs 按 DEX 自然序输出、子命令 help 不再重复全局选项、`skills/droidasc/SKILL.md`。上游字符串下标问题已报：MG1937/ASC#54、MG1937/rust_ASC#8。
+## 8. 待做
 
-**待做**：
 - 注册表最多每秒读一次，约 1 s 的突发多进程扫描看不到彼此，自动线程不收缩（N=16 时每进程 4 线程比满线程快约 16%）。
 - macOS 下 N=16 MCP 进程合计约 21 GB 来自解压中的数据和映射页，不是内存缓存，需另查。
 - 多 APK 扫描接 prefix-skip；多 APK 查询的零结果提示。

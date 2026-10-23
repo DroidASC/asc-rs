@@ -26,7 +26,7 @@
 - 目标来自 dexsql-release `benchmarks/agent-audit/harness/rasc_replay.py` 的 `SCENARIOS`，去掉 class_inventory。通过 `HARNESS` 环境变量指向 harness 目录，运行时导入。
 - prompt = APK 路径 + 目标的 `intent` + 一句起点提示（取自该目标第一步查询的对象，例如 `the string "…"`、`the method … (class …)`）+ 「用现有工具完成目标，简要回答并引用代码证据」。见 `s1/run.py` 的 `prompt()`。
 - 证据：目标的 `expect` 字符串出现在工具输出或回答里就算命中。
-- 第二轮的四组：
+- 四组（数据集 `r2s1`）：
 
 | 组 | 工作区 | MCP 配置 | 读文件 |
 |---|---|---|---|
@@ -70,9 +70,9 @@ python3 extract.py s2 RUNS_DIR ROUND s2/ref-k80.json > round2-s2.csv
 
 | 文件 | 内容 |
 |---|---|
-| `round1-s1.csv` | 第一轮，本地 Linux，Douyin 40.7.0；组 `droidasc`（`8b7a09e`）、`dexsql`，各 34 次 |
-| `round2-s1.csv` | 第二轮，ams，Douyin 40.8.0；4 组 × 第 1、2 次各 17 个目标，另有第 3 次的 18 次（汇总时不计入） |
-| `round2-s2.csv` | 第二轮 S2，2 组 × 4 个目标 × 1 次 |
+| `round1-s1.csv` | 本地 Linux，Douyin 40.7.0；组 `droidasc`（`8b7a09e`）、`dexsql`，各 34 次 |
+| `round2-s1.csv` | ams，Douyin 40.8.0；4 组 × 第 1、2 次各 17 个目标，另有第 3 次的 18 次（汇总时不计入） |
+| `round2-s2.csv` | ams，S2，2 组 × 4 个目标 × 1 次 |
 
 列说明：
 - `calls`：全部工具调用数。
@@ -87,8 +87,8 @@ python3 extract.py s2 RUNS_DIR ROUND s2/ref-k80.json > round2-s2.csv
 - `tool_calls`：按工具名统计的调用次数（JSON）。
 
 **原始记录不提交**：其中有 Douyin 的反编译代码片段，总共约 80 MB。存放位置：
-- 第一轮：本地 `target/grok-eval/runs/round1/`。
-- 第二轮 S1：ams `~/asc-eval/results/agent-raw/s1-runs/r2s1/`（评测结束后从 `/private/tmp/asc-grok/runs/` 移来，macOS 重启会清空 /private/tmp），本地也有一份 `target/grok-eval/runs/r2s1/`，只有第 1、2 次。
-- 第二轮 S2：ams `~/asc-eval/results/agent-raw/s2-runs/r2s2/`（同样移自 `/private/tmp/asc-grok/s2/runs/`）。
+- `round1`（本地 Linux，Douyin 40.7.0）：本地 `target/grok-eval/runs/round1/`。
+- `r2s1`（S1，ams）：ams `~/asc-eval/results/agent-raw/s1-runs/r2s1/`（评测结束后从 `/private/tmp/asc-grok/runs/` 移来，macOS 重启会清空 /private/tmp），本地也有一份 `target/grok-eval/runs/r2s1/`，只有第 1、2 次。
+- `r2s2`（S2，ams）：ams `~/asc-eval/results/agent-raw/s2-runs/r2s2/`（同样移自 `/private/tmp/asc-grok/s2/runs/`）。
 
 `/private/tmp` 下的内容可能被系统清理。
