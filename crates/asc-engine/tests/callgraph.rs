@@ -175,9 +175,7 @@ fn findrefs_context_marks_the_referencing_instructions() {
     let run = |q: &Query, context| {
         let mut rows = Vec::new();
         engine
-            .find_refs_opts(q, FindOptions { aggregate: true, context, ..Default::default() }, &AtomicBool::new(false), &mut |b| {
-                rows.extend(b.results)
-            })
+            .find_refs_opts(q, FindOptions { aggregate: true, context }, &AtomicBool::new(false), &mut |b| rows.extend(b.results))
             .unwrap();
         rows.sort_by_key(|r| r.line());
         rows
@@ -245,7 +243,7 @@ fn programs_of_several_archives_read_as_one() {
                 ]
             );
             let mut rows = Vec::new();
-            let opts = FindOptions { aggregate: true, context: RefContext::Lines(0), ..Default::default() };
+            let opts = FindOptions { aggregate: true, context: RefContext::Lines(0) };
             engine.find_refs_opts(&Query::String("secret".into()), opts, &AtomicBool::new(false), &mut |b| rows.extend(b.results)).unwrap();
             assert_eq!(rows.len(), 1);
             assert!(rows[0].text().starts_with("app.jar/classes.dex | La/Entry;->start()V | \"secret\"\n"), "{}", rows[0].text());

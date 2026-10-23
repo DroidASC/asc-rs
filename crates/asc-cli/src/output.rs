@@ -282,9 +282,10 @@ impl<W: Write> LineSink<W> {
         self.write(line, show);
     }
 
-    /// Write a newline-terminated compact block directly when no window,
-    /// spill copy, or `-o` file requires record-by-record bookkeeping.
-    pub(crate) fn rendered_block(&mut self, text: &str, records: usize) -> bool {
+    /// `records` records at once, as `text` (each followed by `\n`), when
+    /// nothing asks for them one by one (a window, a spill copy or `-o`);
+    /// `false` when the caller has to give them to [`LineSink::line`].
+    pub(crate) fn block(&mut self, text: &str, records: usize) -> bool {
         if !self.window.is_everything() || self.file.is_some() || self.full.is_some() {
             return false;
         }

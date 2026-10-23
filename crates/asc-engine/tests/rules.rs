@@ -228,6 +228,58 @@ fn a_rule_set_shares_rendered_results_with_single_queries() {
     assert_eq!(replayed.len(), 2, "{replayed:?}");
 }
 
+#[test]
+fn text_rows_are_the_lines_find_refs_gives() {
+    let apk = temp_apk();
+    let cache = tempfile::tempdir().unwrap();
+    let cached = || {
+        let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+    };
+    // Rows straight from hits, and the ones that go through `RefResult`s:
+    // several constants, a nested rule, a class relation, a compound, a definition
+    // predicate and a call-site note.
+    let queries = [
+        "string:tok",
+        "method:run",
+        "method:{flag:public}",
+        "extends:La/Base;",
+        "string:tok & method:La/Base;->run",
+        "flag:static",
+        "method:La/Base;->run[ret=unused]",
+    ];
+    let text = |engine: &Engine, q: &Query| {
+        let (mut rows, mut sources, mut count) = (Vec::new(), Vec::new(), 0);
+        let summary = engine
+            .find_refs_text(q, &AtomicBool::new(false), &mut |b| {
+                assert!(b.results.is_empty());
+                count += b.row_count();
+                sources.push(b.source);
+                rows.extend(b.text.iter().flat_map(|t| t.lines().map(String::from)));
+            })
+            .unwrap();
+        assert_eq!((summary.total_results, count), (rows.len(), rows.len()));
+        rows.sort();
+        (rows, sources)
+    };
+    for spec in queries {
+        let q = names::parse_rule(spec).unwrap();
+        let want = lines(&Engine::new(apk.path()).with_threads(2), &q);
+        assert!(!want.is_empty(), "{spec}");
+        for engine in engines(apk.path()) {
+            assert_eq!(text(&engine, &q).0, want, "{spec}");
+        }
+        // Kept in L3 and replayed from it, apart from the rows.
+        let e = cached();
+        assert_eq!(text(&e, &q).0, want, "{spec}");
+        e.flush_cache_writes();
+        let (rows, sources) = text(&cached(), &q);
+        assert_eq!(rows, want, "{spec}");
+        assert!(sources.iter().all(|s| *s == "result"), "{spec}: {sources:?}");
+        assert!(cached().find_refs(&q, |b| assert_ne!(b.source, "result")).is_ok(), "{spec}");
+    }
+}
+
 fn hq(class: &str, direction: Lineage, method: Option<&str>) -> HierarchyQuery {
     HierarchyQuery { class: class.into(), direction, depth: 16, max_nodes: 100, method: method.map(String::from) }
 }

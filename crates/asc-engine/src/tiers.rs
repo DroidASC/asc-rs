@@ -23,7 +23,8 @@
 //! fixed `name` such as `apk`.
 
 use crate::{
-    available_memory, CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, MemoryPolicy, RefBatch, RefResult, RefSite, SharedMemory,
+    available_memory, CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, MemoryPolicy, RefBatch, RefResult, RefSite, Shape,
+    SharedMemory, TextRows,
 };
 use asc_cache::{ApkKey, DiskCache, ProcessRegistry};
 use asc_dex::Dex;
@@ -36,9 +37,10 @@ use std::time::{Duration, Instant};
 pub(crate) const LOCATORS_KIND: &str = "locators";
 /// `find_refs` results larger than this (encoded) are not kept in L3.
 pub(crate) const L3_MAX_RESULT: usize = 4 << 20;
-/// Text-only result blocks contain no repeated public-row metadata. Permit a
-/// broad query to use the normal rendered cache without allowing unbounded L3.
-const L3_MAX_COMPACT_RESULT: usize = 128 << 20;
+/// Text rows ([`Shape::Text`]) larger than this are not kept in L3, nor
+/// beyond an eighth of the disk cache: a few broad queries must not evict the
+/// inflated DEX files every query needs.
+const L3_MAX_TEXT: usize = 32 << 20;
 /// Layout version of the encoded `find_refs` results.
 const RESULT_FORMAT: u32 = 5;
 /// Ends the encoded batches (where an entry name's length would be), so a
@@ -180,32 +182,53 @@ fn tool_version() -> &'static str {
 }
 
 /// The L3 key of a `find_refs` query.
-pub(crate) fn findrefs_key(query: &Query, opts: FindOptions) -> String {
-    asc_cache::rendered_key("findrefs", tool_version(), &format!("{query:?}\0{opts:?}"))
+pub(crate) fn findrefs_key(query: &Query, opts: FindOptions, shape: Shape) -> String {
+    let query = match shape {
+        Shape::Results => format!("{query:?}\0{opts:?}"),
+        Shape::Text => format!("{query:?}\0{opts:?}\0text"),
+    };
+    asc_cache::rendered_key("findrefs", tool_version(), &query)
+}
+
+/// The most bytes a `find_refs` result of `shape` may take in `disk`'s L3.
+pub(crate) fn result_limit(disk: &DiskCache, shape: Shape) -> usize {
+    match shape {
+        Shape::Results => L3_MAX_RESULT,
+        Shape::Text => usize::try_from(disk.capacity_for(0) / 8).unwrap_or(usize::MAX).min(L3_MAX_TEXT),
+    }
 }
 
 /// Encodes the batches of a `find_refs` run for L3 as they stream past.
 /// Runs with an error (an entry that could not be searched may succeed next
-/// time) or results beyond [`L3_MAX_RESULT`] are not kept.
+/// time) or results beyond the recorder's limit ([`result_limit`]) are not
+/// kept.
 pub(crate) struct ResultRecorder {
     out: Vec<u8>,
     keep: bool,
+    limit: usize,
 }
 
 impl ResultRecorder {
-    pub(crate) fn new() -> ResultRecorder {
+    pub(crate) fn new(limit: usize) -> ResultRecorder {
         let mut out = Vec::new();
         out.extend_from_slice(&RESULT_FORMAT.to_le_bytes());
-        ResultRecorder { out, keep: true }
+        ResultRecorder { out, keep: true, limit }
+    }
+
+    /// Stop recording: the run will not be kept.
+    fn abandon(&mut self) {
+        self.keep = false;
+        self.out = Vec::new();
     }
 
     pub(crate) fn record(&mut self, b: &RefBatch) {
         if !self.keep {
             return;
         }
-        if b.error.is_some() {
-            self.keep = false;
-            self.out = Vec::new();
+        // Text rows are the bulk of a broad run: check them before copying.
+        let text_bytes = b.text.as_ref().map_or(0, |t| t.as_str().len() + 4 * t.len());
+        if b.error.is_some() || self.out.len().saturating_add(text_bytes) > self.limit {
+            self.abandon();
             return;
         }
         put_str(&mut self.out, &b.entry_name);
@@ -214,16 +237,11 @@ impl ResultRecorder {
             put_str(&mut self.out, &r.dex_name);
             put_u32(&mut self.out, r.method_idx);
             put_str(&mut self.out, &r.method);
-            put_str(&mut self.out, r.rendered_text());
-            self.out.push(u8::from(r.rendered));
-            put_u32(&mut self.out, r.rendered_ends.len() as u32);
-            for &end in &r.rendered_ends {
-                put_u32(&mut self.out, end);
-            }
+            put_str(&mut self.out, &r.signature);
             put_u32(&mut self.out, r.matched.len() as u32);
             for m in &r.matched {
                 self.out.push(match m {
-                    Matched::String(_) | Matched::TextString { .. } => 0,
+                    Matched::String(_) => 0,
                     Matched::Symbol(_) => 1,
                 });
                 put_str(&mut self.out, m.as_str());
@@ -248,11 +266,22 @@ impl ResultRecorder {
                 }
             }
         }
-        let compact = b.results.iter().any(|r| r.rendered && !r.rendered_ends.is_empty());
-        let limit = if compact { L3_MAX_COMPACT_RESULT } else { L3_MAX_RESULT };
-        if self.out.len() > limit {
-            self.keep = false;
-            self.out = Vec::new();
+        match &b.text {
+            None => self.out.push(0),
+            Some(t) => {
+                let Ok(ends) = t.ends().iter().map(|&e| u32::try_from(e)).collect::<Result<Vec<_>, _>>() else {
+                    return self.abandon();
+                };
+                self.out.push(1);
+                put_str(&mut self.out, t.as_str());
+                put_u32(&mut self.out, ends.len() as u32);
+                for e in ends {
+                    put_u32(&mut self.out, e);
+                }
+            }
+        }
+        if self.out.len() > self.limit {
+            self.abandon();
         }
     }
 
@@ -293,19 +322,10 @@ pub(crate) struct Recorded {
 }
 
 /// The run recorded by [`ResultRecorder`]; `None` for anything malformed.
-#[cfg(test)]
-fn decode_batches(bytes: &[u8]) -> Option<Recorded> {
-    decode_batches_backing(Arc::new(bytes.to_vec()))
-}
-
-/// [`decode_batches`] over a mapped L3 file: rows share it instead of
-/// copying the rendered text.
-pub(crate) fn decode_batches_view(bytes: asc_cache::Rendered) -> Option<Recorded> {
-    decode_batches_backing(Arc::new(bytes))
-}
-
-fn decode_batches_backing(backing: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Option<Recorded> {
-    let bytes = backing.as_ref().as_ref();
+/// Text rows stay views of `payload` (typically a mapped L3 file).
+pub(crate) fn decode_batches(payload: impl AsRef<[u8]> + Send + Sync + 'static) -> Option<Recorded> {
+    let payload: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(payload);
+    let bytes = (*payload).as_ref();
     let mut r = Cursor { bytes, at: 0 };
     if r.u32()? != RESULT_FORMAT {
         return None;
@@ -319,38 +339,16 @@ fn decode_batches_backing(backing: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Option
         }
         let entry_name = String::from_utf8(r.take(len as usize)?.to_vec()).ok()?;
         let n = r.u32()? as usize;
-        let mut results = Vec::with_capacity(n.min(backing.as_ref().as_ref().len()));
+        let mut results = Vec::with_capacity(n.min(bytes.len()));
         for _ in 0..n {
-            let dex_name = r.str()?.into();
+            let dex_name = r.str()?;
             let method_idx = r.u32()?;
             let method = r.str()?;
-            let signature_start = r.str_range()?;
-            let rendered = match r.u8()? {
-                0 => false,
-                1 => true,
-                _ => return None,
-            };
-            let rendered_ends = (0..r.u32()?).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
-            let signature_len = signature_start.end - signature_start.start;
-            let signature = &backing.as_ref().as_ref()[signature_start.clone()];
-            let valid_ends = rendered_ends.windows(2).all(|w| w[0] < w[1])
-                && rendered_ends.iter().all(|&end| signature.get(end as usize) == Some(&b'\n'))
-                && rendered_ends.last().is_none_or(|&end| end as usize + 1 == signature_len);
-            if !valid_ends {
-                return None;
-            }
-            let (signature, rendered_backing) = if rendered {
-                (
-                    String::new(),
-                    Some(crate::RenderedBacking { bytes: Arc::clone(&backing), start: signature_start.start, end: signature_start.end }),
-                )
-            } else {
-                (std::str::from_utf8(&backing.as_ref().as_ref()[signature_start.clone()]).ok()?.to_owned(), None)
-            };
+            let signature = r.str()?;
             let m = r.u32()? as usize;
             let matched = (0..m)
                 .map(|_| match r.u8()? {
-                    0 => Some(Matched::String(r.str()?.into())),
+                    0 => Some(Matched::String(r.str()?)),
                     1 => Some(Matched::Symbol(r.str()?)),
                     _ => None,
                 })
@@ -369,21 +367,20 @@ fn decode_batches_backing(backing: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Option
                 1 => Some(r.str()?),
                 _ => return None,
             };
-            results.push(RefResult {
-                dex_name,
-                method_idx,
-                method,
-                signature,
-                matched: matched.into(),
-                relation,
-                sites,
-                context,
-                rendered,
-                rendered_ends,
-                rendered_backing,
-            });
+            results.push(RefResult { dex_name, method_idx, method, signature, matched, relation, sites, context });
         }
-        out.push(RefBatch { entry_name, results, inflate_us: 0, search_us: 0, source: "result", error: None });
+        let text = match r.u8()? {
+            0 => None,
+            1 => {
+                let len = r.u32()? as usize;
+                let start = r.at;
+                r.take(len)?;
+                let ends = (0..r.u32()?).map(|_| r.u32().map(|e| e as usize)).collect::<Option<Vec<_>>>()?;
+                Some(TextRows::shared(Arc::clone(&payload), start..start + len, ends)?)
+            }
+            _ => return None,
+        };
+        out.push(RefBatch { entry_name, results, text, inflate_us: 0, search_us: 0, source: "result", error: None });
     }
 }
 
@@ -397,14 +394,6 @@ impl Cursor<'_> {
         let s = self.bytes.get(self.at..self.at.checked_add(n)?)?;
         self.at += n;
         Some(s)
-    }
-
-    fn str_range(&mut self) -> Option<std::ops::Range<usize>> {
-        let len = self.u32()? as usize;
-        let start = self.at;
-        let bytes = self.take(len)?;
-        std::str::from_utf8(bytes).ok()?;
-        Some(start..start + len)
     }
 
     fn u8(&mut self) -> Option<u8> {
@@ -634,41 +623,78 @@ mod tests {
             method_idx: 7,
             method: "La;->b".into(),
             signature: "La;->b()V".into(),
-            matched: vec![Matched::String("x\ny".into()), Matched::Symbol("La;->c:I".into())].into(),
+            matched: vec![Matched::String("x\ny".into()), Matched::Symbol("La;->c:I".into())],
             relation: rel,
             sites: vec![RefSite { offset: 9, matched: 1, pc: Some(3), line: None }],
             context: rel.map(|_| "    const-string v0, \"x\"".to_string()),
-            rendered: false,
-            rendered_ends: Vec::new(),
-            rendered_backing: None,
         };
         let batch = |name: &str, results, error: Option<String>| RefBatch {
             entry_name: name.into(),
             results,
+            text: None,
             inflate_us: 5,
             search_us: 6,
             source: "inflate",
             error,
         };
-        let mut rec = ResultRecorder::new();
+        let mut rec = ResultRecorder::new(L3_MAX_RESULT);
         rec.record(&batch("classes.dex", vec![row(None), row(Some(ClassRelation::Implements))], None));
         rec.record(&batch("classes2.dex", vec![], None));
         let bytes = rec.finish(&["a note".to_string()]).unwrap();
-        let Recorded { batches: back, notes } = decode_batches(&bytes).unwrap();
+        let Recorded { batches: back, notes } = decode_batches(bytes.clone()).unwrap();
         assert_eq!(notes, ["a note"]);
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].results, vec![row(None), row(Some(ClassRelation::Implements))]);
         assert_eq!((back[1].entry_name.as_str(), back[1].source), ("classes2.dex", "result"));
-        assert!(decode_batches(&bytes[..bytes.len() - 1]).is_none());
+        assert!(decode_batches(bytes[..bytes.len() - 1].to_vec()).is_none());
         // Cut at a batch boundary: the end marker is missing.
-        let mut one = ResultRecorder::new();
+        let mut one = ResultRecorder::new(L3_MAX_RESULT);
         one.record(&batch("classes2.dex", vec![], None));
         let one = one.finish(&[]).unwrap();
-        assert!(decode_batches(&one[..one.len() - 4]).is_none());
-        assert_eq!(decode_batches(&one).unwrap().batches.len(), 1);
-        assert!(decode_batches(b"").is_none());
-        let mut failed = ResultRecorder::new();
+        assert!(decode_batches(one[..one.len() - 4].to_vec()).is_none());
+        assert_eq!(decode_batches(one).unwrap().batches.len(), 1);
+        assert!(decode_batches(Vec::new()).is_none());
+        let mut failed = ResultRecorder::new(L3_MAX_RESULT);
         failed.record(&batch("classes.dex", vec![], Some("bad".into())));
         assert!(failed.finish(&[]).is_none());
+    }
+
+    #[test]
+    fn text_rows_roundtrip_within_their_limit() {
+        let text = |lines: &[&str]| {
+            let bytes: Arc<dyn AsRef<[u8]> + Send + Sync> =
+                Arc::new(lines.iter().map(|l| format!("{l}\n")).collect::<String>().into_bytes());
+            let mut ends = Vec::new();
+            let mut at = 0;
+            for l in lines {
+                at += l.len();
+                ends.push(at);
+                at += 1;
+            }
+            let len = (*bytes).as_ref().len();
+            TextRows::shared(bytes, 0..len, ends).unwrap()
+        };
+        let batch = |name: &str, t: TextRows| RefBatch {
+            entry_name: name.into(),
+            results: Vec::new(),
+            text: Some(t),
+            inflate_us: 0,
+            search_us: 0,
+            source: "inflate",
+            error: None,
+        };
+        let a = text(&["classes.dex | La;->b()V | \"x\"", "classes.dex | La;->c()V | \"y\""]);
+        let mut rec = ResultRecorder::new(1 << 10);
+        rec.record(&batch("classes.dex", a.clone()));
+        rec.record(&batch("classes2.dex", text(&[])));
+        let Recorded { batches: back, notes } = decode_batches(rec.finish(&["n".to_string()]).unwrap()).unwrap();
+        assert_eq!(notes, ["n"]);
+        assert_eq!(back[0].text.as_ref(), Some(&a));
+        assert_eq!(back[0].row_count(), 2);
+        assert_eq!(back[1].text.as_ref().map(TextRows::len), Some(0));
+        // Past the limit nothing is kept, and the rows are not copied first.
+        let mut rec = ResultRecorder::new(64);
+        rec.record(&batch("classes.dex", a));
+        assert!(rec.out.is_empty() && rec.finish(&[]).is_none());
     }
 }

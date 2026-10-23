@@ -22,6 +22,7 @@
 mod budget;
 mod callgraph;
 mod classes;
+mod compact;
 mod compose;
 pub mod condition;
 pub mod config;
@@ -47,9 +48,7 @@ pub use asc_findrefs::CompiledQuery;
 use asc_findrefs::{FindRefs, Hit, Query, RefKind, SearchState};
 use asc_rebuild::Rebuilt;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::Write as _;
-use std::ops::Deref;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
@@ -64,6 +63,7 @@ pub use asc_smali::Options as SmaliOptions;
 pub use budget::{available_memory, total_memory, Device, MemoryPolicy};
 pub use callgraph::{CallQuery, CallRoots, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
+pub use compact::TextRows;
 pub use compose::{MatchingMethods, DEFAULT_FAN_OUT};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
@@ -132,127 +132,27 @@ pub struct ClassSource {
     pub also_defined_in: Vec<String>,
 }
 
-/// One or several matched constants. A broad string query commonly has one
-/// constant per method; storing it inline avoids one heap allocation per row.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum Matches {
-    #[default]
-    None,
-    One(Matched),
-    Many(Vec<Matched>),
-}
-
-impl Matches {
-    fn one(matched: Matched) -> Matches {
-        Matches::One(matched)
-    }
-}
-
-impl From<Vec<Matched>> for Matches {
-    fn from(mut matched: Vec<Matched>) -> Self {
-        match matched.len() {
-            0 => Matches::None,
-            1 => Matches::One(matched.pop().expect("one element")),
-            _ => Matches::Many(matched),
-        }
-    }
-}
-
-impl Deref for Matches {
-    type Target = [Matched];
-
-    fn deref(&self) -> &[Matched] {
-        match self {
-            Matches::None => &[],
-            Matches::One(m) => std::slice::from_ref(m),
-            Matches::Many(v) => v,
-        }
-    }
-}
-
-impl<'a> IntoIterator for &'a Matches {
-    type Item = &'a Matched;
-    type IntoIter = std::slice::Iter<'a, Matched>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.deref().iter()
-    }
-}
-
-// Preserve the public field's slice-like comparison behavior after replacing
-// its Vec with an inline one-element representation.
-impl<const N: usize> PartialEq<[Matched; N]> for Matches {
-    fn eq(&self, other: &[Matched; N]) -> bool {
-        self.deref() == other
-    }
-}
-
-impl<const N: usize> PartialEq<Matches> for [Matched; N] {
-    fn eq(&self, other: &Matches) -> bool {
-        self == other.deref()
-    }
-}
-
 /// One aggregated reference result: a method and what it references.
 ///
 /// For a class relation query (`Extends` / `Implements`) the row is a class
 /// instead: `method_idx` is its type index, `method` and `signature` its
 /// descriptor, `matched` the target descriptor and `relation` is set.
-#[derive(Clone)]
-struct RenderedBacking {
-    bytes: Arc<dyn AsRef<[u8]> + Send + Sync>,
-    start: usize,
-    end: usize,
-}
-
-impl RenderedBacking {
-    fn text(&self) -> &str {
-        std::str::from_utf8(&self.bytes.as_ref().as_ref()[self.start..self.end]).expect("validated cached UTF-8")
-    }
-}
-
-impl std::fmt::Debug for RenderedBacking {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("RenderedBacking").field(&self.text()).finish()
-    }
-}
-
-impl PartialEq for RenderedBacking {
-    fn eq(&self, other: &Self) -> bool {
-        self.text() == other.text()
-    }
-}
-
-impl Eq for RenderedBacking {}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefResult {
-    /// Shared among every row from one logical DEX. Broad string searches can
-    /// produce hundreds of thousands of rows, so duplicating this small name
-    /// as a separate heap String per row is measurable allocation pressure.
-    pub dex_name: Arc<str>,
+    pub dex_name: String,
     pub method_idx: u32,
     /// `Lcls;->name`
     pub method: String,
     /// `Lcls;->name(params)ret`
     pub signature: String,
     /// The matched constants (strings, descriptors, members).
-    pub matched: Matches,
+    pub matched: Vec<Matched>,
     /// Set for the rows of a class relation query.
     pub relation: Option<ClassRelation>,
     /// The referencing instructions, in offset order (none for class relations).
     pub sites: Vec<RefSite>,
     /// Smali around the sites, when asked for ([`RefContext`]).
     pub context: Option<String>,
-    /// `signature` holds already-rendered text. This compact internal
-    /// representation is used only by the no-context text CLI.
-    rendered: bool,
-    /// End byte of every logical row in a multi-row compact block. Empty for
-    /// structured rows and the legacy one-rendered-row representation.
-    rendered_ends: Vec<u32>,
-    /// On an L3 hit, view rendered text in the shared decoded payload rather
-    /// than copying an APK-wide output into 58 separate Strings.
-    rendered_backing: Option<RenderedBacking>,
 }
 
 /// One instruction behind a [`RefResult`].
@@ -286,31 +186,19 @@ pub struct FindOptions {
     /// One row per method (with every matched constant) instead of one per instruction.
     pub aggregate: bool,
     pub context: RefContext,
-    /// Populate [`RefResult::method`]. The text CLI renders `signature` only,
-    /// so it can skip a second per-row method-name allocation; structured
-    /// clients keep the display name for their response schema.
-    pub method_display: bool,
-    /// Store no-context rows in their final text form rather than materializing
-    /// the public structured row fields. Used only by the text CLI.
-    pub compact_text: bool,
 }
 
 impl Default for FindOptions {
     fn default() -> Self {
-        FindOptions { aggregate: true, context: RefContext::None, method_display: true, compact_text: false }
+        FindOptions { aggregate: true, context: RefContext::None }
     }
 }
 
 /// A constant a [`RefResult`] matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Matched {
-    /// The value of a string constant. Its allocation is shared by every row
-    /// of one DEX that references the same constant.
-    String(Arc<str>),
-    /// A string constant prepared for the text-only findrefs path. Both forms
-    /// are shared per DEX, so repeated constants do not need JSON escaping for
-    /// every referencing method.
-    TextString { value: Arc<str>, quoted: Arc<str> },
+    /// The value of a string constant.
+    String(String),
     /// A type descriptor, `Lcls;->name(params)ret` or `Lcls;->name:type`.
     Symbol(String),
 }
@@ -319,8 +207,7 @@ impl Matched {
     /// The string value or the symbol, unquoted.
     pub fn as_str(&self) -> &str {
         match self {
-            Matched::String(s) | Matched::TextString { value: s, .. } => s,
-            Matched::Symbol(s) => s,
+            Matched::String(s) | Matched::Symbol(s) => s,
         }
     }
 }
@@ -330,48 +217,21 @@ impl Matched {
 impl std::fmt::Display for Matched {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Matched::String(s) => text::write_quoted(f, s),
-            Matched::TextString { quoted, .. } => f.write_str(quoted),
+            Matched::String(s) => f.write_str(&text::quoted(s)),
             Matched::Symbol(s) => f.write_str(s),
         }
     }
 }
 
 impl RefResult {
-    fn rendered_text(&self) -> &str {
-        match &self.rendered_backing {
-            Some(backing) => backing.text(),
-            None => &self.signature,
-        }
-    }
-
     /// `dex | Lcls;->m(params)ret | "a", Lx;->f:I`, or `dex | Lsub; | extends
     /// Lbase;` for a class relation: three `|` columns, one line.
     pub fn line(&self) -> String {
-        if self.rendered {
-            return self.rendered_text().to_string();
+        let matched = self.matched.iter().map(Matched::to_string).collect::<Vec<_>>().join(", ");
+        match self.relation {
+            Some(rel) => format!("{} | {} | {} {matched}", self.dex_name, self.signature, rel.verb()),
+            None => format!("{} | {} | {matched}", self.dex_name, self.signature),
         }
-        // This is the hottest formatting path for broad string searches.  Do
-        // not allocate one String per matched value plus a temporary Vec just
-        // to join it: an APK can have hundreds of thousands of result rows.
-        let matched_len = self.matched.iter().map(|m| m.as_str().len() + 4).sum::<usize>();
-        let mut out = String::with_capacity(self.dex_name.len() + self.signature.len() + matched_len + 8);
-        out.push_str(&self.dex_name);
-        out.push_str(" | ");
-        out.push_str(&self.signature);
-        out.push_str(" | ");
-        if let Some(rel) = self.relation {
-            out.push_str(rel.verb());
-            out.push(' ');
-        }
-        for (i, matched) in self.matched.iter().enumerate() {
-            if i != 0 {
-                out.push_str(", ");
-            }
-            // Display adds the required quotes/escaping for string constants.
-            write!(&mut out, "{matched}").expect("writing to String cannot fail");
-        }
-        out
     }
 
     /// The row followed by its context lines (just the row without one).
@@ -383,59 +243,6 @@ impl RefResult {
         }
         out
     }
-
-    /// Borrow the pre-rendered row when this is a text-only compact result.
-    pub fn rendered_line(&self) -> Option<&str> {
-        (self.rendered && self.rendered_ends.is_empty()).then(|| self.rendered_text())
-    }
-
-    /// Iterate compact logical rows without allocating. Explicit ends retain
-    /// record boundaries even if an unusual DEX entry name contains a newline.
-    pub fn rendered_lines(&self) -> Option<RenderedLines<'_>> {
-        self.rendered.then(|| {
-            if self.rendered_ends.is_empty() {
-                RenderedLines::One(Some(self.rendered_text()))
-            } else {
-                RenderedLines::Many { text: self.rendered_text(), ends: &self.rendered_ends, row: 0, start: 0 }
-            }
-        })
-    }
-
-    /// Newline-terminated compact text and its logical record count.
-    pub fn rendered_block(&self) -> Option<(&str, usize)> {
-        (!self.rendered_ends.is_empty()).then(|| (self.rendered_text(), self.rendered_ends.len()))
-    }
-
-    fn row_count(&self) -> usize {
-        if self.rendered && !self.rendered_ends.is_empty() {
-            self.rendered_ends.len()
-        } else {
-            1
-        }
-    }
-}
-
-/// Borrowed logical rows from a compact result.
-pub enum RenderedLines<'a> {
-    One(Option<&'a str>),
-    Many { text: &'a str, ends: &'a [u32], row: usize, start: usize },
-}
-
-impl<'a> Iterator for RenderedLines<'a> {
-    type Item = &'a str;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            RenderedLines::One(line) => line.take(),
-            RenderedLines::Many { text, ends, row, start } => {
-                let end = *ends.get(*row)? as usize;
-                let line = text.get(*start..end)?;
-                *row += 1;
-                *start = end + 1;
-                Some(line)
-            }
-        }
-    }
 }
 
 /// Results for one DEX, delivered as soon as its search completes.
@@ -443,6 +250,9 @@ impl<'a> Iterator for RenderedLines<'a> {
 pub struct RefBatch {
     pub entry_name: String,
     pub results: Vec<RefResult>,
+    /// The rows as text instead, for [`Engine::find_refs_text`] (`results`
+    /// is then empty).
+    pub text: Option<TextRows>,
     pub inflate_us: u128,
     pub search_us: u128,
     /// Where the bytes came from: `inflate`, `memory`, `disk` or `stored`.
@@ -451,8 +261,9 @@ pub struct RefBatch {
 }
 
 impl RefBatch {
-    pub fn result_count(&self) -> usize {
-        self.results.iter().map(RefResult::row_count).sum()
+    /// The number of rows, in `results` or `text`.
+    pub fn row_count(&self) -> usize {
+        self.results.len() + self.text.as_ref().map_or(0, TextRows::len)
     }
 
     /// Record a failure of one logical DEX of this entry. A container holds
@@ -1491,7 +1302,8 @@ impl Engine {
             target.key.as_ref(),
             entry,
             query,
-            FindOptions { aggregate, context: RefContext::None, ..Default::default() },
+            FindOptions { aggregate, context: RefContext::None },
+            Shape::Results,
             None,
             cancel,
             self.cache.as_deref(),
@@ -1799,7 +1611,7 @@ impl Engine {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(RefBatch),
     ) -> Result<RefSummary> {
-        self.find_refs_opts(query, FindOptions { aggregate, context: RefContext::None, ..Default::default() }, cancel, sink)
+        self.find_refs_opts(query, FindOptions { aggregate, context: RefContext::None }, cancel, sink)
     }
 
     /// `find_refs` with every option: aggregation, context, cancellation.
@@ -1810,10 +1622,29 @@ impl Engine {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(RefBatch),
     ) -> Result<RefSummary> {
+        self.find_refs_shaped(query, opts, Shape::Results, cancel, sink)
+    }
+
+    /// The rows of [`Engine::find_refs`] (one per method, no context) as
+    /// text: each batch holds them in [`RefBatch::text`], exactly the
+    /// [`RefResult::line`]s `find_refs` would give, with no structured rows.
+    /// A broad query renders and replays much faster this way.
+    pub fn find_refs_text(&self, query: &Query, cancel: &AtomicBool, sink: &mut dyn FnMut(RefBatch)) -> Result<RefSummary> {
+        self.find_refs_shaped(query, FindOptions::default(), Shape::Text, cancel, sink)
+    }
+
+    fn find_refs_shaped(
+        &self,
+        query: &Query,
+        opts: FindOptions,
+        shape: Shape,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(RefBatch),
+    ) -> Result<RefSummary> {
         let t0 = Instant::now();
         compose::check_patterns(query)?;
         if let Some(engine) = self.transient(compose::needs_program(query))? {
-            return engine.find_refs_opts(query, opts, cancel, sink);
+            return engine.find_refs_shaped(query, opts, shape, cancel, sink);
         }
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
@@ -1827,10 +1658,10 @@ impl Engine {
         }
         // L3: the rows of an earlier run of this query on this APK.
         let disk = self.cache.as_ref().and_then(|c| c.disk.as_ref()).filter(|d| d.uses(Tier::Rendered));
-        let rendered = disk.zip(key.as_ref()).map(|(d, k)| (d, k, tiers::findrefs_key(query, opts)));
-        if let Some(recorded) = rendered.as_ref().and_then(|(d, k, q)| d.get_rendered_view(k, q)).and_then(tiers::decode_batches_view) {
+        let rendered = disk.zip(key.as_ref()).map(|(d, k)| (d, k, tiers::findrefs_key(query, opts, shape)));
+        if let Some(recorded) = rendered.as_ref().and_then(|(d, k, q)| d.get_rendered_view(k, q)).and_then(tiers::decode_batches) {
             for batch in recorded.batches {
-                summary.total_results += batch.result_count();
+                summary.total_results += batch.row_count();
                 sink(batch);
             }
             summary.notes = recorded.notes;
@@ -1844,7 +1675,7 @@ impl Engine {
         summary.notes = resolved.notes.into_iter().next().unwrap_or_default();
         let _query = self.prebuild.query();
         let compiled = CompiledQuery::new(resolved.queries.as_ref().map_or(query, |r| &r[0]))?;
-        let mut recorder = rendered.as_ref().map(|_| tiers::ResultRecorder::new());
+        let mut recorder = rendered.as_ref().map(|(d, _, _)| tiers::ResultRecorder::new(tiers::result_limit(d, shape)));
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<RefBatch>();
         let workers = self.threads().min(entries.len()).max(1);
@@ -1862,7 +1693,7 @@ impl Engine {
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
-                    let batch = search_entry(apk, key, entry, compiled, opts, Some(probe), cancel, cache, stats);
+                    let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe), cancel, cache, stats);
                     if tx.send(batch).is_err() {
                         break;
                     }
@@ -1877,11 +1708,11 @@ impl Engine {
                         batch.source,
                         batch.inflate_us,
                         batch.search_us,
-                        batch.result_count(),
+                        batch.row_count(),
                         batch.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default()
                     ));
                 }
-                summary.total_results += batch.result_count();
+                summary.total_results += batch.row_count();
                 if let Some(r) = recorder.as_mut() {
                     r.record(&batch);
                 }
@@ -1913,7 +1744,7 @@ impl Engine {
         let mut errors = errors;
         for v in &views {
             let r = Dex::with_name(&v.data, &v.name).map_err(EngineError::from).and_then(|dex| {
-                attach_context(&FindRefs::with_state(&dex, &v.state), rows.iter_mut().filter(|r| r.dex_name.as_ref() == v.name), ctx)
+                attach_context(&FindRefs::with_state(&dex, &v.state), rows.iter_mut().filter(|r| r.dex_name == v.name), ctx)
             });
             if let Err(e) = r {
                 errors.push(format!("{}: {e}", v.name));
@@ -2219,17 +2050,37 @@ fn search_entry(
     entry: &Entry,
     query: &CompiledQuery,
     opts: FindOptions,
+    shape: Shape,
     probe: Option<&skip::Probe<'_>>,
     cancel: &AtomicBool,
     cache: Option<&EngineCache>,
     stats: &Stats,
 ) -> RefBatch {
-    let run = |fr: &FindRefs<'_, '_, '_>| rows_compiled(fr, query, opts).map(|rows| vec![rows]);
+    let run = |fr: &FindRefs<'_, '_, '_>| {
+        Ok(vec![match shape {
+            Shape::Results => Rows::Results(rows_compiled(fr, query, opts)?),
+            Shape::Text => Rows::Text(compact::text_rows(fr, query)?),
+        }])
+    };
     search_entry_with(apk, key, entry, 1, &run, probe, cancel, cache, stats).pop().expect("one batch per query")
 }
 
-/// Rows of `n` queries over one logical DEX, one list per query.
-pub(crate) type RunRows<'q> = dyn Fn(&FindRefs<'_, '_, '_>) -> Result<Vec<Vec<RefResult>>> + Sync + 'q;
+/// Rows of `n` queries over one logical DEX, one per query.
+pub(crate) type RunRows<'q> = dyn Fn(&FindRefs<'_, '_, '_>) -> Result<Vec<Rows>> + Sync + 'q;
+
+/// The rows of one query over one logical DEX, in the form asked for.
+pub(crate) enum Rows {
+    Results(Vec<RefResult>),
+    Text(TextRows),
+}
+
+/// The form [`Engine::find_refs_opts`] (`Results`) and
+/// [`Engine::find_refs_text`] (`Text`) return rows in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shape {
+    Results,
+    Text,
+}
 
 /// Load one entry (through the caches) and run `run` over each of its
 /// logical DEX files: one batch per query, all sharing the load. With a
@@ -2248,8 +2099,15 @@ pub(crate) fn search_entry_with(
     stats: &Stats,
 ) -> Vec<RefBatch> {
     let t0 = Instant::now();
-    let empty =
-        RefBatch { entry_name: entry.name.clone(), results: Vec::new(), inflate_us: 0, search_us: 0, source: "inflate", error: None };
+    let empty = RefBatch {
+        entry_name: entry.name.clone(),
+        results: Vec::new(),
+        text: None,
+        inflate_us: 0,
+        search_us: 0,
+        source: "inflate",
+        error: None,
+    };
     let mut batches = vec![empty; n];
     if probe.is_some_and(|p| p.skips(apk, entry, cache, stats)) {
         let inflate_us = t0.elapsed().as_micros();
@@ -2269,10 +2127,16 @@ pub(crate) fn search_entry_with(
         }
     };
     let t1 = Instant::now();
-    let mut add = |name: &str, r: Result<Vec<Vec<RefResult>>>| match r {
+    let mut add = |name: &str, r: Result<Vec<Rows>>| match r {
         Ok(rows) => {
-            for (b, mut rows) in batches.iter_mut().zip(rows) {
-                b.results.append(&mut rows);
+            for (b, rows) in batches.iter_mut().zip(rows) {
+                match rows {
+                    Rows::Results(mut rows) => b.results.append(&mut rows),
+                    Rows::Text(t) => match &mut b.text {
+                        Some(text) => text.append(&t),
+                        None => b.text = Some(t),
+                    },
+                }
             }
         }
         Err(e) => {
@@ -2348,192 +2212,32 @@ fn hit_matched(dex: &Dex<'_>, kind: RefKind, idx: u32, note: Option<&str>) -> Re
 
 fn matched_name(dex: &Dex<'_>, kind: RefKind, idx: u32) -> Result<Matched> {
     Ok(match kind {
-        RefKind::String => Matched::String(Arc::from(dex.string(idx)?)),
+        RefKind::String => Matched::String(dex.string(idx)?),
         RefKind::Type => Matched::Symbol(dex.type_descriptor(idx)?),
         RefKind::Method => Matched::Symbol(asc_smali::method_signature(dex, idx)?),
         RefKind::Field => Matched::Symbol(asc_smali::field_signature(dex, idx)?),
     })
 }
 
-/// Resolve a matched constant, sharing decoded string data between every row
-/// built from this DEX. Broad string searches frequently put one constant in
-/// thousands of methods; decoding and allocating it for every row dominates
-/// their result materialization otherwise.
-fn matched_name_cached(
-    dex: &Dex<'_>,
-    kind: RefKind,
-    idx: u32,
-    strings: &mut HashMap<u32, (Arc<str>, Arc<str>)>,
-    text_only: bool,
-) -> Result<Matched> {
-    if kind != RefKind::String {
-        return matched_name(dex, kind, idx);
-    }
-    if let Some((value, quoted)) = strings.get(&idx) {
-        return Ok(if text_only {
-            Matched::TextString { value: value.clone(), quoted: quoted.clone() }
-        } else {
-            Matched::String(value.clone())
-        });
-    }
-    let value: Arc<str> = dex.string(idx)?.into();
-    let quoted: Arc<str> = text::quoted(&value).into();
-    strings.insert(idx, (value.clone(), quoted.clone()));
-    Ok(if text_only { Matched::TextString { value, quoted } } else { Matched::String(value) })
-}
-
-/// Reused decoded parts of method signatures from one DEX. A broad string
-/// search typically returns hundreds of thousands of methods but only a small
-/// set of owner types, names and prototypes.
-#[derive(Default)]
-struct SignatureCache {
-    strings: HashMap<u32, String>,
-    types: HashMap<u32, String>,
-    protos: HashMap<u32, String>,
-}
-
-impl SignatureCache {
-    fn prime_string(&mut self, dex: &Dex<'_>, idx: u32) -> Result<()> {
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.strings.entry(idx) {
-            entry.insert(dex.string(idx)?);
-        }
-        Ok(())
-    }
-
-    fn prime_type(&mut self, dex: &Dex<'_>, idx: u32) -> Result<()> {
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.types.entry(idx) {
-            entry.insert(dex.type_descriptor(idx)?);
-        }
-        Ok(())
-    }
-
-    fn prime_proto(&mut self, dex: &Dex<'_>, idx: u32) -> Result<()> {
-        if self.protos.contains_key(&idx) {
-            return Ok(());
-        }
-        let proto = dex.proto_id(idx)?;
-        let params = dex.type_list(proto.parameters_off)?;
-        for &ty in &params {
-            self.prime_type(dex, ty as u32)?;
-        }
-        self.prime_type(dex, proto.return_type_idx)?;
-        let mut text = String::from("(");
-        for ty in params {
-            text.push_str(self.types.get(&(ty as u32)).expect("primed type"));
-        }
-        text.push(')');
-        text.push_str(self.types.get(&proto.return_type_idx).expect("primed return type"));
-        self.protos.insert(idx, text);
-        Ok(())
-    }
-
-    fn method_signature(&mut self, dex: &Dex<'_>, method: u32) -> Result<String> {
-        let id = dex.method_id(method)?;
-        self.prime_type(dex, id.class_idx as u32)?;
-        self.prime_string(dex, id.name_idx)?;
-        self.prime_proto(dex, id.proto_idx as u32)?;
-        let class = self.types.get(&(id.class_idx as u32)).expect("primed class");
-        let name = self.strings.get(&id.name_idx).expect("primed name");
-        let proto = self.protos.get(&(id.proto_idx as u32)).expect("primed proto");
-        let mut signature = String::with_capacity(class.len() + name.len() + proto.len() + 2);
-        signature.push_str(class);
-        signature.push_str("->");
-        signature.push_str(name);
-        signature.push_str(proto);
-        Ok(signature)
-    }
-}
-
 impl RefResult {
     /// The row of method `m` of `dex`, with no context yet.
     fn method_row(dex: &Dex<'_>, m: u32, matched: Vec<Matched>, sites: Vec<RefSite>) -> Result<RefResult> {
-        Self::method_row_with_display(dex, m, matched, sites, true)
-    }
-
-    fn method_row_with_display(
-        dex: &Dex<'_>,
-        m: u32,
-        matched: Vec<Matched>,
-        sites: Vec<RefSite>,
-        method_display: bool,
-    ) -> Result<RefResult> {
-        Self::method_row_with_signature(dex, m, matched, sites, method_display, asc_smali::method_signature(dex, m)?)
-    }
-
-    fn method_row_cached(
-        dex: &Dex<'_>,
-        m: u32,
-        matched: Vec<Matched>,
-        method_display: bool,
-        compact_text: bool,
-        cache: &mut SignatureCache,
-    ) -> Result<RefResult> {
-        let signature = cache.method_signature(dex, m)?;
-        if compact_text {
-            let matched: Matches = matched.into();
-            let mut line =
-                String::with_capacity(dex.name().len() + signature.len() + matched.iter().map(|m| m.as_str().len() + 4).sum::<usize>() + 6);
-            line.push_str(dex.name());
-            line.push_str(" | ");
-            line.push_str(&signature);
-            line.push_str(" | ");
-            for (i, value) in matched.iter().enumerate() {
-                if i != 0 {
-                    line.push_str(", ");
-                }
-                write!(&mut line, "{value}").expect("writing to String cannot fail");
-            }
-            return Ok(RefResult {
-                dex_name: Arc::from(dex.name()),
-                method_idx: m,
-                method: String::new(),
-                signature: line,
-                matched: Matches::None,
-                relation: None,
-                sites: Vec::new(),
-                context: None,
-                rendered: true,
-                rendered_ends: Vec::new(),
-                rendered_backing: None,
-            });
-        }
-        Self::method_row_with_signature(dex, m, matched, Vec::new(), method_display, signature)
-    }
-
-    fn method_row_with_signature(
-        dex: &Dex<'_>,
-        m: u32,
-        matched: Vec<Matched>,
-        sites: Vec<RefSite>,
-        method_display: bool,
-        signature: String,
-    ) -> Result<RefResult> {
-        let method = if method_display {
-            dex.method_display(m)?
-        } else {
-            // Text findrefs renders only `signature`; preserve a cheap,
-            // well-formed field for rows that never leave the CLI.
-            String::new()
-        };
         Ok(RefResult {
-            dex_name: Arc::from(dex.name()),
+            dex_name: dex.name().to_string(),
             method_idx: m,
-            method,
-            signature,
-            matched: matched.into(),
+            method: dex.method_display(m)?,
+            signature: asc_smali::method_signature(dex, m)?,
+            matched,
             relation: None,
             sites,
             context: None,
-            rendered: false,
-            rendered_ends: Vec::new(),
-            rendered_backing: None,
         })
     }
 }
 
 /// Run a reference search over one DEX buffer and return structured results.
 pub fn find_refs_in_dex(dex_name: &str, buf: &[u8], query: &Query, aggregate: bool) -> Result<Vec<RefResult>> {
-    find_refs_in_dex_opts(dex_name, buf, query, FindOptions { aggregate, context: RefContext::None, ..Default::default() })
+    find_refs_in_dex_opts(dex_name, buf, query, FindOptions { aggregate, context: RefContext::None })
 }
 
 /// [`find_refs_in_dex`] with a context.
@@ -2562,22 +2266,7 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOpt
     }
     let Some(classes) = fr.class_relation(query)? else {
         let hits = fr.find_ref_compiled(query)?;
-        // Sites are only observable when a context is requested.  Keeping one
-        // allocation per matching instruction for ordinary CLI output is very
-        // costly for broad string queries (for example `string a`), although
-        // the row only displays the distinct matched constants.
-        let mut rows = results_from_hits_with_sites(
-            dex,
-            query.kind(),
-            &hits,
-            opts.aggregate,
-            // Public structured rows retain instruction sites even without
-            // rendered context. Only the CLI's compact text representation
-            // may omit fields it cannot expose.
-            !opts.compact_text || opts.context != RefContext::None,
-            opts.method_display,
-            opts.compact_text && opts.context == RefContext::None,
-        )?;
+        let mut rows = results_from_hits(dex, query.kind(), &hits, opts.aggregate)?;
         if opts.context != RefContext::None {
             attach_context(fr, &mut rows, opts.context)?;
         }
@@ -2587,7 +2276,7 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOpt
         Query::Extends(t) | Query::Implements(t) => t.as_str(),
         _ => "",
     };
-    let dex_name: Arc<str> = Arc::from(dex.name());
+    let dex_name = dex.name().to_string();
     classes
         .into_iter()
         .map(|c| {
@@ -2597,13 +2286,10 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOpt
                 method_idx: c,
                 method: class.clone(),
                 signature: class,
-                matched: Matches::one(Matched::Symbol(target.to_string())),
+                matched: vec![Matched::Symbol(target.to_string())],
                 relation: query.relation(),
                 sites: Vec::new(),
                 context: None,
-                rendered: false,
-                rendered_ends: Vec::new(),
-                rendered_backing: None,
             })
         })
         .collect()
@@ -2619,70 +2305,8 @@ pub(crate) fn defined_rows(dex: &Dex<'_>, d: &asc_findrefs::Defined) -> Result<V
         .collect()
 }
 
-/// A method's distinct matched indexes in a broad no-context query. Most
-/// methods have one or two matches: keep those inline, allocating a hash table
-/// only when a third distinct constant arrives.
-// Boxing keeps the enum itself to three machine words, which matters because
-// broad queries allocate one slot for every method before only a minority
-// graduate to a hash set.
-#[allow(clippy::box_collection)]
-#[derive(Clone, Default)]
-enum SmallIdxSet {
-    #[default]
-    Empty,
-    One(u32),
-    Two(u32, u32),
-    Many(Box<HashSet<u32>>),
-}
-
-impl SmallIdxSet {
-    fn insert(&mut self, idx: u32) {
-        match self {
-            SmallIdxSet::Empty => *self = SmallIdxSet::One(idx),
-            SmallIdxSet::One(a) if *a == idx => {}
-            SmallIdxSet::One(a) => *self = SmallIdxSet::Two(*a, idx),
-            SmallIdxSet::Two(a, b) if *a == idx || *b == idx => {}
-            SmallIdxSet::Two(a, b) => {
-                let mut many = HashSet::with_capacity(4);
-                many.insert(*a);
-                many.insert(*b);
-                many.insert(idx);
-                *self = SmallIdxSet::Many(Box::new(many));
-            }
-            SmallIdxSet::Many(many) => {
-                many.insert(idx);
-            }
-        }
-    }
-
-    fn into_sorted(self) -> Vec<u32> {
-        let mut out = match self {
-            SmallIdxSet::Empty => Vec::new(),
-            SmallIdxSet::One(a) => vec![a],
-            SmallIdxSet::Two(a, b) => vec![a, b],
-            SmallIdxSet::Many(many) => many.into_iter().collect(),
-        };
-        out.sort_unstable();
-        out
-    }
-}
-
 /// Turn raw hits into display results (grouped per method when `aggregate`).
 pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: bool) -> Result<Vec<RefResult>> {
-    results_from_hits_with_sites(dex, kind, hits, aggregate, true, true, false)
-}
-
-/// Like [`results_from_hits`], optionally omitting instruction sites.  Callers
-/// that do not render a context need only the method and distinct constants.
-pub(crate) fn results_from_hits_with_sites(
-    dex: &Dex<'_>,
-    kind: RefKind,
-    hits: &[Hit],
-    aggregate: bool,
-    keep_sites: bool,
-    method_display: bool,
-    compact_text: bool,
-) -> Result<Vec<RefResult>> {
     if !aggregate {
         let mut out = Vec::new();
         for hit in hits {
@@ -2692,86 +2316,6 @@ pub(crate) fn results_from_hits_with_sites(
                 let site = RefSite { offset: hit.offset, matched: 0, pc: None, line: None };
                 out.push(RefResult::method_row(dex, m, vec![matched.clone()], vec![site])?);
             }
-        }
-        return Ok(out);
-    }
-    // Notes carry call-site constraints introduced by the richer query
-    // language. They are observable in the matched column and cannot be
-    // collapsed into an index-only dense set.
-    if !keep_sites && hits.iter().all(|hit| hit.note.is_none()) {
-        // The usual (no-context) path deliberately retains no per-instruction
-        // data. A short string can produce millions of sites while the output
-        // has only one row per method and one entry per distinct constant.
-        // Method ids are dense DEX-table indexes. A broad string search can
-        // touch most of them, so direct indexing avoids hundreds of thousands
-        // of hash computations, entry allocations and a final method-id sort.
-        // It also emits the required DEX method order by construction.
-        let mut grouped = vec![SmallIdxSet::default(); dex.method_count() as usize];
-        let mut count = 0usize;
-        for hit in hits {
-            let Some(methods) = &hit.methods else { continue };
-            for &m in methods.ids() {
-                let Some(idxs) = grouped.get_mut(m as usize) else { continue };
-                if matches!(idxs, SmallIdxSet::Empty) {
-                    count += 1;
-                }
-                idxs.insert(hit.matched_idx);
-            }
-        }
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-        let mut strings = HashMap::new();
-        let mut signatures = SignatureCache::default();
-        let dex_name: Arc<str> = Arc::from(dex.name());
-        if compact_text {
-            let mut text = String::with_capacity(count.saturating_mul(80));
-            let mut ends = Vec::with_capacity(count);
-            for (m, idxs) in grouped.into_iter().enumerate() {
-                if matches!(idxs, SmallIdxSet::Empty) {
-                    continue;
-                }
-                text.push_str(dex.name());
-                text.push_str(" | ");
-                text.push_str(&signatures.method_signature(dex, m as u32)?);
-                text.push_str(" | ");
-                for (i, idx) in idxs.into_sorted().into_iter().enumerate() {
-                    if i != 0 {
-                        text.push_str(", ");
-                    }
-                    let value = matched_name_cached(dex, kind, idx, &mut strings, true)?;
-                    write!(&mut text, "{value}").expect("writing to String cannot fail");
-                }
-                ends.push(text.len() as u32);
-                text.push('\n');
-            }
-            return Ok(vec![RefResult {
-                dex_name,
-                method_idx: 0,
-                method: String::new(),
-                signature: text,
-                matched: Matches::None,
-                relation: None,
-                sites: Vec::new(),
-                context: None,
-                rendered: true,
-                rendered_ends: ends,
-                rendered_backing: None,
-            }]);
-        }
-        let mut out = Vec::with_capacity(count);
-        for (m, idxs) in grouped.into_iter().enumerate() {
-            if matches!(idxs, SmallIdxSet::Empty) {
-                continue;
-            }
-            let matched = idxs
-                .into_sorted()
-                .into_iter()
-                .map(|i| matched_name_cached(dex, kind, i, &mut strings, !method_display))
-                .collect::<Result<Vec<_>>>()?;
-            let mut row = RefResult::method_row_cached(dex, m as u32, matched, method_display, false, &mut signatures)?;
-            row.dex_name = dex_name.clone();
-            out.push(row);
         }
         return Ok(out);
     }
@@ -2796,7 +2340,7 @@ pub(crate) fn results_from_hits_with_sites(
             .into_iter()
             .map(|(offset, idx)| RefSite { offset, matched: idxs.binary_search(&idx).unwrap_or(0), pc: None, line: None })
             .collect();
-        out.push(RefResult::method_row_with_display(dex, m, matched, sites, method_display)?);
+        out.push(RefResult::method_row(dex, m, matched, sites)?);
     }
     Ok(out)
 }

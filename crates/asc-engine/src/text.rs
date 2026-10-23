@@ -2,31 +2,11 @@
 //! columns, strings quoted and escaped as JSON does ([`asc_arsc::quote`]).
 
 use std::borrow::Cow;
-use std::fmt::{self, Write};
-
-/// Write `s` as a JSON-style quoted value without an intermediate String.
-/// The findrefs text path invokes this for every matched constant, so avoiding
-/// a short-lived allocation materially reduces broad-search output overhead.
-pub fn write_quoted(out: &mut dyn Write, s: &str) -> fmt::Result {
-    out.write_char('"')?;
-    for c in s.chars() {
-        match c {
-            '"' => out.write_str("\\\"")?,
-            '\\' => out.write_str("\\\\")?,
-            '\n' => out.write_str("\\n")?,
-            '\t' => out.write_str("\\t")?,
-            '\r' => out.write_str("\\r")?,
-            c if c.is_control() => write!(out, "\\u{:04x}", u32::from(c))?,
-            c => out.write_char(c)?,
-        }
-    }
-    out.write_char('"')
-}
 
 /// `s` in double quotes, escaped so it stays on one line.
 pub fn quoted(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
-    write_quoted(&mut out, s).expect("writing to String cannot fail");
+    asc_arsc::quote(s, &mut out);
     out
 }
 

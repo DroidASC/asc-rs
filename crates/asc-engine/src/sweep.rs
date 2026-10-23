@@ -16,7 +16,7 @@
 //! A rule set claims with the rules it still has to search (the others came
 //! from L3), so only entries searched for the same rules share rows.
 
-use crate::{tiers, CompiledQuery, Engine, FindOptions, Job, Query, RefBatch, RefContext, SearchTarget, WriteJob};
+use crate::{tiers, CompiledQuery, Engine, FindOptions, Job, Query, RefBatch, RefContext, SearchTarget, Shape, WriteJob};
 use asc_apk::Entry;
 use asc_cache::Tier;
 use sha2::{Digest, Sha256};
@@ -126,7 +126,8 @@ impl Engine {
     pub fn cached_refs(&self, target: &SearchTarget, query: &Query, aggregate: bool) -> Option<Vec<RefBatch>> {
         let (disk, key) = self.rendered_tier(target)?;
         // A sweep takes no condition resolved over the program, so no notes.
-        tiers::decode_batches_view(disk.get_rendered_view(key, &tiers::findrefs_key(query, sweep_opts(aggregate)))?).map(|r| r.batches)
+        tiers::decode_batches(disk.get_rendered_view(key, &tiers::findrefs_key(query, sweep_opts(aggregate), Shape::Results))?)
+            .map(|r| r.batches)
     }
 
     /// Keep the batches of a complete search of `query` on this APK in L3
@@ -137,12 +138,12 @@ impl Engine {
         }
         let Some(apk) = self.open().ok() else { return };
         let Some(key) = self.apk_key(&apk) else { return };
-        let mut recorder = tiers::ResultRecorder::new();
+        let mut recorder = tiers::ResultRecorder::new(tiers::L3_MAX_RESULT);
         for b in batches {
             recorder.record(b);
         }
         if let Some(payload) = recorder.finish(&[]) {
-            let query = tiers::findrefs_key(query, sweep_opts(aggregate));
+            let query = tiers::findrefs_key(query, sweep_opts(aggregate), Shape::Results);
             let job = WriteJob { key, apk: Arc::from(apk.path()), kind: Job::Rendered { query, payload } };
             self.cache.as_ref().expect("an L3 tier implies a cache").put_async(job);
         }
@@ -224,7 +225,7 @@ impl Engine {
 }
 
 fn sweep_opts(aggregate: bool) -> FindOptions {
-    FindOptions { aggregate, context: RefContext::None, ..Default::default() }
+    FindOptions { aggregate, context: RefContext::None }
 }
 
 /// The leader's result, once it is published.
@@ -272,7 +273,7 @@ fn renamed(mut batch: RefBatch, name: &str) -> RefBatch {
     if from != name {
         for r in &mut batch.results {
             if let Some(rest) = r.dex_name.strip_prefix(&from) {
-                r.dex_name = format!("{name}{rest}").into();
+                r.dex_name = format!("{name}{rest}");
             }
         }
         if let Some(e) = &mut batch.error {
@@ -295,17 +296,15 @@ mod tests {
             method_idx: 0,
             method: "La;->m".into(),
             signature: "La;->m()V".into(),
-            matched: Default::default(),
+            matched: vec![],
             relation: None,
             sites: vec![],
             context: None,
-            rendered: false,
-            rendered_ends: Vec::new(),
-            rendered_backing: None,
         };
         let batch = RefBatch {
             entry_name: "classes2.dex".into(),
             results: vec![row("classes2.dex"), row("classes2.dex!classes1.dex")],
+            text: None,
             inflate_us: 0,
             search_us: 0,
             source: "inflate",
@@ -313,7 +312,7 @@ mod tests {
         };
         let b = renamed(batch, "classes5.dex");
         assert_eq!(b.entry_name, "classes5.dex");
-        assert_eq!(b.results.iter().map(|r| r.dex_name.as_ref()).collect::<Vec<_>>(), ["classes5.dex", "classes5.dex!classes1.dex"]);
+        assert_eq!(b.results.iter().map(|r| r.dex_name.as_str()).collect::<Vec<_>>(), ["classes5.dex", "classes5.dex!classes1.dex"]);
         assert_eq!(b.error.as_deref(), Some("classes5.dex!classes2.dex: bad"));
         assert_eq!(b.source, "shared");
     }

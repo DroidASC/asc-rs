@@ -1416,7 +1416,7 @@ fn context_arg(args: &Value) -> Result<RefContext, ToolError> {
 /// (`pc` in code units, source `line`) and the smali around them.
 fn ref_json(r: &RefResult, context: RefContext) -> Value {
     let matched: Vec<&str> = r.matched.iter().map(Matched::as_str).collect();
-    let mut v = json!({"dex": r.dex_name.as_ref(), "method": r.method, "signature": r.signature, "matched": matched});
+    let mut v = json!({"dex": r.dex_name, "method": r.method, "signature": r.signature, "matched": matched});
     if context != RefContext::None {
         v["sites"] = r.sites.iter().map(|s| json!({"pc": s.pc, "line": s.line, "matched": matched.get(s.matched)})).collect();
         v["context"] = json!(r.context);
