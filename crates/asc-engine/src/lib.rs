@@ -1480,20 +1480,24 @@ fn load_entry<'a>(
         }
         let bytes = apk.read_entry_cancellable(entry, cancel)?;
         let (data, keep_in_memory, source) = match bytes {
-            // Stored entries are already free to read; keep them in memory only
-            // for the locator tables that ride along with the cached entry.
+            // Stored entries are already free to read; keep them only for the
+            // locator tables that ride along with a cached entry (in memory,
+            // or through L2). Mapped from the APK file rather than copied, so
+            // they stay file pages the OS can share and reclaim.
             Cow::Borrowed(b) => {
-                if c.memory.is_none() {
+                if c.memory.is_none() && !c.disk.as_ref().is_some_and(|d| d.uses(Tier::Derived)) {
                     return Ok((Loaded::Borrowed(Cow::Borrowed(b)), Source::Stored));
                 }
-                (b.to_vec(), true, Source::Stored)
+                let offset = b.as_ptr() as usize - apk.data().as_ptr() as usize;
+                let data = DexData::map_region(apk.path(), offset as u64, b.len()).unwrap_or_else(|_| DexData::Owned(b.to_vec()));
+                (data, c.memory.is_some(), Source::Stored)
             }
             Cow::Owned(v) => {
                 stats.inflates.fetch_add(1, Ordering::Relaxed);
-                (v, c.memory.is_some(), Source::Inflate)
+                (DexData::Owned(v), c.memory.is_some(), Source::Inflate)
             }
         };
-        let e = Arc::new(CachedEntry::new(&entry.name, Arc::new(DexData::Owned(data))));
+        let e = Arc::new(CachedEntry::new(&entry.name, Arc::new(data)));
         let mut remap = None;
         if keep_in_memory {
             if let Some(mem) = &c.memory {

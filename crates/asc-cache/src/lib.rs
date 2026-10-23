@@ -110,6 +110,24 @@ impl Deref for DexData {
     }
 }
 
+impl DexData {
+    /// `len` bytes at `offset` of the file at `path`, mapped read-only (any
+    /// offset: the mapping starts at the page holding it). For entries an
+    /// APK stores uncompressed, so a host keeping them gets file pages the
+    /// OS can share and reclaim instead of a heap copy. The file must not
+    /// change while mapped, the same contract as mapping the APK itself.
+    pub fn map_region(path: &Path, offset: u64, len: usize) -> std::io::Result<DexData> {
+        let file = fs::File::open(path)?;
+        if file.metadata()?.len() < offset.saturating_add(len as u64) {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "region past the end of the file"));
+        }
+        // SAFETY: read-only mapping of a range checked to lie inside the file;
+        // see the contract above.
+        let map = unsafe { memmap2::MmapOptions::new().offset(offset).len(len).map(&file) }?;
+        Ok(DexData::Mapped(map))
+    }
+}
+
 impl AsRef<[u8]> for DexData {
     fn as_ref(&self) -> &[u8] {
         self
@@ -1163,6 +1181,21 @@ impl<T> MemoryCache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_of_a_file_map_at_any_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.apk");
+        let bytes: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&path, &bytes).unwrap();
+        for (off, len) in [(0, 10), (4097, 3000), (12_345, 7655), (19_999, 1)] {
+            let d = DexData::map_region(&path, off as u64, len).unwrap();
+            assert!(matches!(d, DexData::Mapped(_)));
+            assert_eq!(&*d, &bytes[off..off + len]);
+        }
+        assert!(DexData::map_region(&path, 19_999, 2).is_err());
+        assert!(DexData::map_region(&dir.path().join("missing"), 0, 1).is_err());
+    }
 
     #[test]
     fn memory_remove_apk_releases_only_that_apk() {
