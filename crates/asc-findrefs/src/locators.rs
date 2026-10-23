@@ -139,34 +139,45 @@ impl StringLocator {
     /// searches for (a plain substring, attributed to the string where the
     /// occurrence starts exactly like a regex match).
     pub fn locate_literal(&self, buf: &[u8], finder: &memchr::memmem::Finder<'_>) -> BTreeSet<u32> {
-        let mut out = BTreeSet::new();
         if self.offsets.is_empty() || finder.needle().is_empty() {
-            return out;
+            return BTreeSet::new();
         }
         let region = self.region(buf);
         let needle = finder.needle();
         // Without a NUL in the needle an occurrence never crosses a string's
         // terminator, so after a hit the rest of that string can be skipped.
+        // Both matches and offsets are in physical order, so one cursor also
+        // avoids a binary search per matched string.
         let skip_rest = !needle.contains(&0);
+        let mut out = Vec::new();
+        let mut offset_pos = 0;
         let mut at = 0;
         while at < region.len() {
             let Some(pos) = finder.find(&region[at..]) else { break };
             let start = at + pos;
             let abs = self.strdata_start + start;
-            // Non-overlapping, like `find_iter`.
             at = start + needle.len();
-            let i = self.offsets.partition_point(|&[off, _]| (off as usize) <= abs);
-            if i == 0 {
+            while offset_pos + 1 < self.offsets.len() && self.offsets[offset_pos + 1][0] as usize <= abs {
+                offset_pos += 1;
+            }
+            // An occurrence starting in the length prefix is not in the
+            // string (a length of 97 reads as `a`): look again past it.
+            let off = self.offsets[offset_pos][0] as usize;
+            if asc_dex::leb128::uleb128_len(buf, off).map_or(true, |n| abs < off + n) {
+                at = start + 1;
                 continue;
             }
-            out.insert(self.offsets[i - 1][1]);
+            out.push(self.offsets[offset_pos][1]);
             if skip_rest {
-                if let Some(&[next, _]) = self.offsets.get(i) {
+                if let Some(&[next, _]) = self.offsets.get(offset_pos + 1) {
                     at = at.max((next as usize).saturating_sub(self.strdata_start));
                 }
             }
         }
-        out
+        // Physical string-data order is unrelated to string index order.
+        out.sort_unstable();
+        out.dedup();
+        out.into_iter().collect()
     }
 
     /// All string indexes whose data matches `pattern` (a regex compiled on
@@ -615,5 +626,35 @@ mod tests {
         assert_eq!(loc.types_for_string(3).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(loc.types_for_string(7).collect::<Vec<_>>(), vec![3]);
         assert_eq!(loc.types_for_string(8).count(), 0);
+    }
+
+    #[test]
+    fn dense_regex_matches_insert_each_string_once() {
+        let offsets = vec![[0, 7], [4, 3], [8, 9]];
+        let loc = StringLocator { offsets: offsets.into(), strdata_start: 0, strdata_end: 12 };
+        let re = Regex::new(".").unwrap();
+        // String data begins with one-byte ULEB lengths and ends in NULs.
+        // A dense regex also matches those bytes, so this verifies the same
+        // physical-region attribution as the production path.
+        assert_eq!(loc.locate(b"\x02aa\0\x02bb\0\x02cc\0", &re), [3, 7, 9].into_iter().collect());
+    }
+
+    #[test]
+    fn a_length_prefix_is_not_part_of_its_string() {
+        // 65 bytes: the prefix byte reads as `A`.
+        let mut buf = vec![0x41];
+        buf.extend([b'x'; 65]);
+        buf.push(0);
+        let second = buf.len();
+        buf.push(0x41);
+        buf.push(b'A');
+        buf.extend([b'x'; 64]);
+        buf.push(0);
+        let offsets = vec![[0, 4], [second as u32, 5]];
+        let loc = StringLocator { offsets: offsets.into(), strdata_start: 0, strdata_end: buf.len() };
+        let finder = memchr::memmem::Finder::new(b"A");
+        assert_eq!(loc.locate_literal(&buf, &finder), [5].into_iter().collect());
+        assert_eq!(loc.locate(&buf, &Regex::new("A").unwrap()), [5].into_iter().collect());
+        assert_eq!(loc.locate_literal(&buf, &memchr::memmem::Finder::new(b"Ax")), [5].into_iter().collect());
     }
 }

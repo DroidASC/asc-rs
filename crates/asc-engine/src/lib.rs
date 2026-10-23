@@ -22,6 +22,7 @@
 mod budget;
 mod callgraph;
 mod classes;
+mod compact;
 mod compose;
 pub mod condition;
 pub mod config;
@@ -62,6 +63,7 @@ pub use asc_smali::Options as SmaliOptions;
 pub use budget::{available_memory, total_memory, Device, MemoryPolicy};
 pub use callgraph::{CallQuery, CallRoots, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
+pub use compact::TextRows;
 pub use compose::{MatchingMethods, DEFAULT_FAN_OUT};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
@@ -248,6 +250,9 @@ impl RefResult {
 pub struct RefBatch {
     pub entry_name: String,
     pub results: Vec<RefResult>,
+    /// The rows as text instead, for [`Engine::find_refs_text`] (`results`
+    /// is then empty).
+    pub text: Option<TextRows>,
     pub inflate_us: u128,
     pub search_us: u128,
     /// Where the bytes came from: `inflate`, `memory`, `disk` or `stored`.
@@ -256,6 +261,11 @@ pub struct RefBatch {
 }
 
 impl RefBatch {
+    /// The number of rows, in `results` or `text`.
+    pub fn row_count(&self) -> usize {
+        self.results.len() + self.text.as_ref().map_or(0, TextRows::len)
+    }
+
     /// Record a failure of one logical DEX of this entry. A container holds
     /// several, so failures accumulate instead of overwriting each other.
     /// Consumers prefix `entry_name`; only a container's logical DEX (whose
@@ -1296,6 +1306,7 @@ impl Engine {
             entry,
             query,
             FindOptions { aggregate, context: RefContext::None },
+            Shape::Results,
             None,
             cancel,
             self.cache.as_deref(),
@@ -1614,10 +1625,29 @@ impl Engine {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(RefBatch),
     ) -> Result<RefSummary> {
+        self.find_refs_shaped(query, opts, Shape::Results, cancel, sink)
+    }
+
+    /// The rows of [`Engine::find_refs`] (one per method, no context) as
+    /// text: each batch holds them in [`RefBatch::text`], exactly the
+    /// [`RefResult::line`]s `find_refs` would give, with no structured rows.
+    /// A broad query renders and replays much faster this way.
+    pub fn find_refs_text(&self, query: &Query, cancel: &AtomicBool, sink: &mut dyn FnMut(RefBatch)) -> Result<RefSummary> {
+        self.find_refs_shaped(query, FindOptions::default(), Shape::Text, cancel, sink)
+    }
+
+    fn find_refs_shaped(
+        &self,
+        query: &Query,
+        opts: FindOptions,
+        shape: Shape,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(RefBatch),
+    ) -> Result<RefSummary> {
         let t0 = Instant::now();
         compose::check_patterns(query)?;
         if let Some(engine) = self.transient(compose::needs_program(query))? {
-            return engine.find_refs_opts(query, opts, cancel, sink);
+            return engine.find_refs_shaped(query, opts, shape, cancel, sink);
         }
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
@@ -1631,10 +1661,10 @@ impl Engine {
         }
         // L3: the rows of an earlier run of this query on this APK.
         let disk = self.cache.as_ref().and_then(|c| c.disk.as_ref()).filter(|d| d.uses(Tier::Rendered));
-        let rendered = disk.zip(key.as_ref()).map(|(d, k)| (d, k, tiers::findrefs_key(query, opts)));
-        if let Some(recorded) = rendered.as_ref().and_then(|(d, k, q)| d.get_rendered(k, q)).and_then(|b| tiers::decode_batches(&b)) {
+        let rendered = disk.zip(key.as_ref()).map(|(d, k)| (d, k, tiers::findrefs_key(query, opts, shape)));
+        if let Some(recorded) = rendered.as_ref().and_then(|(d, k, q)| d.get_rendered_view(k, q)).and_then(tiers::decode_batches) {
             for batch in recorded.batches {
-                summary.total_results += batch.results.len();
+                summary.total_results += batch.row_count();
                 sink(batch);
             }
             summary.notes = recorded.notes;
@@ -1648,7 +1678,7 @@ impl Engine {
         summary.notes = resolved.notes.into_iter().next().unwrap_or_default();
         let _query = self.prebuild.query();
         let compiled = CompiledQuery::new(resolved.queries.as_ref().map_or(query, |r| &r[0]))?;
-        let mut recorder = rendered.as_ref().map(|_| tiers::ResultRecorder::new());
+        let mut recorder = rendered.as_ref().map(|(d, _, _)| tiers::ResultRecorder::new(tiers::result_limit(d, shape)));
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<RefBatch>();
         let workers = self.threads().min(entries.len()).max(1);
@@ -1666,7 +1696,7 @@ impl Engine {
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(entry) = entries.get(i) else { break };
-                    let batch = search_entry(apk, key, entry, compiled, opts, Some(probe), cancel, cache, stats);
+                    let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe), cancel, cache, stats);
                     if tx.send(batch).is_err() {
                         break;
                     }
@@ -1681,11 +1711,11 @@ impl Engine {
                         batch.source,
                         batch.inflate_us,
                         batch.search_us,
-                        batch.results.len(),
+                        batch.row_count(),
                         batch.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default()
                     ));
                 }
-                summary.total_results += batch.results.len();
+                summary.total_results += batch.row_count();
                 if let Some(r) = recorder.as_mut() {
                     r.record(&batch);
                 }
@@ -2023,17 +2053,37 @@ fn search_entry(
     entry: &Entry,
     query: &CompiledQuery,
     opts: FindOptions,
+    shape: Shape,
     probe: Option<&skip::Probe<'_>>,
     cancel: &AtomicBool,
     cache: Option<&EngineCache>,
     stats: &Stats,
 ) -> RefBatch {
-    let run = |fr: &FindRefs<'_, '_, '_>| rows_compiled(fr, query, opts).map(|rows| vec![rows]);
+    let run = |fr: &FindRefs<'_, '_, '_>| {
+        Ok(vec![match shape {
+            Shape::Results => Rows::Results(rows_compiled(fr, query, opts)?),
+            Shape::Text => Rows::Text(compact::text_rows(fr, query)?),
+        }])
+    };
     search_entry_with(apk, key, entry, 1, &run, probe, cancel, cache, stats).pop().expect("one batch per query")
 }
 
-/// Rows of `n` queries over one logical DEX, one list per query.
-pub(crate) type RunRows<'q> = dyn Fn(&FindRefs<'_, '_, '_>) -> Result<Vec<Vec<RefResult>>> + Sync + 'q;
+/// Rows of `n` queries over one logical DEX, one per query.
+pub(crate) type RunRows<'q> = dyn Fn(&FindRefs<'_, '_, '_>) -> Result<Vec<Rows>> + Sync + 'q;
+
+/// The rows of one query over one logical DEX, in the form asked for.
+pub(crate) enum Rows {
+    Results(Vec<RefResult>),
+    Text(TextRows),
+}
+
+/// The form [`Engine::find_refs_opts`] (`Results`) and
+/// [`Engine::find_refs_text`] (`Text`) return rows in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shape {
+    Results,
+    Text,
+}
 
 /// Load one entry (through the caches) and run `run` over each of its
 /// logical DEX files: one batch per query, all sharing the load. With a
@@ -2052,8 +2102,15 @@ pub(crate) fn search_entry_with(
     stats: &Stats,
 ) -> Vec<RefBatch> {
     let t0 = Instant::now();
-    let empty =
-        RefBatch { entry_name: entry.name.clone(), results: Vec::new(), inflate_us: 0, search_us: 0, source: "inflate", error: None };
+    let empty = RefBatch {
+        entry_name: entry.name.clone(),
+        results: Vec::new(),
+        text: None,
+        inflate_us: 0,
+        search_us: 0,
+        source: "inflate",
+        error: None,
+    };
     let mut batches = vec![empty; n];
     if probe.is_some_and(|p| p.skips(apk, entry, cache, stats)) {
         let inflate_us = t0.elapsed().as_micros();
@@ -2073,10 +2130,16 @@ pub(crate) fn search_entry_with(
         }
     };
     let t1 = Instant::now();
-    let mut add = |name: &str, r: Result<Vec<Vec<RefResult>>>| match r {
+    let mut add = |name: &str, r: Result<Vec<Rows>>| match r {
         Ok(rows) => {
-            for (b, mut rows) in batches.iter_mut().zip(rows) {
-                b.results.append(&mut rows);
+            for (b, rows) in batches.iter_mut().zip(rows) {
+                match rows {
+                    Rows::Results(mut rows) => b.results.append(&mut rows),
+                    Rows::Text(t) => match &mut b.text {
+                        Some(text) => text.append(&t),
+                        None => b.text = Some(t),
+                    },
+                }
             }
         }
         Err(e) => {

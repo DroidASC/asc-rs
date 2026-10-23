@@ -7,7 +7,7 @@
 
 use crate::{
     attach_context, hit_matched, results_from_hits, rows_compiled, search_entry_with, skip, tiers, Engine, FindOptions, Job, RefBatch,
-    RefContext, RefResult, RefSite, RefSummary, Result, SearchTarget, WriteJob,
+    RefContext, RefResult, RefSite, RefSummary, Result, Rows, SearchTarget, Shape, WriteJob,
 };
 use asc_apk::Entry;
 use asc_cache::Tier;
@@ -186,8 +186,9 @@ impl Engine {
         let rendered = disk.zip(key.as_ref());
         let mut missing = Vec::new();
         for (i, rule) in rules.iter().enumerate() {
-            let replay =
-                rendered.and_then(|(d, k)| d.get_rendered(k, &tiers::findrefs_key(rule, opts))).and_then(|b| tiers::decode_batches(&b));
+            let replay = rendered
+                .and_then(|(d, k)| d.get_rendered_view(k, &tiers::findrefs_key(rule, opts, Shape::Results)))
+                .and_then(tiers::decode_batches);
             match replay {
                 Some(recorded) => {
                     for batch in recorded.batches {
@@ -214,13 +215,13 @@ impl Engine {
         summary.notes = crate::compose::merge_notes(std::mem::take(&mut summary.notes));
         let _query = self.prebuild.query();
         let compiled = compile_rules(resolved.queries.as_deref().unwrap_or(&todo))?;
-        let mut recorders: Vec<_> = missing.iter().map(|_| rendered.map(|_| tiers::ResultRecorder::new())).collect();
+        let mut recorders: Vec<_> = missing.iter().map(|_| rendered.map(|_| tiers::ResultRecorder::new(tiers::L3_MAX_RESULT))).collect();
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<Vec<RefBatch>>();
         let workers = self.threads().min(entries.len()).max(1);
         let searched: Vec<&CompiledQuery> = compiled.iter().collect();
         let (cache, stats, searched) = (self.cache.as_deref(), &self.stats, &searched);
-        let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, searched, opts);
+        let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, searched, opts).map(|rows| rows.into_iter().map(Rows::Results).collect());
         // An entry is left out only when no rule can match it.
         let probe = skip::Probe::new(searched.clone());
         let probe = &probe;
@@ -255,7 +256,7 @@ impl Engine {
         if let Some((_, k)) = rendered.filter(|_| !cancel.load(Ordering::Relaxed)) {
             for ((&i, recorder), notes) in missing.iter().zip(recorders).zip(&rule_notes) {
                 if let Some(payload) = recorder.and_then(|r| r.finish(notes)) {
-                    let query = tiers::findrefs_key(&rules[i], opts);
+                    let query = tiers::findrefs_key(&rules[i], opts, Shape::Results);
                     let job = WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Rendered { query, payload } };
                     self.cache.as_ref().expect("rendered implies a cache").put_async(job);
                 }
@@ -282,7 +283,7 @@ impl Engine {
         cancel: &AtomicBool,
     ) -> Vec<RefBatch> {
         let opts = FindOptions { aggregate, context: RefContext::None };
-        let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, rules, opts);
+        let run = |fr: &FindRefs<'_, '_, '_>| rule_rows(fr, rules, opts).map(|rows| rows.into_iter().map(Rows::Results).collect());
         search_entry_with(&target.apk, target.key.as_ref(), entry, rules.len(), &run, None, cancel, self.cache.as_deref(), &self.stats)
     }
 }

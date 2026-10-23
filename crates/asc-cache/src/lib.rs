@@ -319,6 +319,19 @@ pub struct Derived {
     pub build_cost: Duration,
 }
 
+/// A validated L3 result viewed directly in its cache file.
+#[derive(Debug)]
+pub struct Rendered {
+    map: memmap2::Mmap,
+    body: usize,
+}
+
+impl AsRef<[u8]> for Rendered {
+    fn as_ref(&self) -> &[u8] {
+        &self.map[self.body..]
+    }
+}
+
 impl Deref for Derived {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
@@ -734,26 +747,32 @@ impl DiskCache {
     /// The L3 result stored under `query` (the query, its options and the
     /// producer's version: build it with [`rendered_key`]).
     pub fn get_rendered(&self, key: &ApkKey, query: &str) -> Option<Vec<u8>> {
+        self.get_rendered_view(key, query).map(|view| view.as_ref().to_vec())
+    }
+
+    /// [`DiskCache::get_rendered`] without copying the payload out of its
+    /// cache file. The immutable file is mapped only after its full key and
+    /// CRC have been validated.
+    pub fn get_rendered_view(&self, key: &ApkKey, query: &str) -> Option<Rendered> {
         if !self.uses(Tier::Rendered) {
             return None;
         }
         let path = self.rendered_path(key, query);
-        let mut data = fs::read(&path).ok()?;
+        let file = fs::File::open(&path).ok()?;
+        let data = map_file(&file)?;
         let key_len = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?) as usize;
         let crc = u32::from_le_bytes(data.get(12..16)?.try_into().ok()?);
         let body = 16usize.checked_add(key_len)?;
         if data.get(..8)? != RENDERED_MAGIC || crc32fast::hash(&data[16..]) != crc {
+            drop(data);
             return self.discard(&path);
         }
         // The full key is stored and compared, so a hash collision is a miss.
         if data.get(16..body)? != query.as_bytes() {
             return None;
         }
-        if let Ok(f) = fs::File::open(&path) {
-            let _ = touch_file(&f);
-        }
-        data.drain(..body);
-        Some(data)
+        let _ = touch_file(&file);
+        Some(Rendered { map: data, body })
     }
 
     /// Store an L3 result (see [`DiskCache::get_rendered`]).

@@ -117,6 +117,10 @@ impl CompiledQuery {
     /// Compile `q`. Fails only when one of its patterns is not a valid regex.
     pub fn new(q: &Query) -> Result<CompiledQuery> {
         let parts = match q {
+            // A syntax-free ASCII word has the same language as a literal
+            // substring. Use the Finder path here (also used by rust_ASC);
+            // regex syntax and non-ASCII patterns retain regex semantics.
+            Query::String(p) if is_ascii_word(p) => Parts::Literal(Some(Finder::new(&asc_dex::mutf8::encode(p)).into_owned())),
             Query::String(p) | Query::Type(p) => Parts::Pattern(compile_opt(p)?),
             // MUTF-8, like the string data it is searched in, so a supplementary
             // character (a surrogate pair there) is found too.
@@ -203,6 +207,12 @@ impl std::fmt::Debug for CompiledQuery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompiledQuery").field("query", &self.query).finish_non_exhaustive()
     }
+}
+
+/// A nonempty ASCII letter/digit/underscore sequence contains no regex
+/// syntax and has no Unicode matching behavior, so literal search is exact.
+fn is_ascii_word(pattern: &str) -> bool {
+    !pattern.is_empty() && pattern.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 fn compile_opt(pattern: &str) -> Result<Option<Regex>> {
@@ -296,6 +306,11 @@ mod tests {
         let c = CompiledQuery::new(&Query::StringLiteral("\u{1F600}".into())).unwrap();
         assert!(matches!(c.parts(), Parts::Literal(Some(f)) if f.needle() == [0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]));
         assert!(matches!(CompiledQuery::new(&Query::StringLiteral(String::new())).unwrap().parts(), Parts::Literal(None)));
+
+        let c = CompiledQuery::new(&Query::String("token".into())).unwrap();
+        assert!(matches!(c.parts(), Parts::Literal(Some(f)) if f.needle() == b"token"));
+        let c = CompiledQuery::new(&Query::String("t.k".into())).unwrap();
+        assert!(matches!(c.parts(), Parts::Pattern(Some(_))));
 
         let c = CompiledQuery::new(&Query::Implements("Lexample/Iface;".into())).unwrap();
         assert_eq!(c.relation(), Some(ClassRelation::Implements));

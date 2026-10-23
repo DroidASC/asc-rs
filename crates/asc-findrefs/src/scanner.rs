@@ -111,6 +111,18 @@ impl<'l> CodeScanner<'l> {
     ///
     /// `buf` must be the DEX buffer the instruction locator was built from.
     pub fn scan(&self, buf: &[u8], kind: RefKind, idxs: &IdxSet) -> Vec<(u32, u32)> {
+        self.scan_inner(buf, kind, idxs, false)
+    }
+
+    /// Like [`CodeScanner::scan`], but omits byte-pattern matches at odd DEX
+    /// offsets. All real DEX instructions start at even offsets; the public
+    /// raw scan keeps them for low-level callers, while FindRefs uses this
+    /// path before method verification.
+    pub(crate) fn scan_instruction_candidates(&self, buf: &[u8], kind: RefKind, idxs: &IdxSet) -> Vec<(u32, u32)> {
+        self.scan_inner(buf, kind, idxs, true)
+    }
+
+    fn scan_inner(&self, buf: &[u8], kind: RefKind, idxs: &IdxSet, aligned: bool) -> Vec<(u32, u32)> {
         let end = self.insn.code_item_end().min(buf.len());
         let start = self.insn.code_item_start();
         if start >= end || idxs.is_empty() {
@@ -119,16 +131,16 @@ impl<'l> CodeScanner<'l> {
         let region = &buf[start..end];
         let targets = idxs.iter().collect::<Vec<u32>>();
         if targets.len() <= MEMMEM_MAX_TARGETS {
-            return scan_by_operand(region, start, kind, &targets);
+            return scan_by_operand(region, start, kind, &targets, aligned);
         }
-        scan_by_opcode(region, start, kind, idxs)
+        scan_by_opcode(region, start, kind, idxs, aligned)
     }
 }
 
 /// Few targets: search the operand bytes with SIMD `memmem` and check the
 /// opcode two bytes before each candidate. Operand bytes are far more
 /// selective than opcode bytes, so almost every position is skipped.
-fn scan_by_operand(region: &[u8], base: usize, kind: RefKind, targets: &[u32]) -> Vec<(u32, u32)> {
+fn scan_by_operand(region: &[u8], base: usize, kind: RefKind, targets: &[u32], aligned: bool) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     for &idx in targets {
         let narrow = (idx as u16).to_le_bytes();
@@ -150,7 +162,7 @@ fn scan_by_operand(region: &[u8], base: usize, kind: RefKind, targets: &[u32]) -
             while let Some(rel) = finder.find(&region[from..]) {
                 let pos = from + rel;
                 from = pos + 1;
-                if pos >= 2 && opcode_width(kind, region[pos - 2]) == width {
+                if pos >= 2 && opcode_width(kind, region[pos - 2]) == width && (!aligned || (base + pos - 2) & 1 == 0) {
                     out.push(((base + pos - 2) as u32, idx));
                 }
             }
@@ -223,11 +235,13 @@ fn prefilter_is_selective(highs: &[u8]) -> bool {
 /// most targets (R8 packs related ids together): when the targets span at most
 /// three distinct, selective high bytes, `memchr` on those bytes prefilters
 /// the region; otherwise fall back to one linear sweep over the opcode bytes.
-fn scan_by_opcode(region: &[u8], base: usize, kind: RefKind, idxs: &IdxSet) -> Vec<(u32, u32)> {
+fn scan_by_opcode(region: &[u8], base: usize, kind: RefKind, idxs: &IdxSet, aligned: bool) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     if kind == RefKind::String {
         for i in memchr::memchr2_iter(0x1a, 0x1b, region) {
-            check_candidate(region, base, kind, idxs, i, &mut out);
+            if !aligned || (base + i) & 1 == 0 {
+                check_candidate(region, base, kind, idxs, i, &mut out);
+            }
         }
         return out;
     }
@@ -246,7 +260,7 @@ fn scan_by_opcode(region: &[u8], base: usize, kind: RefKind, idxs: &IdxSet) -> V
     };
     // The high operand byte sits at opcode + 3.
     for p in positions {
-        if p >= 3 {
+        if p >= 3 && (!aligned || (base + p - 3) & 1 == 0) {
             check_candidate(region, base, kind, idxs, p - 3, &mut out);
         }
     }
@@ -271,7 +285,11 @@ mod tests {
         let idxs: IdxSet = targets.iter().copied().collect();
         let mut linear = Vec::new();
         linear_sweep(region, 0, kind, &idxs, &mut linear);
-        vec![("operand", scan_by_operand(region, 0, kind, targets)), ("opcode", scan_by_opcode(region, 0, kind, &idxs)), ("linear", linear)]
+        vec![
+            ("operand", scan_by_operand(region, 0, kind, targets, false)),
+            ("opcode", scan_by_opcode(region, 0, kind, &idxs, false)),
+            ("linear", linear),
+        ]
     }
 
     fn assert_all_agree(region: &[u8], kind: RefKind, targets: &[u32], expected: &[(u32, u32)]) {
@@ -326,16 +344,16 @@ mod tests {
         // operand search must find exactly the same candidates.
         let targets: Vec<u32> = (0..20).map(|i| i * 7).collect();
         let idxs: IdxSet = targets.iter().copied().collect();
-        let a = scan_by_operand(&region, 0, RefKind::Field, &targets);
-        let b = scan_by_opcode(&region, 0, RefKind::Field, &idxs);
+        let a = scan_by_operand(&region, 0, RefKind::Field, &targets, false);
+        let b = scan_by_opcode(&region, 0, RefKind::Field, &idxs, false);
         assert!(!a.is_empty());
         assert_eq!(a, b);
         // Targets sharing one selective high byte (0x02) use the memchr prefilter.
         let targets: Vec<u32> = (74..94).map(|k| k * 7).collect();
         assert!(targets.iter().all(|&t| t >> 8 == 2));
         let idxs: IdxSet = targets.iter().copied().collect();
-        let a = scan_by_operand(&region, 0, RefKind::Field, &targets);
-        let b = scan_by_opcode(&region, 0, RefKind::Field, &idxs);
+        let a = scan_by_operand(&region, 0, RefKind::Field, &targets, false);
+        let b = scan_by_opcode(&region, 0, RefKind::Field, &idxs, false);
         assert!(!a.is_empty());
         assert_eq!(a, b);
     }
