@@ -27,6 +27,16 @@
 //!   30 MiB entry and walking the whole cache directory after every one of
 //!   them is what a query must never wait on). The budget follows the free
 //!   space of the file system by default ([`auto_disk_bytes_for`]).
+//!
+//!   Writes are never synced: everything here can be rebuilt, and a sync
+//!   per file costs more than the query that wrote it (macOS flushes the
+//!   drive's own cache on every one). A temporary file renamed into place
+//!   keeps readers from seeing half a file while the system runs; what a
+//!   crash can leave is a file whose pages never reached the disk. Every
+//!   file carries a CRC-32 of its contents, checked when a file last
+//!   written before the current boot is first read ([`predates_boot`]):
+//!   a damaged one is deleted and read as a miss. L3 files are small and
+//!   always checked.
 //! * [`MemoryCache`] is a byte-bounded LRU of inflated entries for hosts that
 //!   stay alive between queries (GUI, servers).
 //! * [`ProcessRegistry`] lets resident hosts of one user see each other, so
@@ -38,11 +48,11 @@ pub use procs::{ProcessRegistry, ProcessUsage};
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Identity of an APK for cache purposes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -158,6 +168,9 @@ pub struct DiskCache {
     tiers: [bool; 3],
     /// Bytes this handle wrote since its last eviction walk.
     written: std::sync::atomic::AtomicU64,
+    /// When the system booted ([`boot_time`]): files written before it are
+    /// checked on read.
+    boot: Option<SystemTime>,
 }
 
 /// The tiers of a [`DiskCache`].
@@ -227,10 +240,14 @@ pub const TIERS_ENV: &str = "DROIDASC_CACHE_TIERS";
 const DERIVED_MAGIC: &[u8; 8] = b"ASCL2\0\0\0";
 const DERIVED_HEADER: usize = 64;
 /// Layout version of the L2 header, part of every L2 file name.
-const DERIVED_FORMAT: u32 = 1;
+const DERIVED_FORMAT: u32 = 2;
 const RENDERED_MAGIC: &[u8; 8] = b"ASCL3\0\0\0";
 /// Layout version of L3 files, part of every L3 key.
-const RENDERED_FORMAT: u32 = 1;
+const RENDERED_FORMAT: u32 = 2;
+/// End of an L1 file, after the inflated bytes: this magic, then the
+/// CRC-32 of those bytes. Readers map only the bytes before it.
+const L1_MAGIC: &[u8; 4] = b"ASC1";
+const L1_TRAILER: u64 = 8;
 
 /// A derived index mapped from L2: the payload [`DiskCache::put_derived`]
 /// stored, 64-byte aligned.
@@ -442,6 +459,7 @@ impl DiskCache {
             min_derived_cost: DEFAULT_MIN_DERIVED_COST,
             tiers,
             written: Default::default(),
+            boot: boot_time(),
         }
     }
 
@@ -529,6 +547,19 @@ impl DiskCache {
         DiskBudget { capacity: self.cap, cap_bytes, used, space }
     }
 
+    /// Whether a cache file must be checked before use ([`predates_boot`]).
+    fn predates_boot(&self, meta: &fs::Metadata) -> bool {
+        predates_boot(meta.modified().ok(), self.boot, SystemTime::now())
+    }
+
+    /// Delete a damaged file; always a miss.
+    fn discard<T>(&self, path: &Path) -> Option<T> {
+        // A concurrent writer may have just renamed a sound file over it:
+        // deleting that one only costs a rebuild.
+        let _ = fs::remove_file(path);
+        None
+    }
+
     fn entry_path(&self, key: &ApkKey, entry_name: &str) -> PathBuf {
         self.dir.join(key.as_str()).join(safe_name(entry_name))
     }
@@ -542,22 +573,38 @@ impl DiskCache {
         self.dir.join(RENDERED_DIR).join(key.as_str()).join(format!("{:016x}", fnv64(query.as_bytes())))
     }
 
-    /// Map a cached entry if present and of the expected size.
+    /// Map a cached entry if present and of the expected size (0: any).
+    /// A file from before the current boot is checked against its CRC-32
+    /// first; a damaged one is deleted.
     pub fn get(&self, key: &ApkKey, entry_name: &str, expected_len: u64) -> Option<DexData> {
         if !self.uses(Tier::Dex) {
             return None;
         }
         let path = self.entry_path(key, entry_name);
         let file = fs::File::open(&path).ok()?;
-        let len = file.metadata().ok()?.len();
+        let meta = file.metadata().ok()?;
+        let len = meta.len().checked_sub(L1_TRAILER).filter(|&l| l > 0)?;
         if expected_len != 0 && len != expected_len {
             return None;
         }
-        // Touch the APK directory so LRU eviction sees recent use.
-        let _ = touch_dir(path.parent()?);
+        let mut trailer = [0u8; L1_TRAILER as usize];
+        (&file).seek(SeekFrom::Start(len)).ok()?;
+        (&file).read_exact(&mut trailer).ok()?;
         // Not `populate`d: pre-faulting every entry of an APK costs more than
         // faulting in the pages a query reads (getclass reads one class).
-        Some(DexData::Mapped(map_file(&file)?))
+        let map = map_prefix(&file, len)?;
+        if &trailer[..4] != L1_MAGIC {
+            return self.discard(&path);
+        }
+        if self.predates_boot(&meta) {
+            if crc32fast::hash(&map) != u32::from_le_bytes(trailer[4..].try_into().expect("4 bytes")) {
+                return self.discard(&path);
+            }
+            let _ = touch_file(&file);
+        }
+        // Touch the APK directory so LRU eviction sees recent use.
+        let _ = touch_dir(path.parent()?);
+        Some(DexData::Mapped(map))
     }
 
     /// Store an inflated entry (atomic rename; concurrent writers are
@@ -567,7 +614,10 @@ impl DiskCache {
         if !self.uses(Tier::Dex) {
             return Ok(());
         }
-        self.write_atomic(&self.entry_path(key, entry_name), &[bytes], true)
+        let mut trailer = [0u8; L1_TRAILER as usize];
+        trailer[..4].copy_from_slice(L1_MAGIC);
+        trailer[4..].copy_from_slice(&crc32fast::hash(bytes).to_le_bytes());
+        self.write_atomic(&self.entry_path(key, entry_name), &[bytes, &trailer])
     }
 
     /// Map the L2 index `name` (e.g. a logical DEX name) of `kind` at the
@@ -578,7 +628,9 @@ impl DiskCache {
         if !self.uses(Tier::Derived) {
             return None;
         }
-        let file = fs::File::open(self.derived_path(key, name, kind, version)).ok()?;
+        let path = self.derived_path(key, name, kind, version);
+        let file = fs::File::open(&path).ok()?;
+        let meta = file.metadata().ok()?;
         let map = map_file(&file)?;
         let header = map.get(..DERIVED_HEADER)?;
         let u32_at = |o: usize| u32::from_le_bytes(header[o..o + 4].try_into().expect("4 bytes"));
@@ -589,6 +641,9 @@ impl DiskCache {
             || u64_at(24) != (map.len() - DERIVED_HEADER) as u64
         {
             return None;
+        }
+        if self.predates_boot(&meta) && crc32fast::hash(&map[DERIVED_HEADER..]) != u32_at(32) {
+            return self.discard(&path);
         }
         let _ = touch_file(&file);
         Some(Derived { build_cost: Duration::from_micros(u64_at(16)), map })
@@ -615,7 +670,8 @@ impl DiskCache {
         header[12..16].copy_from_slice(&version.to_le_bytes());
         header[16..24].copy_from_slice(&(build_cost.as_micros() as u64).to_le_bytes());
         header[24..32].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-        self.write_atomic(&self.derived_path(key, name, kind, version), &[&header, payload], false)
+        header[32..36].copy_from_slice(&crc32fast::hash(payload).to_le_bytes());
+        self.write_atomic(&self.derived_path(key, name, kind, version), &[&header, payload])
     }
 
     /// The L3 result stored under `query` (the query, its options and the
@@ -627,9 +683,13 @@ impl DiskCache {
         let path = self.rendered_path(key, query);
         let mut data = fs::read(&path).ok()?;
         let key_len = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?) as usize;
-        let body = 12usize.checked_add(key_len)?;
+        let crc = u32::from_le_bytes(data.get(12..16)?.try_into().ok()?);
+        let body = 16usize.checked_add(key_len)?;
+        if data.get(..8)? != RENDERED_MAGIC || crc32fast::hash(&data[16..]) != crc {
+            return self.discard(&path);
+        }
         // The full key is stored and compared, so a hash collision is a miss.
-        if data.get(..8)? != RENDERED_MAGIC || data.get(12..body)? != query.as_bytes() {
+        if data.get(16..body)? != query.as_bytes() {
             return None;
         }
         if let Ok(f) = fs::File::open(&path) {
@@ -644,11 +704,15 @@ impl DiskCache {
         if !self.uses(Tier::Rendered) {
             return Ok(());
         }
-        let mut header = Vec::with_capacity(12 + query.len());
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(query.as_bytes());
+        crc.update(payload);
+        let mut header = Vec::with_capacity(16 + query.len());
         header.extend_from_slice(RENDERED_MAGIC);
         header.extend_from_slice(&(query.len() as u32).to_le_bytes());
+        header.extend_from_slice(&crc.finalize().to_le_bytes());
         header.extend_from_slice(query.as_bytes());
-        self.write_atomic(&self.rendered_path(key, query), &[&header, payload], false)
+        self.write_atomic(&self.rendered_path(key, query), &[&header, payload])
     }
 
     /// Record where the APK of `key` lives, so eviction can tell the entries
@@ -660,17 +724,14 @@ impl DiskCache {
         if fs::read_to_string(&path).is_ok_and(|s| s == stamp) {
             return Ok(());
         }
-        self.write_atomic(&path, &[stamp.as_bytes()], false)
+        self.write_atomic(&path, &[stamp.as_bytes()])
     }
 
     /// Write `parts` to `path` (atomic rename; concurrent writers are
     /// harmless), refusing foreign directories and the free-space reserve.
-    /// With `sync` the data reaches the disk before the rename. L1 entries
-    /// are only checked by length on read, so they are synced; L2 and L3
-    /// files carry headers (and L3 an end marker) that a file cut short by
-    /// a crash fails, and a sync per small file costs more than the query
-    /// that wrote it (a one-shot process per query writes one or two).
-    fn write_atomic(&self, path: &Path, parts: &[&[u8]], sync: bool) -> Result<(), CacheError> {
+    /// Not synced: a file a crash damages fails its checksum on read (see
+    /// the module documentation).
+    fn write_atomic(&self, path: &Path, parts: &[&[u8]]) -> Result<(), CacheError> {
         // Checked before anything is created: the tag must never land in a
         // directory that holds someone else's files.
         if !self.is_cache_dir() {
@@ -697,9 +758,6 @@ impl DiskCache {
             let mut f = fs::File::create(&tmp).map_err(io_err(&tmp))?;
             for p in parts {
                 f.write_all(p).map_err(io_err(&tmp))?;
-            }
-            if sync {
-                f.sync_data().ok();
             }
         }
         fs::rename(&tmp, path).map_err(io_err(path))?;
@@ -1057,6 +1115,56 @@ fn map_file(file: &fs::File) -> Option<memmap2::Mmap> {
     unsafe { memmap2::MmapOptions::new().map(file) }.ok()
 }
 
+/// The first `len` bytes of `file`, mapped as [`map_file`] does.
+fn map_prefix(file: &fs::File, len: u64) -> Option<memmap2::Mmap> {
+    let len = usize::try_from(len).ok()?;
+    // SAFETY: as in `map_file`; the caller checked `len` against the file.
+    unsafe { memmap2::MmapOptions::new().len(len).map(file) }.ok()
+}
+
+/// Whether a file last modified at `mtime` may predate the current boot,
+/// and so may hold pages a crash kept from reaching the disk. Unknown
+/// times count as old, and so does a time in the future (a clock moved
+/// back since): checking a sound file costs one read, trusting a damaged
+/// one a wrong answer.
+fn predates_boot(mtime: Option<SystemTime>, boot: Option<SystemTime>, now: SystemTime) -> bool {
+    match (mtime, boot) {
+        (Some(m), Some(b)) => m < b || m > now,
+        _ => true,
+    }
+}
+
+/// When the system booted, read once per process.
+fn boot_time() -> Option<SystemTime> {
+    static BOOT: OnceLock<Option<SystemTime>> = OnceLock::new();
+    *BOOT.get_or_init(read_boot_time)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn read_boot_time() -> Option<SystemTime> {
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    let secs = stat.lines().find_map(|l| l.strip_prefix("btime "))?.trim().parse().ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+#[cfg(target_vendor = "apple")]
+fn read_boot_time() -> Option<SystemTime> {
+    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
+    let mut len = std::mem::size_of::<libc::timeval>();
+    // SAFETY: `kern.boottime` is a `struct timeval`; the kernel writes at most
+    // `len` bytes into `tv` and sets `len` to what it wrote.
+    let rc = unsafe { libc::sysctlbyname(c"kern.boottime".as_ptr(), (&raw mut tv).cast(), &mut len, std::ptr::null_mut(), 0) };
+    if rc != 0 || len != std::mem::size_of::<libc::timeval>() {
+        return None;
+    }
+    Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(tv.tv_sec).ok()?) + Duration::from_micros(u64::try_from(tv.tv_usec).ok()?))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn read_boot_time() -> Option<SystemTime> {
+    None
+}
+
 /// Rebuild cost recorded in an L2 file's header (0 when unreadable).
 fn derived_cost_us(path: &Path) -> u64 {
     use std::io::Read;
@@ -1277,15 +1385,15 @@ mod tests {
         assert_eq!(&*cache.get(&key, "classes.dex", 3).unwrap(), b"abc");
         assert!(cache.get(&key, "classes.dex", 4).is_none());
         let (dirs, files, bytes) = cache.stats();
-        assert_eq!((dirs, files, bytes), (1, 1, 3));
-        assert_eq!(cache.clear().unwrap(), 3);
+        assert_eq!((dirs, files, bytes), (1, 1, 3 + L1_TRAILER));
+        assert_eq!(cache.clear().unwrap(), 3 + L1_TRAILER);
         assert!(cache.get(&key, "classes.dex", 3).is_none());
     }
 
     #[test]
     fn disk_evicts_least_recently_used_apk() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = DiskCache::open(dir.path()).with_capacity(10);
+        let cache = DiskCache::open(dir.path()).with_capacity(20);
         let old = ApkKey("old-0000000000000001".into());
         let new = ApkKey("new-0000000000000002".into());
         cache.put(&old, "classes.dex", &[0; 6]).unwrap();
@@ -1293,9 +1401,9 @@ mod tests {
         let later = SystemTime::now() + Duration::from_secs(5);
         cache.put(&new, "classes.dex", &[0; 6]).unwrap();
         fs::File::open(dir.path().join("new-0000000000000002")).unwrap().set_modified(later).unwrap();
-        assert_eq!(cache.stats(), (2, 2, 12));
+        assert_eq!(cache.stats(), (2, 2, 2 * (6 + L1_TRAILER)));
         cache.evict();
-        assert_eq!(cache.stats(), (1, 1, 6));
+        assert_eq!(cache.stats(), (1, 1, 6 + L1_TRAILER));
         assert!(cache.get(&new, "classes.dex", 6).is_some());
         assert!(cache.get(&old, "classes.dex", 6).is_none());
     }
@@ -1364,12 +1472,12 @@ mod tests {
             fs::File::open(dir.path().join(k.as_str())).unwrap().set_modified(t).unwrap();
         }
         cache.evict();
-        assert_eq!(cache.stats(), (3, 3, 30));
+        assert_eq!(cache.stats(), (3, 3, 3 * (10 + L1_TRAILER)));
         // Same directory, smaller budget (as when the free space drops): the
         // next eviction pass trims to it, oldest first.
-        let cache = cache.with_capacity(15);
+        let cache = cache.with_capacity(25);
         cache.evict();
-        assert_eq!(cache.stats(), (1, 1, 10));
+        assert_eq!(cache.stats(), (1, 1, 10 + L1_TRAILER));
         assert!(cache.get(&keys[2], "classes.dex", 10).is_some());
     }
 
@@ -1399,12 +1507,12 @@ mod tests {
         fs::write(thesis.join("chapter1.txt"), vec![0u8; 100]).unwrap();
         fs::write(dir.path().join("notes.txt"), b"keep").unwrap();
         // Only the cache directory is counted, even though the thesis is bigger.
-        assert_eq!(cache.stats(), (1, 1, 8));
+        assert_eq!(cache.stats(), (1, 1, 8 + L1_TRAILER));
         cache.evict();
         assert!(thesis.join("chapter1.txt").is_file());
         assert!(cache.get(&key, "classes.dex", 8).is_none());
         cache.put(&key, "classes.dex", &[0; 8]).unwrap();
-        assert_eq!(cache.clear().unwrap(), 8);
+        assert_eq!(cache.clear().unwrap(), 8 + L1_TRAILER);
         assert!(thesis.join("chapter1.txt").is_file());
         assert!(dir.path().join("notes.txt").is_file());
         assert!(dir.path().join(CACHEDIR_TAG).is_file());
@@ -1600,6 +1708,105 @@ mod tests {
     }
 
     #[test]
+    fn files_are_checked_when_they_predate_the_boot() {
+        let now = SystemTime::now();
+        let boot = Some(now - Duration::from_secs(60));
+        assert!(predates_boot(Some(now - Duration::from_secs(61)), boot, now));
+        assert!(!predates_boot(Some(now - Duration::from_secs(59)), boot, now));
+        // A clock moved back, an unknown boot or mtime: checked.
+        assert!(predates_boot(Some(now + Duration::from_secs(5)), boot, now));
+        assert!(predates_boot(Some(now), None, now));
+        assert!(predates_boot(None, boot, now));
+    }
+
+    /// A cache whose system booted a minute ago.
+    fn booted_cache(dir: &Path) -> DiskCache {
+        let mut cache = DiskCache::open(dir).with_capacity(1 << 20);
+        cache.boot = Some(SystemTime::now() - Duration::from_secs(60));
+        cache
+    }
+
+    /// Overwrite `damage` (offset, bytes) and cut the file to `cut`, then
+    /// make it look written before the boot of [`booted_cache`].
+    fn age(path: &Path, damage: Option<(u64, &[u8])>, cut: Option<u64>) {
+        let f = fs::OpenOptions::new().write(true).open(path).unwrap();
+        if let Some((at, bytes)) = damage {
+            (&f).seek(SeekFrom::Start(at)).unwrap();
+            (&f).write_all(bytes).unwrap();
+        }
+        if let Some(len) = cut {
+            f.set_len(len).unwrap();
+        }
+        f.set_modified(SystemTime::now() - Duration::from_secs(120)).unwrap();
+    }
+
+    #[test]
+    fn l1_files_from_an_earlier_boot_are_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = booted_cache(dir.path());
+        let key = ApkKey("app-0123456789abcdef".into());
+        let data: Vec<u8> = (0..4096u32).map(|i| i as u8).collect();
+        let path = cache.entry_path(&key, "classes.dex");
+        let n = data.len() as u64;
+
+        // Sound: served, and marked checked for this boot.
+        cache.put(&key, "classes.dex", &data).unwrap();
+        age(&path, None, None);
+        assert_eq!(&*cache.get(&key, "classes.dex", n).unwrap(), &data[..]);
+        assert!(!cache.predates_boot(&fs::metadata(&path).unwrap()));
+
+        // Zeroed pages, a flipped byte: deleted and missed.
+        let flipped = [!data[7]];
+        for (at, bytes) in [(1024, &[0u8; 1024][..]), (7, &flipped[..])] {
+            cache.put(&key, "classes.dex", &data).unwrap();
+            age(&path, Some((at, bytes)), None);
+            assert!(cache.get(&key, "classes.dex", n).is_none(), "damage at {at}");
+            assert!(!path.exists(), "damage at {at}");
+        }
+        // Cut short (looked up without a declared size, so the length alone
+        // cannot tell): the trailer is gone.
+        for cut in [n, n - 100] {
+            cache.put(&key, "classes.dex", &data).unwrap();
+            age(&path, None, Some(cut));
+            assert!(cache.get(&key, "classes.dex", 0).is_none(), "cut to {cut}");
+            assert!(!path.exists(), "cut to {cut}");
+        }
+
+        // Written during this boot: trusted without a check.
+        cache.put(&key, "classes.dex", &data).unwrap();
+        let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        (&f).write_all(&[!data[0]]).unwrap();
+        f.set_modified(SystemTime::now()).unwrap();
+        assert_eq!(cache.get(&key, "classes.dex", n).unwrap()[0], !data[0]);
+    }
+
+    #[test]
+    fn l2_and_l3_files_carry_checksums() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = booted_cache(dir.path());
+        let key = ApkKey("app-0123456789abcdef".into());
+        let path = cache.derived_path(&key, "classes.dex", "locators", 1);
+        let flip = DERIVED_HEADER as u64 + 3;
+        cache.put_derived(&key, "classes.dex", "locators", 1, Duration::from_millis(7), b"tables").unwrap();
+        age(&path, None, None);
+        assert_eq!(&*cache.get_derived(&key, "classes.dex", "locators", 1).unwrap(), b"tables");
+        age(&path, Some((flip, b"X")), None);
+        assert!(cache.get_derived(&key, "classes.dex", "locators", 1).is_none());
+        assert!(!path.exists());
+
+        // L3 is checked on every read.
+        cache.put_rendered(&key, "q", b"rows").unwrap();
+        assert_eq!(cache.get_rendered(&key, "q").unwrap(), b"rows");
+        let path = cache.rendered_path(&key, "q");
+        let len = fs::metadata(&path).unwrap().len();
+        let f = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        (&f).seek(SeekFrom::Start(len - 1)).unwrap();
+        (&f).write_all(b"X").unwrap();
+        assert!(cache.get_rendered(&key, "q").is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn derived_roundtrip_is_versioned_and_aligned() {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
@@ -1651,7 +1858,7 @@ mod tests {
         cache.put_rendered(&b, "q", &[0; 3]).unwrap();
         let (apks, files, bytes) = cache.stats();
         assert_eq!((apks, files), (2, 3));
-        assert_eq!(bytes, 10 + (64 + 6) + (12 + 1 + 3));
+        assert_eq!(bytes, (10 + L1_TRAILER) + (64 + 6) + (16 + 1 + 3));
         let [l1, l2, l3] = cache.tier_stats();
         assert_eq!((l1.apks, l2.apks, l3.apks), (1, 1, 1));
         // A cache with tier directories but no tag (lost) is still ours.

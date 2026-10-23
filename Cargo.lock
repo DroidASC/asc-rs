@@ -206,6 +206,7 @@ name = "asc-cache"
 version = "0.1.0"
 dependencies = [
  "asc-apk",
+ "crc32fast",
  "libc",
  "memmap2",
  "tempfile",
