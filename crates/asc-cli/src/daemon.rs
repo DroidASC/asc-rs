@@ -461,7 +461,7 @@ struct Daemon {
 #[derive(Default)]
 struct Pool {
     /// `(canonical APK path, threads)` -> engine and its last use.
-    engines: HashMap<(PathBuf, usize), (Arc<Engine>, u64)>,
+    engines: HashMap<(PathBuf, Option<usize>), (Arc<Engine>, u64)>,
     tick: u64,
 }
 
