@@ -171,6 +171,10 @@ pub enum Query {
     Extends(String),
     /// Classes that directly implement exactly this interface descriptor.
     Implements(String),
+    /// Methods matched by how they are declared, not by what their code
+    /// references (`flag:`, `annotation:`, `override:`, `in:{...}`). Answered
+    /// from the class definitions; the rows have no call site.
+    Defined(Defined),
     /// Methods whose code matches every query of `all` and none of `none`
     /// (string / type / method / field queries; at least one in `all`).
     /// A row lists the constants each `all` query matched, in that order.
@@ -187,7 +191,7 @@ impl Query {
         match self {
             Query::String(_) | Query::StringLiteral(_) => RefKind::String,
             Query::Type(_) | Query::Extends(_) | Query::Implements(_) => RefKind::Type,
-            Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) | Query::Call { .. } => RefKind::Method,
+            Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) | Query::Call { .. } | Query::Defined(_) => RefKind::Method,
             Query::Field(_) => RefKind::Field,
             // Rows of a compound query list constants of several kinds.
             Query::All { all, .. } => all.first().map_or(RefKind::String, Query::kind),
@@ -200,6 +204,45 @@ impl Query {
             Query::Extends(_) => Some(ClassRelation::Extends),
             Query::Implements(_) => Some(ClassRelation::Implements),
             _ => None,
+        }
+    }
+}
+
+/// A method-definition predicate ([`Query::Defined`]).
+///
+/// `Flags` and `Annotation` are matched against each method's own
+/// declaration. `Override` and `In` need the class hierarchy (which spans
+/// every DEX), so the engine resolves them into `Members` — a set of
+/// declaring classes, optionally with a name and proto — before a search;
+/// compiling them unresolved fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Defined {
+    /// Carries all of these access flags (`flag:public,static`).
+    Flags(u32),
+    /// Annotated with this annotation type descriptor (`annotation:Lx/Y;`).
+    Annotation(String),
+    /// Declared in one of `classes` (exact descriptors), and, when set, with
+    /// this `name` and `proto` (`(params)ret`). `override:` and `in:{...}`
+    /// resolve to this.
+    Members { classes: Vec<String>, name: Option<String>, proto: Option<String> },
+    /// `override:TARGET`: methods overriding or implementing it. The engine
+    /// resolves it into `Members` over the class hierarchy.
+    Override(MemberQuery),
+    /// `in:{CLASS-RULE}`: methods declared in a matching class. The engine
+    /// resolves it into `Members`.
+    In(Box<Query>),
+}
+
+impl Defined {
+    /// A short label for the matched column of a definitional row.
+    pub fn label(&self) -> String {
+        match self {
+            Defined::Flags(_) => "flag".into(),
+            Defined::Annotation(a) => format!("@{a}"),
+            Defined::Members { name: Some(n), .. } => format!("override {n}"),
+            Defined::Members { .. } => "in".into(),
+            Defined::Override(m) => format!("override {}", m.name.as_deref().unwrap_or("")),
+            Defined::In(_) => "in".into(),
         }
     }
 }
@@ -419,6 +462,21 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             Parts::Call(c) => self.cannot_match(&c.target),
             // A class nobody references cannot be extended or implemented.
             Parts::Relation(_, descriptor) => Ok(self.dex.find_type_idx(descriptor)?.is_none()),
+            // A definition predicate reads no code, so locating it yields
+            // nothing: rule it out only from the type table (flags could be
+            // on any method, so they never skip).
+            Parts::Defined(Defined::Flags(_)) => Ok(false),
+            Parts::Defined(Defined::Annotation(a)) => Ok(self.dex.find_type_idx(&asc_dex::mutf8::encode(a))?.is_none()),
+            Parts::Defined(Defined::Members { classes, .. }) => {
+                for c in classes {
+                    if self.dex.find_type_idx(&asc_dex::mutf8::encode(c))?.is_some() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            // Unresolved predicates never reach a search.
+            Parts::Defined(Defined::Override(_) | Defined::In(_)) => Ok(false),
             // Nor can its members be: one binary search, before the member
             // tables are built (most DEX files do not reference the class).
             Parts::Member(query::CompiledMember { class: Some(query::CompiledClass::Precise(descriptor)), .. })
@@ -442,7 +500,7 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     /// no hits here; [`FindRefs::class_relation`] answers them. Compound
     /// queries give none either: run their parts with [`FindRefs::find_many`].
     pub fn find_ref_compiled(&self, query: &CompiledQuery) -> Result<Vec<Hit>> {
-        if query.relation().is_some() || query.compound().is_some() {
+        if query.relation().is_some() || query.compound().is_some() || query.defined().is_some() {
             return Ok(Vec::new());
         }
         let idxs = self.locate_compiled(query)?;

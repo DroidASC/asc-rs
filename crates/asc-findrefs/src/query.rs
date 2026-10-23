@@ -5,7 +5,7 @@
 //! [`FindRefs`](crate::FindRefs) through `find_ref_compiled`.
 
 use crate::calls::CompiledCall;
-use crate::{ClassQuery, ClassRelation, FindError, MemberQuery, MemberSignature, Query, RefKind, Result, TypeMatch};
+use crate::{ClassQuery, ClassRelation, Defined, FindError, MemberQuery, MemberSignature, Query, RefKind, Result, TypeMatch};
 use memchr::memmem::Finder;
 use regex::bytes::Regex;
 
@@ -80,6 +80,10 @@ pub(crate) enum Parts {
     MemberSet(Vec<CompiledMember>),
     /// Class-definition query: the MUTF-8 encoded target descriptor.
     Relation(ClassRelation, Vec<u8>),
+    /// Method-definition predicate ([`Query::Defined`]), resolved. It names no
+    /// constant pool index, so the engine answers it from the class
+    /// definitions rather than a code scan.
+    Defined(Defined),
     Compound(Compound),
     /// A method query whose call sites are judged by their values.
     Call(CompiledCall),
@@ -122,6 +126,12 @@ impl CompiledQuery {
                 ))
             }
             Query::Call { target, constraints } => Parts::Call(CompiledCall::new(target, constraints)?),
+            Query::Defined(Defined::Override(_) | Defined::In(_)) => {
+                return Err(FindError::Invalid(
+                    "override: / in:{...} need the class hierarchy (every DEX); the engine resolves them before a search".into(),
+                ))
+            }
+            Query::Defined(d) => Parts::Defined(d.clone()),
             Query::Field(m) => Parts::Member(compile_member(m, RefKind::Field)?),
             Query::Extends(d) => Parts::Relation(ClassRelation::Extends, asc_dex::mutf8::encode(d)),
             Query::Implements(d) => Parts::Relation(ClassRelation::Implements, asc_dex::mutf8::encode(d)),
@@ -166,6 +176,15 @@ impl CompiledQuery {
     pub fn compound(&self) -> Option<&Compound> {
         match &self.parts {
             Parts::Compound(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The resolved method-definition predicate of a [`Query::Defined`].
+    #[inline]
+    pub fn defined(&self) -> Option<&Defined> {
+        match &self.parts {
+            Parts::Defined(d) => Some(d),
             _ => None,
         }
     }

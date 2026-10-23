@@ -321,3 +321,78 @@ fn cancelled_walks_stop_and_leave_nothing_half_built() {
         assert_eq!(engine.call_graph(&call).unwrap().lines().len(), 3);
     }
 }
+
+fn rule(spec: &str) -> Query {
+    names::parse_rule(spec).unwrap()
+}
+
+#[test]
+fn definition_predicates_match_methods_by_how_they_are_declared() {
+    let apk = temp_apk();
+    for engine in engines(apk.path()) {
+        // override: the base method and every subtype's, across DEX files.
+        assert_eq!(
+            lines(&engine, &rule("override:b.Api->run")),
+            [
+                "classes.dex | La/Base;->run()V | override run",
+                "classes.dex | La/Sub;->run()V | override run",
+                "classes2.dex | Lb/Api;->run()V | override run",
+                "classes2.dex | Lb/Impl;->run()V | override run",
+            ]
+        );
+        // flag: the three static methods of Caller.
+        assert_eq!(
+            lines(&engine, &rule("flag:static")),
+            [
+                "classes.dex | La/Caller;->call()V | flag",
+                "classes.dex | La/Caller;->go()V | flag",
+                "classes.dex | La/Caller;->only()V | flag"
+            ]
+        );
+        // in:{extends:...}: Base and its subclasses that define a method.
+        assert_eq!(
+            lines(&engine, &rule("in:{extends:a.Base}")),
+            ["classes.dex | La/Base;->run()V | in", "classes.dex | La/Sub;->run()V | in"]
+        );
+        // override: needs a concrete class.
+        assert!(engine.find_refs(&rule("override:run"), |_| {}).unwrap_err().to_string().contains("concrete class"));
+    }
+}
+
+#[test]
+fn definition_predicates_compose_with_code_conditions() {
+    let apk = temp_apk();
+    for engine in engines(apk.path()) {
+        // Static methods that also load "token": go and only (not call).
+        assert_eq!(
+            lines(&engine, &rule("string:token & flag:static")),
+            ["classes.dex | La/Caller;->go()V | \"token\", flag", "classes.dex | La/Caller;->only()V | \"token\", flag"]
+        );
+        // Static methods that do not load "token": only call is left.
+        assert_eq!(lines(&engine, &rule("flag:static & !string:token")), ["classes.dex | La/Caller;->call()V | flag"]);
+        // A compound of only definition parts intersects their method sets.
+        assert_eq!(
+            lines(&engine, &rule("in:{extends:a.Base} & override:b.Api->run")),
+            ["classes.dex | La/Base;->run()V | in, override run", "classes.dex | La/Sub;->run()V | in, override run"]
+        );
+    }
+}
+
+#[test]
+fn nested_and_callgraph_seed_from_definition_predicates() {
+    let apk = temp_apk();
+    for engine in engines(apk.path()) {
+        // Call sites of the methods that override Api.run: Caller.call and
+        // Caller.go both invoke Base.run.
+        assert_eq!(
+            lines(&engine, &rule("method:{override:b.Api->run}")),
+            ["classes.dex | La/Caller;->call()V | La/Base;->run()V", "classes.dex | La/Caller;->go()V | La/Base;->run()V"]
+        );
+        // callgraph --to seeds the callers walk with every overrider.
+        let roots = asc_engine::CallRoots::Matching(rule("override:b.Api->run"));
+        let t = engine.call_graph(&CallQuery { depth: 2, ..CallQuery::new(roots, Direction::Callers) }).unwrap();
+        let lines = t.lines();
+        assert!(lines.iter().any(|l| l.contains("La/Caller;->call()V")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("La/Caller;->go()V")), "{lines:?}");
+    }
+}

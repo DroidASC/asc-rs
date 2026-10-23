@@ -11,7 +11,7 @@ use crate::{
 };
 use asc_apk::Entry;
 use asc_cache::Tier;
-use asc_findrefs::{CompiledQuery, Compound, FindRefs, Query};
+use asc_findrefs::{CompiledQuery, Compound, Defined, FindRefs, Query};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
@@ -23,35 +23,62 @@ use std::time::Instant;
 /// matching instruction of the `all` parts, in offset order.
 pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindOptions) -> Result<Vec<RefResult>> {
     let dex = fr.dex();
-    let parts: Vec<&CompiledQuery> = c.all.iter().chain(&c.none).collect();
+    // Code parts are found with a shared scan; definition parts (`flag:`,
+    // `override:`, ...) name methods from the class definitions instead.
+    let code_all: Vec<&CompiledQuery> = c.all.iter().filter(|q| q.defined().is_none()).collect();
+    let code_none: Vec<&CompiledQuery> = c.none.iter().filter(|q| q.defined().is_none()).collect();
+    let def_all: Vec<&Defined> = c.all.iter().filter_map(|q| q.defined()).collect();
+    let def_none: Vec<&Defined> = c.none.iter().filter_map(|q| q.defined()).collect();
+
+    let parts: Vec<&CompiledQuery> = code_all.iter().chain(&code_none).copied().collect();
     let hits = fr.find_many(&parts)?;
-    let n = c.all.len();
-    // method -> per `all` part, its (offset, matched index, note) hits
+    let n = code_all.len();
+    // method -> per code `all` part, its (offset, matched index, note) hits
     type PartHits<'h> = Vec<(u32, u32, Option<&'h str>)>;
     let mut methods: BTreeMap<u32, Vec<PartHits<'_>>> = BTreeMap::new();
-    for (p, part_hits) in hits[..n].iter().enumerate() {
-        for h in part_hits {
-            let Some(ms) = &h.methods else { continue };
-            for &m in ms.ids() {
-                // The first part proposes the methods, the others can only keep them.
-                let slot = if p == 0 { Some(methods.entry(m).or_insert_with(|| vec![Vec::new(); n])) } else { methods.get_mut(&m) };
-                if let Some(slot) = slot {
-                    slot[p].push((h.offset, h.matched_idx, h.note.as_deref()));
+    if n == 0 {
+        // No code part proposes methods: seed from the first definition part.
+        let seed = defined_method_set(dex, def_all[0])?;
+        for m in seed {
+            methods.insert(m, Vec::new());
+        }
+    } else {
+        for (p, part_hits) in hits[..n].iter().enumerate() {
+            for h in part_hits {
+                let Some(ms) = &h.methods else { continue };
+                for &m in ms.ids() {
+                    // The first part proposes the methods, the others can only keep them.
+                    let slot = if p == 0 { Some(methods.entry(m).or_insert_with(|| vec![Vec::new(); n])) } else { methods.get_mut(&m) };
+                    if let Some(slot) = slot {
+                        slot[p].push((h.offset, h.matched_idx, h.note.as_deref()));
+                    }
                 }
             }
         }
+        methods.retain(|_, per_part| per_part.iter().all(|h| !h.is_empty()));
     }
-    methods.retain(|_, per_part| per_part.iter().all(|h| !h.is_empty()));
+    // Keep only methods every definition `all` part also names (`def_all[0]`
+    // already seeded the set when there is no code part).
+    for d in def_all.iter().skip(usize::from(n == 0)) {
+        let keep = defined_method_set(dex, d)?;
+        methods.retain(|m, _| keep.contains(m));
+    }
+    // Drop methods a `none` part matches, code or definition.
     for h in hits[n..].iter().flatten() {
         for &m in h.methods.iter().flat_map(|ms| ms.ids()) {
             methods.remove(&m);
         }
     }
+    for d in &def_none {
+        let drop = defined_method_set(dex, d)?;
+        methods.retain(|m, _| !drop.contains(m));
+    }
+    let def_labels: Vec<String> = def_all.iter().map(|d| d.label()).collect();
     let mut rows = Vec::with_capacity(methods.len());
     for (m, per_part) in methods {
         let mut matched = Vec::new();
         let mut sites = Vec::new();
-        for (part, part_hits) in c.all.iter().zip(per_part) {
+        for (part, part_hits) in code_all.iter().zip(per_part) {
             let mut idxs: Vec<(u32, Option<&str>)> = part_hits.iter().map(|&(_, i, note)| (i, note)).collect();
             idxs.sort_unstable();
             idxs.dedup();
@@ -63,6 +90,9 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
                 sites.push(RefSite { offset, matched: base + idxs.binary_search(&(i, note)).unwrap_or(0), pc: None, line: None });
             }
         }
+        for label in &def_labels {
+            matched.push(crate::Matched::Symbol(label.clone()));
+        }
         sites.sort_by_key(|s| s.offset);
         rows.push(RefResult::method_row(dex, m, matched, sites)?);
     }
@@ -72,11 +102,18 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
     Ok(rows)
 }
 
+/// The method ids a resolved definition predicate names in this DEX, as a set.
+fn defined_method_set(dex: &asc_dex::Dex<'_>, d: &Defined) -> Result<std::collections::BTreeSet<u32>> {
+    Ok(crate::defs::defined_methods(dex, d)?.into_iter().collect())
+}
+
 /// Rows of every rule over one DEX, one list per rule. Plain code queries
 /// share [`FindRefs::find_many`]'s scans; class relations and compound
 /// queries run on their own.
 pub(crate) fn rule_rows(fr: &FindRefs<'_, '_, '_>, rules: &[&CompiledQuery], opts: FindOptions) -> Result<Vec<Vec<RefResult>>> {
-    let plain: Vec<usize> = (0..rules.len()).filter(|&i| rules[i].relation().is_none() && rules[i].compound().is_none()).collect();
+    let plain: Vec<usize> = (0..rules.len())
+        .filter(|&i| rules[i].relation().is_none() && rules[i].compound().is_none() && rules[i].defined().is_none())
+        .collect();
     let hits = fr.find_many(&plain.iter().map(|&i| rules[i]).collect::<Vec<_>>())?;
     let mut out: Vec<Option<Vec<RefResult>>> = (0..rules.len()).map(|_| None).collect();
     for (&i, hits) in plain.iter().zip(hits) {
@@ -151,7 +188,7 @@ impl Engine {
         // The `method:{RULE}` conditions of the rules to search, all in one
         // pass first. L3 keys on the rules as given, so replays skip this.
         let todo: Vec<Query> = missing.iter().map(|&i| rules[i].clone()).collect();
-        let resolved = self.resolve_nested(&todo, cancel)?;
+        let resolved = self.resolve(&todo, cancel)?;
         let _query = self.prebuild.query();
         let compiled = compile_rules(resolved.as_deref().unwrap_or(&todo))?;
         let mut recorders: Vec<_> = missing.iter().map(|_| rendered.map(|_| tiers::ResultRecorder::new())).collect();
