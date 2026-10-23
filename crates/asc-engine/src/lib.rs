@@ -688,6 +688,15 @@ impl Engine {
         self.cache.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
     }
 
+    /// Drop this APK's entries from the in-memory cache (shared or not) and
+    /// return the bytes released; queries still holding them keep them alive.
+    pub fn release_memory_cache(&self) -> usize {
+        let Some(memory) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
+        let key = self.key_cache.lock().unwrap().as_ref().map(|(_, _, key)| key.clone());
+        let Some(key) = key.or_else(|| self.open().ok().and_then(|apk| self.apk_key(&apk))) else { return 0 };
+        memory.lock().unwrap().remove_apk(&key)
+    }
+
     /// Entry bytes of the in-memory cache that are mapped from the disk cache
     /// (file-backed pages the OS can reclaim) rather than held on the heap.
     pub fn memory_cache_mapped_bytes(&self) -> usize {

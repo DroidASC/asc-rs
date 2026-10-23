@@ -143,9 +143,10 @@ enum Command {
     /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
     /// opened APKs resident across calls.
     Mcp {
-        /// In-memory cache budget shared by every opened APK, in MiB.
-        #[arg(long, value_name = "MIB", default_value_t = 2048)]
-        memory_mb: usize,
+        /// In-memory cache budget shared by every opened APK, in MiB
+        /// (default: a quarter of available memory, at most 2048).
+        #[arg(long, value_name = "MIB")]
+        memory_mb: Option<usize>,
     },
     /// Inspect or clear the on-disk cache of inflated DEX files.
     Cache {
@@ -433,7 +434,10 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
             let opts = asc_mcp::Options {
                 threads: common.threads,
                 debug: common.debug,
-                cache: CacheConfig { memory_bytes: memory_mb.saturating_mul(1 << 20), disk },
+                cache: CacheConfig {
+                    memory_bytes: memory_mb.map_or_else(asc_engine::auto_memory_bytes, |mb| mb.saturating_mul(1 << 20)),
+                    disk,
+                },
             };
             asc_mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), opts).map_err(|e| format!("mcp: {e}"))?;
         }

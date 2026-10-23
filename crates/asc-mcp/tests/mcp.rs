@@ -107,7 +107,9 @@ fn full_session() {
 
     // Same path → same session.
     assert_eq!(ok(&replies[8])["apk_id"], "apk1");
-    assert_eq!(ok(&replies[9])["closed"], true);
+    let closed = ok(&replies[9]);
+    assert_eq!(closed["closed"], true);
+    assert!(closed["released_bytes"].as_u64().unwrap() > 0);
     assert_eq!(replies[10]["result"], json!({}));
 }
 

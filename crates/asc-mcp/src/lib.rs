@@ -235,7 +235,11 @@ impl Server {
     fn close_apk(&mut self, args: &Value) -> ToolResult {
         let Some(i) = self.index_of(args)? else { return Err(ToolError("that APK is not open".into())) };
         let apk = self.apks.remove(i);
-        Ok((format!("closed {}", apk.id), json!({"apk_id": apk.id, "closed": true})))
+        let released = apk.engine.release_memory_cache();
+        Ok((
+            format!("closed {} (released {} MiB of cached DEX)", apk.id, released >> 20),
+            json!({"apk_id": apk.id, "closed": true, "released_bytes": released}),
+        ))
     }
 
     // ---- queries -----------------------------------------------------------

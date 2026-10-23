@@ -500,6 +500,13 @@ impl<T> MemoryCache<T> {
         self.len() == 0
     }
 
+    /// Drop every entry cached for `key` and return the bytes released.
+    pub fn remove_apk(&mut self, key: &ApkKey) -> usize {
+        let freed: usize = self.map.remove(key).map(|per| per.values().map(|s| s.size).sum()).unwrap_or(0);
+        self.used -= freed;
+        freed
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
         self.used = 0;
@@ -509,6 +516,19 @@ impl<T> MemoryCache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_remove_apk_releases_only_that_apk() {
+        let (a, b) = (ApkKey("a-0123456789abcdef".into()), ApkKey("b-0123456789abcdef".into()));
+        let mut mem = MemoryCache::new(1 << 20);
+        mem.insert(&a, "classes.dex", Arc::new(1), 100);
+        mem.insert(&a, "classes2.dex", Arc::new(2), 50);
+        mem.insert(&b, "classes.dex", Arc::new(3), 7);
+        assert_eq!(mem.remove_apk(&a), 150);
+        assert_eq!(mem.remove_apk(&a), 0);
+        assert_eq!((mem.used_bytes(), mem.len()), (7, 1));
+        assert!(mem.get(&b, "classes.dex").is_some());
+    }
 
     #[test]
     fn disk_roundtrip_and_clear() {

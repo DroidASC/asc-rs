@@ -215,7 +215,7 @@ on the shared high operand byte before the linear sweep.
 `droidasc mcp` is a resident session for agents: an MCP server on stdio (JSON-RPC 2.0, one
 message per line). It keeps every APK it opens in one process, so the inflated DEX files
 and locator tables stay in memory between calls instead of being rebuilt by a new process
-per question. All opened APKs share one in-memory budget (`--memory-mb`, default 2048); the
+per question. All opened APKs share one in-memory budget (`--memory-mb`, default a quarter of available memory, at most 2048 MiB); `close_apk` releases that APK's share; the
 on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`).
 
 ```json
