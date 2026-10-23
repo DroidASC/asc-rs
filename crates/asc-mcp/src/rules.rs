@@ -3,11 +3,11 @@
 
 use crate::multi::{self, Report, Section};
 use crate::{
-    bool_arg, context_arg, describe_query, max_bytes, parse_query, ref_json, result_json, str_arg, usize_arg, Call, Found, OpenApk, Server,
-    ToolError, ToolResult, PER_APK,
+    bool_arg, choice_arg, context_arg, describe_query, max_bytes, parse_query, ref_json, result_json, str_arg, usize_arg, Call, Found,
+    OpenApk, Server, ToolError, ToolResult, PER_APK,
 };
 use asc_engine::{
-    compile_rules, names, Claim, CompiledQuery, DexDedup, FindOptions, HierarchyQuery, Lineage, RefBatch, RefResult, SearchTarget,
+    compile_rules, hints, names, Claim, CompiledQuery, DexDedup, FindOptions, HierarchyQuery, Lineage, RefBatch, RefResult, SearchTarget,
 };
 use asc_findrefs::Query;
 use serde_json::{json, Map, Value};
@@ -203,11 +203,16 @@ impl Server {
             if let Some(n) = &next {
                 text.push_str(&format!("{name} | more | {} more: findrefs {n}\n", total - page.len()));
             }
+            let hint = (total == 0 && found.sdk_hits == 0).then(|| hints::query_hint(&queries[i])).flatten();
+            if let Some(h) = &hint {
+                text.push_str(&format!("# {name} hint: {h}\n"));
+            }
             errors.extend(std::mem::take(&mut found.errors));
             out.push(json!({
                 "rule": name,
                 "query": rules[i],
                 "total": total,
+                "hint": hint,
                 "returned": page.len(),
                 "results": page.iter().map(|r| ref_json(r, context)).collect::<Vec<_>>(),
                 "sdk_hits": found.sdk_hits,
@@ -236,12 +241,14 @@ impl Server {
         // Identical DEX in several APKs is searched once (per set of rules).
         let dedup = DexDedup::new();
         let cached_rules = AtomicUsize::new(0);
+        let dex_entries = AtomicUsize::new(0);
         let (sections, empty, stats) = self.sweep(
             paths,
             call,
             bool_arg(args, "release")?,
             |apk| {
                 let target = apk.engine.search_target().map_err(|e| e.to_string())?;
+                dex_entries.fetch_add(target.entries.len(), Ordering::Relaxed);
                 // L3: each rule may have run on this APK version already, alone or in a set.
                 let mut cached = Vec::new();
                 let mut missing = Vec::new();
@@ -301,8 +308,16 @@ impl Server {
             stats.hits,
             stats.errors
         );
+        if rule_hits.iter().any(|&(hits, _)| hits == 0) {
+            header.push_str(&format!("\n# hint: {}", hints::searched_hint(paths.len(), dex_entries.load(Ordering::Relaxed))));
+        }
+        let rule_hints: Vec<Option<String>> =
+            rule_hits.iter().zip(queries).map(|(&(hits, _), q)| (hits == 0).then(|| hints::query_hint(q)).flatten()).collect();
         for (i, (hits, apks)) in rule_hits.iter().enumerate() {
             header.push_str(&format!("\n# {} {}: {hits} hits in {apks} APKs", names[i], describe(&rules[i])));
+            if let Some(h) = &rule_hints[i] {
+                header.push_str(&format!("\n# {} hint: {h}", names[i]));
+            }
         }
         let summary = json!({
             "apks_total": paths.len(),
@@ -314,8 +329,8 @@ impl Server {
             "memory_cache_bytes": self.cache.memory_bytes(),
             "rules_from_result_cache": cached_rules.load(Ordering::Relaxed),
             "dex_shared": dedup.shared(),
-            "rules": rules.iter().zip(&names).zip(&rule_hits).map(|((q, r), (hits, apks))| {
-                json!({"rule": r, "query": q, "total": hits, "apks_with_hits": apks})
+            "rules": rules.iter().zip(&names).zip(&rule_hits).zip(&rule_hints).map(|(((q, r), (hits, apks)), hint)| {
+                json!({"rule": r, "query": q, "total": hits, "apks_with_hits": apks, "hint": hint})
             }).collect::<Vec<_>>(),
         });
         self.report(Report { tool: "findrefs", header, summary, sections, empty, max_bytes: max_bytes(args)? })
@@ -324,10 +339,13 @@ impl Server {
     pub(crate) fn hierarchy(&self, args: &Value, _: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("hierarchy needs `class`".into()))?;
-        let direction = match str_arg(args, "direction")?.unwrap_or("subclasses") {
+        const CHOICES: &[(&str, &[&str])] = &[
+            ("subclasses", &["subclass", "children", "descendants", "implementers", "down"]),
+            ("supers", &["super", "superclasses", "supertypes", "parents", "ancestors", "up"]),
+        ];
+        let direction = match choice_arg(args, "direction", "subclasses", CHOICES)? {
             "subclasses" => Lineage::Subclasses,
-            "supers" => Lineage::Supers,
-            d => return Err(ToolError(format!("unknown direction {d:?}: use subclasses or supers"))),
+            _ => Lineage::Supers,
         };
         let q = HierarchyQuery {
             class: names::format_class_name(class)?,
@@ -448,7 +466,7 @@ fn rules_section(
 }
 
 pub mod defs {
-    use crate::defs::{apk_props, merge};
+    use crate::defs::{apk_props, merge, shape};
     use serde_json::{json, Value};
 
     pub fn hierarchy() -> Value {
@@ -457,11 +475,15 @@ pub mod defs {
                 `method`, which of them override it.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string"},
-                "direction": {"type": "string", "enum": ["subclasses", "supers"]},
-                "depth": {"type": "integer"},
-                "max_nodes": {"type": "integer"},
+                "direction": {"type": "string", "description": "subclasses (default) or supers."},
+                "depth": {"type": "integer", "description": format!("Default {}.", super::HIERARCHY_DEPTH)},
+                "max_nodes": {"type": "integer", "description": format!("Default {}.", super::HIERARCHY_MAX_NODES)},
                 "method": {"type": "string", "description": "A name or name(params)ret."},
             })]), "required": ["class"]},
+            "outputSchema": shape(&[
+                ("apk_id", "string"), ("direction", "string"), ("depth", "integer"), ("classes", "integer"), ("truncated", "boolean"),
+                ("rows", "array"),
+            ]),
         })
     }
 

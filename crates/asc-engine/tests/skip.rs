@@ -35,6 +35,7 @@ fn queries() -> Vec<(Query, bool)> {
             class: class.map(|c| ClassQuery { pattern: c.into(), precise: true }),
             name: Some(name.into()),
             exact_name: false,
+            signature: None,
         })
     };
     vec![

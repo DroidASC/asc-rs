@@ -133,7 +133,8 @@ classes.dex | Lcom/poc/Main;->run()V | "token"
 写作 `KIND:VALUE`：`string:REGEX`、`literal:TEXT`、`type:PATTERN`、`method:TARGET`、
 `field:TARGET`。TARGET 是 `[CLASS->]NAME`，也可写成 `com.a.B.name`、`com.a.B#name` 或
 `Lcom/a/B;->name(I)V`（CLASS 为精确匹配，`~CLASS` 为模糊匹配，不带包名的类如 `WebView` 可匹配任意
-包；NAME 为 regex / 子串，`=NAME` 或带签名的名字为精确匹配）。`findrefs method` / `field` 也接受同样
+包；NAME 为 regex / 子串，`=NAME` 或带签名的名字为精确匹配）。带签名时只命中该重载：`name(I)V`、只写参数的
+`name(I)`（任意返回类型）、Java 写法 `name(int, String)`（不带包名的类匹配任意包），字段写 `f:I`。`findrefs method` / `field` 也接受同样
 的 TARGET 来代替名字，且 kind 的写法很宽松（`methods:`、`Method:`）。matched 列按顺序列出每个条件
 匹配到的内容。`findrefs APK rules RULE...`（以及 `--file`，每行一条规则）在每个 DEX 上只扫描一遍就
 回答多个查询，结果行带有 `r1 | `、`r2 | `... 前缀；一条规则可以是一个条件、`extends:CLASS` /

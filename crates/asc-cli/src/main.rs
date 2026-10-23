@@ -670,6 +670,11 @@ fn findrefs_rules(
     for e in &errors {
         io.note(format_args!("Warning: {e}"));
     }
+    for (i, (n, rule)) in totals.iter().zip(&rules).enumerate() {
+        if let Some(h) = (*n == 0).then(|| asc_engine::hints::query_hint(rule)).flatten() {
+            io.note(format_args!("hint: r{}: {h}", i + 1));
+        }
+    }
     if common.debug {
         io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
     }

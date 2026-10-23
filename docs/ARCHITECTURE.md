@@ -104,9 +104,15 @@ the matching methods picked from it (`asc_mcp::class_text`, as MCP `getclass` do
 Query spellings are parsed in one place, `asc_engine::names`: `MemberTarget::parse` reads
 every form of a method / field target, `member_query` builds the query from wherever the
 class was written, `parse_kind` forgives kinds, `parse_condition` / `parse_rule` read CLI
-conditions and MCP string rules. MCP rewrites aliased argument keys (`class_name`,
-`apk_path`, …) before a tool runs (`asc-mcp/src/lenient.rs`). What a miss tells the agent
-is `asc-engine/src/hints.rs`, computed only on those paths.
+conditions and MCP string rules. A signature after the name (`m(I)V`, `m(I)`, `m(int,
+String)`, `f:I`) becomes a `MemberSignature` that the method / field locators check against
+the proto and type ids once the name and class have picked the ids, so other overloads are
+never scanned for. MCP rewrites aliased argument keys (`class_name`, `apk_path`, …) before a
+tool runs (`asc-mcp/src/lenient.rs`), and reads enumerated values (`direction`, `spill`,
+`group`, ...) with `choice_arg`, which forgives case, plurals and synonyms; the schemas
+therefore list the values in descriptions, not as `enum`s that strictly sampling clients
+would enforce. What a miss tells the agent is `asc-engine/src/hints.rs`, computed only on
+those paths: over many APKs only from the query and the counts the sweep already has.
 
 ### Output format
 

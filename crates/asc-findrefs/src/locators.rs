@@ -4,7 +4,7 @@
 //! from is passed back in at lookup time, so they can be cached and shared
 //! between threads without any raw-pointer aliasing.
 
-use crate::query::{CompiledClass, CompiledMember, CompiledName, CompiledQuery, Parts};
+use crate::query::{CompiledClass, CompiledMember, CompiledName, CompiledQuery, CompiledSignature, CompiledType, Parts};
 use crate::table::Table;
 use crate::{MemberQuery, Result};
 use asc_dex::Dex;
@@ -358,6 +358,40 @@ fn exact_name_matches(dex: &Dex<'_>, name_idx: u32, name: &str, bytes: &[u8]) ->
     }
 }
 
+/// Whether method `id` takes `params` (and returns `ret`, when given).
+/// Errors propagate rather than count as a mismatch: on a DEX prefix
+/// ([`FindRefs::cannot_match`](crate::FindRefs::cannot_match)) the parameter
+/// lists may lie beyond it.
+fn method_has_signature(dex: &Dex<'_>, id: u32, params: &[CompiledType], ret: Option<&CompiledType>) -> Result<bool> {
+    let proto = dex.proto_id(dex.method_id(id)?.proto_idx as u32)?;
+    if let Some(ret) = ret {
+        if !ret.matches(dex.type_bytes(proto.return_type_idx)?) {
+            return Ok(false);
+        }
+    }
+    let have = dex.type_list(proto.parameters_off)?;
+    if have.len() != params.len() {
+        return Ok(false);
+    }
+    for (&t, want) in have.iter().zip(params) {
+        if !want.matches(dex.type_bytes(t as u32)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The members of `ids` that `keep` accepts, the first error aborting.
+fn retain_ok(ids: BTreeSet<u32>, mut keep: impl FnMut(u32) -> Result<bool>) -> Result<BTreeSet<u32>> {
+    let mut out = BTreeSet::new();
+    for id in ids {
+        if keep(id)? {
+            out.insert(id);
+        }
+    }
+    Ok(out)
+}
+
 /// Method id locator.
 pub struct MethodLocator(pub(crate) MemberLocator);
 
@@ -386,7 +420,15 @@ impl MethodLocator {
         query: &CompiledQuery,
     ) -> Result<BTreeSet<u32>> {
         match query.parts() {
-            Parts::Member(m) if query.kind() == crate::RefKind::Method => self.0.locate(dex, strings, types, m),
+            Parts::Member(m) if query.kind() == crate::RefKind::Method => {
+                let ids = self.0.locate(dex, strings, types, m)?;
+                match &m.signature {
+                    Some(CompiledSignature::Method { params, ret }) => {
+                        retain_ok(ids, |id| method_has_signature(dex, id, params, ret.as_ref()))
+                    }
+                    _ => Ok(ids),
+                }
+            }
             _ => Ok(BTreeSet::new()),
         }
     }
@@ -420,7 +462,15 @@ impl FieldLocator {
         query: &CompiledQuery,
     ) -> Result<BTreeSet<u32>> {
         match query.parts() {
-            Parts::Member(m) if query.kind() == crate::RefKind::Field => self.0.locate(dex, strings, types, m),
+            Parts::Member(m) if query.kind() == crate::RefKind::Field => {
+                let ids = self.0.locate(dex, strings, types, m)?;
+                match &m.signature {
+                    Some(CompiledSignature::Field(t)) => {
+                        retain_ok(ids, |id| Ok(t.matches(dex.type_bytes(dex.field_id(id)?.type_idx as u32)?)))
+                    }
+                    _ => Ok(ids),
+                }
+            }
             _ => Ok(BTreeSet::new()),
         }
     }

@@ -4,7 +4,7 @@
 //! regexes it needs are compiled once here and reused by every
 //! [`FindRefs`](crate::FindRefs) through `find_ref_compiled`.
 
-use crate::{ClassQuery, ClassRelation, FindError, MemberQuery, Query, RefKind, Result};
+use crate::{ClassQuery, ClassRelation, FindError, MemberQuery, MemberSignature, Query, RefKind, Result, TypeMatch};
 use memchr::memmem::Finder;
 use regex::bytes::Regex;
 
@@ -27,10 +27,46 @@ pub(crate) enum CompiledName {
     Exact { name: String, bytes: Vec<u8> },
 }
 
+/// A [`TypeMatch`], MUTF-8 encoded like the descriptors it is compared with.
+pub(crate) struct CompiledType {
+    /// The whole descriptor, or `Name;` of a simple name.
+    bytes: Vec<u8>,
+    /// Array levels in front of a simple name; `None` for a descriptor.
+    simple_dims: Option<usize>,
+}
+
+impl CompiledType {
+    pub(crate) fn new(t: &TypeMatch) -> CompiledType {
+        match t {
+            TypeMatch::Descriptor(d) => CompiledType { bytes: asc_dex::mutf8::encode(d), simple_dims: None },
+            TypeMatch::Simple { name, dims } => {
+                CompiledType { bytes: asc_dex::mutf8::encode(&format!("{name};")), simple_dims: Some(*dims) }
+            }
+        }
+    }
+
+    /// Whether the raw descriptor `d` is of this type.
+    pub(crate) fn matches(&self, d: &[u8]) -> bool {
+        let Some(dims) = self.simple_dims else { return d == self.bytes };
+        // `[[Lpkg/Name;` for dims 2: the array levels, then `L`, any package
+        // ending in `/` (or none), then `Name;`.
+        let Some(class) = d.get(dims..).filter(|_| d[..dims].iter().all(|&b| b == b'[')) else { return false };
+        let Some(class) = class.strip_prefix(b"L") else { return false };
+        class.ends_with(&self.bytes) && (class.len() == self.bytes.len() || class[class.len() - self.bytes.len() - 1] == b'/')
+    }
+}
+
+/// A [`MemberSignature`] ready to run.
+pub(crate) enum CompiledSignature {
+    Method { params: Vec<CompiledType>, ret: Option<CompiledType> },
+    Field(CompiledType),
+}
+
 /// Member (method / field) query with its patterns compiled.
 pub(crate) struct CompiledMember {
     pub class: Option<CompiledClass>,
     pub name: Option<CompiledName>,
+    pub signature: Option<CompiledSignature>,
 }
 
 pub(crate) enum Parts {
@@ -73,7 +109,8 @@ impl CompiledQuery {
             // MUTF-8, like the string data it is searched in, so a supplementary
             // character (a surrogate pair there) is found too.
             Query::StringLiteral(p) => Parts::Literal((!p.is_empty()).then(|| Finder::new(&asc_dex::mutf8::encode(p)).into_owned())),
-            Query::Method(m) | Query::Field(m) => Parts::Member(compile_member(m)?),
+            Query::Method(m) => Parts::Member(compile_member(m, RefKind::Method)?),
+            Query::Field(m) => Parts::Member(compile_member(m, RefKind::Field)?),
             Query::Extends(d) => Parts::Relation(ClassRelation::Extends, asc_dex::mutf8::encode(d)),
             Query::Implements(d) => Parts::Relation(ClassRelation::Implements, asc_dex::mutf8::encode(d)),
             Query::All { all, none } => {
@@ -141,7 +178,7 @@ fn compile_opt(pattern: &str) -> Result<Option<Regex>> {
     }
 }
 
-fn compile_member(m: &MemberQuery) -> Result<CompiledMember> {
+fn compile_member(m: &MemberQuery, kind: RefKind) -> Result<CompiledMember> {
     let class = match m.class.as_ref().filter(|c| !c.pattern.is_empty()) {
         None => None,
         Some(ClassQuery { pattern, precise: true }) => Some(CompiledClass::Precise(asc_dex::mutf8::encode(pattern))),
@@ -155,7 +192,16 @@ fn compile_member(m: &MemberQuery) -> Result<CompiledMember> {
         Some(n) if matches!(class, Some(CompiledClass::Precise(_))) => Some(CompiledName::Substring(n.to_string())),
         Some(n) => Some(CompiledName::Regex(Regex::new(n)?)),
     };
-    Ok(CompiledMember { class, name })
+    let signature = match (&m.signature, kind) {
+        (None, _) => None,
+        (Some(MemberSignature::Method { params, ret }), RefKind::Method) => Some(CompiledSignature::Method {
+            params: params.iter().map(CompiledType::new).collect(),
+            ret: ret.as_ref().map(CompiledType::new),
+        }),
+        (Some(MemberSignature::Field(t)), RefKind::Field) => Some(CompiledSignature::Field(CompiledType::new(t))),
+        (Some(sig), _) => return Err(FindError::Invalid(format!("signature {sig} does not fit a {} query", kind.as_str()))),
+    };
+    Ok(CompiledMember { class, name, signature })
 }
 
 #[cfg(test)]
@@ -175,6 +221,7 @@ mod tests {
             class: Some(ClassQuery { pattern: "Lexample/Test;".into(), precise: true }),
             name: Some("(".into()), // invalid regex, but a substring here
             exact_name: false,
+            signature: None,
         });
         let c = CompiledQuery::new(&q).unwrap();
         assert_eq!(c.kind(), RefKind::Method);
@@ -185,20 +232,24 @@ mod tests {
 
         // An exact name is never compiled as a regex, whatever the class.
         for class in [None, Some(ClassQuery { pattern: "Lexample/Test;".into(), precise: true })] {
-            let q = Query::Field(MemberQuery { class, name: Some("a(".into()), exact_name: true });
+            let q = Query::Field(MemberQuery { class, name: Some("a(".into()), exact_name: true, signature: None });
             let c = CompiledQuery::new(&q).unwrap();
             let Parts::Member(m) = c.parts() else { panic!() };
             assert!(matches!(&m.name, Some(CompiledName::Exact { name, bytes }) if name == "a(" && bytes == b"a("));
         }
-        let q = Query::Method(MemberQuery { class: None, name: Some("\u{1F600}".into()), exact_name: true });
+        let q = Query::Method(MemberQuery { class: None, name: Some("\u{1F600}".into()), exact_name: true, signature: None });
         let c = CompiledQuery::new(&q).unwrap();
         let Parts::Member(m) = c.parts() else { panic!() };
         assert!(matches!(&m.name, Some(CompiledName::Exact { bytes, .. }) if bytes == &[0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]));
 
-        let q = Query::Field(MemberQuery { class: None, name: Some("(".into()), exact_name: false });
+        let q = Query::Field(MemberQuery { class: None, name: Some("(".into()), exact_name: false, signature: None });
         assert!(CompiledQuery::new(&q).is_err());
-        let q =
-            Query::Field(MemberQuery { class: Some(ClassQuery { pattern: "(".into(), precise: false }), name: None, exact_name: false });
+        let q = Query::Field(MemberQuery {
+            class: Some(ClassQuery { pattern: "(".into(), precise: false }),
+            name: None,
+            exact_name: false,
+            signature: None,
+        });
         assert!(CompiledQuery::new(&q).is_err());
         let q = Query::String("[".into());
         assert!(CompiledQuery::new(&q).is_err());
@@ -222,6 +273,7 @@ mod tests {
             class: Some(ClassQuery { pattern: String::new(), precise: false }),
             name: None,
             exact_name: false,
+            signature: None,
         });
         let c = CompiledQuery::new(&q).unwrap();
         let Parts::Member(m) = c.parts() else { panic!() };

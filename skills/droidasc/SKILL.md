@@ -45,7 +45,8 @@ droidasc findrefs app.apk string 'https?://' --limit 50
 | resources | `droidasc resources app.apk string/app_name`, `--search 'https?://' --in value`; `droidasc xml app.apk res/xml/file_paths.xml` |
 
 Member targets accept `Lcom/a/B;->name(sig)`, `com.a.B->name`, `com.a.B#name`, `com.a.B.name`,
-or `B.name` (any package). A name alone is a substring / regex (`=name` or a signature: exact).
+or `B.name` (any package). A name alone is a substring / regex (`=name` or a signature: exact). A signature picks that
+overload: `run(I)V`, `run(I)` (any return), `run(int, String)`; `f:I` a field of that type.
 
 ## Audit workflow
 

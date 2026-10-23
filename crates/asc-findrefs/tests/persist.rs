@@ -23,6 +23,7 @@ fn queries() -> Vec<Query> {
         class: class.map(|c| ClassQuery { pattern: c.into(), precise: true }),
         name: Some(name.into()),
         exact_name: false,
+        signature: None,
     };
     vec![
         Query::String("token".into()),

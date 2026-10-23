@@ -16,7 +16,7 @@
 //! standing for the whole class, the first page of a multi-APK report) by
 //! putting the whole text under [`FULL`] in its structured result.
 
-use crate::{str_arg, usize_arg, ToolError};
+use crate::{choice_arg, usize_arg, ToolError};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -51,12 +51,13 @@ pub enum Spill {
 
 impl Spill {
     fn from_args(args: &Value) -> Result<Spill, ToolError> {
-        match str_arg(args, "spill")? {
-            None | Some("auto") => Ok(Spill::Auto),
-            Some("always") => Ok(Spill::Always),
-            Some("never") => Ok(Spill::Never),
-            Some(s) => Err(ToolError(format!("unknown spill {s:?}: use auto, always or never"))),
-        }
+        const CHOICES: &[(&str, &[&str])] =
+            &[("auto", &["default"]), ("always", &["yes", "true", "file"]), ("never", &["no", "false", "off"])];
+        Ok(match choice_arg(args, "spill", "auto", CHOICES)? {
+            "always" => Spill::Always,
+            "never" => Spill::Never,
+            _ => Spill::Auto,
+        })
     }
 }
 
