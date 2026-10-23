@@ -637,6 +637,10 @@ impl<T> MemoryCache<T> {
         self.used
     }
 
+    pub fn capacity_bytes(&self) -> usize {
+        self.cap_bytes
+    }
+
     /// Every cached value, in no particular order (recency is not touched).
     pub fn values(&self) -> impl Iterator<Item = &Arc<T>> {
         self.map.values().flat_map(|per| per.values().map(|s| &s.value))
