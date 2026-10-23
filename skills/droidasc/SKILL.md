@@ -36,11 +36,14 @@ droidasc findrefs app.apk string 'https?://' --limit 50
 | who reads / writes a field | `droidasc findrefs app.apk field 'android.os.Build->SERIAL'` |
 | who uses a type | `droidasc findrefs app.apk type android.content.ClipboardManager` |
 | subclasses / implementers | `droidasc findrefs app.apk extends android.webkit.WebViewClient` (`impl` for interfaces); all levels: `droidasc hierarchy app.apk android.app.Service` |
-| several queries at once | `droidasc findrefs app.apk rules 'method:java.lang.Runtime->exec' 'string:(?i)password'` (rows prefixed `r1 |`, `r2 |`) |
-| conditions in one method | `droidasc findrefs app.apk all 'string:https?://' 'method:android.webkit.WebView->loadUrl'` |
+| several queries at once | `droidasc findrefs app.apk rules 'method:java.lang.Runtime->exec' 'string:(?i)password'` (rows prefixed `r1 |`, `r2 |`; `--file` for many) |
+| conditions in one method | `droidasc findrefs app.apk all 'string:https?://' 'method:android.webkit.WebView->loadUrl' '!string:localhost'` |
+| callers of the methods that use X | `droidasc findrefs app.apk method '{literal:device_id}'` (one call, any depth of `{}`) |
+| calls of a list of methods | `droidasc findrefs app.apk method @methods.txt` |
 | code around each hit | add `--context 3`, or `--context method` for the whole method |
 | read code | `droidasc getclass app.apk com.a.B` (smali); one method: `--method onReceive` |
 | callers / callees | `droidasc callgraph app.apk com.a.B onReceive --depth 3` (`--callees`, `--virtual`) |
+| paths from a source to a sink | `droidasc callgraph app.apk --to 'method:Runtime.exec' --from 'method:Intent.getStringExtra' --unless 'method:Validator.check' --depth 4` |
 | classes | `droidasc listclass app.apk --prefix com.a` |
 | resources | `droidasc resources app.apk string/app_name`, `--search 'https?://' --in value`; `droidasc xml app.apk res/xml/file_paths.xml` |
 
@@ -62,6 +65,36 @@ droidasc callgraph framework.jar,telephony-common.jar,TeleService.apk android.te
 DEX names start with their archive (`services.jar/classes2.dex | ...`), callgraph rows end with
 `[services.jar]`. Archives with no `classes*.dex` (odex/vdex only) are listed as `# warning:` on
 stderr: deodex them first.
+
+## Rules: composing conditions in one call
+
+A rule is `KIND:VALUE` (`string`, `literal`, `type`, `method`, `field`, `extends`, `impl`),
+several joined with `&` (all in one method), `!` before a part to drop methods matching it.
+`rules`, `all`, `callgraph --to/--from/--unless` and MCP's `rule` / `rules` all take them.
+
+- `method:{RULE}`: calls of the methods whose own code matches RULE. Nest freely:
+  `method:{method:{literal:imei}}` is two levels up. Answered in one pass per level, so prefer
+  it to looping `findrefs` over a list of methods.
+- `method:@FILE`: calls of the methods FILE lists, one per line; earlier findrefs / callgraph
+  output works as it is (the first `Lcls;->m(..)` on each line is taken), as do other spellings.
+- Calls are matched by the signature the call site names: a call through a subclass or an
+  interface names that class. Use `callgraph --virtual` to follow dispatch.
+- `string:` regexes match each string on its own: `^abc$` is the whole string. Write `\&` for
+  a literal `&` in a regex.
+
+```sh
+# who calls the methods that build a device id, minus test code
+droidasc findrefs app.apk rules 'method:{literal:device_id} & !type:Lcom/a/test/'
+# paths from methods that read an Intent extra to Runtime.exec, none through a method
+# that calls the app's validator
+droidasc callgraph app.apk --to 'method:java.lang.Runtime->exec' \
+  --from 'method:android.content.Intent->getStringExtra' \
+  --unless 'method:com.a.Validator->check' --depth 5
+```
+
+`--to RULE` targets every method whose code matches it (callers walk); `--from RULE` keeps only
+the caller paths that start at a matching method (marked `[from]`), or alone walks its callees;
+`--unless RULE` (repeatable) leaves out methods whose code matches it and what only they reach.
 
 ## Audit workflow
 

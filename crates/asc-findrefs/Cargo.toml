@@ -11,6 +11,7 @@ description = "Cross-reference search primitives for asc-rs: string/type/method/
 asc-dex.workspace = true
 asc-dalvik.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 memchr.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true

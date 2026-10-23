@@ -42,6 +42,7 @@ memmap2 = "0.9"
 bytemuck = "1"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 regex = "1.11"
+regex-syntax = "0.8"
 memchr = "2.7"
 clap = { version = "4.5", features = ["derive"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }

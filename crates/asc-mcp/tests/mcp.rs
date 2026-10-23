@@ -233,6 +233,32 @@ fn findrefs_context_and_callgraph() {
 }
 
 #[test]
+fn rule_strings_nest_and_pick_callgraph_targets() {
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true));
+    let a = apk.path().to_str().unwrap();
+    let replies = session(&[
+        // compute loads the string and calls itself.
+        call(1, "findrefs", json!({"apk": a, "rule": "method:{string:llo}"})),
+        call(2, "findrefs", json!({"apk": a, "rules": ["method:{string:llo} & !string:llo", "method:{string:llo}"]})),
+        call(3, "callgraph", json!({"apk": a, "to": "string:llo", "depth": 1})),
+        call(4, "callgraph", json!({"apk": a, "to": "string:llo", "from": "string:llo", "unless": ["literal:absent"]})),
+        call(5, "callgraph", json!({"apk": a})),
+        call(6, "findrefs", json!({"apk": a, "rule": "method:{string:llo"})),
+    ]);
+    assert!(text(&replies[0]).contains("classes.dex | Lexample/Rich;->compute(II)I | Lexample/Rich;->compute(II)I"), "{}", replies[0]);
+    let rules = text(&replies[1]);
+    assert!(rules.contains("# r1 method:{string:llo} & !string:llo: 0 results"), "{rules}");
+    assert!(rules.contains("r2 | classes.dex | Lexample/Rich;->compute(II)I"), "{rules}");
+    assert!(text(&replies[2]).starts_with("0 Lexample/Rich;->compute(II)I\n"), "{}", text(&replies[2]));
+    let r = ok(&replies[3]);
+    // Every root also matches `from`: each is a path of its own.
+    assert_eq!((r["reached"].as_u64(), r["pruned"].as_u64(), r["rows"][0]["from"].as_bool()), (Some(2), Some(0), Some(true)));
+    assert_eq!(replies[4]["result"]["isError"], true);
+    assert!(text(&replies[4]).contains("`to` or `from`"), "{}", text(&replies[4]));
+    assert!(text(&replies[5]).contains("expected `}`"), "{}", text(&replies[5]));
+}
+
+#[test]
 fn concurrent_calls_all_answer() {
     let apk = temp_apk();
     let path = apk.path().to_str().unwrap();

@@ -15,7 +15,7 @@
 use crate::hierarchy::{ClassGraph, Lineage};
 use crate::{cancelled, DexView, Engine, EngineError, Result, NOT_CANCELLED};
 use asc_dex::Dex;
-use asc_findrefs::FindRefs;
+use asc_findrefs::{FindRefs, Query};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -45,13 +45,24 @@ impl Direction {
     }
 }
 
+/// Where a call graph starts.
+#[derive(Debug, Clone)]
+pub enum CallRoots {
+    /// The overloads of one method.
+    Method {
+        /// Declaring class, as a Dalvik descriptor (`Lcom/poc/Main;`).
+        class: String,
+        /// Method name (every overload) or exact `name(params)ret`.
+        method: String,
+    },
+    /// Every method whose code matches the condition (a findrefs rule).
+    Matching(Query),
+}
+
 /// A call graph query.
 #[derive(Debug, Clone)]
 pub struct CallQuery {
-    /// Declaring class, as a Dalvik descriptor (`Lcom/poc/Main;`).
-    pub class: String,
-    /// Method name (every overload) or exact `name(params)ret`.
-    pub method: String,
+    pub roots: CallRoots,
     pub direction: Direction,
     /// Levels to expand (1 = direct callers / callees).
     pub depth: usize,
@@ -59,6 +70,25 @@ pub struct CallQuery {
     pub max_nodes: usize,
     /// Follow virtual dispatch through the class hierarchy (see the module docs).
     pub virtual_calls: bool,
+    /// Callers only: keep just the branches that end at a method whose code
+    /// matches this (the paths from such a method to a root), and stop
+    /// there.
+    pub from: Option<Query>,
+    /// Leave out every method whose code matches one of these, with
+    /// everything reached only through it.
+    pub unless: Vec<Query>,
+}
+
+impl CallQuery {
+    /// Callers or callees of the overloads of `class`'s `method`: 2 levels,
+    /// at most 500 methods, static calls only.
+    pub fn method(class: impl Into<String>, method: impl Into<String>, direction: Direction) -> CallQuery {
+        CallQuery::new(CallRoots::Method { class: class.into(), method: method.into() }, direction)
+    }
+
+    pub fn new(roots: CallRoots, direction: Direction) -> CallQuery {
+        CallQuery { roots, direction, depth: 2, max_nodes: 500, virtual_calls: false, from: None, unless: Vec::new() }
+    }
 }
 
 /// One line of the tree, in depth-first order.
@@ -77,6 +107,8 @@ pub struct CallRow {
     /// Reached through virtual dispatch: the supertype whose method this
     /// caller invokes, or (callees) the class of the callee this overrides.
     pub via: Option<String>,
+    /// Its code matches [`CallQuery::from`].
+    pub from: bool,
 }
 
 /// Result of [`Engine::call_graph`].
@@ -89,6 +121,10 @@ pub struct CallTree {
     pub methods: usize,
     /// More callers / callees exist than `max_nodes` allowed.
     pub truncated: bool,
+    /// Methods left out because their code matches [`CallQuery::unless`].
+    pub pruned: usize,
+    /// With [`CallQuery::from`]: the distinct `from` methods reached.
+    pub reached: Option<usize>,
     /// DEX entries that could not be loaded or searched.
     pub errors: Vec<String>,
 }
@@ -125,6 +161,9 @@ impl CallTree {
                         Direction::Callees => s.push_str(&format!(" (override of {v})")),
                     }
                 }
+                if r.from {
+                    s.push_str(" [from]");
+                }
                 if r.repeated {
                     s.push_str(" (repeated)");
                 }
@@ -137,6 +176,12 @@ impl CallTree {
     pub fn footer(&self) -> String {
         let mut s =
             format!("# {} rows, {} distinct methods ({}, depth {})", self.rows.len(), self.methods, self.direction.as_str(), self.depth);
+        if let Some(n) = self.reached {
+            s.push_str(&format!("; {n} from methods reached"));
+        }
+        if self.pruned > 0 {
+            s.push_str(&format!("; {} methods left out by unless", self.pruned));
+        }
         if self.truncated {
             s.push_str("; truncated (raise max_nodes or lower depth)");
         }
@@ -214,15 +259,20 @@ impl Engine {
     /// [`Engine::call_graph`] that stops, with `ApkError::Cancelled`, once
     /// `cancel` is raised.
     pub fn call_graph_cancellable(&self, q: &CallQuery, cancel: &AtomicBool) -> Result<CallTree> {
-        let (name, proto) = match q.method.find('(') {
-            Some(p) => {
-                let sig = asc_smali::normalize_method_signature(&q.method)?;
-                let p2 = sig.find('(').unwrap_or(p);
-                (sig[..p2].to_string(), Some(sig[p2..].to_string()))
-            }
-            None => (q.method.clone(), None),
-        };
+        if q.from.is_some() && q.direction == Direction::Callees {
+            return Err(EngineError::Query("`from` keeps paths of a callers walk: walk the callers of the target instead".into()));
+        }
         let t0 = std::time::Instant::now();
+        // Every condition (roots, from, unless) answered in one pass.
+        let matching_roots = match &q.roots {
+            CallRoots::Matching(c) => Some(c),
+            CallRoots::Method { .. } => None,
+        };
+        let conditions: Vec<Query> = matching_roots.into_iter().chain(&q.from).chain(&q.unless).cloned().collect();
+        let mut sets = if conditions.is_empty() { Vec::new() } else { self.matching_methods(&conditions, cancel)? }.into_iter();
+        let matched_roots = matching_roots.and_then(|_| sets.next());
+        let from = q.from.as_ref().and_then(|_| sets.next());
+        let unless: HashSet<String> = sets.flatten().collect();
         let _query = self.prebuild.query();
         let (views, mut errors) = self.load_views(None, cancel)?;
         // The tables built before a cancellation stay charged to the cache.
@@ -232,18 +282,14 @@ impl Engine {
         };
         let graph = if q.virtual_calls { Some(self.class_graph(&views, &mut errors, cancel).map_err(|e| stop(&views, e))?) } else { None };
         let load_us = t0.elapsed().as_micros();
-        // Roots: every matching signature any DEX knows.
-        let mut roots = BTreeSet::new();
-        for v in &views {
-            let dex = Dex::with_name(&v.data, &v.name)?;
-            for m in method_ids(&dex, &q.class, &name, proto.as_deref())? {
-                roots.insert(asc_smali::method_signature(&dex, m)?);
-            }
-        }
-        if roots.is_empty() {
-            let hint = self.member_not_found_hint(&q.class, Some(&name), true);
-            return Err(EngineError::Query(format!("no method {}->{} in this APK{hint}", q.class, q.method)));
-        }
+        let mut roots = match (&q.roots, matched_roots) {
+            (CallRoots::Method { class, method }, _) => self.method_roots(&views, class, method)?,
+            (CallRoots::Matching(_), Some(set)) if !set.is_empty() => set,
+            (CallRoots::Matching(_), _) => return Err(EngineError::Query("no method's code matches the root condition".into())),
+        };
+        let mut pruned: HashSet<String> = roots.iter().filter(|r| unless.contains(*r)).cloned().collect();
+        roots.retain(|r| !pruned.contains(r));
+        let is_from = |sig: &str| from.as_ref().is_some_and(|f| f.contains(sig));
         let max_nodes = q.max_nodes.max(roots.len());
         // Breadth-first: `depth_of` is each method's shallowest level, `next`
         // its neighbours, `bodies` where it is defined.
@@ -277,7 +323,8 @@ impl Engine {
             for sig in &frontier {
                 let f = found.get(sig);
                 bodies.insert(sig.clone(), f.map(|f| f.bodies.iter().cloned().collect()).unwrap_or_default());
-                if !expand {
+                // A `from` method ends its paths.
+                if !expand || is_from(sig) {
                     continue;
                 }
                 let mut neighbours: Vec<(String, Option<String>)> =
@@ -304,6 +351,10 @@ impl Engine {
                 neighbours.retain(|(n, _)| seen.insert(n.clone()));
                 let mut kept = Vec::new();
                 for (n, through) in &neighbours {
+                    if unless.contains(n) {
+                        pruned.insert(n.clone());
+                        continue;
+                    }
                     if let Some(c) = through {
                         via.insert((sig.clone(), n.clone()), c.clone());
                     }
@@ -322,6 +373,16 @@ impl Engine {
             frontier = following;
         }
         self.recharge_views(&views);
+        let mut methods = depth_of.len();
+        let reached = from.as_ref().map(|from| {
+            let keep = on_paths_to(&next, depth_of.keys().filter(|m| from.contains(*m)));
+            for kids in next.values_mut() {
+                kids.retain(|k| keep.contains(k));
+            }
+            roots.retain(|r| keep.contains(r));
+            methods = keep.len();
+            depth_of.keys().filter(|m| from.contains(*m)).count()
+        });
         if self.debug {
             let graphs: Vec<_> = views.iter().filter_map(|v| v.state.call_graph()).collect();
             self.log(format!(
@@ -348,6 +409,7 @@ impl Engine {
                 dex: bodies.get(&sig).cloned().unwrap_or_default(),
                 repeated: !expand_here && has_children,
                 via: parent.and_then(|p| via.get(&(rows[p].method.clone(), sig.clone())).cloned()),
+                from: is_from(&sig),
             });
             if expand_here {
                 expanded.insert(sig.clone());
@@ -359,7 +421,32 @@ impl Engine {
         }
         errors.sort();
         errors.dedup();
-        Ok(CallTree { direction: q.direction, depth: q.depth, rows, methods: depth_of.len(), truncated, errors })
+        Ok(CallTree { direction: q.direction, depth: q.depth, rows, methods, truncated, pruned: pruned.len(), reached, errors })
+    }
+
+    /// Every overload of `class`'s `method` (or that exact signature) some
+    /// DEX knows; an unknown method is an error.
+    fn method_roots(&self, views: &[DexView], class: &str, method: &str) -> Result<BTreeSet<String>> {
+        let (name, proto) = match method.find('(') {
+            Some(p) => {
+                let sig = asc_smali::normalize_method_signature(method)?;
+                let p2 = sig.find('(').unwrap_or(p);
+                (sig[..p2].to_string(), Some(sig[p2..].to_string()))
+            }
+            None => (method.to_string(), None),
+        };
+        let mut roots = BTreeSet::new();
+        for v in views {
+            let dex = Dex::with_name(&v.data, &v.name)?;
+            for m in method_ids(&dex, class, &name, proto.as_deref())? {
+                roots.insert(asc_smali::method_signature(&dex, m)?);
+            }
+        }
+        if roots.is_empty() {
+            let hint = self.member_not_found_hint(class, Some(&name), true);
+            return Err(EngineError::Query(format!("no method {class}->{method} in this APK{hint}")));
+        }
+        Ok(roots)
     }
 
     /// Look every frontier method up in every DEX (in parallel) and collect
@@ -402,6 +489,27 @@ impl Engine {
         errors.extend(errs.into_inner().unwrap());
         merged.into_inner().unwrap()
     }
+}
+
+/// The methods on a path to one of `ends` along the `next` edges (`ends`
+/// included); the graph may have cycles.
+fn on_paths_to<'s>(next: &HashMap<String, Vec<String>>, ends: impl Iterator<Item = &'s String>) -> HashSet<String> {
+    let mut parents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (p, kids) in next {
+        for k in kids {
+            parents.entry(k).or_default().push(p);
+        }
+    }
+    let mut keep: HashSet<String> = ends.cloned().collect();
+    let mut todo: Vec<String> = keep.iter().cloned().collect();
+    while let Some(m) = todo.pop() {
+        for &p in parents.get(m.as_str()).into_iter().flatten() {
+            if keep.insert(p.to_string()) {
+                todo.push(p.to_string());
+            }
+        }
+    }
+    keep
 }
 
 /// For each frontier method (not a constructor / initializer), the same

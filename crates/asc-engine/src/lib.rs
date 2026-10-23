@@ -22,6 +22,8 @@
 mod budget;
 mod callgraph;
 mod classes;
+mod compose;
+pub mod condition;
 pub mod config;
 mod hierarchy;
 pub mod hints;
@@ -57,7 +59,7 @@ pub use asc_cache;
 pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use budget::{available_memory, total_memory, Device, MemoryPolicy};
-pub use callgraph::{CallQuery, CallRow, CallTree, Direction};
+pub use callgraph::{CallQuery, CallRoots, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
@@ -1556,8 +1558,7 @@ impl Engine {
         sink: &mut dyn FnMut(RefBatch),
     ) -> Result<RefSummary> {
         let t0 = Instant::now();
-        let _query = self.prebuild.query();
-        let compiled = CompiledQuery::new(query)?;
+        compose::check_patterns(query)?;
         let apk = self.open()?;
         let mut entries = apk.dex_entries()?;
         // Every entry has to be searched, so run the largest first: the biggest
@@ -1580,6 +1581,11 @@ impl Engine {
             self.log(format!("[APK] for_each_findrefs total={} us count={} source=result", summary.total_us, entries.len()));
             return Ok(summary);
         }
+        // `method:{RULE}`: the methods RULE matches first, then the calls of
+        // them. L3 keys on the query as given, so a replay skips this too.
+        let resolved = self.resolve_nested(std::slice::from_ref(query), cancel)?;
+        let _query = self.prebuild.query();
+        let compiled = CompiledQuery::new(resolved.as_ref().map_or(query, |r| &r[0]))?;
         let mut recorder = rendered.as_ref().map(|_| tiers::ResultRecorder::new());
         let next = AtomicUsize::new(0);
         let (tx, rx) = mpsc::channel::<RefBatch>();

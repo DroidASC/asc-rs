@@ -390,6 +390,20 @@ fn type_match(t: &str) -> Option<TypeMatch> {
     is_identifier(base).then(|| TypeMatch::Simple { name: base.to_string(), dims })
 }
 
+/// The query of exactly the method `signature` names, `Lcls;->name(params)ret`
+/// as findrefs and callgraph print it (whatever characters the name holds).
+pub fn exact_method(signature: &str) -> Result<MemberQuery> {
+    let bad = || EngineError::Query(format!("not a method signature: {signature:?} (want Lcls;->name(params)ret)"));
+    let (class, member) = signature.trim().split_once("->").ok_or_else(bad)?;
+    let p = member.find('(').ok_or_else(bad)?;
+    Ok(MemberQuery {
+        class: Some(ClassQuery { pattern: class.to_string(), precise: true }),
+        name: Some(member[..p].to_string()),
+        exact_name: true,
+        signature: Some(parse_signature(&member[p..], true)?),
+    })
+}
+
 /// Parse a one-word findrefs condition, as the CLI's compound and rule
 /// options take them:
 ///
@@ -398,35 +412,21 @@ fn type_match(t: &str) -> Option<TypeMatch> {
 ///   `android.webkit.WebView->loadUrl`; the class is exact unless prefixed
 ///   `~` (fuzzy) or written without package, the name a regex / substring
 ///   unless prefixed `=` or followed by a signature (exact)
+/// - `method:{RULE}`: calls of the methods whose code matches RULE
+/// - `method:@FILE`: calls of the methods FILE lists, one per line
 /// - `extends:CLASS`, `impl:CLASS`
 ///
-/// The kind is read by [`parse_kind`] (`methods:`, `Method:` work too).
+/// The kind is read by [`parse_kind`] (`methods:`, `Method:` work too); the
+/// grammar is [`crate::condition`]'s.
 pub fn parse_condition(spec: &str) -> Result<Query> {
-    let bad = || {
-        EngineError::Query(format!(
-            "bad condition {spec:?}: use KIND:VALUE, KIND one of string, literal, type, method, field, extends, impl"
-        ))
-    };
-    let (kind, value) = spec.split_once(':').ok_or_else(bad)?;
-    Ok(match parse_kind(kind).map_err(|_| bad())? {
-        "string" => Query::String(value.to_string()),
-        "literal" => Query::StringLiteral(value.to_string()),
-        "type" => Query::Type(value.to_string()),
-        "extends" => Query::Extends(format_class_name(value.trim())?),
-        "impl" => Query::Implements(format_class_name(value.trim())?),
-        "method" => Query::Method(member_query("method", None, false, Some(value), false)?),
-        _ => Query::Field(member_query("field", None, false, Some(value), false)?),
-    })
+    crate::condition::parse_condition_in(spec, None)
 }
 
 /// One rule of a rule set: a [`parse_condition`] condition, or several
-/// joined with `&` (a compound: all must match in one method).
+/// joined with `&` (a compound: every part must match in one method, none
+/// of the `!` parts).
 pub fn parse_rule(spec: &str) -> Result<Query> {
-    let parts: Vec<&str> = spec.split('&').map(str::trim).collect();
-    if let [one] = parts.as_slice() {
-        return parse_condition(one);
-    }
-    Ok(Query::All { all: parts.iter().map(|p| parse_condition(p)).collect::<Result<_>>()?, none: Vec::new() })
+    crate::condition::parse_rule_in(spec, None)
 }
 
 #[cfg(test)]

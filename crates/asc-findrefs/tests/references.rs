@@ -84,6 +84,38 @@ fn last_string_is_searchable() {
 }
 
 #[test]
+fn anchors_apply_to_each_string() {
+    let data = make_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let loc = StringLocator::build(&dex).unwrap();
+    let find = |p: &str| loc.locate_pattern(dex.buf(), p).unwrap().into_iter().collect::<Vec<_>>();
+    // Strings: Lexample/Test; Ljava/lang/Object; V first second token
+    assert_eq!(find("^first$"), [3]);
+    assert_eq!(find("^L"), [0, 1]);
+    assert_eq!(find(";$"), [0, 1]);
+    assert_eq!(find(r"\Aseco"), [4]);
+    assert_eq!(find("(?m)^V$"), [2]);
+    assert!(find("^irst").is_empty() && find("^firs$").is_empty());
+    // `[^...]` is a class, not an anchor: still one pass over the region.
+    assert_eq!(find("[^a-z]oken"), Vec::<u32>::new());
+}
+
+#[test]
+fn method_sets_are_the_union_of_their_members() {
+    let data = make_dex();
+    let dex = Dex::parse(&data).unwrap();
+    let fr = FindRefs::new(&dex);
+    let member = |name: &str| MemberQuery { name: Some(name.into()), exact_name: true, ..Default::default() };
+    let one = |name: &str| fr.locate(&Query::Method(member(name))).unwrap();
+    let all: BTreeSet<u32> = ["first", "second"].iter().flat_map(|n| one(n)).collect();
+    let set = Query::MethodSet(vec![member("first"), member("second"), member("absent")]);
+    assert_eq!(fr.locate(&set).unwrap(), all);
+    assert!(fr.locate(&Query::MethodSet(Vec::new())).unwrap().is_empty());
+    let err = CompiledQuery::new(&Query::Nested(Box::new(Query::String("x".into())))).unwrap_err().to_string();
+    assert!(err.contains("resolved over every DEX"), "{err}");
+}
+
+#[test]
 fn literal_strings_are_plain_substrings() {
     let data = make_dex();
     let dex = Dex::parse(&data).unwrap();

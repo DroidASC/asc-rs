@@ -317,6 +317,37 @@ fn findrefs_context_and_callgraph() {
 }
 
 #[test]
+fn nested_conditions_method_files_and_callgraph_rules() {
+    let apk = rich_apk();
+    let a = path(apk.path());
+    // compute loads the string and calls itself: the callers of the methods using it.
+    let nested = droidasc(&["findrefs", a, "method", "{string:llo}"]);
+    assert!(nested.status.success(), "{}", stderr(&nested));
+    assert!(stdout(&nested).contains("classes.dex | Lexample/Rich;->compute(II)I | Lexample/Rich;->compute(II)I\n"), "{}", stdout(&nested));
+    let all = droidasc(&["findrefs", a, "all", "method:{string:llo}"]);
+    assert_eq!(stdout(&all), stdout(&nested));
+    assert_eq!(stdout(&droidasc(&["findrefs", a, "all", "method:{string:llo}", "!string:llo"])), "");
+    // That output as a method set, from the command's directory.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("set.txt"), stdout(&nested)).unwrap();
+    let out = bin().current_dir(dir.path()).args(["--no-cache", "findrefs", a, "method", "@set.txt"]).output().unwrap();
+    assert_eq!(stdout(&out), stdout(&nested), "{}", stderr(&out));
+    let out = droidasc(&["findrefs", a, "rules", "method:{string:llo", "string:x"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("expected `}`"), "{}", stderr(&out));
+
+    let out = droidasc(&["callgraph", a, "--to", "string:llo", "--depth", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).starts_with("0 Lexample/Rich;->compute(II)I\n"), "{}", stdout(&out));
+    let out = droidasc(&["callgraph", a, "--to", "string:llo", "--unless", "string:llo"]);
+    assert!(stdout(&out).contains("2 methods left out by unless"), "{}", stdout(&out));
+    for args in [&["callgraph", a][..], &["callgraph", a, "example.Rich"], &["callgraph", a, "example.Rich", "compute", "--to", "string:x"]]
+    {
+        assert_eq!(droidasc(args).status.code(), Some(1), "{args:?}");
+    }
+}
+
+#[test]
 fn findrefs_extends_and_impl_print_class_rows() {
     let apk = rich_apk();
     for target in ["java.lang.Object", "Ljava/lang/Object;", "java/lang/Object"] {
