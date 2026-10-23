@@ -68,9 +68,10 @@ stderr: deodex them first.
 
 ## Rules: composing conditions in one call
 
-A rule is `KIND:VALUE` (`string`, `literal`, `type`, `method`, `field`, `extends`, `impl`),
-several joined with `&` (all in one method), `!` before a part to drop methods matching it.
-`rules`, `all`, `callgraph --to/--from/--unless` and MCP's `rule` / `rules` all take them.
+A rule is `KIND:VALUE` (code: `string`, `literal`, `type`, `method`, `field`, `extends`, `impl`;
+how a method is declared: `override`, `annotation`, `flag`, `in`), several joined with `&` (all
+in one method), `!` before a part to drop methods matching it. `rules`, `all`,
+`callgraph --to/--from/--unless` and MCP's `rule` / `rules` all take them.
 
 - `method:{RULE}`: calls of the methods whose own code matches RULE. Nest freely:
   `method:{method:{literal:imei}}` is two levels up. Answered in one pass per level, so prefer
@@ -81,6 +82,33 @@ several joined with `&` (all in one method), `!` before a part to drop methods m
   interface names that class. Use `callgraph --virtual` to follow dispatch.
 - `string:` regexes match each string on its own: `^abc$` is the whole string. Write `\&` for
   a literal `&` in a regex.
+
+Definition predicates name method **definitions** (rows have no call site; the matched column
+names the predicate). They answer from the class definitions, not a code scan, and span every
+archive of the program:
+
+- `override:CLASS->name`: every method overriding or implementing it, through the hierarchy
+  (the class's own definition and every subtype's). `override:android.os.IInterface->asBinder`.
+- `annotation:TYPE`: methods carrying that annotation; `in:{annotation:TYPE}` the methods of a
+  class carrying it. `annotation:androidx.annotation.RequiresPermission`.
+- `flag:public,static` (comma = all); `!flag:abstract` drops them. public, private, protected,
+  static, final, synchronized, native, abstract, synthetic, constructor.
+- `in:{CLASS-COND}`: methods declared in a matching class. `in:{extends:C}` / `in:{impl:C}`
+  take C's subtree (C exact); `in:{type:REGEX}` matches the declaring class descriptor by
+  regex (e.g. every `$Stub` class, `in:{type:.*\$Stub;}`); `in:{annotation:TYPE}`.
+
+```sh
+# every AIDL stub's declared methods (the $Stub classes themselves)
+droidasc findrefs system/framework rules 'in:{type:.*\$Stub;}'
+# binder-exposed implementations of one interface that reach an identifier getter,
+# skipping any path through a permission check
+droidasc callgraph system/framework \
+  --from 'override:com.android.internal.telephony.ITelephony->getDeviceId' \
+  --to 'method:android.telephony.TelephonyManager->getImei' \
+  --unless 'method:~enforce.*Permission' --depth 6
+# native methods that also load a crypto string
+droidasc findrefs app.apk rules 'flag:native & string:AES'
+```
 
 ```sh
 # who calls the methods that build a device id, minus test code

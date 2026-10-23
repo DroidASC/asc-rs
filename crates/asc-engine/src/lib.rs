@@ -25,6 +25,7 @@ mod classes;
 mod compose;
 pub mod condition;
 pub mod config;
+mod defs;
 mod hierarchy;
 pub mod hints;
 mod manifest;
@@ -1583,7 +1584,7 @@ impl Engine {
         }
         // `method:{RULE}`: the methods RULE matches first, then the calls of
         // them. L3 keys on the query as given, so a replay skips this too.
-        let resolved = self.resolve_nested(std::slice::from_ref(query), cancel)?;
+        let resolved = self.resolve(std::slice::from_ref(query), cancel)?;
         let _query = self.prebuild.query();
         let compiled = CompiledQuery::new(resolved.as_ref().map_or(query, |r| &r[0]))?;
         let mut recorder = rendered.as_ref().map(|_| tiers::ResultRecorder::new());
@@ -2103,6 +2104,13 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOpt
     if let Some(c) = query.compound() {
         return rules::compound_rows(fr, c, opts);
     }
+    if let Some(d) = query.defined() {
+        let mut rows = defined_rows(dex, d)?;
+        if opts.context != RefContext::None {
+            attach_context(fr, &mut rows, opts.context)?;
+        }
+        return Ok(rows);
+    }
     let Some(classes) = fr.class_relation(query)? else {
         let hits = fr.find_ref_compiled(query)?;
         let mut rows = results_from_hits(dex, query.kind(), &hits, opts.aggregate)?;
@@ -2131,6 +2139,16 @@ fn rows_compiled(fr: &FindRefs<'_, '_, '_>, query: &CompiledQuery, opts: FindOpt
                 context: None,
             })
         })
+        .collect()
+}
+
+/// Rows of a method-definition predicate: one per matching method, with no
+/// call site (the `matched` column names the predicate).
+pub(crate) fn defined_rows(dex: &Dex<'_>, d: &asc_findrefs::Defined) -> Result<Vec<RefResult>> {
+    let label = d.label();
+    defs::defined_methods(dex, d)?
+        .into_iter()
+        .map(|m| RefResult::method_row(dex, m, vec![Matched::Symbol(label.clone())], Vec::new()))
         .collect()
 }
 

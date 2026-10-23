@@ -333,6 +333,17 @@ impl ClassGraph {
         (view != 0).then(|| self.dex_names[view as usize - 1].as_str())
     }
 
+    /// Descriptors of the classes this APK defines whose descriptor matches
+    /// `re` (for `in:{type:...}`).
+    pub(crate) fn defined_classes_matching(&self, re: &regex::bytes::Regex) -> Vec<String> {
+        self.names
+            .iter()
+            .enumerate()
+            .filter(|&(id, name)| self.defined[id].0 != 0 && re.is_match(name.as_bytes()))
+            .map(|(_, name)| name.to_string())
+            .collect()
+    }
+
     /// `name(params)ret` of the methods `class` defines whose name is `name`
     /// (and proto `proto` when given).
     pub(crate) fn defines(&self, views: &[DexView], class: &str, name: &str, proto: Option<&str>) -> Result<Vec<String>> {

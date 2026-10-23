@@ -17,7 +17,7 @@
 
 use crate::names::{exact_method, member_query, parse_kind};
 use crate::{EngineError, Result};
-use asc_findrefs::{MemberQuery, Query};
+use asc_findrefs::{Defined, MemberQuery, Query};
 use std::path::Path;
 
 /// Parse a rule (see the module docs). `@PATH` files are read relative to
@@ -138,6 +138,17 @@ impl<'a> Parser<'a> {
                 return self.method_file(path);
             }
         }
+        // `in:{CLASS-CONDITION}`: the methods of a matching class.
+        if kind == "in" {
+            if !self.eat('{') {
+                return Err(self.error("in: takes a class condition in braces, e.g. in:{extends:android.app.Activity}"));
+            }
+            let inner = self.condition(true)?;
+            if !self.eat('}') {
+                return Err(self.error("expected `}`"));
+            }
+            return Ok(Query::Defined(Defined::In(Box::new(inner))));
+        }
         let value = self.text(nested)?.trim();
         if kind == "method" && is_constraint(value) {
             return Err(self.error(NO_CONSTRAINTS));
@@ -148,6 +159,9 @@ impl<'a> Parser<'a> {
             "type" => Query::Type(value.to_string()),
             "extends" => Query::Extends(crate::names::format_class_name(value)?),
             "impl" => Query::Implements(crate::names::format_class_name(value)?),
+            "override" => Query::Defined(Defined::Override(member_query("method", None, false, Some(value), false)?)),
+            "annotation" => Query::Defined(Defined::Annotation(crate::defs::annotation_descriptor(value)?)),
+            "flag" => Query::Defined(Defined::Flags(crate::defs::parse_flags(value)?)),
             "method" => Query::Method(member_query("method", None, false, Some(value), false)?),
             _ => Query::Field(member_query("field", None, false, Some(value), false)?),
         })
@@ -251,6 +265,30 @@ mod tests {
         );
         // A regex brace inside the body stays in its value.
         assert_eq!(parse_rule("method:{string:a{2}}").unwrap(), Query::Nested(Box::new(Query::String("a{2}".into()))));
+    }
+
+    #[test]
+    fn definition_predicates_parse_into_defined_queries() {
+        use asc_dex::access;
+        assert_eq!(parse_rule("flag:public,static").unwrap(), Query::Defined(Defined::Flags(access::PUBLIC | access::STATIC)));
+        assert_eq!(parse_rule("annotation:a.B").unwrap(), Query::Defined(Defined::Annotation("La/B;".into())));
+        let Query::Defined(Defined::Override(m)) = parse_rule("override:a.B->run").unwrap() else { panic!("an override") };
+        assert_eq!((m.name.as_deref(), m.class.unwrap().pattern.as_str()), (Some("run"), "La/B;"));
+        assert_eq!(parse_rule("in:{extends:a.Base}").unwrap(), Query::Defined(Defined::In(Box::new(format_extends("a.Base")))));
+        // A definition predicate joins a code condition in a compound.
+        let Query::All { all, none } = parse_rule("string:x & flag:native & !annotation:a.B").unwrap() else { panic!("a compound") };
+        assert_eq!(all.len(), 2);
+        assert_eq!(none, vec![Query::Defined(Defined::Annotation("La/B;".into()))]);
+        // Bad spellings are reported at parse time; a non-class `in:{...}` is
+        // caught later, when the engine resolves it over the hierarchy.
+        for (spec, want) in [("flag:bogus", "use public"), ("in:extends:a.B", "in: takes a class condition")] {
+            assert!(parse_rule(spec).unwrap_err().to_string().contains(want), "{spec}");
+        }
+        assert!(matches!(parse_rule("in:{string:x}").unwrap(), Query::Defined(Defined::In(_))));
+    }
+
+    fn format_extends(c: &str) -> Query {
+        Query::Extends(format_class_name(c).unwrap())
     }
 
     #[test]

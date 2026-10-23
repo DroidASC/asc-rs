@@ -6,7 +6,7 @@
 //! ([`Engine::find_refs_rules`]), which also keeps each of them in L3.
 
 use crate::{names, Engine, EngineError, FindOptions, Result};
-use asc_findrefs::{CompiledQuery, Query};
+use asc_findrefs::{CompiledQuery, Defined, Query};
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 
@@ -33,6 +33,16 @@ impl Engine {
             return Err(EngineError::Query(format!("cannot answer a method condition: {}", errors.join("; "))));
         }
         Ok(sets)
+    }
+
+    /// `queries` with every condition that needs the whole program resolved:
+    /// `override:` / `in:{...}` over the class hierarchy, then `method:{RULE}`
+    /// over the code. `None` when nothing had to be resolved.
+    pub(crate) fn resolve(&self, queries: &[Query], cancel: &AtomicBool) -> Result<Option<Vec<Query>>> {
+        let defs = self.resolve_defined(queries, cancel)?;
+        let base: &[Query] = defs.as_deref().unwrap_or(queries);
+        let nested = self.resolve_nested(base, cancel)?;
+        Ok(nested.or(defs))
     }
 
     /// `queries` with every `method:{RULE}` replaced by the methods RULE
@@ -75,6 +85,7 @@ fn nested_rules<'q>(q: &'q Query, out: &mut Vec<&'q Query>) {
         | Query::Type(_)
         | Query::Method(_)
         | Query::MethodSet(_)
+        | Query::Defined(_)
         | Query::Field(_)
         | Query::Extends(_)
         | Query::Implements(_) => {}
@@ -92,6 +103,11 @@ fn substitute(q: &Query, sets: &mut impl Iterator<Item = BTreeSet<String>>) -> R
             all: all.iter().map(|p| substitute(p, sets)).collect::<Result<_>>()?,
             none: none.iter().map(|p| substitute(p, sets)).collect::<Result<_>>()?,
         },
+        // `check_patterns` compiles before resolution: stand an unresolved
+        // predicate in for its resolved form so compiling does not reject it.
+        Query::Defined(Defined::Override(_) | Defined::In(_)) => {
+            Query::Defined(Defined::Members { classes: Vec::new(), name: None, proto: None })
+        }
         q => q.clone(),
     })
 }

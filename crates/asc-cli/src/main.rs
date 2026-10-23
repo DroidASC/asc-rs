@@ -76,6 +76,9 @@ examples:
   droidasc findrefs app.apk method '{literal:device_id}'
   droidasc findrefs app.apk rules 'method:{string:^https?://} & !type:Lcom/a/test/'
   droidasc findrefs app.apk method @methods.txt
+  droidasc findrefs app.apk rules 'override:android.os.IInterface->asBinder'
+  droidasc findrefs app.apk rules 'flag:native & string:AES'
+  droidasc findrefs app.apk rules 'in:{extends:android.app.Service} & annotation:androidx.annotation.RequiresPermission'
   droidasc callgraph app.apk com.poc.Main onCreate --depth 3
   droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
   droidasc findrefs system/framework impl com.android.internal.telephony.ITelephony

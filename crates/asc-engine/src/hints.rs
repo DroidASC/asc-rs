@@ -368,6 +368,9 @@ pub fn query_hint(query: &Query) -> Option<String> {
         Query::MethodSet(_) => {
             "calls match the class the call site names: a call through a subclass or an interface names another one".into()
         }
+        Query::Defined(_) => {
+            "this lists method definitions (no call site); override:/in: need the class to be defined in the program".into()
+        }
         Query::String(_) | Query::Type(_) | Query::Method(_) | Query::Field(_) => return None,
     })
 }

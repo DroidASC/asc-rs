@@ -214,7 +214,7 @@ pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Op
 
 /// The findrefs kinds, as conditions spell them (`literal` is a string
 /// matched as plain text).
-pub const KINDS: &[&str] = &["string", "literal", "type", "method", "field", "extends", "impl"];
+pub const KINDS: &[&str] = &["string", "literal", "type", "method", "field", "extends", "impl", "override", "annotation", "flag", "in"];
 
 /// The canonical kind for what an agent wrote: case and plurals do not
 /// matter (`Methods`), nor common synonyms (`implements`, `class`, `call`).
@@ -230,6 +230,10 @@ pub fn parse_kind(kind: &str) -> Result<&'static str> {
             "field" => "field",
             "extends" | "extend" | "subclass" | "superclass" => "extends",
             "impl" | "implements" | "implement" | "interface" | "implementer" => "impl",
+            "override" | "overrides" | "implementor" => "override",
+            "annotation" | "annotated" | "anno" => "annotation",
+            "flag" | "flags" | "access" | "modifier" => "flag",
+            "in" | "inclass" => "in",
             _ => return None,
         })
     };
