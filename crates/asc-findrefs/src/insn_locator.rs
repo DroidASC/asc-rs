@@ -22,6 +22,7 @@
 //! bucket, and a lookup is a single indexed load. The table stores offsets
 //! only; the DEX buffer is handed back in for verification (`locate`).
 
+use crate::table::Table;
 use asc_dex::{class_data, map_type, Dex, Result};
 
 /// Method(s) owning an instruction offset.
@@ -41,8 +42,8 @@ impl MethodRef {
     }
 }
 
-const NONE: u32 = u32::MAX;
-const SHARED_BIT: u32 = 1 << 31;
+pub(crate) const NONE: u32 = u32::MAX;
+pub(crate) const SHARED_BIT: u32 = 1 << 31;
 
 /// `(insn_off, insn_size_bytes, method_idx)` for a method with a body.
 type Entry = (u32, u32, u32);
@@ -73,14 +74,17 @@ fn push_entry(buf: &[u8], entries: &mut Vec<Entry>, method_cap: usize, midx: u32
 /// Dense bucket table from instruction offsets to methods.
 pub struct InsnLocator {
     /// Bucket index of `table[0]`.
-    base_bucket: u32,
-    /// Per bucket: `NONE`, a method index, or `SHARED_BIT | index into shared`.
-    table: Vec<u32>,
-    shared: Vec<Vec<u32>>,
+    pub(crate) base_bucket: u32,
+    /// Per bucket: `NONE`, a method index, or `SHARED_BIT | index of a
+    /// shared list`.
+    pub(crate) table: Table<u32>,
+    /// Shared list `i` is `shared_ids[shared_starts[i]..shared_starts[i + 1]]`.
+    pub(crate) shared_starts: Table<u32>,
+    pub(crate) shared_ids: Table<u32>,
     /// First instruction offset per method index (`NONE` when no body).
-    method_bounds: Vec<u32>,
-    code_item_start: usize,
-    code_item_end: usize,
+    pub(crate) method_bounds: Table<u32>,
+    pub(crate) code_item_start: usize,
+    pub(crate) code_item_end: usize,
 }
 
 impl InsnLocator {
@@ -123,43 +127,64 @@ impl InsnLocator {
             }
         }
 
-        let mut loc = InsnLocator {
-            base_bucket: 0,
-            table: Vec::new(),
-            shared: Vec::new(),
-            method_bounds: vec![NONE; method_cap],
-            code_item_start: 0,
-            code_item_end: 0,
-        };
+        let mut method_bounds = vec![NONE; method_cap];
         if entries.is_empty() {
-            return Ok(loc);
+            return Ok(InsnLocator {
+                base_bucket: 0,
+                table: Table::default(),
+                shared_starts: vec![0].into(),
+                shared_ids: Table::default(),
+                method_bounds: method_bounds.into(),
+                code_item_start: 0,
+                code_item_end: 0,
+            });
         }
         // `push_entry` guarantees `insn_off + size <= buf.len() <= u32::MAX`,
         // so the bucket arithmetic below cannot overflow.
         let min_bucket = entries.iter().map(|e| e.0 >> 4).min().unwrap_or(0);
         let max_bucket = entries.iter().map(|e| (e.0 + e.1 - 1) >> 4).max().unwrap_or(0);
-        loc.base_bucket = min_bucket;
-        loc.table = vec![NONE; (max_bucket - min_bucket + 1) as usize];
-        loc.code_item_start = (min_bucket as usize) << 4;
-        loc.code_item_end = ((max_bucket as usize) + 1) << 4;
+        let mut table = vec![NONE; (max_bucket - min_bucket + 1) as usize];
+        let mut shared: Vec<Vec<u32>> = Vec::new();
         for (insn_off, size, midx) in entries {
-            loc.method_bounds[midx as usize] = insn_off;
+            method_bounds[midx as usize] = insn_off;
             let start = ((insn_off >> 4) - min_bucket) as usize;
             let end = (((insn_off + size - 1) >> 4) - min_bucket) as usize;
-            let value = match loc.table[start] {
+            let value = match table[start] {
                 NONE => midx,
                 old if old & SHARED_BIT != 0 => {
-                    loc.shared[(old & !SHARED_BIT) as usize].push(midx);
+                    shared[(old & !SHARED_BIT) as usize].push(midx);
                     old
                 }
                 old => {
-                    loc.shared.push(vec![midx, old]);
-                    SHARED_BIT | (loc.shared.len() as u32 - 1)
+                    shared.push(vec![midx, old]);
+                    SHARED_BIT | (shared.len() as u32 - 1)
                 }
             };
-            loc.table[start..=end].fill(value);
+            table[start..=end].fill(value);
         }
-        Ok(loc)
+        let mut shared_starts = Vec::with_capacity(shared.len() + 1);
+        shared_starts.push(0);
+        let mut shared_ids = Vec::with_capacity(shared.iter().map(Vec::len).sum());
+        for list in &shared {
+            shared_ids.extend_from_slice(list);
+            shared_starts.push(shared_ids.len() as u32);
+        }
+        Ok(InsnLocator {
+            base_bucket: min_bucket,
+            table: table.into(),
+            shared_starts: shared_starts.into(),
+            shared_ids: shared_ids.into(),
+            method_bounds: method_bounds.into(),
+            code_item_start: (min_bucket as usize) << 4,
+            code_item_end: ((max_bucket as usize) + 1) << 4,
+        })
+    }
+
+    /// Methods of shared list `i` (empty for an index a damaged persisted
+    /// table might hold).
+    fn shared(&self, i: u32) -> &[u32] {
+        let (Some(&a), Some(&b)) = (self.shared_starts.get(i as usize), self.shared_starts.get(i as usize + 1)) else { return &[] };
+        self.shared_ids.get(a as usize..b as usize).unwrap_or(&[])
     }
 
     pub fn code_item_start(&self) -> usize {
@@ -177,8 +202,7 @@ impl InsnLocator {
 
     /// Heap bytes held by the bucket, shared-method and bounds tables.
     pub fn heap_bytes(&self) -> usize {
-        use crate::locators::vec_bytes;
-        vec_bytes(&self.table) + vec_bytes(&self.shared) + self.shared.iter().map(vec_bytes).sum::<usize>() + vec_bytes(&self.method_bounds)
+        self.table.heap_bytes() + self.shared_starts.heap_bytes() + self.shared_ids.heap_bytes() + self.method_bounds.heap_bytes()
     }
 
     /// Number of non-empty buckets.
@@ -205,7 +229,7 @@ impl InsnLocator {
     pub fn get(&self, off: u32) -> Option<MethodRef> {
         match self.bucket_value(off) {
             NONE => None,
-            v if v & SHARED_BIT != 0 => Some(MethodRef::Shared(self.shared[(v & !SHARED_BIT) as usize].clone())),
+            v if v & SHARED_BIT != 0 => Some(MethodRef::Shared(self.shared(v & !SHARED_BIT).to_vec())),
             v => Some(MethodRef::Single(v)),
         }
     }
@@ -228,7 +252,7 @@ impl InsnLocator {
                 if v == NONE {
                     return None;
                 }
-                let first = if v & SHARED_BIT != 0 { self.shared[(v & !SHARED_BIT) as usize][0] } else { v };
+                let first = if v & SHARED_BIT != 0 { *self.shared(v & !SHARED_BIT).first()? } else { v };
                 let bound = *self.method_bounds.get(first as usize)?;
                 if bound == NONE {
                     return None;

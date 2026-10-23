@@ -533,6 +533,7 @@ fn cache_stats_reports_the_disk_budget() {
     let text = stdout(&out);
     assert!(text.contains("\n1 APKs, "), "{text}");
     assert!(text.contains(" (auto), used "), "{text}");
+    assert!(text.contains("  L1 dex ") && text.contains("  L2 derived ") && text.contains("  L3 rendered "), "{text}");
     if cfg!(unix) {
         assert!(text.contains("file system: ") && text.contains(" free of "), "{text}");
     }

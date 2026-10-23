@@ -1,22 +1,42 @@
-//! Caches for inflated DEX entries.
+//! Caches for inflated DEX entries and what is derived from them.
 //!
 //! Inflating the largest DEX of an APK is the critical path of every query, and
 //! it produces the same bytes every time. Two caches remove that cost for
 //! repeated queries without introducing any preprocessing step: they are
 //! filled lazily by the first query that needs an entry.
 //!
-//! * [`DiskCache`] stores inflated entries under a cache directory keyed by the
-//!   APK's size, modification time and central directory. Later processes
-//!   memory-map them, so the operating system's page cache keeps them hot.
-//!   Writes are plain `put`s; eviction is a separate [`DiskCache::evict`] step
-//!   so a host can batch it (writing a 30 MiB entry and walking the whole cache
-//!   directory after every one of them is what a query must never wait on).
-//!   Its capacity follows the free space of its file system by default
-//!   ([`auto_disk_bytes_for`]).
+//! * [`DiskCache`] stores data under a cache directory keyed by the APK's
+//!   size, modification time and central directory ([`ApkKey`]), in three
+//!   tiers ([`Tier`]) that share one budget:
+//!   - **L1** inflated DEX entries ([`DiskCache::put`] / [`DiskCache::get`]),
+//!     cheap to rebuild and large: evicted first, largest-and-oldest first.
+//!     Entries below [`DiskCache::min_dex_bytes`] are not worth writing
+//!     (re-inflating them is cheaper than the write).
+//!   - **L2** derived indexes ([`DiskCache::put_derived`] /
+//!     [`DiskCache::get_derived`]): locator tables and other per-DEX or
+//!     per-APK structures, stored so they can be mapped and viewed in place.
+//!     Every process mapping one shares its pages instead of building a
+//!     private copy. Kept by rebuild cost per byte; evicted last.
+//!   - **L3** rendered results ([`DiskCache::put_rendered`] /
+//!     [`DiskCache::get_rendered`]): small outputs keyed by the query and the
+//!     tool version, plain LRU under a small budget of their own.
+//!
+//!   Later processes memory-map L1 and L2 files, so the operating system's
+//!   page cache keeps them hot. Writes are plain `put`s; eviction is a
+//!   separate [`DiskCache::evict`] step so a host can batch it (writing a
+//!   30 MiB entry and walking the whole cache directory after every one of
+//!   them is what a query must never wait on). The budget follows the free
+//!   space of the file system by default ([`auto_disk_bytes_for`]).
 //! * [`MemoryCache`] is a byte-bounded LRU of inflated entries for hosts that
 //!   stay alive between queries (GUI, servers).
+//! * [`ProcessRegistry`] lets resident hosts of one user see each other, so
+//!   their memory budgets add up to one machine-wide budget.
 
-use std::collections::HashMap;
+mod procs;
+
+pub use procs::{ProcessRegistry, ProcessUsage};
+
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::ops::Deref;
@@ -90,6 +110,24 @@ impl Deref for DexData {
     }
 }
 
+impl DexData {
+    /// `len` bytes at `offset` of the file at `path`, mapped read-only (any
+    /// offset: the mapping starts at the page holding it). For entries an
+    /// APK stores uncompressed, so a host keeping them gets file pages the
+    /// OS can share and reclaim instead of a heap copy. The file must not
+    /// change while mapped, the same contract as mapping the APK itself.
+    pub fn map_region(path: &Path, offset: u64, len: usize) -> std::io::Result<DexData> {
+        let file = fs::File::open(path)?;
+        if file.metadata()?.len() < offset.saturating_add(len as u64) {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "region past the end of the file"));
+        }
+        // SAFETY: read-only mapping of a range checked to lie inside the file;
+        // see the contract above.
+        let map = unsafe { memmap2::MmapOptions::new().offset(offset).len(len).map(&file) }?;
+        Ok(DexData::Mapped(map))
+    }
+}
+
 impl AsRef<[u8]> for DexData {
     fn as_ref(&self) -> &[u8] {
         self
@@ -110,10 +148,127 @@ fn io_err(path: &Path) -> impl Fn(std::io::Error) -> CacheError + '_ {
     move |source| CacheError::Io { path: path.to_path_buf(), source }
 }
 
-/// On-disk cache of inflated entries.
+/// On-disk cache of inflated entries, derived indexes and rendered results.
 pub struct DiskCache {
     dir: PathBuf,
     cap: DiskCapacity,
+    min_dex_bytes: u64,
+    min_derived_cost: Duration,
+    /// Tiers written and read; the others behave as permanently empty.
+    tiers: [bool; 3],
+    /// Bytes this handle wrote since its last eviction walk.
+    written: std::sync::atomic::AtomicU64,
+}
+
+/// The tiers of a [`DiskCache`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Tier {
+    /// L1: inflated DEX entries, `<dir>/<apk key>/<entry>`.
+    Dex,
+    /// L2: derived indexes, `<dir>/derived/<apk key>/<name>~<kind>.v<format>.<version>`.
+    Derived,
+    /// L3: rendered results, `<dir>/rendered/<apk key>/<hash of the query>`.
+    Rendered,
+}
+
+impl Tier {
+    pub const ALL: [Tier; 3] = [Tier::Dex, Tier::Derived, Tier::Rendered];
+
+    /// Name in [`TIERS_ENV`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Tier::Dex => "dex",
+            Tier::Derived => "derived",
+            Tier::Rendered => "rendered",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tier::Dex => "L1 dex",
+            Tier::Derived => "L2 derived",
+            Tier::Rendered => "L3 rendered",
+        }
+    }
+}
+
+/// Subdirectory of the L2 tier.
+const DERIVED_DIR: &str = "derived";
+/// Subdirectory of the L3 tier.
+const RENDERED_DIR: &str = "rendered";
+/// Where each APK key's source path is recorded, to spot dead entries.
+const SOURCES_DIR: &str = "sources";
+
+/// Absolute cap of L3, which also never takes more than
+/// 1/[`RENDERED_BUDGET_DIVISOR`] of the total budget.
+pub const RENDERED_MAX: u64 = 128 << 20;
+pub const RENDERED_BUDGET_DIVISOR: u64 = 8;
+/// L2 never takes more than 1/[`DERIVED_BUDGET_DIVISOR`] of the total budget.
+pub const DERIVED_BUDGET_DIVISOR: u64 = 2;
+
+/// Inflated DEX entries smaller than this are not written to L1 by default:
+/// re-inflating them costs less than writing (and later evicting) them.
+pub const DEFAULT_MIN_DEX_BYTES: u64 = 4 << 20;
+/// Environment variable overriding [`DEFAULT_MIN_DEX_BYTES`], in MiB.
+pub const MIN_DEX_ENV: &str = "DROIDASC_CACHE_MIN_DEX_MB";
+/// Derived indexes that took less than this to build are not written to L2
+/// by default: mapping and checking a file would save next to nothing.
+pub const DEFAULT_MIN_DERIVED_COST: Duration = Duration::from_millis(2);
+
+/// Environment variable naming the tiers to use (`dex,derived,rendered`, the
+/// default: all of them), e.g. to measure one tier on its own.
+pub const TIERS_ENV: &str = "DROIDASC_CACHE_TIERS";
+
+/// Header of an L2 file; the payload follows at [`DERIVED_HEADER`], so it is
+/// as aligned as the mapping (page-aligned) up to that.
+const DERIVED_MAGIC: &[u8; 8] = b"ASCL2\0\0\0";
+const DERIVED_HEADER: usize = 64;
+/// Layout version of the L2 header, part of every L2 file name.
+const DERIVED_FORMAT: u32 = 1;
+const RENDERED_MAGIC: &[u8; 8] = b"ASCL3\0\0\0";
+/// Layout version of L3 files, part of every L3 key.
+const RENDERED_FORMAT: u32 = 1;
+
+/// A derived index mapped from L2: the payload [`DiskCache::put_derived`]
+/// stored, 64-byte aligned.
+pub struct Derived {
+    map: memmap2::Mmap,
+    /// Rebuild cost recorded by the writer.
+    pub build_cost: Duration,
+}
+
+impl Deref for Derived {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.map[DERIVED_HEADER..]
+    }
+}
+
+impl AsRef<[u8]> for Derived {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+/// Per-tier usage reported by [`DiskCache::tier_stats`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TierStats {
+    /// APK keys with data in the tier.
+    pub apks: usize,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+/// One evictable unit: an L1 APK directory, or one L2 / L3 file.
+struct Item {
+    tier: Tier,
+    key: String,
+    path: PathBuf,
+    mtime: SystemTime,
+    files: usize,
+    bytes: u64,
+    /// Rebuild cost (L2 only).
+    cost_us: u64,
 }
 
 /// How a [`DiskCache`] is bounded.
@@ -269,7 +424,63 @@ impl DiskCache {
     /// A cache in `dir` bounded by [`DiskCapacity::from_env`] (automatic
     /// unless [`CACHE_MAX_ENV`] is set).
     pub fn open(dir: impl Into<PathBuf>) -> DiskCache {
-        DiskCache { dir: dir.into(), cap: DiskCapacity::from_env() }
+        let min_dex_bytes = match std::env::var(MIN_DEX_ENV).ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            Some(mb) => mb.saturating_mul(1 << 20),
+            None => DEFAULT_MIN_DEX_BYTES,
+        };
+        let tiers = match std::env::var(TIERS_ENV) {
+            Ok(v) => Tier::ALL.map(|t| v.split(',').any(|n| n.trim() == t.name())),
+            Err(_) => [true; 3],
+        };
+        DiskCache {
+            dir: dir.into(),
+            cap: DiskCapacity::from_env(),
+            min_dex_bytes,
+            min_derived_cost: DEFAULT_MIN_DERIVED_COST,
+            tiers,
+            written: Default::default(),
+        }
+    }
+
+    /// Use only `tiers`: reads of the others miss and writes to them are
+    /// skipped. Entries already stored in them still count and are evicted.
+    pub fn with_tiers(mut self, tiers: &[Tier]) -> DiskCache {
+        self.tiers = Tier::ALL.map(|t| tiers.contains(&t));
+        self
+    }
+
+    pub fn uses(&self, tier: Tier) -> bool {
+        self.tiers[tier as usize]
+    }
+
+    /// Write inflated entries of at least `bytes` to L1 (0: all of them).
+    pub fn with_min_dex_bytes(mut self, bytes: u64) -> DiskCache {
+        self.min_dex_bytes = bytes;
+        self
+    }
+
+    /// Smallest inflated entry worth writing to L1 ([`DEFAULT_MIN_DEX_BYTES`]
+    /// unless [`MIN_DEX_ENV`] says otherwise). [`DiskCache::put`] itself
+    /// writes whatever it is given; hosts ask [`DiskCache::admits_dex`] first.
+    pub fn min_dex_bytes(&self) -> u64 {
+        self.min_dex_bytes
+    }
+
+    pub fn admits_dex(&self, len: u64) -> bool {
+        len >= self.min_dex_bytes
+    }
+
+    /// Write derived indexes that took at least `cost` to build to L2
+    /// (default [`DEFAULT_MIN_DERIVED_COST`]; zero: all of them).
+    pub fn with_min_derived_cost(mut self, cost: Duration) -> DiskCache {
+        self.min_derived_cost = cost;
+        self
+    }
+
+    /// Whether an index that took `cost` to build is worth an L2 file.
+    /// Like [`DiskCache::admits_dex`], a policy for hosts to apply.
+    pub fn admits_derived(&self, cost: Duration) -> bool {
+        cost >= self.min_derived_cost
     }
 
     /// Open the default directory, if one can be determined.
@@ -316,12 +527,23 @@ impl DiskCache {
     }
 
     fn entry_path(&self, key: &ApkKey, entry_name: &str) -> PathBuf {
-        let safe: String = entry_name.chars().map(|c| if is_key_char(c) { c } else { '_' }).collect();
-        self.dir.join(key.as_str()).join(safe)
+        self.dir.join(key.as_str()).join(safe_name(entry_name))
+    }
+
+    fn derived_path(&self, key: &ApkKey, name: &str, kind: &str, version: u32) -> PathBuf {
+        let file = format!("{}~{}.v{DERIVED_FORMAT}.{version}", safe_name(name), safe_name(kind));
+        self.dir.join(DERIVED_DIR).join(key.as_str()).join(file)
+    }
+
+    fn rendered_path(&self, key: &ApkKey, query: &str) -> PathBuf {
+        self.dir.join(RENDERED_DIR).join(key.as_str()).join(format!("{:016x}", fnv64(query.as_bytes())))
     }
 
     /// Map a cached entry if present and of the expected size.
     pub fn get(&self, key: &ApkKey, entry_name: &str, expected_len: u64) -> Option<DexData> {
+        if !self.uses(Tier::Dex) {
+            return None;
+        }
         let path = self.entry_path(key, entry_name);
         let file = fs::File::open(&path).ok()?;
         let len = file.metadata().ok()?.len();
@@ -330,33 +552,139 @@ impl DiskCache {
         }
         // Touch the APK directory so LRU eviction sees recent use.
         let _ = touch_dir(path.parent()?);
-        // SAFETY: read-only mapping of a file this process wrote atomically; a
-        // concurrent overwrite replaces the directory entry, not the mapped inode.
-        let map = unsafe { memmap2::MmapOptions::new().populate().map(&file) }.ok()?;
-        Some(DexData::Mapped(map))
+        // Not `populate`d: pre-faulting every entry of an APK costs more than
+        // faulting in the pages a query reads (getclass reads one class).
+        Some(DexData::Mapped(map_file(&file)?))
     }
 
     /// Store an inflated entry (atomic rename; concurrent writers are
     /// harmless). Does not evict: call [`DiskCache::evict`] after a batch of
     /// puts.
     pub fn put(&self, key: &ApkKey, entry_name: &str, bytes: &[u8]) -> Result<(), CacheError> {
+        if !self.uses(Tier::Dex) {
+            return Ok(());
+        }
+        self.write_atomic(&self.entry_path(key, entry_name), &[bytes], true)
+    }
+
+    /// Map the L2 index `name` (e.g. a logical DEX name) of `kind` at the
+    /// producer's format `version`, as [`DiskCache::put_derived`] stored it.
+    /// A file of another version, a damaged header or a truncated payload
+    /// is a miss.
+    pub fn get_derived(&self, key: &ApkKey, name: &str, kind: &str, version: u32) -> Option<Derived> {
+        if !self.uses(Tier::Derived) {
+            return None;
+        }
+        let file = fs::File::open(self.derived_path(key, name, kind, version)).ok()?;
+        let map = map_file(&file)?;
+        let header = map.get(..DERIVED_HEADER)?;
+        let u32_at = |o: usize| u32::from_le_bytes(header[o..o + 4].try_into().expect("4 bytes"));
+        let u64_at = |o: usize| u64::from_le_bytes(header[o..o + 8].try_into().expect("8 bytes"));
+        if &header[..8] != DERIVED_MAGIC
+            || u32_at(8) != DERIVED_FORMAT
+            || u32_at(12) != version
+            || u64_at(24) != (map.len() - DERIVED_HEADER) as u64
+        {
+            return None;
+        }
+        let _ = touch_file(&file);
+        Some(Derived { build_cost: Duration::from_micros(u64_at(16)), map })
+    }
+
+    /// Store an L2 index (see [`DiskCache::get_derived`]). `build_cost` is
+    /// what rebuilding it takes: eviction keeps the indexes that save the
+    /// most time per byte.
+    pub fn put_derived(
+        &self,
+        key: &ApkKey,
+        name: &str,
+        kind: &str,
+        version: u32,
+        build_cost: Duration,
+        payload: &[u8],
+    ) -> Result<(), CacheError> {
+        if !self.uses(Tier::Derived) {
+            return Ok(());
+        }
+        let mut header = [0u8; DERIVED_HEADER];
+        header[..8].copy_from_slice(DERIVED_MAGIC);
+        header[8..12].copy_from_slice(&DERIVED_FORMAT.to_le_bytes());
+        header[12..16].copy_from_slice(&version.to_le_bytes());
+        header[16..24].copy_from_slice(&(build_cost.as_micros() as u64).to_le_bytes());
+        header[24..32].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        self.write_atomic(&self.derived_path(key, name, kind, version), &[&header, payload], false)
+    }
+
+    /// The L3 result stored under `query` (the query, its options and the
+    /// producer's version: build it with [`rendered_key`]).
+    pub fn get_rendered(&self, key: &ApkKey, query: &str) -> Option<Vec<u8>> {
+        if !self.uses(Tier::Rendered) {
+            return None;
+        }
+        let path = self.rendered_path(key, query);
+        let mut data = fs::read(&path).ok()?;
+        let key_len = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?) as usize;
+        let body = 12usize.checked_add(key_len)?;
+        // The full key is stored and compared, so a hash collision is a miss.
+        if data.get(..8)? != RENDERED_MAGIC || data.get(12..body)? != query.as_bytes() {
+            return None;
+        }
+        if let Ok(f) = fs::File::open(&path) {
+            let _ = touch_file(&f);
+        }
+        data.drain(..body);
+        Some(data)
+    }
+
+    /// Store an L3 result (see [`DiskCache::get_rendered`]).
+    pub fn put_rendered(&self, key: &ApkKey, query: &str, payload: &[u8]) -> Result<(), CacheError> {
+        if !self.uses(Tier::Rendered) {
+            return Ok(());
+        }
+        let mut header = Vec::with_capacity(12 + query.len());
+        header.extend_from_slice(RENDERED_MAGIC);
+        header.extend_from_slice(&(query.len() as u32).to_le_bytes());
+        header.extend_from_slice(query.as_bytes());
+        self.write_atomic(&self.rendered_path(key, query), &[&header, payload], false)
+    }
+
+    /// Record where the APK of `key` lives, so eviction can tell the entries
+    /// of an APK deleted or replaced since (evicted first) from live ones.
+    /// Cheap to repeat; hosts call it once per APK.
+    pub fn note_source(&self, key: &ApkKey, apk_path: &Path) -> Result<(), CacheError> {
+        let path = self.dir.join(SOURCES_DIR).join(key.as_str());
+        let Some(stamp) = source_stamp(apk_path) else { return Ok(()) };
+        if fs::read_to_string(&path).is_ok_and(|s| s == stamp) {
+            return Ok(());
+        }
+        self.write_atomic(&path, &[stamp.as_bytes()], false)
+    }
+
+    /// Write `parts` to `path` (atomic rename; concurrent writers are
+    /// harmless), refusing foreign directories and the free-space reserve.
+    /// With `sync` the data reaches the disk before the rename. L1 entries
+    /// are only checked by length on read, so they are synced; L2 and L3
+    /// files carry headers (and L3 an end marker) that a file cut short by
+    /// a crash fails, and a sync per small file costs more than the query
+    /// that wrote it (a one-shot process per query writes one or two).
+    fn write_atomic(&self, path: &Path, parts: &[&[u8]], sync: bool) -> Result<(), CacheError> {
         // Checked before anything is created: the tag must never land in a
         // directory that holds someone else's files.
         if !self.is_cache_dir() {
             return Err(self.not_a_cache_dir());
         }
-        // One statvfs per entry: with the automatic budget, never write into
+        let len: u64 = parts.iter().map(|p| p.len() as u64).sum();
+        // One statvfs per write: with the automatic budget, never write into
         // the reserve the file system needs (another program may have filled
         // the disk since the last eviction).
         if self.cap == DiskCapacity::Auto {
             if let Some((free, total)) = disk_space(&self.dir) {
-                if free.saturating_sub(bytes.len() as u64) < auto_disk_reserve(total) {
-                    return Err(CacheError::LowDiskSpace { path: self.dir.clone(), bytes: bytes.len() as u64 });
+                if free.saturating_sub(len) < auto_disk_reserve(total) {
+                    return Err(CacheError::LowDiskSpace { path: self.dir.clone(), bytes: len });
                 }
             }
         }
-        let path = self.entry_path(key, entry_name);
-        let parent = path.parent().expect("entry path has a parent");
+        let parent = path.parent().expect("cache path has a parent");
         fs::create_dir_all(parent).map_err(io_err(parent))?;
         // Best effort: an unwritable root (shared cache, full disk) must not
         // stop entries from being written into their own directories.
@@ -364,29 +692,39 @@ impl DiskCache {
         let tmp = parent.join(format!(".{}.{}.tmp", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
         {
             let mut f = fs::File::create(&tmp).map_err(io_err(&tmp))?;
-            f.write_all(bytes).map_err(io_err(&tmp))?;
-            f.sync_data().ok();
+            for p in parts {
+                f.write_all(p).map_err(io_err(&tmp))?;
+            }
+            if sync {
+                f.sync_data().ok();
+            }
         }
-        fs::rename(&tmp, &path).map_err(io_err(&path))?;
+        fs::rename(&tmp, path).map_err(io_err(path))?;
+        self.written.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// `(apk directories, files, bytes)` currently stored.
+    /// `(APKs, files, bytes)` currently stored, over every tier (an APK
+    /// with data in several tiers counts once).
     pub fn stats(&self) -> (usize, usize, u64) {
-        let mut dirs = 0;
-        let mut files = 0;
-        let mut bytes = 0;
-        for (_, _, n, size) in self.apk_dirs() {
-            dirs += 1;
-            files += n;
-            bytes += size;
-        }
-        (dirs, files, bytes)
+        let items = self.items();
+        let keys: HashSet<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        (keys.len(), items.iter().map(|i| i.files).sum(), items.iter().map(|i| i.bytes).sum())
     }
 
-    /// Delete every cached APK directory (and nothing else). Returns the
-    /// number of bytes freed. Refuses to run on a directory that is not a
-    /// cache directory (see [`CACHEDIR_TAG`]).
+    /// Usage of each tier, in [`Tier::ALL`] order.
+    pub fn tier_stats(&self) -> [TierStats; 3] {
+        let items = self.items();
+        Tier::ALL.map(|tier| {
+            let of_tier = || items.iter().filter(move |i| i.tier == tier);
+            let keys: HashSet<&str> = of_tier().map(|i| i.key.as_str()).collect();
+            TierStats { apks: keys.len(), files: of_tier().map(|i| i.files).sum(), bytes: of_tier().map(|i| i.bytes).sum() }
+        })
+    }
+
+    /// Delete every cached entry of every tier (and nothing else). Returns
+    /// the number of bytes freed. Refuses to run on a directory that is not
+    /// a cache directory (see [`CACHEDIR_TAG`]).
     pub fn clear(&self) -> Result<u64, CacheError> {
         if !self.dir.exists() {
             return Ok(0);
@@ -395,9 +733,15 @@ impl DiskCache {
             return Err(self.not_a_cache_dir());
         }
         let mut bytes = 0;
-        for (_, path, _, size) in self.apk_dirs() {
-            fs::remove_dir_all(&path).map_err(io_err(&path))?;
-            bytes += size;
+        for item in self.items() {
+            remove_item(&item).map_err(io_err(&item.path))?;
+            bytes += item.bytes;
+        }
+        for sub in [DERIVED_DIR, RENDERED_DIR, SOURCES_DIR] {
+            let path = self.dir.join(sub);
+            if path.is_dir() {
+                fs::remove_dir_all(&path).map_err(io_err(&path))?;
+            }
         }
         Ok(bytes)
     }
@@ -456,8 +800,8 @@ impl DiskCache {
                 let name = d.file_name();
                 let name = name.to_string_lossy();
                 match d.file_type() {
-                    Ok(t) if t.is_dir() => is_cache_dir_name(&name),
-                    Ok(t) if t.is_file() => name == ".DS_Store",
+                    Ok(t) if t.is_dir() => is_cache_dir_name(&name) || TIER_DIRS.contains(&&*name),
+                    Ok(t) if t.is_file() => name == ".DS_Store" || name == EVICT_MARKER,
                     _ => false,
                 }
             }),
@@ -470,58 +814,267 @@ impl DiskCache {
     /// directory is ignored); also removes temporary files left behind by a
     /// killed writer.
     fn apk_dirs(&self) -> Vec<(SystemTime, PathBuf, usize, u64)> {
-        let mut out = Vec::new();
-        let Ok(rd) = fs::read_dir(&self.dir) else { return out };
-        let now = SystemTime::now();
-        for d in rd.flatten() {
-            let path = d.path();
-            if !is_cache_dir_name(&d.file_name().to_string_lossy()) || !path.is_dir() {
-                continue;
-            }
-            let mtime = d.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            let (mut files, mut size) = (0usize, 0u64);
-            if let Ok(fd) = fs::read_dir(&path) {
-                for f in fd.flatten() {
+        apk_dirs_in(&self.dir)
+    }
+
+    /// Every evictable unit of every tier.
+    fn items(&self) -> Vec<Item> {
+        let mut out: Vec<Item> = self
+            .apk_dirs()
+            .into_iter()
+            .map(|(mtime, path, files, bytes)| Item {
+                tier: Tier::Dex,
+                key: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                path,
+                mtime,
+                files,
+                bytes,
+                cost_us: 0,
+            })
+            .collect();
+        for (tier, sub) in [(Tier::Derived, DERIVED_DIR), (Tier::Rendered, RENDERED_DIR)] {
+            for (_, dir, _, _) in apk_dirs_in(&self.dir.join(sub)) {
+                let key = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let Ok(rd) = fs::read_dir(&dir) else { continue };
+                for f in rd.flatten() {
                     let Ok(m) = f.metadata() else { continue };
-                    let name = f.file_name();
-                    let is_tmp = name.to_string_lossy().ends_with(".tmp");
-                    if is_tmp && m.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age > STALE_TMP) {
-                        let _ = fs::remove_file(f.path());
+                    if !m.is_file() || f.file_name().to_string_lossy().ends_with(".tmp") {
                         continue;
                     }
-                    files += 1;
-                    size += m.len();
+                    let cost_us = if tier == Tier::Derived { derived_cost_us(&f.path()) } else { 0 };
+                    let mtime = m.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                    out.push(Item { tier, key: key.clone(), path: f.path(), mtime, files: 1, bytes: m.len(), cost_us });
                 }
             }
-            out.push((mtime, path, files, size));
         }
         out
     }
 
-    /// Evict least recently used APK directories until under capacity
-    /// ([`DiskCache::capacity_for`], re-evaluated against the current free
-    /// space). Does nothing in a directory that is not a cache directory (see
-    /// [`CACHEDIR_TAG`]).
+    /// APK keys whose recorded source ([`DiskCache::note_source`]) is gone
+    /// or has changed since.
+    fn dead_keys(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let Ok(rd) = fs::read_dir(self.dir.join(SOURCES_DIR)) else { return out };
+        for f in rd.flatten() {
+            let Ok(stamp) = fs::read_to_string(f.path()) else { continue };
+            let Some(path) = stamp.lines().nth(2) else { continue };
+            if source_stamp(Path::new(path)).as_deref() != Some(stamp.as_str()) {
+                out.insert(f.file_name().to_string_lossy().into_owned());
+            }
+        }
+        out
+    }
+}
+
+/// `(mtime, path, file count, bytes)` per APK directory directly under
+/// `root` (subdirectories whose name matches [`is_cache_dir_name`]; anything
+/// else is ignored); also removes temporary files left behind by a killed
+/// writer.
+fn apk_dirs_in(root: &Path) -> Vec<(SystemTime, PathBuf, usize, u64)> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(root) else { return out };
+    let now = SystemTime::now();
+    for d in rd.flatten() {
+        let path = d.path();
+        if !is_cache_dir_name(&d.file_name().to_string_lossy()) || !path.is_dir() {
+            continue;
+        }
+        let mtime = d.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        let (mut files, mut size) = (0usize, 0u64);
+        if let Ok(fd) = fs::read_dir(&path) {
+            for f in fd.flatten() {
+                let Ok(m) = f.metadata() else { continue };
+                let name = f.file_name();
+                let is_tmp = name.to_string_lossy().ends_with(".tmp");
+                if is_tmp && m.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age > STALE_TMP) {
+                    let _ = fs::remove_file(f.path());
+                    continue;
+                }
+                files += 1;
+                size += m.len();
+            }
+        }
+        out.push((mtime, path, files, size));
+    }
+    out
+}
+
+impl DiskCache {
+    /// Evict until under capacity ([`DiskCache::capacity_for`],
+    /// re-evaluated against the current free space). Does nothing in a
+    /// directory that is not a cache directory (see [`CACHEDIR_TAG`]).
+    ///
+    /// L3 is first trimmed to its own budget (the smaller of
+    /// [`RENDERED_MAX`] and 1/[`RENDERED_BUDGET_DIVISOR`] of the total) and
+    /// L2 to 1/[`DERIVED_BUDGET_DIVISOR`]. Over the total, entries of APKs
+    /// that are gone ([`DiskCache::note_source`]) go first, then L1 (the
+    /// largest, least recently used APK directories first), then L3 (least
+    /// recently used first), then L2 (least rebuild time saved per byte
+    /// first, discounted by age).
     pub fn evict(&self) {
         if !self.is_cache_dir() {
             return;
         }
-        let mut dirs = self.apk_dirs();
-        let mut total: u64 = dirs.iter().map(|d| d.3).sum();
+        self.written.store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = fs::File::create(self.dir.join(EVICT_MARKER));
+        let items = self.items();
+        let mut total: u64 = items.iter().map(|i| i.bytes).sum();
         let cap = self.capacity_for(total);
-        if total <= cap {
-            return;
+        let caps = [cap, cap / DERIVED_BUDGET_DIVISOR, (cap / RENDERED_BUDGET_DIVISOR).min(RENDERED_MAX)];
+        let mut tier_used = [0u64; 3];
+        for i in &items {
+            tier_used[i.tier as usize] += i.bytes;
         }
-        dirs.sort();
-        for (_, path, _, size) in dirs {
-            if total <= cap {
-                break;
+        if total > cap || tier_used[1] > caps[1] || tier_used[2] > caps[2] {
+            let order = eviction_order(&items, &self.dead_keys());
+            let mut gone = vec![false; items.len()];
+            let mut remove = |idx: usize, total: &mut u64, tier_used: &mut [u64; 3]| {
+                if !gone[idx] && remove_item(&items[idx]).is_ok() {
+                    gone[idx] = true;
+                    *total = total.saturating_sub(items[idx].bytes);
+                    let t = items[idx].tier as usize;
+                    tier_used[t] = tier_used[t].saturating_sub(items[idx].bytes);
+                }
+            };
+            // The per-tier budgets of L3 and L2, each in its own order.
+            for tier in [Tier::Rendered, Tier::Derived] {
+                for &idx in order.iter().filter(|&&i| items[i].tier == tier) {
+                    if tier_used[tier as usize] <= caps[tier as usize] {
+                        break;
+                    }
+                    remove(idx, &mut total, &mut tier_used);
+                }
             }
-            if fs::remove_dir_all(&path).is_ok() {
-                total = total.saturating_sub(size);
+            for &idx in &order {
+                if total <= cap {
+                    break;
+                }
+                remove(idx, &mut total, &mut tier_used);
+            }
+        }
+        // Drop the source records of keys with nothing left.
+        if let Ok(rd) = fs::read_dir(self.dir.join(SOURCES_DIR)) {
+            let live: HashSet<String> = self.items().into_iter().map(|i| i.key).collect();
+            for f in rd.flatten() {
+                if !live.contains(&*f.file_name().to_string_lossy()) {
+                    let _ = fs::remove_file(f.path());
+                }
             }
         }
     }
+}
+
+impl DiskCache {
+    /// [`DiskCache::evict`], skipped when another walk happened less than
+    /// [`EVICT_INTERVAL`] ago and this handle has written less than
+    /// 1/[`EVICT_WRITE_DIVISOR`] of the budget since its own last walk. For
+    /// hosts that evict after every burst of writes: a process per query
+    /// would otherwise walk the whole cache thousands of times over a batch.
+    pub fn evict_lazily(&self) {
+        if !self.recently_evicted() {
+            self.evict();
+        }
+    }
+
+    /// Whether a walk can be skipped: some process walked the cache less
+    /// than [`EVICT_INTERVAL`] ago and this handle has written less than
+    /// 1/[`EVICT_WRITE_DIVISOR`] of the budget since its own last walk. A
+    /// walk reads every file's metadata (and every L2 header), which a
+    /// process per query would otherwise repeat thousands of times over a
+    /// batch; the overshoot is bounded, and every automatic-budget write
+    /// still checks the free-space reserve.
+    fn recently_evicted(&self) -> bool {
+        let written = self.written.load(std::sync::atomic::Ordering::Relaxed);
+        let fresh = fs::metadata(self.dir.join(EVICT_MARKER))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age < EVICT_INTERVAL);
+        fresh && written < self.capacity_for(0) / EVICT_WRITE_DIVISOR
+    }
+}
+
+/// Touched by every eviction walk; see [`DiskCache::evict`].
+const EVICT_MARKER: &str = ".last-evict";
+const EVICT_INTERVAL: Duration = Duration::from_secs(5);
+const EVICT_WRITE_DIVISOR: u64 = 16;
+
+/// Indexes of `items` in eviction order: entries of dead APKs first
+/// (largest first), then L1 by `age × size` (descending), then L3 by age
+/// (descending), then L2 by `rebuild µs / byte / (1 + age in hours)`
+/// (ascending). Ages count from the newest item (plus one second), so clock
+/// skew between writers cannot invert the order; ties go oldest first.
+fn eviction_order(items: &[Item], dead: &HashSet<String>) -> Vec<usize> {
+    let newest = items.iter().map(|i| i.mtime).max().unwrap_or(SystemTime::UNIX_EPOCH);
+    let age_secs = |i: &Item| newest.duration_since(i.mtime).unwrap_or_default().as_secs_f64() + 1.0;
+    let score = |i: &Item| -> (u8, f64) {
+        if dead.contains(&i.key) {
+            return (0, -(i.bytes as f64));
+        }
+        match i.tier {
+            Tier::Dex => (1, -(age_secs(i) * i.bytes as f64)),
+            Tier::Rendered => (2, -age_secs(i)),
+            Tier::Derived => (3, i.cost_us as f64 / i.bytes.max(1) as f64 / (1.0 + age_secs(i) / 3600.0)),
+        }
+    };
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (sa, sb) = (score(&items[a]), score(&items[b]));
+        sa.0.cmp(&sb.0).then(sa.1.total_cmp(&sb.1)).then(items[a].mtime.cmp(&items[b].mtime))
+    });
+    order
+}
+
+fn remove_item(item: &Item) -> std::io::Result<()> {
+    match item.tier {
+        Tier::Dex => fs::remove_dir_all(&item.path),
+        _ => fs::remove_file(&item.path),
+    }
+}
+
+/// Subdirectories of the cache root that belong to it besides APK directories.
+const TIER_DIRS: [&str; 3] = [DERIVED_DIR, RENDERED_DIR, SOURCES_DIR];
+
+/// `name` with every character a cache file name may not hold replaced.
+fn safe_name(name: &str) -> String {
+    name.chars().map(|c| if is_key_char(c) { c } else { '_' }).collect()
+}
+
+/// The key an L3 result is stored under: the producer (e.g. `findrefs`)
+/// and its version, the L3 layout version and the query, so a tool upgrade
+/// never serves output of the old one.
+pub fn rendered_key(producer: &str, version: &str, query: &str) -> String {
+    format!("{producer}\0{version}\0{RENDERED_FORMAT}\0{query}")
+}
+
+/// Read-only mapping of a cache file.
+fn map_file(file: &fs::File) -> Option<memmap2::Mmap> {
+    // SAFETY: read-only mapping of a file renamed into place atomically; a
+    // concurrent overwrite replaces the directory entry, not the mapped inode.
+    unsafe { memmap2::MmapOptions::new().map(file) }.ok()
+}
+
+/// Rebuild cost recorded in an L2 file's header (0 when unreadable).
+fn derived_cost_us(path: &Path) -> u64 {
+    use std::io::Read;
+    let mut header = [0u8; 24];
+    match fs::File::open(path).and_then(|mut f| f.read_exact(&mut header)) {
+        Ok(()) if &header[..8] == DERIVED_MAGIC => u64::from_le_bytes(header[16..24].try_into().expect("8 bytes")),
+        _ => 0,
+    }
+}
+
+/// `size\nmtime\npath` of an APK, as [`DiskCache::note_source`] records it.
+fn source_stamp(apk: &Path) -> Option<String> {
+    let abs = fs::canonicalize(apk).ok()?;
+    let meta = fs::metadata(&abs).ok()?;
+    let mtime = meta.modified().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos();
+    let path = abs.to_str()?;
+    (!path.contains('\n')).then(|| format!("{}\n{mtime}\n{path}", meta.len()))
+}
+
+fn touch_file(file: &fs::File) -> std::io::Result<()> {
+    file.set_modified(SystemTime::now())
 }
 
 fn touch_dir(dir: &Path) -> std::io::Result<()> {
@@ -641,6 +1194,18 @@ impl<T> MemoryCache<T> {
         self.cap_bytes
     }
 
+    /// Change the capacity, evicting least recently used entries if the
+    /// cache now holds more.
+    pub fn set_capacity(&mut self, cap_bytes: usize) {
+        self.cap_bytes = cap_bytes;
+        self.evict_over_cap();
+    }
+
+    /// The entry cached under `entry_name`, without touching its recency.
+    pub fn peek(&self, key: &ApkKey, entry_name: &str) -> Option<Arc<T>> {
+        self.map.get(key)?.get(entry_name).map(|s| Arc::clone(&s.value))
+    }
+
     /// Every cached value, in no particular order (recency is not touched).
     pub fn values(&self) -> impl Iterator<Item = &Arc<T>> {
         self.map.values().flat_map(|per| per.values().map(|s| &s.value))
@@ -670,6 +1235,21 @@ impl<T> MemoryCache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_of_a_file_map_at_any_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.apk");
+        let bytes: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&path, &bytes).unwrap();
+        for (off, len) in [(0, 10), (4097, 3000), (12_345, 7655), (19_999, 1)] {
+            let d = DexData::map_region(&path, off as u64, len).unwrap();
+            assert!(matches!(d, DexData::Mapped(_)));
+            assert_eq!(&*d, &bytes[off..off + len]);
+        }
+        assert!(DexData::map_region(&path, 19_999, 2).is_err());
+        assert!(DexData::map_region(&dir.path().join("missing"), 0, 1).is_err());
+    }
 
     #[test]
     fn memory_remove_apk_releases_only_that_apk() {
@@ -945,6 +1525,19 @@ mod tests {
     }
 
     #[test]
+    fn memory_lru_capacity_can_shrink_and_peek_keeps_recency() {
+        let mut m: MemoryCache<u8> = MemoryCache::new(10);
+        let k = ApkKey("k".into());
+        m.insert(&k, "a", Arc::new(1), 4);
+        m.insert(&k, "b", Arc::new(2), 4);
+        assert_eq!(*m.peek(&k, "a").unwrap(), 1); // a stays least recently used
+        m.set_capacity(5);
+        assert_eq!((m.capacity_bytes(), m.used_bytes()), (5, 4));
+        assert!(m.peek(&k, "a").is_none());
+        assert!(m.peek(&k, "b").is_some());
+    }
+
+    #[test]
     fn memory_lru_replace_keeps_size_and_recency() {
         let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
         let k = ApkKey("k".into());
@@ -979,5 +1572,202 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(fnv64(b""), fnv64(b"\0"));
         assert_eq!(fnv64(b"abc"), scalar(b"abc")); // short inputs take the scalar path
+    }
+
+    fn set_mtime(path: &Path, secs_from_now: i64) {
+        let t = if secs_from_now >= 0 {
+            SystemTime::now() + Duration::from_secs(secs_from_now as u64)
+        } else {
+            SystemTime::now() - Duration::from_secs((-secs_from_now) as u64)
+        };
+        fs::File::open(path).unwrap().set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn derived_roundtrip_is_versioned_and_aligned() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
+        let key = ApkKey("app-0123456789abcdef".into());
+        assert!(cache.get_derived(&key, "classes.dex", "locators", 1).is_none());
+        cache.put_derived(&key, "classes.dex", "locators", 1, Duration::from_millis(7), b"tables").unwrap();
+        let d = cache.get_derived(&key, "classes.dex", "locators", 1).unwrap();
+        assert_eq!(&*d, b"tables");
+        assert_eq!(d.build_cost, Duration::from_millis(7));
+        assert_eq!(d.as_ptr() as usize % 64, 0, "payload as aligned as the mapping");
+        // Another producer version, kind or name is another file.
+        assert!(cache.get_derived(&key, "classes.dex", "locators", 2).is_none());
+        assert!(cache.get_derived(&key, "classes.dex", "callgraph", 1).is_none());
+        assert!(cache.get_derived(&key, "classes2.dex", "locators", 1).is_none());
+        // A truncated file is a miss.
+        let path = cache.derived_path(&key, "classes.dex", "locators", 1);
+        let full = fs::read(&path).unwrap();
+        fs::write(&path, &full[..full.len() - 1]).unwrap();
+        assert!(cache.get_derived(&key, "classes.dex", "locators", 1).is_none());
+        fs::write(&path, &full[..10]).unwrap();
+        assert!(cache.get_derived(&key, "classes.dex", "locators", 1).is_none());
+        let [l1, l2, l3] = cache.tier_stats();
+        assert_eq!((l1.files, l2.files, l3.files), (0, 1, 0));
+    }
+
+    #[test]
+    fn rendered_results_are_keyed_by_the_full_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
+        let key = ApkKey("app-0123456789abcdef".into());
+        let q = rendered_key("findrefs", "1.0", "string\0token");
+        assert!(cache.get_rendered(&key, &q).is_none());
+        cache.put_rendered(&key, &q, b"rows").unwrap();
+        assert_eq!(cache.get_rendered(&key, &q).unwrap(), b"rows");
+        assert!(cache.get_rendered(&key, &rendered_key("findrefs", "1.1", "string\0token")).is_none(), "tool upgrade");
+        // A file found under another query's hash (a collision) is a miss.
+        let other = rendered_key("findrefs", "1.0", "string\0other");
+        fs::rename(cache.rendered_path(&key, &q), cache.rendered_path(&key, &other)).unwrap();
+        assert!(cache.get_rendered(&key, &other).is_none());
+    }
+
+    #[test]
+    fn stats_and_clear_cover_every_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(1 << 20);
+        let (a, b) = (ApkKey("a-0123456789abcdef".into()), ApkKey("b-0123456789abcdef".into()));
+        cache.put(&a, "classes.dex", &[0; 10]).unwrap();
+        cache.put_derived(&a, "classes.dex", "locators", 1, Duration::ZERO, &[0; 6]).unwrap();
+        cache.put_rendered(&b, "q", &[0; 3]).unwrap();
+        let (apks, files, bytes) = cache.stats();
+        assert_eq!((apks, files), (2, 3));
+        assert_eq!(bytes, 10 + (64 + 6) + (12 + 1 + 3));
+        let [l1, l2, l3] = cache.tier_stats();
+        assert_eq!((l1.apks, l2.apks, l3.apks), (1, 1, 1));
+        // A cache with tier directories but no tag (lost) is still ours.
+        fs::remove_file(dir.path().join(CACHEDIR_TAG)).unwrap();
+        assert!(cache.check_usable().is_ok());
+        assert_eq!(cache.clear().unwrap(), bytes);
+        assert_eq!(cache.stats(), (0, 0, 0));
+        assert!(!dir.path().join("derived").exists() && !dir.path().join("rendered").exists());
+    }
+
+    #[test]
+    fn disabled_tiers_miss_and_skip_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(1 << 20).with_tiers(&[Tier::Derived]);
+        let key = ApkKey("app-0123456789abcdef".into());
+        cache.put(&key, "classes.dex", b"abc").unwrap();
+        cache.put_rendered(&key, "q", b"rows").unwrap();
+        cache.put_derived(&key, "classes.dex", "k", 1, Duration::ZERO, b"t").unwrap();
+        assert_eq!(cache.tier_stats().map(|t| t.files), [0, 1, 0]);
+        let all = DiskCache::open(dir.path()).with_capacity(1 << 20).with_tiers(&Tier::ALL);
+        all.put(&key, "classes.dex", b"abc").unwrap();
+        assert!(cache.get(&key, "classes.dex", 3).is_none());
+        assert!(cache.uses(Tier::Derived) && !cache.uses(Tier::Dex));
+    }
+
+    #[test]
+    fn lazy_eviction_skips_a_walk_right_after_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(1 << 30);
+        let key = ApkKey("app-0123456789abcdef".into());
+        cache.put(&key, "classes.dex", &[0; 100]).unwrap();
+        cache.evict();
+        assert!(dir.path().join(EVICT_MARKER).is_file());
+        assert!(cache.check_usable().is_ok(), "the marker is the cache's own");
+        // Over a lowered budget: a lazy pass right after a walk leaves it ...
+        let cache = cache.with_capacity(50);
+        cache.evict_lazily();
+        assert_eq!(cache.stats().1, 1);
+        // ... until enough was written since (1/16 of the budget), or the walk is old.
+        cache.put(&key, "classes2.dex", &[0; 100]).unwrap();
+        cache.evict_lazily();
+        assert_eq!(cache.stats().1, 0);
+    }
+
+    #[test]
+    fn small_dex_entries_are_not_admitted_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path());
+        if std::env::var_os(MIN_DEX_ENV).is_none() {
+            assert_eq!(cache.min_dex_bytes(), DEFAULT_MIN_DEX_BYTES);
+        }
+        let cache = cache.with_min_dex_bytes(100);
+        assert!(!cache.admits_dex(99));
+        assert!(cache.admits_dex(100));
+        assert!(cache.with_min_dex_bytes(0).admits_dex(0));
+    }
+
+    #[test]
+    fn eviction_trims_tiers_then_goes_l1_l3_l2() {
+        let dir = tempfile::tempdir().unwrap();
+        // Budget 1000: L2 may hold 500, L3 125.
+        let cache = DiskCache::open(dir.path()).with_capacity(1000);
+        let k = |i: u32| ApkKey(format!("app-{i:016x}"));
+        // L3: four 64-byte results (+ header), the oldest beyond L3's own budget.
+        for i in 0..4 {
+            let q = format!("q{i}");
+            cache.put_rendered(&k(0), &q, &[0; 64]).unwrap();
+            set_mtime(&cache.rendered_path(&k(0), &q), -100 + i as i64);
+        }
+        cache.evict();
+        let [_, _, l3] = cache.tier_stats();
+        assert_eq!(l3.files, 1, "trimmed to its own budget, newest kept");
+        assert!(cache.get_rendered(&k(0), "q3").is_some());
+        // L2: a cheap and an expensive index per byte; L1: two APKs.
+        cache.put_derived(&k(1), "classes.dex", "cheap", 1, Duration::from_micros(10), &[0; 136]).unwrap();
+        cache.put_derived(&k(1), "classes.dex", "dear", 1, Duration::from_secs(1), &[0; 136]).unwrap();
+        cache.put(&k(2), "classes.dex", &[0; 300]).unwrap();
+        cache.put(&k(3), "classes.dex", &[0; 300]).unwrap();
+        set_mtime(&dir.path().join(k(2).as_str()), -50);
+        // 78 + 400 + 600 = 1078 > 1000: one L1 directory goes, the older.
+        cache.evict();
+        assert!(cache.get(&k(2), "classes.dex", 300).is_none());
+        assert!(cache.get(&k(3), "classes.dex", 300).is_some());
+        assert_eq!(cache.tier_stats().map(|t| t.files), [1, 2, 1]);
+        // Budget 450 (L2 225, L3 56): L3 and the cheap L2 index exceed their
+        // own budgets, then L1 goes to fit the total.
+        let cache = cache.with_capacity(450);
+        cache.evict();
+        assert_eq!(cache.tier_stats().map(|t| t.files), [0, 1, 0]);
+        assert!(cache.get_derived(&k(1), "classes.dex", "dear", 1).is_some());
+    }
+
+    #[test]
+    fn l1_eviction_weighs_size_with_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(600);
+        let (big, small) = (ApkKey("big-0000000000000001".into()), ApkKey("small-0000000000000002".into()));
+        // The big entry is newer but costs far more space per second of age.
+        cache.put(&small, "classes.dex", &[0; 100]).unwrap();
+        cache.put(&big, "classes.dex", &[0; 550]).unwrap();
+        set_mtime(&dir.path().join(small.as_str()), -3);
+        cache.evict();
+        assert!(cache.get(&small, "classes.dex", 100).is_some());
+        assert!(cache.get(&big, "classes.dex", 550).is_none());
+    }
+
+    #[test]
+    fn entries_of_deleted_apks_go_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let apks = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path()).with_capacity(1000);
+        let (live, dead) = (ApkKey("live-0000000000000001".into()), ApkKey("dead-0000000000000002".into()));
+        let (live_apk, dead_apk) = (apks.path().join("live.apk"), apks.path().join("dead.apk"));
+        fs::write(&live_apk, b"PK").unwrap();
+        fs::write(&dead_apk, b"PK").unwrap();
+        cache.note_source(&live, &live_apk).unwrap();
+        cache.note_source(&dead, &dead_apk).unwrap();
+        cache.put(&live, "classes.dex", &[0; 400]).unwrap();
+        // The dead APK's entry is the newest one, and its L2 index the dearest.
+        cache.put_derived(&dead, "classes.dex", "locators", 1, Duration::from_secs(9), &[0; 100]).unwrap();
+        cache.put(&dead, "classes.dex", &[0; 400]).unwrap();
+        set_mtime(&dir.path().join(live.as_str()), -100);
+        fs::remove_file(&dead_apk).unwrap();
+        // 400 + 164 + 400 = 964: within budget, nothing goes.
+        cache.evict();
+        assert_eq!(cache.stats().1, 3);
+        let cache = cache.with_capacity(500);
+        cache.evict();
+        assert!(cache.get(&live, "classes.dex", 400).is_some());
+        assert!(cache.get(&dead, "classes.dex", 400).is_none());
+        assert!(cache.get_derived(&dead, "classes.dex", "locators", 1).is_none());
+        assert!(!dir.path().join("sources").join(dead.as_str()).exists(), "source record dropped with its entries");
+        assert!(dir.path().join("sources").join(live.as_str()).exists());
     }
 }

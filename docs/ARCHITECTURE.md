@@ -211,9 +211,28 @@ These differ from the Python CLI on purpose and apply to `getclass`, `findrefs` 
 `asc-cache` adds two layers that keep the "no preprocessing" property (they are filled
 lazily by the queries themselves):
 
-* `DiskCache`: `<dir>/<apk-key>/<entry>` files with the inflated bytes, keyed by size,
-  mtime and an FNV hash of the central directory; atomic `rename` writes, `populate`d
-  mmap reads, LRU eviction by APK directory above a byte cap. The cap is a
+* `DiskCache`: three tiers under one cap, all keyed by `ApkKey` (size, mtime and an FNV
+  hash of the central directory), atomic `rename` writes, lazily faulted mmap reads (a
+  `populate`d mapping of every entry of an APK cost more than a getclass reading one of
+  them):
+  - L1 `<dir>/<apk-key>/<entry>`: inflated bytes. The engine only writes entries of at
+    least `min_dex_bytes` (4 MiB): below that, re-inflating is cheaper than the write.
+  - L2 `<dir>/derived/<apk-key>/<name>~<kind>.v<format>.<version>`: a 64-byte header
+    (magic, versions, rebuild cost, payload length) and a payload the mapping exposes
+    64-byte aligned (`Derived`). `put_derived` / `get_derived` take an opaque payload;
+    the engine stores `SearchState::persist` there (kind `locators`), only for tables
+    that took `min_derived_cost` (2 ms) or more to build.
+  - L3 `<dir>/rendered/<apk-key>/<fnv of the key>`: the full key (`rendered_key(producer,
+    version, query)`) followed by the payload; a read compares the key, so a hash
+    collision is a miss.
+  - `<dir>/sources/<apk-key>`: size, mtime and path of the APK the key came from, written
+    with the first write for it (`note_source`).
+
+  `evict` trims L3 to min(128 MiB, cap / 8) and L2 to cap / 2 in their own orders, then
+  removes over the total: entries of keys whose source is gone or changed (largest
+  first), L1 APK directories by age × size, L3 files by age, L2 files by rebuild µs per
+  byte / (1 + age in hours). Ages count from the newest item. `with_tiers` (or
+  `$DROIDASC_CACHE_TIERS`) turns tiers off: their reads miss and writes are skipped. The cap is a
   `DiskCapacity`: `Fixed(bytes)` (`--cache-max-mb`, `$DROIDASC_CACHE_MAX_MB`) or `Auto`
   (default), which `capacity_for(used)` turns into `auto_disk_bytes_for(disk_space(dir),
   used)` = min(20 % of used + free, 4 GiB, used + free - `auto_disk_reserve(total)`),
@@ -222,7 +241,7 @@ lazily by the queries themselves):
   `put` refuses (`CacheError::LowDiskSpace`) an entry that would leave less than the
   reserve free, at the cost of one `statvfs` per entry. `disk_space` returns `None`
   off Unix, where `Auto` means the old 4 GiB. `budget()` reports cap, usage and free
-  space for `cache stats`. The engine queues writes
+  space for `cache stats`, `tier_stats()` the usage per tier. The engine queues writes
   to one background thread (writing and syncing a 30 MiB entry costs as much as the whole
   query it came from) and evicts once per burst rather than after every entry;
   `Engine::flush_cache_writes` / `Drop` wait for the queue. Concurrent queries that need
@@ -236,7 +255,13 @@ lazily by the queries themselves):
   `SearchState::heap_bytes` (vector capacities of the built locators) through
   `MemoryCache::resize`, which evicts least recently used entries when that crosses the
   cap. `CacheConfig::resident_auto` sizes the cap with `auto_memory_bytes` (a quarter of
-  `available_memory()`, clamped to 64 MiB–2 GiB; 2 GiB where it cannot be read).
+  `available_memory()`, clamped to 64 MiB–2 GiB; 2 GiB where it cannot be read) and sets
+  `memory_auto`: the cache then registers the process in a `ProcessRegistry` (one file per
+  pid in `$XDG_RUNTIME_DIR/droidasc` holding its start time and the bytes its caches hold;
+  stale pids are recognised by the start time and removed by readers) and, at most once a
+  second after charging bytes, resizes itself (`MemoryCache::set_capacity`) to
+  `auto_memory_share` = (available + held by every registered process) / 4 / processes.
+  A fixed `--memory-mb` cache registers too but keeps its size.
 * Remapping: a freshly inflated entry that goes into the memory cache is queued for the
   disk writer together with a `Weak` handle to it. Once the file is renamed into place
   the writer maps it, compares it with the heap bytes, and swaps the LRU slot for a
@@ -256,8 +281,23 @@ mapping keeps its inode (POSIX) and stays valid. A third party truncating a cach
 place would fault the mapping (SIGBUS), exactly as for disk hits; on Windows a mapped file
 cannot be deleted, so eviction skips it and `cache clear` reports the error.
 
-Stored (uncompressed) entries are borrowed straight from the APK mapping and never copied
-unless an in-memory cache wants to keep their tables.
+Stored (uncompressed) entries are borrowed straight from the APK mapping. A cache that
+keeps them (memory LRU, or L2 for their tables) maps their byte range of the APK file
+instead (`DexData::map_region`), so they are file pages, never heap copies.
+
+* L2 locator tables: `asc_findrefs::SearchState` keeps every table as a `Table<T>`, a
+  `Vec` or a bytemuck-checked view into an `Arc<dyn AsRef<[u8]>>` (the mapped file).
+  `persist` writes the built tables after a header with the DEX length, checksum and
+  signature; `from_persisted` checks those and every table's length against the DEX,
+  then views them in place (the call graph, in its own flat form, is copied out). A
+  search first `fill_from`s what L2 has for a logical DEX (once per `LogicalDex`), and
+  when it built new tables queues a write with the time it took; the writer then swaps
+  the memory cache's `SearchState` for the mapped one, as for L1 bytes. Lookups stay
+  bounds-checked, so a damaged file can give wrong rows, never a crash.
+* L3 results: `find_refs_opts` looks the query up before searching and records the
+  batches as they stream (`ResultRecorder`; dropped on any error or past 4 MiB); the key
+  includes the query, the `FindOptions` and the executable's size and mtime, so a rebuilt
+  binary never replays the old one's rows. Batches replayed from L3 have source `result`.
 
 `SharedCache` wraps one such cache (memory LRU, disk cache, writer thread) for several
 engines. Because the LRU is keyed by APK, engines over different APKs attached with
@@ -305,8 +345,9 @@ has at most 65 536 method ids, so the two CSR tables (callees by caller, callers
 callee) store `u16` targets: about 4 bytes per distinct edge plus 8 per method id. On
 Douyin (55 DEX) all graphs together are 9.7 M edges, 73 MiB, built in 85 ms on 16
 threads; a walk only builds the graphs of DEX files that reference a frontier method.
-`to_bytes` / `from_bytes` give a flat, 4-byte-aligned form for an on-disk cache, and
-`SearchState::set_call_graph` installs one loaded from there.
+`to_bytes` / `from_bytes` give a flat, 4-byte-aligned form, which L2 stores with the
+other locator tables (`SearchState::persist`); `SearchState::set_call_graph` installs one
+loaded from elsewhere.
 
 `Engine::call_graph` keys methods by signature, since method ids are local to a DEX: each
 level looks the frontier up in every DEX (binary search over the sorted `method_id`

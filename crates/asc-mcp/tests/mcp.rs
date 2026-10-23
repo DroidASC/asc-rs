@@ -19,7 +19,7 @@ fn temp_apk() -> tempfile::NamedTempFile {
 }
 
 fn opts() -> asc_mcp::Options {
-    asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, disk: None })
+    asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() })
 }
 
 /// Run one session: `messages` in, one parsed reply per request out.

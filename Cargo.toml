@@ -38,6 +38,7 @@ asc-fixture = { path = "crates/asc-fixture" }
 
 thiserror = "2"
 memmap2 = "0.9"
+bytemuck = "1"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 regex = "1.11"
 memchr = "2.7"

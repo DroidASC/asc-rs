@@ -254,6 +254,7 @@ dependencies = [
  "asc-dalvik",
  "asc-dex",
  "asc-fixture",
+ "bytemuck",
  "memchr",
  "regex",
  "thiserror 2.0.20",

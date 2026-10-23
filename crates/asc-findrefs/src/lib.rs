@@ -26,14 +26,18 @@ mod callgraph;
 mod classdefs;
 mod insn_locator;
 mod locators;
+mod persist;
 mod query;
 mod scanner;
+mod table;
 
 pub use callgraph::CallGraph;
 pub use insn_locator::{InsnLocator, MethodRef};
 pub use locators::{FieldLocator, MethodLocator, StringLocator, TypeLocator};
+pub use persist::FORMAT_VERSION as PERSIST_FORMAT_VERSION;
 pub use query::CompiledQuery;
 pub use scanner::{CodeScanner, IdxSet, RefKind};
+pub use table::Backing;
 
 use asc_dex::Dex;
 use query::Parts;

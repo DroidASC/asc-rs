@@ -5,6 +5,7 @@
 //! between threads without any raw-pointer aliasing.
 
 use crate::query::{CompiledClass, CompiledMember, CompiledName, CompiledQuery, Parts};
+use crate::table::Table;
 use crate::{MemberQuery, Result};
 use asc_dex::Dex;
 use regex::bytes::Regex;
@@ -15,10 +16,10 @@ use std::collections::BTreeSet;
 /// R8 keeps `string_data_item`s contiguous and in index order, so a match
 /// position maps to a string through a binary search over the data offsets.
 pub struct StringLocator {
-    /// `(data_off, string_idx)` sorted by offset.
-    offsets: Vec<(u32, u32)>,
-    strdata_start: usize,
-    strdata_end: usize,
+    /// `[data_off, string_idx]` sorted by offset.
+    pub(crate) offsets: Table<[u32; 2]>,
+    pub(crate) strdata_start: usize,
+    pub(crate) strdata_end: usize,
 }
 
 impl StringLocator {
@@ -28,11 +29,11 @@ impl StringLocator {
         // Every string_id is 4 bytes: never reserve more than the buffer could hold.
         let mut offsets = Vec::with_capacity((count as usize).min(buf.len() / 4));
         for idx in 0..count {
-            offsets.push((dex.string_data_off(idx)?, idx));
+            offsets.push([dex.string_data_off(idx)?, idx]);
         }
         offsets.sort_unstable();
         let (strdata_start, strdata_end) = match (offsets.first(), offsets.last()) {
-            (Some(&(first, _)), Some(&(last, _))) => {
+            (Some(&[first, _]), Some(&[last, _])) => {
                 let item = dex.string_item_at(last)?;
                 let end = (last as usize + asc_dex::leb128::uleb128_len(buf, last as usize)?) + item.bytes.len() + 1;
                 let end = end.min(buf.len());
@@ -40,7 +41,7 @@ impl StringLocator {
             }
             _ => (0, 0),
         };
-        Ok(StringLocator { offsets, strdata_start, strdata_end })
+        Ok(StringLocator { offsets: offsets.into(), strdata_start, strdata_end })
     }
 
     pub fn string_count(&self) -> usize {
@@ -49,16 +50,16 @@ impl StringLocator {
 
     /// Heap bytes held by the table.
     pub fn heap_bytes(&self) -> usize {
-        vec_bytes(&self.offsets)
+        self.offsets.heap_bytes()
     }
 
     /// Index of the string whose data contains absolute offset `pos`.
     fn idx_at(&self, pos: usize) -> Option<u32> {
-        let i = self.offsets.partition_point(|&(off, _)| (off as usize) <= pos);
+        let i = self.offsets.partition_point(|&[off, _]| (off as usize) <= pos);
         if i == 0 {
             None
         } else {
-            Some(self.offsets[i - 1].1)
+            Some(self.offsets[i - 1][1])
         }
     }
 
@@ -105,13 +106,13 @@ impl StringLocator {
             let abs = self.strdata_start + start;
             // Non-overlapping, like `find_iter`.
             at = start + needle.len();
-            let i = self.offsets.partition_point(|&(off, _)| (off as usize) <= abs);
+            let i = self.offsets.partition_point(|&[off, _]| (off as usize) <= abs);
             if i == 0 {
                 continue;
             }
-            out.insert(self.offsets[i - 1].1);
+            out.insert(self.offsets[i - 1][1]);
             if skip_rest {
-                if let Some(&(next, _)) = self.offsets.get(i) {
+                if let Some(&[next, _]) = self.offsets.get(i) {
                     at = at.max((next as usize).saturating_sub(self.strdata_start));
                 }
             }
@@ -136,8 +137,8 @@ impl StringLocator {
 /// `(string_idx, type_idx)` vector and every type sharing a string is
 /// reported.
 pub struct TypeLocator {
-    /// `(string_idx, type_idx)` sorted.
-    by_string: Vec<(u32, u32)>,
+    /// `[string_idx, type_idx]` sorted.
+    pub(crate) by_string: Table<[u32; 2]>,
 }
 
 impl TypeLocator {
@@ -145,21 +146,21 @@ impl TypeLocator {
         let count = dex.type_count();
         let mut by_string = Vec::with_capacity((count as usize).min(dex.buf().len() / 4));
         for t in 0..count {
-            by_string.push((dex.type_string_idx(t)?, t));
+            by_string.push([dex.type_string_idx(t)?, t]);
         }
         by_string.sort_unstable();
-        Ok(TypeLocator { by_string })
+        Ok(TypeLocator { by_string: by_string.into() })
     }
 
     /// Heap bytes held by the table.
     pub fn heap_bytes(&self) -> usize {
-        vec_bytes(&self.by_string)
+        self.by_string.heap_bytes()
     }
 
     /// Every type whose descriptor is string `string_idx`.
     pub fn types_for_string(&self, string_idx: u32) -> impl Iterator<Item = u32> + '_ {
-        let start = self.by_string.partition_point(|&(s, _)| s < string_idx);
-        self.by_string[start..].iter().take_while(move |&&(s, _)| s == string_idx).map(|&(_, t)| t)
+        let start = self.by_string.partition_point(|&[s, _]| s < string_idx);
+        self.by_string[start..].iter().take_while(move |&&[s, _]| s == string_idx).map(|&[_, t]| t)
     }
 
     /// Fuzzy (regex) descriptor match.
@@ -193,12 +194,12 @@ pub(crate) fn vec_bytes<T>(v: &Vec<T>) -> usize {
 /// `(name_idx, id)` vector, which is several times cheaper to build than a
 /// hash map of vectors.
 pub struct MemberLocator {
-    table_off: usize,
-    count: u32,
-    /// `(name_idx, id)` sorted.
-    by_name: Vec<(u32, u32)>,
-    /// `(class_idx, id)` sorted; only built when the table is not class-sorted.
-    by_class: Option<Vec<(u32, u32)>>,
+    pub(crate) table_off: usize,
+    pub(crate) count: u32,
+    /// `[name_idx, id]` sorted.
+    pub(crate) by_name: Table<[u32; 2]>,
+    /// `[class_idx, id]` sorted; only built when the table is not class-sorted.
+    pub(crate) by_class: Option<Table<[u32; 2]>>,
 }
 
 impl MemberLocator {
@@ -207,15 +208,15 @@ impl MemberLocator {
         let base = table_off as usize;
         // Every id item is 8 bytes: never reserve more than the buffer could hold.
         let cap = (count as usize).min(buf.len() / 8);
-        let mut by_name: Vec<(u32, u32)> = Vec::with_capacity(cap);
-        let mut by_class: Vec<(u32, u32)> = Vec::new();
+        let mut by_name: Vec<[u32; 2]> = Vec::with_capacity(cap);
+        let mut by_class: Vec<[u32; 2]> = Vec::new();
         let mut sorted = true;
         let mut last_class = 0u32;
         for i in 0..count {
             let off = base + i as usize * 8;
             let class_idx = asc_dex::read_u16(buf, off)? as u32;
             let name_idx = asc_dex::read_u32(buf, off + 4)?;
-            by_name.push((name_idx, i));
+            by_name.push([name_idx, i]);
             if class_idx < last_class {
                 sorted = false;
             }
@@ -226,15 +227,15 @@ impl MemberLocator {
             by_class.reserve(cap);
             for i in 0..count {
                 let off = base + i as usize * 8;
-                by_class.push((asc_dex::read_u16(buf, off)? as u32, i));
+                by_class.push([asc_dex::read_u16(buf, off)? as u32, i]);
             }
             by_class.sort_unstable();
         }
-        Ok(MemberLocator { table_off: base, count, by_name, by_class: (!sorted).then_some(by_class) })
+        Ok(MemberLocator { table_off: base, count, by_name: by_name.into(), by_class: (!sorted).then(|| by_class.into()) })
     }
 
     fn heap_bytes(&self) -> usize {
-        vec_bytes(&self.by_name) + self.by_class.as_ref().map_or(0, vec_bytes)
+        self.by_name.heap_bytes() + self.by_class.as_ref().map_or(0, Table::heap_bytes)
     }
 
     /// `name_idx` of member `id`.
@@ -243,8 +244,8 @@ impl MemberLocator {
     }
 
     fn ids_by_name(&self, name_idx: u32, out: &mut BTreeSet<u32>) {
-        let start = self.by_name.partition_point(|&(n, _)| n < name_idx);
-        for &(n, id) in &self.by_name[start..] {
+        let start = self.by_name.partition_point(|&[n, _]| n < name_idx);
+        for &[n, id] in &self.by_name[start..] {
             if n != name_idx {
                 break;
             }
@@ -254,8 +255,8 @@ impl MemberLocator {
 
     fn ids_by_class(&self, buf: &[u8], class_idx: u32, out: &mut BTreeSet<u32>) {
         if let Some(v) = &self.by_class {
-            let start = v.partition_point(|&(c, _)| c < class_idx);
-            for &(c, id) in &v[start..] {
+            let start = v.partition_point(|&[c, _]| c < class_idx);
+            for &[c, id] in &v[start..] {
                 if c != class_idx {
                     break;
                 }
@@ -363,7 +364,7 @@ fn exact_name_matches(dex: &Dex<'_>, name_idx: u32, name: &str, bytes: &[u8]) ->
 }
 
 /// Method id locator.
-pub struct MethodLocator(MemberLocator);
+pub struct MethodLocator(pub(crate) MemberLocator);
 
 impl MethodLocator {
     pub fn build(dex: &Dex<'_>) -> Result<MethodLocator> {
@@ -397,7 +398,7 @@ impl MethodLocator {
 }
 
 /// Field id locator.
-pub struct FieldLocator(MemberLocator);
+pub struct FieldLocator(pub(crate) MemberLocator);
 
 impl FieldLocator {
     pub fn build(dex: &Dex<'_>) -> Result<FieldLocator> {
@@ -445,8 +446,9 @@ mod tests {
 
     #[test]
     fn type_lookup_handles_duplicates_and_gaps() {
-        let mut loc = TypeLocator { by_string: vec![(1, 0), (3, 2), (3, 1), (7, 3)] };
-        loc.by_string.sort_unstable();
+        let mut by_string = vec![[1, 0], [3, 2], [3, 1], [7, 3]];
+        by_string.sort_unstable();
+        let loc = TypeLocator { by_string: by_string.into() };
         assert_eq!(loc.types_for_string(0).count(), 0);
         assert_eq!(loc.types_for_string(1).collect::<Vec<_>>(), vec![0]);
         assert_eq!(loc.types_for_string(2).count(), 0);
