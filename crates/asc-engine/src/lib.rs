@@ -1,4 +1,4 @@
-//! The Droid ASC engine: stateless, zero-preprocessing queries against an APK.
+//! The asc-rs engine: stateless, zero-preprocessing queries against an APK.
 //!
 //! * [`Engine::get_class_dex`] inflates the DEX entries in parallel (smallest
 //!   first) and stops as soon as one defines the requested class.

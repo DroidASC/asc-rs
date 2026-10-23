@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Inflated-DEX caches for Droid ASC: an on-disk cache shared across processes and an in-memory LRU for long-running hosts."
+description = "Inflated-DEX caches for asc-rs: an on-disk cache shared across processes and an in-memory LRU for long-running hosts."
 
 [dependencies]
 asc-apk.workspace = true

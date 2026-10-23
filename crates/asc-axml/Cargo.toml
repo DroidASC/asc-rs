@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Android binary XML (AXML) decoder used by Droid ASC to print AndroidManifest.xml."
+description = "Android binary XML (AXML) decoder used by asc-rs to print AndroidManifest.xml."
 
 [dependencies]
 thiserror.workspace = true

@@ -1,185 +1,140 @@
 # 评测
 
-asc-rs 的全部评测结论按问题组织，每个问题给出当前版本的实测结果。旧版本和其他工具作为对照列出现。复现所需的脚本见文末[复现](#复现)。
+按问题组织的实测结论。两类评测：
 
-评测分两类：
+- **确定性**：脚本回放固定步骤或规则，测耗时、内存和结果一致性，可重复。
+- **agent**：grok headless 只接一个工具完成分析目标，测调用、token、费用与正确性。只测过 grok-4.7，2026-10-23 起不再做。
 
-- **确定性评测**：用脚本回放固定的步骤或规则，度量耗时和内存，并核对结果是否一致。不经过模型，可以重复跑。
-- **agent 评测**：让真实 agent（grok headless）只接一个工具去完成分析目标，度量调用次数、token、费用、耗时，以及证据或答案是否正确。只用过 grok-4.7 一个模型。2026-10-23 起不再做新的 agent 评测。
-
-数字均取自结果文件或当时的运行日志，没有测的写「未测」。同一指标测过多个版本时，以最新版本为主，旧值作对照并注明版本。不同机器的数字不放在同一列里比较。
-
-**结果文件不入库**：所有 `results/` 目录、语料清单 `*.tsv` 和 `agent/s2/ref-k80.json` 都保存在仓库之外，目录结构与这里相同：本地 `target/benchmark-data/benchmark/`。下文提到的这些路径都相对于那里，脚本也会把新结果写到同样的位置。
+旧版本与对照工具（Python ASC、rust_ASC、dexsql）作对照列；不同机器的数字分表。结果文件（`results/`、`*.tsv`、`agent/s2/ref-k80.json`）不入库，放在本地 `target/benchmark-data/benchmark/`，目录结构与这里相同。
 
 ## 总览
 
-| 问题 | 结论 | 关键数字 | 详见 |
-|---|---|---|---|
-| 结果对不对 | 与 Python 上游语义一致、与 dexdump 一致；上游在 string_data 乱序的 DEX 上会出错 | 语义差异 0；312 个系统 APK 上，上游有 24 个（APK，规则）组合出错，已报 issue | [正确性](#正确性) |
-| 资源解码 | 与 aapt2 基本一致 | 419 个 APK、1094 万个取值，只差 4 处 | [正确性](#正确性) |
-| 单 APK 有多快 | 常驻进程是最快的用法；CLI 冷查询靠 prefix-skip 提速 | Douyin 47 步：MCP 热缓存 61 ms，CLI 不开缓存 2065 ms（r1 2649，rust_ASC 2528） | [单 APK](#单-apkdouyin47-步回放) |
-| 多 APK 有多快 | 规则集模式是关键：一次扫描跑完全部规则 | 836 个 APK × 8 条规则：MCP 热缓存 0.48 s，4–8 个进程 0.23 s；dexsql 2.4 s，rust_ASC 10.7 s | [多 APK](#多-apk) |
-| 内存和多进程 | 写盘队列内存有界，冷扫之后 L1 完整；空闲后的突发扫描线程会收缩；16 进程的「21 GB」一半是文件页 | 冷扫从超过 30 GB 被强制终止降到 3.1 GB 峰值；L1 从 86 个文件增至 866 个；16 进程空闲 7 s 后的热扫 4148 → 695 ms | [缓存、内存与多进程](#缓存内存与多进程) |
-| agent 用起来怎么样 | 超长时写文件这个设计最省 token；比 dexsql 省得多 | S1 每目标 207k token（dexsql 785k，r1 578k）；S2 416 个 APK 每目标 104k token（dexsql 4.8M），两边都全对 | [agent 评测](#agent-评测grok-47) |
-| 报错能不能帮 agent | 失败调用几乎都变成成功，或者给出下一步怎么做 | 92 次历史失败调用：没有提示的从 15 次降到 0 次 | [agent 评测](#agent-评测grok-47) |
+| 问题 | 结论 | 关键数字 |
+|---|---|---|
+| [结果对不对](#正确性) | 与 Python ASC、dexdump 语义一致；资源与 aapt2 一致 | 语义差异 0；1094 万个资源取值只差 4 处 |
+| [单 APK](#单-apkdouyin47-步) | 常驻进程最快；CLI 冷查询靠 prefix-skip | Douyin 47 步：MCP 热 61 ms，CLI 不开缓存 2065 ms（r1 2649，rust_ASC 2528） |
+| [多 APK](#多-apk) | 规则集模式一次扫完全部规则 | 836 APK × 8 规则：MCP 热 0.48 s，4–8 进程 0.23 s；dexsql 2.4 s，rust_ASC 10.7 s |
+| [内存与多进程](#缓存内存与多进程) | 冷扫内存有界、L1 完整；空闲后突发扫描线程会收缩 | 冷扫从 >30 GB 被杀降到 3.1 GB；N=16 空闲后热扫 4148 → 695 ms |
+| [agent](#agent-评测grok-47) | 超长输出写文件最省 token | S1 每目标 207k token（dexsql 785k，r1 578k）；S2 104k（dexsql 4.8M），都全对 |
+| [报错](#失败调用回放) | 失败调用都变成成功或带下一步提示 | 92 次历史失败中无提示的 15 → 0 |
 
-## 测试环境与版本
+## 环境与版本
 
-| | 说明 |
+| | |
 |---|---|
-| 本地 | AMD Ryzen 7 8745H（16 线程），12 GB 内存，Arch Linux，内核 7.2.11，ext4 / NVMe |
-| Mac | Apple M3 Ultra（32 核），96 GB 内存，macOS 15.7.3（24G419）。**多人共用**，评测期间 load 在 4–30 之间波动，出现异常值的配置都交替重跑过 |
-| asc-rs（被测版本） | 各节表头注明 commit。「r1」= `8b7a09e`，作为旧版本对照（`bin/droidasc-r1`，sha256 `37c1c62f…4581`）。agent 评测用的是 `a23650e` |
-| Python ASC | `9216fe2`（MG1937/ASC） |
-| rust_ASC | dev `6db7135`，main `236dd09`（MG1937/rust_ASC，radguard 子模块 `290de20`） |
-| dexsql | 0.1.1（LSPosed/dexsql-release），darwin-arm64 二进制 sha256 `d983de33007e11c56e681aaa238ae15637eff961623335f1131527f8d2c82a77` |
-| dexsql-release harness | `3ac6fb1`，MIT 许可。S1 的 17 个目标（47 步）来自其中的 `benchmarks/agent-audit/harness/rasc_replay.py`（`SCENARIOS`）。脚本运行时通过 `HARNESS` 环境变量导入，不复制进本仓库 |
-| grok | grok CLI 1.0.67（`2fe064390d07`），模型 grok-4.7-build，headless 模式（`-p … --output-format streaming-json`） |
-| 语料 | 见 [corpus.md](corpus.md)：Douyin 40.7.0（本地）、Douyin 40.8.0（K80）、REDMI K80 的 416 个 APK、Xiaomi 17 的 420 个、Pixel 6 的 312 个系统 APK |
+| 本地 | Ryzen 7 8745H（16 线程），12 GB，Arch Linux 7.2.11，ext4 / NVMe |
+| Mac | M3 Ultra（32 核），96 GB，macOS 15.7.3。多人共用，load 4–30，异常值都交替重跑过 |
+| asc-rs | 各表注明 commit；r1 = `8b7a09e`（旧版对照）；agent 评测用 `a23650e` |
+| Python ASC | MG1937/ASC `9216fe2` |
+| rust_ASC | MG1937/rust_ASC dev `6db7135`，main `236dd09` |
+| dexsql | 0.1.1（LSPosed/dexsql-release），darwin-arm64 sha256 `d983de33…2a77`；harness `3ac6fb1`（MIT），S1 的 17 个目标取自 `rasc_replay.py`，运行时经 `HARNESS` 导入 |
+| grok | CLI 1.0.67，grok-4.7-build，headless |
+| 语料 | [corpus.md](corpus.md) |
 
 ## 正确性
 
-**结论：asc-rs 的结果与 Python 上游语义一致、与 dexdump 一致；开关缓存、开关 daemon 的输出都相同。**
-
 | 检查 | 方法 | 结果 |
 |---|---|---|
-| 与 Python 上游的语义对比 | 双方输出解析成（dex，方法，命中值集合）再比较，[`parity/semantic.py`](parity/semantic.py)；数据是 reference-workload，以及 prefix-skip 合入时用的 9 条查询 | 差异 0 |
-| 与 dexdump 对比、上游 bug | 312 个 Pixel 6 系统 APK × 8 条规则，[`deterministic/rust-asc/`](deterministic/rust-asc/) | asc-rs 与 dexdump 一致。Python ASC `9216fe2`、rust_ASC main 和 dev 在 24 个（APK，规则）组合上给出同样的错误行，见下 |
-| 资源 | 419 个 APK、160 万个资源 id、1094 万个取值，与 `aapt2 dump resources` 逐项对比，[`arsc-compare/compare.py`](arsc-compare/compare.py) | 只差 4 处，都是 aapt2 的文本输出没法准确拆分的带样式字符串 |
-| 开关缓存一致 | 40 个设备 APK × 9 条查询，冷、热缓存与 `--no-cache` 逐块比较，[`deterministic/cache/consistency.py`](deterministic/cache/consistency.py)；prefix-skip 合入时又跑了 720 组 | 内容一致 |
-| 新旧版本一致 | Douyin 40.8.0 上 47 步回放，新版对 r1：21 个 findrefs / manifest 步骤比较行集合，26 个 getclass 比较全文，[`deterministic/s1_same.py`](deterministic/s1_same.py)；836 个 APK × 8 条规则比较命中 APK 集合，[`s2_cmp.py`](deterministic/s2_cmp.py) | 完全相同；69470 行结果一致 |
-| 与 dexsql、rust_ASC 的 APK 级命中 | 836 个 APK × 8 条规则 | 与 rust_ASC 8 条规则完全一致。与 dexsql 7 条一致；password 规则 dexsql 多 4 个 APK，原因是它的 `LIKE` 不区分大小写，droidasc 的正则区分大小写。droidasc 没有漏报 |
-| 开关 daemon 一致 | `crates/asc-cli/tests/daemon.rs`：26 种命令比较 stdout、stderr、退出码；macOS 上另跑 7 种查询 | 逐字节相同，包括退出码 1、零结果、截断输出 |
-| 缓存文件损坏 | no-fsync 版本：整页清零、翻转一个字节、截断，[`nofsync_check.sh`](deterministic/cache/nofsync_check.sh) | 全部检出，文件被删除后重新写回，结果与 `--no-cache` 相同 |
+| 与 Python ASC | 解析成（dex，方法，命中集合）比较，[`parity/semantic.py`](parity/semantic.py) | 差异 0 |
+| 与 dexdump | 312 个 Pixel 系统 APK × 8 规则，[`deterministic/rust-asc/`](deterministic/rust-asc/) | 一致；Python ASC 与 rust_ASC 在 24 个（APK，规则）上出错，见下 |
+| 资源 | 419 APK、1094 万取值对比 `aapt2 dump resources`，[`arsc-compare/`](arsc-compare/compare.py) | 差 4 处，都是 aapt2 文本无法拆分的带样式字符串 |
+| 开关缓存 | 40 APK × 9 查询，冷 / 热 / `--no-cache` 比较，[`cache/consistency.py`](deterministic/cache/consistency.py) | 一致 |
+| 新旧版本 | Douyin 47 步对 r1，[`s1_same.py`](deterministic/s1_same.py)；836 APK × 8 规则，[`s2_cmp.py`](deterministic/s2_cmp.py) | 完全相同 |
+| APK 级命中 | 836 APK × 8 规则对照 | 与 rust_ASC 全同；与 dexsql 7 条同，password 规则 dexsql 多 4 个（其 `LIKE` 不分大小写） |
+| 开关 daemon | `crates/asc-cli/tests/daemon.rs`，26 种命令 | stdout、stderr、退出码逐字节相同 |
+| 缓存文件损坏 | 清零、翻字节、截断，[`nofsync_check.sh`](deterministic/cache/nofsync_check.sh) | 全部检出并重写 |
 
-**上游的字符串下标 bug**：已报给上游，见 [MG1937/ASC#54](https://github.com/MG1937/ASC/issues/54) 和 [MG1937/rust_ASC#8](https://github.com/MG1937/rust_ASC/issues/8)。
+**对照工具的字符串下标 bug**（[MG1937/ASC#54](https://github.com/MG1937/ASC/issues/54)、[MG1937/rust_ASC#8](https://github.com/MG1937/rust_ASC/issues/8)）：它们假设 string_data 按 string_ids 顺序连续存放；布局优化过的系统 APK（如 dialer、GoogleCamera）不满足，会漏报并把命中对到别的字符串。例：`getDeviceId` 误中 `Display.getDeviceProductInfo`，漏掉 14 处 `MotionEvent.getDeviceId`。
 
-上游的 `StringLocator` 假设 string_data 的条目按 string_ids 的顺序首尾相连地存放，这个假设在两处出错：
+## 单 APK（Douyin，47 步）
 
-- 搜索区间取的是从第 0 个字符串到最后一个字符串，顺序乱了就会漏掉一部分。
-- 命中之后，用「物理上紧跟着的下一个字符串的下标减 1」作为结果，顺序乱了就会对应到别的字符串。
+dexsql-release 的 17 个目标共 47 步，5 次中位数，耗时 / 峰值 RSS。
 
-经过布局优化的系统 APK 会触发这个问题，例如 dialer、GoogleCamera 的 classes.dex 里约有 14.8k 处逆序，d8 的产物则不受影响。实际例子：`getDeviceId` 误中 `Display.getDeviceProductInfo`，同时漏掉 dexdump 能看到的 14 处 `MotionEvent.getDeviceId` 调用。issue 里附了不依赖第三方 APK 的最小复现：一个 Java 类，加一个重排 string_data 的脚本。
+**Mac，Douyin 40.8.0**
 
-## 单 APK（Douyin，47 步回放）
-
-**结论：常驻进程（MCP 或 daemon）最快；一次性 CLI 冷查询比 r1 快约 22%，主要来自 prefix-skip；asc-rs 的各种用法都比 rust_ASC 和 dexsql 快。**
-
-dexsql-release 的 17 个目标，共 47 步。表中是 5 次的中位数，格式为耗时 / 峰值 RSS。
-
-**Mac，Douyin 40.8.0：**
-
-| 配置 | asc-rs `0e08806` | r1 `8b7a09e` | rust_ASC dev | dexsql 0.1.1 |
+| 配置 | asc-rs `0e08806` | r1 | rust_ASC dev | dexsql |
 |---|---:|---:|---:|---:|
 | CLI，不开缓存 | 2065 ms / 352 MB | 2649 ms / 504 MB | 2528 ms / 362 MB | — |
 | CLI，磁盘缓存热 | 317 ms / 19 MB | 307 ms / 19 MB | — | — |
-| MCP，不开缓存 | 134 ms / 643 MB | 137 ms / 643 MB | 2691 ms / 354 MB | 约 722 ms（open 443 + 场景 279），进程树 2.4 GB |
+| MCP，不开缓存 | 134 ms / 643 MB | 137 ms / 643 MB | 2691 ms / 354 MB | 约 722 ms，2.4 GB |
 | MCP，磁盘缓存 | 61 ms / 103 MB | 61 ms / 107 MB | — | — |
 
-- 回放脚本写死了 40.7.0 的混淆类名，所以每个工具在 40.8.0 上都会缺 13–14 个证据，droidasc 各配置缺的完全相同。dexsql 写死的 method id 导致 18 次 decode 报错，它的数字只能当作工作量相近时的计时参考。
-- CLI 热缓存比本地 Linux 慢（317 ms 对 176 ms），应该是 macOS 起进程的开销。
-- big-machine 合入（`c1fc2da`）后复测没有退化：CLI 不开缓存 1805 ms，MCP 热缓存 50 ms。
+回放写死了 40.7.0 的混淆名，各工具在 40.8.0 上都缺 13–14 个证据（droidasc 各配置缺得相同）；dexsql 写死的 method id 有 18 次报错，只作计时参考。
 
-**本地 Linux，Douyin 40.7.0：**
+**本地 Linux，Douyin 40.7.0**
 
 | 配置 | asc-rs | 对照 |
 |---|---:|---:|
-| CLI，不开缓存（每步一个进程） | 2212 ms（prefix-skip 之后） | 2724 ms（`79f01d9`，prefix-skip 之前）；rust_ASC dev 2586 ms，main 4618 ms |
-| CLI，磁盘缓存热 | 176 ms；经 daemon 135 ms（`b3320c2`） | — |
-| MCP，同一进程 | 55 ms（`b3320c2`）；磁盘缓存命中 81 ms（`integrate/plan`） | dexsql 1112 ms；rasc 3819 ms；rust_ASC dev MCP 2357 ms / 509 MB |
-| 每个目标的几何平均（MCP） | 4.7 ms（`integrate/plan`） | dexsql 22.6 ms；rasc 189 ms |
+| CLI，不开缓存 | 2212 ms | `79f01d9`（prefix-skip 前）2724 ms；rust_ASC dev 2586 ms |
+| CLI，缓存热 | 176 ms；经 daemon 135 ms | — |
+| MCP | 55 ms | dexsql 1112 ms；rust_ASC dev 2357 ms |
 
-**prefix-skip**：一次性冷查询先只解开每个 DEX 开头的 id 表和字符串数据，能确定不会命中的 DEX 就跳过。下表是本地 Linux、Douyin 40.7.0 上 `--no-cache` 冷查询的中位数，脚本 [`deterministic/prefix_skip.py`](deterministic/prefix_skip.py)：
+**prefix-skip**（一次性冷查询先只解 DEX 前缀，跳过不可能命中的 DEX；本地，`--no-cache`，[`prefix_skip.py`](deterministic/prefix_skip.py)）
 
-| 查询 | `79f01d9` | prefix-skip |
+| 查询 | 之前 | 之后 |
 |---|---:|---:|
-| `method exec --class java.lang.Runtime` | 77 ms / 328 MB | 57 ms / 201 MB（55 个 DEX 跳过 37 个） |
-| `type DexClassLoader` | 72 ms / 325 MB | 54 ms / 200 MB |
-| `string ttdownloaderClickId` | 71 ms / 319 MB | 47 ms / 186 MB |
-| `field SDK_INT`、`string http://`（覆盖面广） | 95 / 92 ms | 97 / 92 ms |
+| `method exec --class java.lang.Runtime` | 77 ms / 328 MB | 57 ms / 201 MB（55 个 DEX 跳过 37） |
+| `type DexClassLoader` | 72 ms | 54 ms |
+| `string ttdownloaderClickId` | 71 ms | 47 ms |
+| `field SDK_INT`、`string http://` | 95 / 92 ms | 97 / 92 ms |
 
-MCP 会话有常驻缓存，不会触发 prefix-skip。不压缩存放的 APK（GMS），以及字符串数据放在后部的 DEX（Chrome），结果都持平。Mac 上 Douyin 40.8.0 的 56 个 DEX 跳过了 22 个。
-
-**daemon**：本地 Linux，Douyin 40.7.0，`b3320c2`。
+**daemon**（本地，`b3320c2`）
 
 | 场景 | 不经 daemon | 经 daemon |
 |---|---:|---:|
-| 空缓存第一条查询 / 换一类的第二条 | 256 / 234 ms | 81 / 9 ms |
-| `hierarchy android.app.Activity`（1343 行），首次 / 重复 | 433 / 408 ms | 326 / 6 ms |
-| `callgraph WebView loadUrl --virtual`，首次 / 重复 | 425 / 398 ms | 22 / 5 ms |
-
-macOS 上 `callgraph --virtual` 第一次调用：经 daemon 261 ms，本地 276 ms。
+| 空缓存首条 / 换一类的第二条 | 256 / 234 ms | 81 / 9 ms |
+| `hierarchy android.app.Activity` 首次 / 重复 | 433 / 408 ms | 326 / 6 ms |
+| `callgraph … --virtual` 首次 / 重复 | 425 / 398 ms | 22 / 5 ms |
 
 ## 多 APK
 
-**结论：规则集模式（一次扫描跑完全部规则）是多 APK 审计的正确用法，热缓存下比 dexsql 快约 5–10 倍，比 rust_ASC 快约 20 倍；只按「每条规则一次调用」测会大幅低估 asc-rs。**
+**Mac，836 个 APK（K80 416 + Xiaomi 17 420）× 8 规则，3 次中位数**
 
-**Mac，836 个 APK（K80 416 个 + Xiaomi 17 420 个）× 8 条规则，3 次中位数：**
-
-| 配置 | asc-rs `a23650e` | r1 `8b7a09e` |
+| 配置 | asc-rs `a23650e` | r1 |
 |---|---:|---:|
 | 每条规则一个 CLI 进程，P=16：不开缓存 / 冷 / 热 | 11.5 / 42.6 / 8.0 s | 12.0 / 42.7 / 8.1 s |
-| 规则集，每个 APK 一个 CLI 进程：不开缓存 / 冷 / 热 | 1.54 / 7.17 / 1.06 s | 1.50 / 6.68 / 4.90 s |
-| MCP 单进程规则集：不开缓存 / 冷 / 热 | 1.16 / 1.39 s（3.2 GB）/ 0.48 s（180 MB） | 1.26 / 1.18 s（12.2 GB）/ 1.13 s（7.2 GB） |
-| MCP 规则集，N=4 / 8 / 16 个进程，冷 | 0.99 / 1.00 / 1.28 s | 0.94 / 0.98 / 1.61 s |
-| MCP 规则集，N=4 / 8 / 16 个进程，热 | 0.24 / 0.23 / 0.53 s | 0.94 / 1.06 / 1.32 s |
+| 规则集，每 APK 一个 CLI 进程：不开缓存 / 冷 / 热 | 1.54 / 7.17 / 1.06 s | 1.50 / 6.68 / 4.90 s |
+| MCP 单进程规则集：不开缓存 / 冷 / 热 | 1.16 / 1.39 s（3.2 GB）/ 0.48 s（180 MB） | 1.26 / 1.18 s（12.2 GB）/ 1.13 s |
+| MCP 规则集 N=4 / 8 / 16，热 | 0.24 / 0.23 / 0.53 s | 0.94 / 1.06 / 1.32 s |
 | rust_ASC dev CLI，P=16 | 10.7 s / 1.8 GB | |
-| dexsql，每个 APK 一个进程跑 8 条 SQL，P=16、T=2 | 2.4 s / 1.8 GB | |
+| dexsql，P=16、T=2 | 2.4 s / 1.8 GB | |
 
-- r1 的「热」规则集 CLI，每个进程峰值约 700 MB、进程树约 2 GB（新版是 14 MB / 64 MB），说明它其实在重新解压。原因没有查。
-- big-machine 合入（`c1fc2da`）后，自动线程下的规则集复测见[缓存、内存与多进程](#缓存内存与多进程)。
+只按「每条规则一次调用」测会大幅低估 asc-rs；规则集模式是多 APK 审计的用法。
 
-**本地 Linux，Pixel 6 的 312 个系统 APK（3.8 GB）× 8 条规则：**
+**本地 Linux，Pixel 6 的 312 个系统 APK × 8 规则**
 
 | 配置 | asc-rs | 对照 |
 |---|---:|---:|
-| MCP 单进程，空缓存 / 缓存已建好 | 393 ms / 179 ms，124 MB（rust_ASC 对比时测，16 线程）；`integrate/plan` 合入时测为 428 ms（1.49 GB）/ 144 ms（122 MB） | main `3a1e5cd`：683–842 ms，1.75 GB |
-| CLI，16 个进程，不开缓存 / 热缓存 | 1188 ms / 688 ms，每进程 21 MB（rust_ASC 对比时测）；`integrate/plan` 合入时测为 525 ms | main `3a1e5cd`：949 ms，每进程 108 MB；rust_ASC dev CLI 2946 ms，每进程 219 MB |
-| rust_ASC dev MCP | — | 3138 ms，进程树 4.6 GB（它的 MCP 每次调用都起一个 CLI 进程） |
+| MCP 单进程，空缓存 / 已建 | 393 / 179 ms | `3a1e5cd` 683–842 ms；rust_ASC dev MCP 3138 ms（4.6 GB） |
+| CLI 16 进程，不开缓存 | 1188 ms | rust_ASC dev CLI 2946 ms |
 
 ## 缓存、内存与多进程
 
-**结论：冷扫的内存现在有上限，冷扫之后 L1 基本完整；macOS 上的进程注册表、去重的 SHA-256 和写盘同步这几个问题都已修好；空闲后的突发扫描会收缩自动线程；多进程合计内存已查清，真实堆内存主要是按设计分配的内存缓存。**
+Mac，836 APK，除非另注。
 
-| 改动 | 现象 | 做法 | 实测（Mac，836 个 APK，除非另注） |
-|---|---|---|---|
-| 写盘队列有界 | 旧版（r1 也一样）一个 MCP 进程冷扫 416 个 APK，4 s 内涨到 28–44 GB，缓存目录 8.6 GB，是预算的两倍 | `4d701d8`：排队写入超过 512 MiB 就丢弃新的写入；写入期间也做淘汰 | 每条规则调用一次的冷扫：从超过 30 GB 被强制终止，变为 6.5 s / 5.2 GB；规则集 1.4 s / 3.2 GB |
-| 超限时延后写入，不再丢弃 | 上面的丢弃让冷扫后 L1 很不完整，热跑只能靠 L3 | `db29fc6`：超限的 L1 写入只记下是哪个条目，由写盘线程之后从 APK 重新解压再写；写盘线程按 CPU 数 1–4 个 | 冷扫后 L1 从 86 个文件 / 1.2 GB 增至 866 个 / 7.4 GB；之后对 30 个最重的 APK 各跑一次 CLI，合计 1873 → 909 ms。代价：冷扫回答 1452 → 1541 ms，到进程退出 2489 → 3867 ms；峰值 RSS 3403 → 3090 MB |
-| 写盘与预建降优先级 | 上面多出来的重新解压会和查询抢 CPU | `7a6123d`：Linux nice 19，Apple 用 utility QoS | Linux 上确认写盘线程 nice 为 19。macOS 上测不出差别（见下文），保留 |
-| aarch64 硬件 SHA-256 | 跨 APK 去重时的 SHA-256 是采样第一的热点，两台手机的系统 APK 大量重复 | `a23650e`：aarch64 上开启 sha2 的 `asm` | 规则集冷跑 2055 → 1713 ms（r1 1732 ms，交替 5 轮） |
-| 写缓存去掉 fsync | macOS 上 `sync_data` 实际是 `F_FULLFSYNC`：每个 8 MiB 文件 9.8 ms，普通 fsync 2.0 ms | 不再 fsync；文件带 CRC，重启之前写入的文件在读取时校验一次 | Mac 上用临时去掉同步的构建测：每条规则一个进程冷跑 52.7 → 21.1 s，规则集冷跑 8.0 → 4.0 s；合入版本在 macOS 上**未正式测**。本地 Linux 见下表 |
-| 进程注册表在 macOS 生效 | 注册表原来只在 Linux 上实现，macOS 上一直没有登记，内存预算和线程都没有按进程分摊 | `c1fc2da`（big-machine） | N=16 冷扫时，登记从 0 个变为 16 个；扫描期间一次性查询的 worker 从 32 个降到 7 个 |
-| 突发扫描时线程收缩 | 是否忙碌只看条目是否 5 秒内更新过、扫描开始时只读一次。agent 两次调用之间服务器常空闲超过 5 秒，突发一来各进程都用满 32 个 CPU（16 进程合计 512 个 worker） | `f3c4238`：条目加 busy 标记，请求开始和结束时各写一次；注册表 100 ms 重读一次；多 APK 扫描在两个任务之间按当前线程数排队 | 见下表：空闲 7 s 后 N=16 热扫 4148 → 695 ms，冷扫与 N=1 持平 |
-| 写盘队列按内存预算 | 每进程固定 512 MiB 的队列上限不随进程数分摊，16 进程时队列本身就能占 8 GB | `dc46cce`：上限取 512 MiB 与内存预算（`--memory-mb` 或自动份额）的较小值 | `--memory-mb 64`、N=16 冷扫：各进程峰值 footprint 之和 10.1 → 4.1 GB，L1 不变；代价是更多 L2 写入被丢弃（冷扫后 L2 约 2 → 0.3 GB），之后查询会重建 |
+| 改动 | 问题 | 效果 |
+|---|---|---|
+| 写盘队列有界（`4d701d8`） | 冷扫 416 APK 时单进程 4 s 涨到 28–44 GB | 每条规则一次冷扫：从 >30 GB 被杀到 6.5 s / 5.2 GB；规则集 1.4 s / 3.2 GB |
+| 超限延后重新解压（`db29fc6`） | 丢弃写入使冷扫后 L1 不完整 | L1 86 → 866 个文件；之后 30 个最重 APK 的 CLI 合计 1873 → 909 ms。代价：冷扫 1452 → 1541 ms，退出 2489 → 3867 ms |
+| aarch64 硬件 SHA-256（`a23650e`） | 去重的 SHA-256 是首要热点 | 规则集冷跑 2055 → 1713 ms |
+| 去掉 fsync，文件带 CRC | macOS `sync_data` 是 `F_FULLFSYNC`，每 8 MiB 9.8 ms | 临时构建：每规则冷跑 52.7 → 21.1 s，规则集 8.0 → 4.0 s；本地见下表 |
+| macOS 进程注册表（`c1fc2da`） | macOS 上未登记，预算与线程不分摊 | N=16 登记 0 → 16 个；一次性查询 worker 32 → 7 |
+| 突发扫描线程收缩（`f3c4238`） | 忙碌只看 5 s 内更新，agent 调用间空闲后各进程都用满 32 CPU | 见下表 |
+| 写盘队列按内存预算（`dc46cce`） | 512 MiB 上限不随进程数分摊 | `--memory-mb 64`、N=16：峰值 footprint 之和 10.1 → 4.1 GB，L1 不变；L2 写入多丢（约 2 → 0.3 GB），之后重建 |
+| 写盘与预建降优先级（`7a6123d`） | 重新解压与查询抢 CPU | Linux nice 19；macOS 上测不出差别，保留 |
 
-**no-fsync，本地 Linux（ext4 / NVMe，5 次中位数，交替跑）**，脚本 [`cache/nofsync_bench.py`](deterministic/cache/nofsync_bench.py)：
+**no-fsync，本地 Linux，5 次中位数**（[`nofsync_bench.py`](deterministic/cache/nofsync_bench.py)）
 
-| 场景 | `a23650e` | no-fsync |
+| 场景 | 之前 | 之后 |
 |---|---:|---:|
-| Douyin 冷缓存单条查询（写约 380 MB） | 447 ms | 180 ms |
+| Douyin 冷缓存单查询（写约 380 MB） | 447 ms | 180 ms |
 | Douyin 热缓存 | 12 ms | 8 ms |
-| Douyin 重启后第一次 / 第二次查询 | 7 / 6 ms | 20 / 6 ms |
-| 312 个 Pixel APK 规则集冷跑，P=16 | 263 ms | 276 ms |
+| 重启后第一次查询（CRC 校验） | 7 ms | 20 ms |
+| 312 Pixel APK 规则集冷跑 | 263 ms | 276 ms |
 
-重启后第一次读取要多花 14–22 ms 算 CRC。Pixel 语料的 DEX 大多不写 L1，省不到 fsync，只多了 CRC 的开销。
+**突发扫描，规则集，自动线程，`938a3dc` → `f3c4238`**（[`s2.py`](deterministic/s2.py) `AUTO=1`，空闲列加 `IDLE=7`）
 
-**big-machine，Mac，规则集，旧 `36ab1e2` 对新 `c1fc2da`，交替 3 次中位数**，驱动 [`deterministic/bm.sh`](deterministic/bm.sh)：
-
-| N 个 MCP 进程（自动线程） | 冷：旧 → 新 | 热：旧 → 新 |
-|---|---:|---:|
-| 1 | 1436 → 1454 ms | 509 → 500 ms |
-| 4 | 929 → 907 ms | 703 → 267 ms |
-| 8 | 868 → 880 ms | 2956 → 244 ms |
-| 16 | 1086 → 1128 ms | 964 → 251 ms |
-
-- 冷跑新旧持平，差异在 ±4% 以内。
-- 旧版热跑的慢值不可靠：N=8 时重跑，旧版自动线程是 249–311 ms，新版 233–284 ms。所以热跑**不算** big-machine 的确定收益。
-- N=16 冷跑时固定每进程线程数：2 / 4 / 8 / 32 线程分别为 1263 / 951 / 1053 / 1136 ms，自动线程 1128 ms。说明每进程线程太少会出现长尾。之后复测时固定 4 线程是 857–1115 ms，并不比自动线程快，冷扫的差距在噪声以内；真正的问题出在空闲之后（见下表）。
-- 磁盘自动上限 32 GiB：在这次验证时，大部分 L1 写入被 512 MiB 队列上限丢掉，没有碰到上限。延后写入之后冷扫写了 7.4 GB，仍在上限之内。
-
-**突发扫描，Mac，规则集，自动线程，`938a3dc` → `f3c4238`，3 次中位数**，用 [`deterministic/s2.py`](deterministic/s2.py) 的 `AUTO=1`，「空闲后」再加 `IDLE=7`（调用前让服务器先空闲 7 s）：
-
-| N 个 MCP 进程 | 冷 | 热 | 空闲 7 s 后热 |
+| N 进程 | 冷 | 热 | 空闲 7 s 后热 |
 |---|---:|---:|---:|
 | 1 | 1362 → 1393 ms | 765 → 577 ms | 857 → 826 ms |
 | 4 | 929 → 918 ms | 220 → 222 ms | 693 → 709 ms |
@@ -187,102 +142,69 @@ macOS 上 `callgraph --virtual` 第一次调用：经 daemon 261 ms，本地 276
 | 16 | 924 → 896 ms | 226 → 669 ms | **4148 → 695 ms** |
 | 16，固定 4 / 8 线程 | 933 / 881 ms | 220 / 308 ms | 689 / 626 ms |
 
-- 「热」一列的差异是噪声：这台机器上热跑在约 220 ms 与约 650 ms 两档间随机跳，固定线程同样会跳；逐进程计时 main 372/641/599 ms，新版 638/629 ms。main 在刚启动时看着快，是因为启动时写的条目恰好还在 5 秒窗口内。
-- 读一次注册表约 1.1 ms（31 个服务器），写一次约 0.2 ms。
+「热」列是噪声：这台机器热跑在约 220 与约 650 ms 两档间随机跳，固定线程也一样。读一次注册表约 1.1 ms，写约 0.2 ms。
 
-**内存，N=16 个 MCP 进程冷扫（`938a3dc`）**，用 [`deterministic/mem/footprint.py`](deterministic/mem/footprint.py) 包住 `s2.py` 采样 macOS `footprint`：
+**内存，N=16 MCP 进程冷扫**（[`mem/footprint.py`](deterministic/mem/footprint.py)）
 
-| 配置 | `ps` RSS 合计 | 各进程峰值 footprint 之和 | 同一时刻 footprint 合计 |
-|---|---:|---:|---:|
-| 默认 | 22.3 GB | 12.4 GB | 10.8 GB |
-| `--no-cache`（无磁盘缓存，也就没有写盘线程） | 13.9 GB | 11.4 GB | 7.0 GB |
-| `--memory-mb 64` | 12.6 GB | 10.0 GB | 7.3 GB |
-| 两者都加 | 7.1 GB | 2.9 GB | — |
-
-- 之前说的「约 21 GB」是 `ps` RSS 之和，其中约 10 GB 是映射的 APK 与 L1 文件的干净页，可共享、可回收。
-- 真实堆约 11–12 GB，主要是内存缓存：自动份额是可用内存的四分之一按 16 个进程分，每进程约 700 MB，与设计一致。其余是解压中的数据（各进程峰值合计最多约 2.9 GB）和写盘队列；后者已按内存预算封顶（上表 `dc46cce`）。
-
-**macOS 降优先级**：一个 MCP 进程冷扫 836 个 APK 后，紧接着交替发 12 次 Douyin 单 APK 查询和 12 次多 APK 单规则查询，对比写盘线程不降优先级的临时构建，交替 3 次，脚本 [`cache/after_scan.py`](deterministic/cache/after_scan.py)：
-
-| | 降优先级（当前） | 不降优先级 |
+| 配置 | `ps` RSS 合计 | 峰值 footprint 之和 |
 |---|---:|---:|
-| 12 次多 APK 查询合计 | 8.7–8.9 s | 8.5–9.0 s |
-| 前 3 对查询合计 | 1.99–2.08 s | 1.94–2.16 s |
-| 12 次单 APK 查询合计 | 75–92 ms | 68–80 ms |
+| 默认 | 22.3 GB | 12.4 GB |
+| `--no-cache` | 13.9 GB | 11.4 GB |
+| `--memory-mb 64` | 12.6 GB | 10.0 GB |
+| 两者都加 | 7.1 GB | 2.9 GB |
 
-32 个 CPU 上最多 4 个写盘线程，争不到多少 CPU；没有直接确认测量窗口里写盘线程是否一直在忙（退出时已无积压）。
+RSS 里约 10 GB 是映射 APK 与 L1 的干净文件页。真实堆主要是内存缓存（自动份额为可用内存的 1/4 按进程分，每进程约 700 MB），其余是解压中的数据和写盘队列（已按预算封顶）。
 
-**多 APK 扫描接 prefix-skip（未合入）**：实验版本在 MCP 扫描里对所有 Deflate 条目先探测，N=1 冷缓存，3 次：8 条规则一起慢约 4%（N=16 慢约 5%，`http://` 这类规则几乎每个 DEX 都命中，跳不掉）；单条稀有规则 DexClassLoader 快约 7%，Runtime.exec、getDeviceId 持平；结果完全一致。被跳过的条目不进 L1，换规则时还要重新解压，所以不合入。Pixel 312 个 APK 上同样没有收益。
+**macOS 降优先级**（冷扫后紧接 12 次单 APK + 12 次多 APK 查询，[`after_scan.py`](deterministic/cache/after_scan.py)）：多 APK 合计 8.7–8.9 s 对不降优先级 8.5–9.0 s，单 APK 75–92 对 68–80 ms，无可分辨差别。
+
+**多 APK 扫描接 prefix-skip（未合入）**：8 条规则一起慢约 4–5%（`http://` 几乎每个 DEX 都命中），单条稀有规则最多快约 7%，且跳过的条目不进 L1。
 
 ## agent 评测（grok-4.7）
 
-**结论：超长输出写到文件、由 agent 按需 grep，是最省 token 的设计。新版每个目标的 token 约为 dexsql 的 1/4、r1 的 1/3，证据持平。多 APK 问题上，droidasc 的 token 只有 dexsql 的约 1/46，两边答案都全对。**
-
 **S1：Mac，Douyin 40.8.0，17 个目标 × 2 次，每组只接一个工具**
 
-| 组 | MCP 调用/目标 | 失败调用 | token/目标 | $/目标 | 耗时 | 证据 | 总费用 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| asc-rs `a23650e`，MCP + 读文件，超长时写文件 | 11.0 | 5 | 207k | 0.071 | 83 s | 92/100 | $3.28 |
-| asc-rs `a23650e`，只 MCP，超长时分页（`--spill-mb 0`） | 24.5 | 15 | 379k | 0.119 | 116 s | 92/100 | $4.08 |
-| r1 `8b7a09e`，只 MCP | 25.0 | 63 | 578k | 0.162 | 136 s | 86/100 | $7.69 |
-| dexsql，MCP + 读文件 | 42.5 | 68 | 785k | 0.201 | 162 s | 92/100 | $9.04 |
+| 组 | MCP 调用/目标 | 失败 | token/目标 | $/目标 | 耗时 | 证据 |
+|---|---:|---:|---:|---:|---:|---:|
+| asc-rs，MCP + 读文件，超长写文件 | 11.0 | 5 | 207k | 0.071 | 83 s | 92/100 |
+| asc-rs，只 MCP，超长分页 | 24.5 | 15 | 379k | 0.119 | 116 s | 92/100 |
+| r1，只 MCP | 25.0 | 63 | 578k | 0.162 | 136 s | 86/100 |
+| dexsql，MCP + 读文件 | 42.5 | 68 | 785k | 0.201 | 162 s | 92/100 |
 
-- 分页组对比 r1：token 少 34%，失败调用从 63 次降到 15 次。r1 在 manifest_exported_components 上 0/3，原因是单 APK 的 manifest 摘要被 grok 截断（约 20 KB），又没有办法翻页；新版这一项满分。
-- 写文件组对比分页组：token 再少 45%，调用数减半。写文件组的 agent 确实用了 read_file 和 grep 去读写出来的文件。
-- 对照，本地 Linux、Douyin 40.7.0，同样 17 个目标 × 2 次，只接 MCP：r1 26.5 次调用、610k token、$0.167、112 s、证据 86/100，其中 78 次失败里有 58 次是 getclass 方法签名的写法不被接受，922 次返回里有 165 次超过 20 KB；dexsql 38 次调用、659k token、$0.173、105 s、92/100。r1 在两台机器、两个 Douyin 版本上的结果几乎一样，说明换机器、换版本没有带来明显偏差。
+r1 在 manifest_exported_components 上 0/3：单 APK 的 manifest 摘要被 grok 截断（约 20 KB）且无法翻页。本地 Linux、40.7.0 上的 r1 与 dexsql 结果几乎相同，换机器、换版本没有明显偏差。
 
 **S2：Mac，K80 的 416 个 APK，4 个「哪些 APK 调用了某 API」目标 × 1 次**
 
-参考答案先由 droidasc 生成，再用 dexsql 独立交叉核对。四个目标里三个完全一致；剩下一个差异来自 com.android.bluetooth，它只调用了 `sendTextMessageWithoutPersisting`，droidasc 的方法名是模糊匹配所以命中了它，这里记为可选项。
+| 工具 | 召回 | 准确 | 调用/目标 | token/目标 | $/目标 | 耗时 |
+|---|---:|---:|---:|---:|---:|---:|
+| asc-rs，MCP + 读文件 | 1.00 | 1.00 | 6 | 104k | 0.039 | 74 s |
+| dexsql，MCP + 读文件 | 1.00 | 1.00 | 110 | 4815k | 1.225 | 716 s |
 
-| 工具 | 召回 | 准确 | 调用/目标（全部工具） | token/目标 | $/目标 | 耗时 | 总费用 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| asc-rs `a23650e`，MCP + 读文件 | 1.00 | 1.00 | 6 | 104k | 0.039 | 74 s | $0.16 |
-| dexsql，MCP + 读文件 | 1.00 | 1.00 | 110 | 4815k | 1.225 | 716 s | $5.86 |
+参考答案由 droidasc 生成、dexsql 独立核对。dexsql 每个 dataset 最多 64 个输入，只能分批。
 
-dexsql 每个 dataset 最多 64 个输入，只能分批打开、逐批写 SQL。
+### 失败调用回放
 
-**失败调用回放：本地 Linux，Douyin 40.7.0**
+agent 评测中 92 次失败的 droidasc 调用在同一 MCP 会话重放（本地，Douyin 40.7.0）：
 
-把 agent 评测里全部 92 次失败的 droidasc 调用，在同一个 MCP 会话里重放。另有 12 次是客户端调用了不存在的工具，已去掉。
-
-| 版本 | 成功 | 报错但有可操作提示 | 报错且无提示 |
+| 版本 | 成功 | 报错带提示 | 报错无提示 |
 |---|---:|---:|---:|
-| `f344edf`（统一查询语法之前） | 46 | 31 | 15 |
-| 统一查询语法、宽松参数、可操作报错之后 | 49 | 43 | 0 |
+| `f344edf`（统一查询语法前） | 46 | 31 | 15 |
+| 之后 | 49 | 43 | 0 |
 
-「有可操作提示」用 `cli-native/replay.py` 里的正则判定，两个版本用同一个正则。
+## 已知局限
 
-## 已知局限与未测项
-
-- **agent 评测**：
-  - 只测了 grok-4.7 一个模型，结论不一定适用于其他模型。
-  - S1 的证据指标已经饱和：各组都缺同样 8 条证据，就是 40.7.0 写死的混淆名。
-  - S2 每个目标只跑 1 次。
-  - S1 的第 3 次重复只跑完 18 次，没有计入。
-  - 14 路并发会被限流，被限流的那批已全部丢弃，正式结果是 4 路并发、带退避重试跑的。
-  - S2 的 dexsql 组运行时，Mac 上同时在跑基准，耗时略受影响。
-- **失败调用回放**：S1 第二组调用原本是在 40.8.0 上发出的，这里在 40.7.0 上重放，部分混淆类名对不上。所以这部分只能说明「找不到时的提示质量」，不代表在原版本上会成功。
-- **S1 回放**：回放脚本写死了 40.7.0 的混淆名，在 40.8.0 上每个工具都会缺证据；dexsql 写死的 method id 在 40.8.0 上会报错。
-- **Mac 是共享机器**：有异常值的配置都交替重跑过，旧版热跑的个别慢值不可靠。
-- **未测**：
-  - 合入的 no-fsync 版本在 macOS 上的正式前后对比。
-  - 机器内存小、CPU 少时降优先级的效果（只在 32 核的 Mac 上测过，测不出差别）。
-  - 修改输出格式之后，用 rust_ASC 对比脚本重跑。
-- **无法复现**：
-  - 资源对比里 6 个第三方 APK（快手、美团、拼多多、淘宝两个版本、小红书）当时没有记录版本，APK 也已不在本地。
-  - daemon 单条查询的计时脚本没有保留；47 步回放可以用 `DROIDASC_DAEMON=auto` 跑 `deterministic/s1.py` 复现。
-  - 本地的 47 步回放只保留了最后一次的结果（81 ms 那次）。
+- agent 评测只用了一个模型；S1 证据已饱和（各组都缺 40.7.0 写死的 8 条）；S2 每目标 1 次。
+- 回放脚本写死 40.7.0 的混淆名，40.8.0 上各工具都缺证据；失败调用回放的部分调用原本发自 40.8.0。
+- Mac 是共享机器，个别热跑慢值不可靠。
+- 未测：合入版 no-fsync 在 macOS 上的正式对比；小机器上降优先级的效果；输出格式改动后重跑 rust_ASC 对比。
+- 资源对比的 6 个第三方 APK 版本未记录，已无法复现。
 
 ## 复现
 
-| 问题 | 脚本 |
+| 内容 | 位置 |
 |---|---|
-| 语料、版本、拉取、清单 | [corpus.md](corpus.md)、[corpus/](corpus/)（`pull.sh`、`manifest.py`） |
-| 单 APK 47 步回放、多 APK 矩阵、prefix-skip、缓存一致性、no-fsync、big-machine、rust_ASC 与 dexsql 对照 | [deterministic/README.md](deterministic/README.md) |
-| 本地 MCP 47 步回放（早期脚本） | [agent-audit/replay_mcp.py](agent-audit/replay_mcp.py) |
-| 本地多 APK 暴露面审计与规则集（早期脚本） | [multi-apk/](multi-apk/)（`audit.py`、`rules.py`） |
-| 与 Python 上游语义对比 | [parity/semantic.py](parity/semantic.py) |
-| 资源与 aapt2 对比 | [arsc-compare/compare.py](arsc-compare/compare.py) |
-| agent 评测（S1、S2 的 runner、参考答案、打分、指标提取） | [agent/README.md](agent/README.md) |
-| 失败调用回放 | [cli-native/README.md](cli-native/README.md) |
+| 语料与清单 | [corpus.md](corpus.md)、[corpus/](corpus/) |
+| 单 / 多 APK、缓存、内存、对照工具 | [deterministic/](deterministic/README.md) |
+| 早期 MCP 回放、多 APK 审计 | [agent-audit/](agent-audit/replay_mcp.py)、[multi-apk/](multi-apk/) |
+| 语义对比、资源对比 | [parity/](parity/semantic.py)、[arsc-compare/](arsc-compare/compare.py) |
+| agent 评测 | [agent/](agent/README.md) |
+| 失败调用回放 | [cli-native/](cli-native/README.md) |

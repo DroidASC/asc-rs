@@ -1,585 +1,125 @@
 English | [简体中文](README.md)
 
-# asc-rs — Droid ASC in Rust
+# asc-rs
 
-Rust port of [Droid ASC](https://github.com/MG1937/ASC) ("R8 Compiler Optimization as a
-DeCompiler Primitive"): a stateless, zero-preprocessing engine that treats an APK as a
-read-only database. It locates a class, searches cross references or decodes the manifest
-directly from the compressed artifact in milliseconds, without building any global index.
-
-```
-usage: droidasc [--debug] [--threads N] [--no-cache] [--cache-dir DIR] [--cache-max-mb MIB]
-                [--memory-mb MIB] <COMMAND>
-
-  getclass     Locate the target class in APK, extract one DEX in memory, then disassemble.
-  disassemble  Same, without debug directives unless --debuginfo (Python's smali command).
-  listclass    List classes across all DEX entries (--prefix com.poc to filter). Alias: classes.
-  getmanifest  Decode AndroidManifest.xml from APK and print it as XML (--resolve: resource
-               references by name). Alias: manifest.
-  manifest-summary  The manifest's attack surface, one record per line (--json): exported
-               components and why, permissions, providers, deep links, FileProvider paths,
-               network security config.
-  resources    Query resources.arsc: one resource (id or type/name, --resolve), --search, or
-               the whole table, one line per resource and configuration.
-  xml          Decode any binary XML file of the APK (res/xml/..., layouts) with names.
-  findrefs     Find code references for string/type/method/field, or subclasses / implementors
-               (extends / impl), across all DEX entries in APK.
-  callgraph    Callers (default) or callees of a method across all DEX entries, as a tree.
-  hierarchy    Transitive subclasses / implementers (or --supers) of a class, and overrides.
-  mcp          Serve MCP tools over stdio, keeping opened APKs resident.
-  cache        Inspect or clear the on-disk cache (path | stats | clear).
-
-  --threads N      worker threads (default: logical CPUs split with your other busy mcp / daemon processes); --thread N also works
-  --no-cache       bypass the on-disk cache of inflated DEX files
-  --cache-dir DIR  use DIR instead of the default cache directory
-  --cache-max-mb MIB  on-disk cache budget (default: automatic, see "Caching")
-  --memory-mb MIB  in-memory budget of mcp / the daemon (default: automatic)
-  --debug          profiling output on stderr
-  --limit N / --max-bytes N / --offset N
-                   keep stdout to N records / bytes (whole records), from record N;
-                   the whole output goes to a file the last line names
-  -v, -V, --version
-
-examples:
-  droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
-  droidasc getclass app.apk com.poc.Main --threads 16 --dump-dex Main.dex
-  droidasc disassemble app.apk com.poc.Main --debuginfo
-  droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
-  droidasc listclass app.apk --prefix com.poc -o classes.txt
-  droidasc getmanifest app.apk -o AndroidManifest.xml
-  droidasc getmanifest app.apk --resolve
-  droidasc manifest-summary app.apk | grep exported=true
-  droidasc resources app.apk string/app_name
-  droidasc resources app.apk 0x7f0d0001 --resolve
-  droidasc resources app.apk --search 'https?://' --in value
-  droidasc xml app.apk res/xml/network_security_config.xml
-  droidasc getclass app.apk com.poc.Main --res-names
-  droidasc findrefs app.apk string token -o string_refs.txt
-  droidasc findrefs app.apk string 'https://' --literal
-  droidasc findrefs app.apk type com.poc.Main
-  droidasc findrefs app.apk extends android.app.Activity -o subclasses.txt
-  droidasc findrefs app.apk impl android.os.IInterface
-  droidasc findrefs app.apk method onCreate --class com.poc.Main
-  droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
-  droidasc findrefs app.apk method run --class com.poc.Main --exact
-  droidasc findrefs app.apk field apiKey -o field_refs.txt
-  droidasc findrefs app.apk string token --no-cache
-  droidasc findrefs app.apk string token --context 3
-  droidasc findrefs app.apk method loadUrl --context method
-  droidasc findrefs app.apk method android.webkit.WebView.loadUrl
-  droidasc callgraph app.apk com.poc.Main onCreate --depth 3
-  droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
-  droidasc callgraph app.apk com.poc.Base run --virtual
-  droidasc findrefs app.apk all 'string:https?://' 'method:android.webkit.WebView->loadUrl'
-  droidasc findrefs app.apk all 'method:getDeviceId' --none 'method:~Log->d'
-  droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec' --file rules.txt
-  droidasc hierarchy app.apk android.webkit.WebViewClient --method shouldOverrideUrlLoading
-  droidasc mcp --memory-mb 4096
-  droidasc cache stats
-```
-
-Exit status is 0 on success, 1 on error and 2 when `findrefs` or `callgraph` finished but
-some DEX entries could not be searched (a warning per entry is printed on stderr).
-
-The command line and query semantics are the Python tool's; the output is asc-rs's own, one
-record per line in `|` columns so it greps and cuts. A `findrefs` row is `dex | method |
-matched`: the method with its full signature (ready for `getclass --method` or
-`callgraph`), then what it references, `, `-separated: strings quoted and escaped as JSON
-(a multi-line string stays on its line), types as descriptors, methods as
-`Lcls;->name(params)ret`, fields as `Lcls;->name:type`. `extends` / `impl` rows are
-`dex | class | extends Lbase;`:
-
-```
-classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
-classes.dex | LWV/Sh;->onClick(Landroid/content/DialogInterface;I)V | "\n* If this app is available on Google Play, please include a URL:\n\nSteps to reproduce:\n…"
-classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-classes8.dex | Lcgjc;->apply(Ljava/lang/Object;)Ljava/lang/Object; | Landroid/os/Build$VERSION;->SDK_INT:I
-classes4.dex | Ldxbs; | extends Landroid/webkit/WebViewClient;
-```
-
-The rows found are the Python tool's (`benchmark/parity/semantic.py` compares the two by dex,
-method and matched set).
-
-`getclass` and `disassemble` take `--method` to render only some methods: a name (every
-overload), an exact signature (`'run(I)V'`), a signature prefix or a Java-style one
-(`'run(int)'`); a method the class lacks fails with the methods it has. `findrefs extends` / `impl` list the classes
-whose direct superclass / one of whose direct interfaces is the target (dotted or Dalvik
-form). `findrefs string --literal` matches a plain substring instead of a regex.
-
-`findrefs --context N` prints, after each result, where the references are and the smali
-around them, so the next step rarely needs a `getclass`; `--context method` prints the
-whole method (a method over 150 lines shows 10 lines around each reference instead):
-
-```
-classes.dex | Lcom/poc/Main;->run()V | "token"
-  @ pc 0x4 line 12
-        .line 12
-  >     const-string v0, "token"
-        invoke-static {v0}, Lcom/poc/Net;->send(Ljava/lang/String;)V
-```
-
-`callgraph APK CLASS METHOD` walks callers (or `--callees`) `--depth` levels (default 2,
-at most `--max-nodes` methods, default 500), across DEX files. `METHOD` is a name (every
-overload) or an exact `name(params)ret`. One line per call; `[no body]` marks methods no
-DEX of the APK defines (framework / SDK), `(repeated)` methods expanded elsewhere:
-
-```
-0 Landroid/webkit/WebView;->loadUrl(Ljava/lang/String;)V [no body]
-  1 <- Lcom/poc/Web;->open(Ljava/lang/String;)V
-    2 <- Lcom/poc/DeepLink;->onCreate(Landroid/os/Bundle;)V
-# 3 rows, 3 distinct methods (callers, depth 2)
-```
-
-The graph is the static references in the bytecode: a call through `Lcom/poc/Sub;->m()V`
-is not a call of `Lcom/poc/Base;->m()V`. With `--virtual` it follows dispatch through the
-class hierarchy: the callers of a method also include the callers of the same signature on
-each supertype (`(via Lcom/poc/Base;)`), the callees also the overrides of each callee in
-its subclasses (`(override of Lcom/poc/Base;)`).
-
-`findrefs APK all COND...` finds methods whose code matches every condition, `--none COND`
-drops those matching another. A condition is `KIND:VALUE`: `string:REGEX`, `literal:TEXT`,
-`type:PATTERN`, `method:TARGET`, `field:TARGET`. A TARGET is `[CLASS->]NAME`, also written
-`com.a.B.name`, `com.a.B#name` or `Lcom/a/B;->name(I)V` (CLASS exact, `~CLASS` fuzzy, a class
-without package such as `WebView` in any package; NAME a regex / substring, `=NAME` or a
-name with its signature exact). A signature also narrows to that overload: `name(I)V`,
-`name(I)` (any return type), Java style `name(int, String)` (a class without package in any
-package), `f:I` for a field's type. `findrefs method` / `field` take the same targets in place
-of the name, and the kind is forgiving (`methods:`, `Method:`). The matched column lists what each condition
-matched, in order. `findrefs APK rules RULE...` (and `--file`, one rule per line) answers several
-queries in one pass over each DEX, rows prefixed `r1 | `, `r2 | `...; a rule is a condition,
-`extends:CLASS` / `impl:CLASS`, or conditions joined with `&`. On Douyin, eight audit rules
-take 114 ms in one `rules` call against 700 ms as eight `findrefs` processes.
-
-A miss says what to try. A class the APK does not define is either a framework class
-(find its uses with `findrefs type` / `extends`) or gets the closest classes it does
-define; a missing method lists the class's methods; a search without results prints, on
-stderr (`# hint:` lines over MCP), how many DEX entries it searched and why it may have
-found nothing (case-sensitive patterns, a class no DEX references, a member that exists
-but is never referenced); missing resource files and names point at shrunk layouts.
-
-`hierarchy APK CLASS` prints the transitive subclasses and implementers (`--supers`: the
-superclasses and interfaces) across DEX files, one line per class with its DEX or
-`[not in APK]`; `--method NAME` marks the classes defining it and adds one
-`override Lcom/poc/Sub;->m(...)V classes2.dex` line per definition:
-
-```
-0 Landroid/webkit/WebViewClient; [not in APK]
-  1 subclass Lcom/poc/WebClient; classes.dex [defines shouldOverrideUrlLoading(Landroid/webkit/WebView;Ljava/lang/String;)Z]
-    2 subclass Lcom/poc/StrictClient; classes2.dex
-override Lcom/poc/WebClient;->shouldOverrideUrlLoading(Landroid/webkit/WebView;Ljava/lang/String;)Z classes.dex
-# 3 rows, 3 distinct classes (subclasses, depth 16); 1 define shouldOverrideUrlLoading
-```
-
-Scripts written for the other Rust ports keep working: `classes` and `manifest` are
-aliases of `listclass` and `getmanifest` (as in rasc), `--thread` of `--threads` (as in
-rust_ASC), and `--literal` gives their literal string matching.
+Treats an APK as a read-only database: locate classes, search cross-references, disassemble, and decode
+the manifest and resources straight from the archive, in milliseconds, with no preprocessing or global
+index. Built for people and agents: CLI first (with a transparent warm daemon on Unix), plus an MCP
+server. The binary is `droidasc`.
 
 ## Build
 
 ```sh
-cargo build --release                       # -> target/release/droidasc
+cargo build --release        # -> target/release/droidasc (Rust 1.85+)
 cargo test --workspace
 ```
 
-Rust 1.85 or newer.
+## Quick start
 
-## Workspace layout
+```sh
+droidasc manifest-summary app.apk | grep exported=true          # attack surface
+droidasc findrefs app.apk string 'https?://' --limit 50         # who uses this string
+droidasc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
+droidasc getclass app.apk com.poc.Main --method onCreate        # read smali
+droidasc callgraph app.apk com.poc.Main onCreate --depth 3      # caller tree
+droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
+```
 
-| crate | role |
+## Commands
+
+| command | what it does |
 |---|---|
-| `asc-dex` | Zero-copy DEX parser: header, id tables, MUTF-8, LEB128, class data, code items, encoded values, debug info, annotations, DEX 041 containers, checksum/signature. |
-| `asc-dalvik` | Dalvik opcode table (generated from ART's `dex_instruction_list.h`), instruction formats, operand decoding, payload-aware instruction walk. |
-| `asc-findrefs` | Cross-reference search on one DEX: regex / literal (`memmem`) string locator, subclass / implementor lookup over `class_def_item`s, type/method/field locators, dense 16-byte-bucket instruction→method resolver, raw code-region opcode scan. |
-| `asc-rebuild` | Extracts one class plus everything it references and writes a minimal, spec-valid DEX (sorted id tables, annotations, debug info, try/catch, static values, Adler-32 + SHA-1). |
-| `asc-smali` | baksmali-style disassembler used as the built-in output backend. |
-| `asc-apk` | Memory-mapped zip access: central directory (incl. zip64), root-level DEX enumeration, Deflate inflation (libdeflate, or streaming zlib-rs for prefixes / cancellation; a one-shot `findrefs` streams a prefix first and skips entries it shows cannot match). |
-| `asc-cache` | Inflated-DEX caches: an on-disk cache shared across processes and a byte-bounded in-memory LRU for resident hosts. |
-| `asc-axml` | Android binary XML: text XML, an element tree, names for references through a resolver; lazy string pools. |
-| `asc-arsc` | `resources.arsc` reader: indexes chunks only and decodes names and values on demand (u32 / 16-bit / sparse entry tables, compact entries, bags, library / overlayable / staged-alias chunks); per-config values, AOSP config matching and reference resolution. Checked against `aapt2 dump resources` (`benchmark/arsc-compare`). |
-| `asc-engine` | Orchestration: parallel class lookup with early stop, streaming multi-DEX reference search, class rebuild + disassembly, manifest decoding and summary, resource queries. |
-| `asc-mcp` | MCP server over stdio (`droidasc mcp`): one resident session, several APKs sharing one memory budget, CLI-format text plus structured results, paging. |
-| `asc-cli` | `droidasc` binary (clap). |
-| `asc-fixture` | Synthetic DEX/APK fixtures shared by the tests. |
+| `getclass` / `disassemble` | Locate a class, rebuild a one-class DEX in memory and print smali; `--method` for one method, `--dump-dex` writes the DEX for jadx and friends |
+| `listclass` (`classes`) | List classes, `--prefix` to filter |
+| `findrefs` | Code references to a `string` / `type` / `method` / `field`, direct subclasses and implementers (`extends` / `impl`); `all` combines conditions, `rules` answers many rules in one scan |
+| `callgraph` | Callers (default) or `--callees` of a method; `--virtual` follows dispatch through the class hierarchy |
+| `hierarchy` | Transitive subclasses / implementers, or `--supers`; `--method` marks overrides |
+| `getmanifest` (`manifest`) / `manifest-summary` | Decode the manifest; the summary is one record per line: exported components and why, permissions, providers, deep links, FileProvider, network security config |
+| `resources` / `xml` | Query `resources.arsc`; decode any binary XML |
+| `mcp` / `daemon` / `cache` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`) |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces map onto the Python
-modules and where the port deliberately differs.
+All options: `droidasc --help` and `droidasc <command> --help`. Exit status: 0 success, 1 error, 2 some
+DEX entries could not be searched (the other results are valid).
 
-## Differences from the Python implementation
+## Output and query syntax
 
-* **Output of `getclass` is smali, not Java.** The Python tool leans on androguard's
-  decompiler; there is no equivalent Rust library. Instead the rebuilt DEX is a fully valid
-  single-class DEX (canonically sorted tables, correct checksum and signature), so it can be
-  written out with `--dump-dex` and fed to jadx, baksmali, dexdump or any other tool. jadx
-  has been verified to decompile such DEX files to Java. `disassemble` (upstream's smali
-  command) shares the same backend: baksmali-style output rather than dadguard's format,
-  and `--debug` adds timings but no per-instruction offset comments.
-* **Correct string decoding.** Non-ASCII class and member names (common in obfuscated apps)
-  are decoded as MUTF-8; the Python version truncates them.
-* **Threads instead of processes** for `findrefs`; results stream per DEX in DEX order
-  (each as soon as the earlier ones are done). `getclass` returns as soon as one worker finds the class; workers still
-  inflating another DEX finish in the background.
-* Global `--debug` / `--threads` flags can appear anywhere on the command line;
-  `--threads 0` runs one worker (Python's `listclass` rejects it).
-* Every root-level `*.dex` is a DEX entry (Python prefers `classes*` names), and a
-  duplicated entry name resolves to its last central-directory record (Python: the
-  first). This holds for `getclass`, `findrefs` and `listclass` alike.
-* `invoke-polymorphic` method and proto operands are remapped during rebuild
-  (the Python version leaves them dangling); `invoke-custom` / method handles are still not
-  rebuilt. A class that cannot be rebuilt (undefined opcode, `invoke-custom`) is still
-  shown, disassembled straight from the original DEX, with a warning on stderr;
-  `--dump-dex` is refused for it.
-* Regex details differ at the edges: a match that spans several string items is
-  attributed to the item where it *starts* (Python: where it ends); patterns use
-  `regex` Unicode semantics, so `.` does not cross MUTF-8-encoded NUL bytes or
-  surrogates the way Python's byte-`re` does; an empty `string` pattern matches nothing
-  (Python: every string).
-* `findrefs extends` compares each `class_def_item`'s superclass field directly; Python
-  scans the packed table with a non-overlapping regex, which could in principle hide an
-  aligned match behind an unaligned one (no row differs on the reference fixtures).
-  `findrefs string --literal` and the `classes` / `manifest` aliases are extensions with
-  no Python counterpart; `classes` keeps the `listclass` output (not rasc's
-  `dex | descriptor | java name | package= | class=` rows) and has no `-f/--filter`.
-* `getmanifest` names attributes from the resource id whenever it is a known framework
-  attribute (androguard only when the pool name is empty), so obfuscated manifests show
-  `android:name` instead of `android:a`; unknown ids print as `attr_0x........`.
-* No GUI: the Python tool's Tk browser is not ported (an egui browser existed until
-  2026-10; agents use the CLI and MCP).
+One record per line, columns separated by ` | `; lines starting with `#` are headers, totals and hints, so
+grep / cut work. A `findrefs` row is `dex | method (full signature) | matched`:
+
+```
+classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
+classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
+```
+
+- Classes are `com.a.B` or `Lcom/a/B;`.
+- Members are written the same way in the CLI, MCP and rules: `Lcom/a/B;->name(I)V`, `com.a.B->name`,
+  `com.a.B#name`, `com.a.B.name`, `B.name` (a class without a package matches any package). A bare name is a
+  regex / substring; `=name` is exact.
+- A signature picks that overload: `run(I)V`, parameters only `run(I)`, Java style `run(int, String)`;
+  fields `f:I`.
+- Conditions are `KIND:VALUE` (`string:`, `literal:`, `type:`, `method:`, `field:`); in `rules` they combine
+  with `&`, or come from `--file`, one per line.
+- An empty result prints `hint:` lines on stderr: DEX entries searched, case sensitivity, a framework class
+  the APK does not define, the closest class or the methods it has, and so on.
+
+## For agents
+
+- **Cut output, spilled to a file**: nothing is cut unless asked. `--limit N` / `--max-bytes N` (or
+  `$DROIDASC_LIMIT` / `$DROIDASC_MAX_BYTES`) keep stdout short; the whole output goes to `out/` in the cache
+  directory and the last line says where and how to continue:
+
+  ```
+  # records 1-50 of 523 shown; full output in /home/u/.cache/droidasc/out/3f2a….txt (grep it, or rerun with --offset 50)
+  ```
+
+- **Skill**: [`skills/droidasc/SKILL.md`](skills/droidasc/SKILL.md) is an
+  [Agent Skill](https://agentskills.io/specification) for agents that work through a shell.
+- **Daemon** (Unix): one-shot commands are handed to a per-user daemon that keeps opened APKs resident; the
+  output (stdout, stderr, exit status) is byte-identical to running without it. The first command starts
+  it and it exits when idle; Ctrl-C in the client cancels the query in the daemon. `droidasc daemon
+  status|stop|start` controls it, `DROIDASC_DAEMON=off` turns it off.
+- **MCP**: `droidasc mcp` is a resident session over stdio with the tools `open_apk`, `close_apk`,
+  `getclass`, `findrefs`, `callgraph`, `hierarchy`, `listclass`, `getmanifest`, `manifest_summary`,
+  `resources`. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
+  APKs in one call. Replies stay within `max_bytes` (default 16384); the rest is spilled to a file or paged,
+  per `spill`.
+
+  ```json
+  { "mcpServers": { "droidasc": { "command": "/absolute/path/to/droidasc", "args": ["mcp"] } } }
+  ```
+
+## Caching and resources
+
+Inflated DEX files, derived search tables and query results are cached on disk (shared across processes,
+on by default); resident processes (`mcp`, the daemon) also keep an in-memory LRU. The cache only speeds
+things up and can be deleted at any time; files carry a CRC, so damage is just a miss. Budgets are sized
+to the machine by default, and resident processes register so they split memory and threads.
+
+| option / variable | effect |
+|---|---|
+| `--no-cache` | Do not read or write the on-disk cache |
+| `--cache-dir DIR`, `$DROIDASC_CACHE_DIR` | Cache location (default `$XDG_CACHE_HOME/droidasc` or `~/.cache/droidasc`) |
+| `--cache-max-mb MIB`, `$DROIDASC_CACHE_MAX_MB` | Disk budget (default: 20% of the cache plus free space, at most 32 GiB, keeping at least 1 GiB / 5% free) |
+| `--memory-mb MIB` | Memory budget of `mcp` / the daemon (default: a quarter of available memory, at most 2 GiB, split between processes) |
+| `--threads N` | Worker threads (default: the logical CPUs, split with other busy resident processes) |
+| `DROIDASC_DAEMON`, `DROIDASC_DAEMON_WAIT_MS`, `DROIDASC_DAEMON_IDLE` | Turn the daemon off; ms the first command waits for it (300); idle seconds before it exits (900) |
+| `--debug` | Timing and cache statistics on stderr |
 
 ## Performance
 
-Measured on Linux (this workstation, 8 threads, warm page cache, median of 5 fresh
-processes, output discarded) against a synthetic 14-DEX / 95 MB APK assembled from real
-apps, side by side with the upstream `rust` branch (`rasc`) and the Python reference
-(CPython 3, androguard 4.1.3):
+A 47-step agent replay on Douyin (360 MB, 56 DEX files): about 60 ms through a warm MCP session. 836 APKs ×
+8 rules in one scan: about 0.5 s in one warm MCP process. Full numbers, the tools compared and how to
+reproduce them: [benchmark/README.md](benchmark/README.md).
 
-| scenario | rasc | asc-rs | Python | rows rasc / asc-rs / Python |
-|---|---:|---:|---:|---|
-| `findrefs string Authorization` | 64 ms | 64 ms | 208 ms | 44 / 44 / 44 |
-| `findrefs string okhttp` | 63 ms | 63 ms | 206 ms | 19 / 19 / 19 |
-| `findrefs type Gson` | 63 ms | 65 ms | 229 ms | 369 / 369 / 369 |
-| `findrefs method onCreate` | 64 ms | 69 ms | 287 ms | 645 / 654 / 654 |
-| `findrefs method onCreate --class androidx --fuzzy-class` | 64 ms | 66 ms | 263 ms | 168 / 168 / 168 |
-| `findrefs field INSTANCE` | 64 ms | 65 ms | 267 ms | 530 / 531 / 531 |
-| `getclass` early class (`classes.dex`) | 251 ms | 36 ms | 2041 ms | Java / smali / Java |
-| `getclass` late class (`classes13.dex`) | 88 ms | 82 ms | 288 ms | |
-| `getclass` missing class | 30 ms | 20 ms | 258 ms | |
-| `getmanifest` | 3 ms | 2 ms | 128 ms | |
-| **geometric mean speed-up vs Python** | **5.6×** | **7.3×** | | |
-| geometric mean, `findrefs` only | 3.8× | 3.7× | | |
+## Documentation
 
-asc-rs finds the same rows as the Python reference (its own line format); rasc uses literal, instruction-boundary
-matching and drops a few rows. `getclass` outputs differ in kind (rasc decompiles to
-Java, asc-rs disassembles), so that row measures different work. The upstream README's
-8.0× figure was taken on macOS, where the Python process pool is far slower to start; on
-Linux both Rust ports land at 3-4× for reference search, which is bounded by inflating the
-largest DEX.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crates, implementation and design trade-offs.
+- [benchmark/README.md](benchmark/README.md): correctness and performance evaluation.
 
-What it took to get there, in order of impact:
+## Credits
 
-* the instruction→method bucket table is a dense `Vec<u32>` over the code region (range
-  fills instead of one hash insert per 16-byte bucket);
-* Deflate entries are inflated with libdeflate (`asc-apk` feature `libdeflate`, on by
-  default; `--no-default-features` keeps the pure-Rust zlib-rs path);
-* `findrefs` hands out the largest DEX first: its inflate is the critical path and must
-  not queue behind the small ones (the Python and rasc order is smallest-first);
-* `getclass` streams only the id tables and string data of each DEX (typically a third of
-  it) to decide whether the class is defined there, and fully inflates just the hit;
-* release profile with fat LTO and a single codegen unit.
-
-## Caching for repeated queries
-
-Inflating the largest DEX is the critical path of every query and always yields the same
-bytes, so the engine caches inflated entries. Nothing is precomputed: the first query pays
-the normal cost and fills the cache as a side effect.
-
-* **On-disk cache** (`~/.cache/droidasc`, or `$DROIDASC_CACHE_DIR` / `$XDG_CACHE_HOME`),
-  on by default for the CLI and shared between processes. Entries are keyed by the APK's
-  size, mtime and central directory, written atomically and memory-mapped on the next run,
-  in three tiers under one budget (see below). Writes are not synced (the cache can always
-  be rebuilt); every file carries a CRC-32 that is checked the first time a file written
-  before the last reboot is read, so a file a crash cut short is a miss, never a wrong
-  answer:
-
-  | tier | holds | written when | evicted |
-  |---|---|---|---|
-  | L1 | inflated DEX entries | inflated, 4 MiB or larger (`$DROIDASC_CACHE_MIN_DEX_MB`): re-inflating a small DEX is cheaper than writing it | first, largest and oldest first |
-  | L2 | locator tables and call graphs per DEX, in a form the next process maps and reads in place (every process mapping them shares one copy) | built in 2 ms or more | last, least rebuild time saved per byte first |
-  | L3 | `findrefs` results, keyed by the query, its options and the build of the tool | the query ran without errors, result under 4 MiB | own budget: min(128 MiB, 1/8 of the total), oldest first |
-
-  Entries of APKs that were deleted or replaced since go before anything else.
-  `$DROIDASC_CACHE_TIERS=dex,derived,rendered` picks the tiers (all by default).
-  Writes are queued to a background thread, so a
-  query never waits for its own cache entry to be written (the process still lands queued
-  writes before exiting). The directory carries a `CACHEDIR.TAG`; a `--cache-dir` that
-  already holds other files (dot-files included) is refused outright with a warning and the
-  disk cache is disabled (nothing is written, tagged, evicted or cleared there), and eviction and `cache clear` only ever touch entry directories of the
-  cache's own naming shape. `--no-cache` bypasses it,
-  `--cache-dir` moves it, `droidasc cache path|stats|clear` manages it (`stats` prints
-  each tier's usage, the budget, where it comes from and the file system's free space).
-* **In-memory LRU** (`mcp`, the daemon and embedders, `CacheConfig::resident`) that
-  also keeps the locator tables built for each DEX, so a second query only runs the
-  regex, the scan and the offset→method resolution. Its budget counts those tables too
-  (102 MB on top of Douyin's 437 MB of DEX after string and type queries), and resident hosts size it
-  from the machine: a quarter of the available memory (`MemAvailable`, or the cgroup v2
-  headroom when lower), clamped to 64 MiB–2 GiB, so several resident processes do not each
-  claim 2 GiB. With the disk cache on, an entry inflated on the heap is swapped for a
-  mapping of its cache file as soon as that file is written (after a byte-for-byte
-  check), and locator tables for a view of their L2 file, so resident entries are
-  file-backed pages the OS can reclaim and share between processes rather than anonymous
-  memory. Entries an APK stores uncompressed (nearly every system app) are mapped from
-  the APK itself.
-
-Both caches size themselves from the machine unless given a number:
-
-| | automatic budget | explicit |
-|---|---|---|
-| disk | 20 % of what the cache could hold (its own bytes + the file system's free space), at most 32 GiB, and never so much that less than max(1 GiB, 5 % of the file system) stays free; 4 GiB where the free space cannot be read (Windows) | `--cache-max-mb MIB`, else `$DROIDASC_CACHE_MAX_MB` |
-| memory (mcp, daemon) | one budget for all of the user's running `mcp` / daemon processes, split evenly: a quarter of (available memory + what their caches hold), divided by the number of processes, 64 MiB–2 GiB each; 2 GiB where it cannot be read. Each process registers in `$XDG_RUNTIME_DIR/droidasc` and re-reads the registry at most once a second | `--memory-mb MIB` (fixed; still registered, so the others count it) |
-| threads | the logical CPUs split evenly between this process and the user's other registered `mcp` / daemon processes that are serving a request (an MCP tool call or a daemon command; idle servers between an agent's calls do not count), with up to 4 workers per CPU in all: each keeps every CPU while at most 4 are busy, at least 2; the registry is read at most every 100 ms, and a multi-APK sweep shrinks and grows back while it runs as the others start and finish. One-shot commands count the resident processes but do not register | `--threads N` |
-
-The disk budget is re-evaluated at every eviction pass (once per burst of writes, the
-same directory walk as before) and each automatic-budget write first checks the free
-space with one `statvfs`: an entry that would cut into the reserve is not written, and
-when another program has filled the disk the next eviction shrinks the cache below what
-it holds, oldest APKs first. One-shot CLI commands keep no memory cache, so
-`--memory-mb` only matters for `mcp` and the daemon.
-
-Resident memory of one process holding a resident engine (16 threads, Douyin
-40.7.0 = 437 MB of DEX, then Kuaishou and Xiaohongshu opened in the same process; class
-scan plus three queries each):
-
-| | anonymous before | anonymous after | file-backed after |
-|---|---:|---:|---:|
-| Douyin, first open (disk cache cold) | 549 MB | 111 MB | 439 MB |
-| three APKs, first open | 1150 MB | 224 MB | 910 MB |
-| three APKs, disk cache warm | 227 MB | 225 MB | 923 MB |
-| three APKs, `--no-cache` | 1148 MB | 1146 MB | 2 MB |
-
-What stays anonymous is the locator tables. Without a disk cache the bytes have nowhere
-to be mapped from, so `--no-cache` keeps them on the heap as before.
-
-Same 14-DEX / 95 MB APK, 8 threads, median of 5 fresh processes:
-
-| scenario | cold | disk cache warm |
-|---|---:|---:|
-| `findrefs string Authorization` | 65 ms | 9 ms |
-| `findrefs string okhttp` | 63 ms | 9 ms |
-| `findrefs type Gson` | 64 ms | 12 ms |
-| `findrefs field INSTANCE` | 65 ms | 19 ms |
-| `findrefs method onCreate` | 65 ms | 21 ms |
-| `getclass` early class | 38 ms | 12 ms |
-| `getclass` late class | 80 ms | 3 ms |
-| `getclass` missing class | 25 ms | 2 ms |
-
-With a warm in-memory cache a reference search over the same archive is one scan per DEX
-(about 4 ms for a 4 MB code region) with no table builds at all.
-
-The scan itself adapts to the query: up to eight target indexes are found with SIMD
-`memmem` over the operand bytes (0.2 ms per 4 MB instead of 3 ms), string queries use
-`memchr2` over their two opcodes, and clustered index sets are prefiltered with `memchr`
-on the shared high operand byte before the linear sweep.
-
-## Output for agents
-
-Every one-shot command prints one record per line (`dex | Lcls;->m(..)V | "matched"`,
-columns separated by ` | `); lines starting with `#` are headers, totals and hints.
-`findrefs` (single queries and `rules`) prints in DEX order (`classes.dex`,
-`classes2.dex`, ..., then other names), the same on every run, streaming as soon as the
-earlier DEX files are done.
-
-Long outputs are cut only when asked to, so scripts keep the whole stream:
-
-| option | effect |
-|---|---|
-| `--limit N` | at most N records on stdout (a findrefs result with its `--context` lines is one record; smali, class and tree lines are one each) |
-| `--max-bytes N` | at most N bytes of records on stdout, whole records only |
-| `--offset N` | skip the first N records (the next page) |
-| `--spill-mb MIB` | budget of the directory cut outputs go to (`out/` in the cache directory, default 64; 0: no file) |
-| `$DROIDASC_LIMIT`, `$DROIDASC_MAX_BYTES` | defaults for `--limit` / `--max-bytes`, for an agent host to set once |
-
-When the window cuts the output, the whole output is written to a file (named by its
-content, so a rerun names the same file; `-o FILE` holds it instead) and the last stdout
-line says what was shown and where the rest is:
-
-```
-# records 1-50 of 523 shown; full output in /home/u/.cache/droidasc/out/3f2a….txt (grep it, or rerun with --offset 50)
-```
-
-`#` header and total lines (`# r1 ...`, `# r1 523 results`, a tree's footer) are always
-shown. Subcommand help lists only the command's own options; the cache and thread options
-are listed once by `droidasc --help`. [`skills/droidasc/SKILL.md`](skills/droidasc/SKILL.md)
-is an [Agent Skill](https://agentskills.io/specification) with the commands, the query
-syntax and an audit workflow, for agents that work through a shell.
-
-## Daemon: warm one-shot commands
-
-On Unix every one-shot command (`findrefs`, `getclass`, `callgraph`, `hierarchy`,
-`manifest-summary`, ...) answers through a per-user daemon that keeps the APKs it has
-opened resident, so a shell or an agent calling the CLI step by step gets MCP-like latency
-without an MCP client. Nothing changes in how commands are written or what they print:
-stdout, stderr and the exit status are byte for byte those of a run without the daemon.
-
-* The first command starts the daemon (`droidasc daemon serve`, detached), waits up to
-  300 ms for it (`DROIDASC_DAEMON_WAIT_MS`) and hands itself over once it is up, or runs
-  itself; the daemon exits after 15 idle minutes (`DROIDASC_DAEMON_IDLE`, in seconds, from
-  the environment of the command that started it).
-* A client that disconnects (Ctrl-C) cancels its command: `findrefs`, `getclass`,
-  `callgraph` and `hierarchy` stop between DEX files.
-* The class graphs and resource tables of the APKs it keeps open count against the
-  daemon's memory budget, up to half of it; beyond that the least recently used APKs close.
-  The rest of the budget holds inflated DEX.
-* `--debug` and `--no-cache` always run in the calling process, as do `mcp`,
-  `cache` and `daemon`. `DROIDASC_DAEMON=off` turns the daemon off.
-* One daemon per build and cache configuration (`--cache-dir`, `--cache-max-mb`,
-  `DROIDASC_*` but `DROIDASC_DAEMON*`, umask): a rebuilt binary starts a fresh daemon, which retires the old one.
-* `droidasc daemon status` lists the running daemons, `daemon stop` stops them,
-  `daemon start` starts one ahead of time.
-* The socket is in a directory only the user can enter (`$DROIDASC_RUNTIME_DIR/daemon`,
-  `$XDG_RUNTIME_DIR/droidasc/daemon`, else `<temp dir>/droidasc-<uid>/daemon`) and both ends
-  check the peer's uid. A client killed with Ctrl-C cancels its search in the daemon.
-
-Douyin (360 MB, 55 DEX, 16 threads), one process per command, disk cache warm:
-
-| | without daemon | with daemon |
-|---|---:|---:|
-| 47-step agent-audit replay | 176 ms | 135 ms (MCP session: 55 ms) |
-| first query, empty cache | 256 ms | 81 ms |
-| second query, other kind | 234 ms | 9 ms |
-| `hierarchy android.app.Activity` (1343 rows), repeated | 500 ms | 6 ms |
-| `callgraph WebView loadUrl --virtual`, repeated | 400 ms | 5 ms |
-
-About 1.6 ms of each command is the process start itself, which the daemon cannot remove;
-a long session of many calls is still cheaper over MCP.
-
-## MCP server
-
-`droidasc mcp` is a resident session for agents: an MCP server on stdio (JSON-RPC 2.0, one
-message per line). It keeps every APK it opens in one process, so the inflated DEX files
-and locator tables stay in memory between calls instead of being rebuilt by a new process
-per question. All opened APKs share one in-memory budget (`--memory-mb`, default a quarter of available memory, at most 2048 MiB; DEX and tables mapped from the disk cache or the APK count at 1/8 of their size, since they are shared, reclaimable file pages); `close_apk` releases that APK's share; the
-on-disk cache is used as by the CLI (`--no-cache`, `--cache-dir`). Tool calls run concurrently (a slow
-query does not block `ping` or other calls; replies carry their request id and may arrive
-out of order), and a panic inside one call is returned as an error result rather than
-ending the session.
-
-```json
-{
-  "mcpServers": {
-    "droidasc": { "command": "/absolute/path/to/droidasc", "args": ["mcp"] }
-  }
-}
-```
-
-| tool | arguments | result |
-|---|---|---|
-| `open_apk` | `apk`, `warm` (default true: inflate every DEX now), `prebuild` (default true: then build the search tables in the background, queries first); or `apks` / `dir` | `apk_id`; the same path returns the same id. For many APKs: one line per APK (id, DEX count and size, path), nothing inflated |
-| `close_apk` | `apk_id` or `apk` | releases that APK's share of the memory cache |
-| `getclass` | `class`, `method` (a name: every overload; `name(params)ret`, or a prefix of it), `full`, `debug_info` (default false), `resource_names` (default true) | smali, as `droidasc getclass --res-names`: constants that are resource ids end in `# @type/name`. A class over the output budget comes as an outline (header, fields, every method's declaration with its instruction count and size) unless `full`; an unknown `method` is an error listing the class's signatures |
-| `findrefs` | `kind` (`string`/`type`/`method`/`field`/`extends`/`impl`), `value` or `name`, `literal`, `class`, `fuzzy_class`, `exact`, `context` (N lines or `"method"`), `offset`, `limit` (500) | `findrefs` lines in DEX order (each followed by its context), then a `# N results` line; `structuredContent` rows carry `dex`, `method`, `signature` (full) and `matched` (unquoted values); with `context` they also carry `sites` (`pc`, `line`, `matched`) and `context` |
-| `findrefs` (several conditions) | `all` / `none`: lists of condition objects (`kind`, `value` / `name`, `class`, ...) instead of `kind` | methods matching every `all` condition and no `none` one |
-| `findrefs` (rule set) | `rules`: list of queries (single or `all` / `none`); `limit` (100) per rule | per rule a `# r1 string "http://": 12 results` line and its `r1 \| ...` rows; `rules` in `structuredContent`, each with a complete follow-up call in `next` |
-| `callgraph` | `class`, `method` (name or `name(params)ret`), `direction` (`callers`/`callees`), `depth` (2), `max_nodes` (200), `virtual` | the `droidasc callgraph` tree; `rows` with `depth`, `parent`, `method`, `dex`, `repeated`, `via` |
-| `hierarchy` | `class`, `direction` (`subclasses`/`supers`), `depth` (16), `max_nodes` (500), `method` | the `droidasc hierarchy` tree and `override` lines; `rows` with `depth`, `parent`, `class`, `relation`, `dex`, `defines` |
-| `listclass` | `prefix`, `offset`, `limit` (1000) | class descriptors |
-| `getmanifest` | `resolve` | decoded XML (references by name with `resolve`) |
-| `manifest_summary` | `filter` (`all` / `exported`), `kind` (record kinds: `provider`, `activity`, `uses-permission`, `deeplink`, …; a string or a list), `name` (case-insensitive regex over the record), `offset`; or `apks` / `dir` | the `droidasc manifest-summary` records; `exported` (the default unless `kind` / `name` narrow the search) keeps what other apps can reach (exported components, deep links, non-signature permissions, cleartext domains). For many APKs: per APK `apkN \| package \| minSdk / targetSdk \| exported: 3 activity, 1 provider \| flags: debuggable,allowBackup,cleartext`, then its records |
-| `resources` | `query` (+ `resolve`), `search` (+ `in`, `literal`), `limit`, or `xml` (a path in the APK); or `apks` / `dir` | `droidasc resources` rows (`0x7f0d0001 \| string/app_name [zh-rCN] \| "..."`), or the decoded XML file |
-
-Every tool except `open_apk` takes `apk_id` or an `apk` path (opened on first use). Results
-carry the CLI text as `content` and the same data as `structuredContent` (`total` and
-`next_offset` for paged tools). Some clients (Grok Build, for one) show the model both, so
-`droidasc mcp` by default sends a compact `structuredContent` without the values longer than
-256 bytes the text already carries (rows, smali; `omitted` names them); `--structured full`
-keeps everything. Failures come back as `isError: true` results; the session keeps running.
-Integer arguments may be given as strings of digits and booleans as `"true"` / `"false"`.
-
-#### Output budget and spill files
-
-Clients cut long tool results (Grok Build at about 20 KB), and every byte of a reply is read
-again on each later turn, so every reply stays within `max_bytes` (default 16384). What does
-not fit goes where `spill` says:
-
-| `spill` | reply | for |
-|---|---|---|
-| `auto` (default) | the text if it fits, else its first lines; then `# full output (N lines, M bytes) in /abs/path.txt` and the call that pages through it instead. A class adds an index (`#   10-580 LJII(I)V`: each method's line range in that file). The file is also a `resource_link` content item, and `structuredContent` names `file`, `lines`, `bytes`, `index` | agents that can read files (Claude Code, Codex, Grok Build with its file tools): they grep or read the lines they need |
-| `always` | every reply goes to a file; inline only its head and the path | the same, when even mid-size replies should stay out of the context |
-| `never` | pages of whole records (a line with the indented lines under it: a findrefs row and its context, a smali method), each ending `# page 0 of 0..5 …; next page: tool {…}` with the complete arguments of the next call (`next` in `structuredContent`) | clients whose agent cannot read local files (a remote or sandboxed agent) |
-
-Files are named by content (`out/<sha256>.txt`, mode 0600, directory 0700) in the cache
-directory, or `$XDG_RUNTIME_DIR/droidasc/out` without one; the same reply reuses its file, and
-the directory is kept under 64 MiB (`--spill-mb`, least recently used first; `--spill-mb 0`
-pages instead). `droidasc cache clear` removes it with the rest of the cache. A multi-APK
-report pages by `cursor` as before and, when it has more pages, spills the whole report next
-to the first one. A `more` / `next` hint passed back as the `cursor` (as a JSON object, or the
-`tool {…}` text of a hint) runs as the call it names.
-
-`notifications/cancelled` stops a running call (work not yet started is skipped and the call
-gets no reply). Every APK is treated as untrusted: an entry that would inflate past 1 GiB or
-expand more than 100:1 is refused (`--max-entry-mb`, `--max-ratio`), and only that APK fails.
-
-#### Many APKs in one call
-
-`findrefs`, `listclass`, `open_apk`, `manifest_summary` and `resources` also take `apks` (paths) or `dir` (with `glob`,
-default `*.apk`, and `recursive`, default true) instead of one APK. Every DEX of every APK
-goes on one work queue (heaviest APK first), and the reply has one section per APK, every
-line prefixed with its `apk_id` (excerpt of a real reply; a section can also end with
-`apkN | more | 3 more: findrefs {"apk_id":"apkN","kind":…,"offset":10,…}` hints whose JSON is
-the complete arguments of the follow-up call (also in `structuredContent` as `next`), `apkN | sdk | Landroidx/ 23, …` folded counts and warnings).
-A findrefs sweep replays an APK's rows from the disk cache when the same query already ran on
-that APK version (one-APK and sweep calls share them), and searches a DEX that several APKs
-carry byte for byte only once (`structuredContent`: `apks_from_result_cache`, `dex_shared`):
-
-```
-# findrefs method addJavascriptInterface over 312 APKs: 20 with hits, 103 hits, 0 errors, 193 ms
-apk15 | 1 hits | /data/apks/com.android.carrierdefaultapp.apk
-apk15 | classes.dex | Lcom/android/carrierdefaultapp/SlicePurchaseActivity;->setupWebView()V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-apk124 | 6 hits | /data/apks/com.android.vending.apk
-apk124 | classes3.dex | Lzlc;->c(Ljava/lang/String;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-apk124 | classes3.dex | Lzln;-><init>(Lzlj;Lzjk;…)V | Lzlm;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-...
-# nothing in the other 292 APKs
-# APKs 0..4 of 20 shown (output budget 16384 bytes); call findrefs with cursor="1:4" for the rest
-```
-
-| argument | effect |
-|---|---|
-| `per_apk` (10) | rows shown per APK; the `more` line says how to page that APK |
-| `collapse_sdks` (true for many APKs) / `sdk_prefixes` | fold hits in common SDK packages (androidx, kotlin, gms, okhttp3, …; `--sdk-prefixes` replaces the list) into per-SDK counts |
-| `group: "package"`, `package_depth` (3) | one line per package with its hit count and an example, instead of rows |
-| `max_bytes` (16384) | output budget; whole APK sections that do not fit are left for `cursor` |
-| `cursor` | pass back alone to the same tool for the next page (the session keeps the last 16 reports) |
-| `release` | drop each APK's DEX from memory once searched (default: when the selected APKs' DEX would not fit the memory budget) |
-
-Exposure audit with [`benchmark/multi-apk/audit.py`](benchmark/multi-apk/audit.py): the 8 rules of the
-multi-APK benchmark over the 312 system APKs of a Pixel 6 (3.8 GB, 405 DEX, 1.28 GB of DEX),
-one `droidasc --no-cache mcp`:
-
-| | tool calls | reply text | wall | peak RSS |
-|---|---:|---:|---:|---:|
-| one call per APK per rule, a rule's 312 calls pipelined | 2,496 | 762 KiB | 416 ms | 1,667 MB |
-| one `dir` call per rule, first page only | **8** | **166 KiB** | 480 ms | 1,695 MB |
-| one `dir` call per rule, every cursor page | 14 | 297 KiB | 480 ms | 1,691 MB |
-| one `dir` call per rule, `release: true` | 8 | 166 KiB | 1,573 ms | 565 MB |
-
-### Agent session benchmark
-
-The 17 analysis goals (47 steps) of the [dexsql-release agent audit](https://github.com/LSPosed/dexsql-release/tree/main/benchmarks/agent-audit),
-replayed by [`benchmark/agent-audit/replay_mcp.py`](benchmark/agent-audit/replay_mcp.py) on
-Douyin 40.7.0 (343 MiB, 56 DEX, 551,080 classes). Same machine (Linux, 16 threads, 12 GB),
-dexsql 0.1.1 linux-amd64 measured with its own `dexsql_replay.py` / `whole_suite.py`; asc-rs
-with `--no-cache` unless noted. Medians of 7.
-
-| | asc-rs `mcp` | asc-rs `mcp`, disk cache warm | dexsql 0.1.1 MCP | rasc (process per step) |
-|---|---:|---:|---:|---:|
-| open the APK | 77 ms | 18 ms | 589 ms | — |
-| whole session: start, open, 17 goals, exit | **218 ms** | 153 ms | 1,112 ms | 3,819 ms |
-| per goal once open, geometric mean | **5.3 ms** | 5.3 ms | 22.6 ms | — |
-| peak RSS | 646 MB | 522 MB | ~1.35 GB (two processes) | ~350 MB per step |
-
-Every goal finds its evidence; three of the expected tokens are Java spellings that read
-differently in smali (`new java.io.File` → `Ljava/io/File;-><init>`, `36865` → `0x9001`,
-`return true` → `const/4 v0, 0x1` / `return v0`). dexsql answers SQL, including multi-hop
-call-graph joins that `findrefs` cannot express; this compares only these goals.
+asc-rs grew out of the ideas and original implementation of [ASC](https://github.com/MG1937/ASC) (MG1937,
+"R8 Compiler Optimization as a DeCompiler Primitive").
 
 ## License
 

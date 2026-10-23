@@ -1,7 +1,9 @@
 # Architecture
 
-The port keeps the Python pipeline but splits it into crates along the natural seams of the
-data: *format* → *search / rebuild* → *orchestration* → *front ends*.
+asc-rs answers queries against an APK without preprocessing it: the APK is a read-only
+database, and everything a query needs (inflated DEX, locator tables, results) is built
+lazily and cached. The crates follow the data: *format* → *search / rebuild* →
+*orchestration* → *front ends*.
 
 ```
                      +-----------+        +-------------+
@@ -15,628 +17,157 @@ data: *format* → *search / rebuild* → *orchestration* → *front ends*.
           +--------------+               +--------------+            +-----------+
                  │                               │                          │
                  └──────────────► asc-engine ◄───┴──────────────────────────┘
-                                     │     (+ asc-axml, asc-arsc for manifest / resources)
+                                     │     (+ asc-axml, asc-arsc, asc-cache)
                           ┌──────────┤
                        asc-cli ── asc-mcp
 ```
 
-## Mapping to the Python modules
-
-| Python | Rust |
+| Crate | Role |
 |---|---|
-| `asc_client/apk_handler.py` (EOCD / central directory scan, chunked inflate with stop event, thread pool with early exit, process pool for findrefs, `list_classes`) | `asc-apk` (zip + inflate) and `asc-engine` (`get_class_dex`, `find_refs`, `list_classes` / `scan_classes`) |
-| `asc_client/dex_container.py` (DEX 041 logical DEX split) | `asc_dex::container` |
-| `asc_client/asc_handler.py` (`getclass`, `findrefs` line formatting) | `asc_engine::{decompile_dex_class, find_refs_in_dex, RefResult::line}` (own line format, see Output format) |
-| `asc_client/manifest_handler.py` (androguard AXMLPrinter) | `asc-axml` (plus `asc-arsc` and `asc_engine::manifest_summary`, which have no Python counterpart) |
-| `asc_core/utils/tinydex.py` (lazy DEX model) | `asc_dex::Dex` (every accessor computes from header offsets; nothing is cached) |
-| `asc_core/utils/leb128.py`, `dex_parser.py` (encoded values, debug info, annotations) | `asc_dex::{leb128, encoded, debug_info, annotations}` |
-| `asc_core/models/dvm_opcode.py`, `resource/gen_dvmopcode.py` | `asc_dalvik::table` (generated from the same table) |
-| `asc_core/utils/dvm_regdec.py` | `asc_dalvik::decode` |
-| `asc_core/core/dvm_interpreter.py`, `dvm_handlers.py` (IndexHandler) | `asc_dalvik::walk` + `asc_rebuild::{collect, writer::rewrite_insns}` |
-| `asc_core/findrefs/locator/string_locator.py` (regex over the string-data region, offset → idx map) | `asc_findrefs::StringLocator` (regex over the same region, binary search over sorted data offsets) |
-| `.../type_locator.py`, `method_locator.py`, `field_locator.py` | `asc_findrefs::{TypeLocator, MethodLocator, FieldLocator}` |
-| `.../insn_locator.py` (16-byte bucket table in a dict, `INSN_VERIFY` regex) | `asc_findrefs::InsnLocator` (same buckets in a dense `Vec<u32>` over the code region, filled by ranges; verification is a linear opcode-length walk, `asc_dalvik::verify_range`) |
-| `.../scan/code_item_scan.py` (regex / translate prefilter over the code region) | `asc_findrefs::CodeScanner` (single pass with a 256-entry opcode table and a bitset of target indexes) |
-| `.../scan/class_def_item_scan.py` (`findrefs extends` / `impl`) | `asc_findrefs::FindRefs::class_relation` (`classdefs` module) |
-| `asc_client/apk/dex_reader.py::class_defines_prefix_len` + `loader.py::_inflate_dex_prefix` (prefix-only inflate for `getclass`) | `asc_dex::quick::probe_needed_len` + `asc_apk::Apk::inflate_until` (already there before upstream added it) |
-| `dadguard/disassembler.py` (`disassemble`, `--method`, `--debuginfo`) | `asc_smali::disassemble_class_method` behind `getclass` / `disassemble` |
-| `asc_core/core/dex/dex_constructor.py` (DexHollower) | `asc_rebuild::hollow` |
-| `asc_core/core/dex/dex_remapper.py` (DexIndexMapper) | `asc_rebuild::{collect, tables}` |
-| `asc_core/core/dex/dex_builder.py` (DexBuilder) | `asc_rebuild::writer` |
-| `asc_core/utils/decompiler.py` (androguard DAD) | `asc-smali` (disassembly) — see below |
-| `asc_client/gui/*` (Tk) | — (not ported; an egui browser existed until 2026-10) |
-| — (no equivalent) | `asc-cache` (disk + memory caches of inflated entries), `asc_findrefs::SearchState` (reusable locator tables) |
-| — (no equivalent) | `asc-mcp` (`droidasc mcp`: resident MCP session over stdio; one `Engine` per opened APK, all attached to one `asc_engine::SharedCache`) |
-| `tests/dex_fixture.py` | `asc-fixture` |
+| `asc-apk` | Memory-mapped zip: central directory, root DEX entries, cancellable inflate (libdeflate, zlib-rs for streamed prefixes), size / ratio limits against zip bombs |
+| `asc-dex` | Zero-copy lazy DEX accessors (nothing cached), MUTF-8, encoded values, debug info, DEX 041 containers |
+| `asc-dalvik` | Opcode table, operand decoding, payload-aware instruction walk |
+| `asc-findrefs` | Locator tables (string / type / method / field / instruction), code scanner, call graph, `SearchState` |
+| `asc-rebuild` | Extract one class and its dependencies into a minimal, valid DEX |
+| `asc-smali` | baksmali-style disassembly of one class or method |
+| `asc-axml`, `asc-arsc` | Binary XML and `resources.arsc` |
+| `asc-cache` | Disk tiers, memory LRU, process registry |
+| `asc-engine` | Queries over an APK: class lookup, findrefs, rules, call graph, hierarchy, manifest summary, multi-APK sweeps |
+| `asc-cli` | `droidasc` binary and its daemon |
+| `asc-mcp` | `droidasc mcp`: resident stdio MCP session |
+| `asc-fixture` | Synthetic DEX / APK fixtures for tests |
 
-## Where the port deliberately differs
+## Query syntax and output
 
-### Rebuilt DEX is spec-valid
+One parser (`asc_engine::names`) reads every way of writing a target, for the CLI, MCP and
+rule sets alike: `Lc;->m(sig)`, `c.B->m`, `c.B#m`, `c.B.m`, `B.m`. A signature after the
+name (`m(I)V`, `m(I)`, `m(int, String)`, `f:I`) selects one overload; the locators check it
+against proto and type ids, so other overloads are never scanned. MCP additionally repairs
+aliased argument keys (`asc-mcp/src/lenient.rs`) and reads enumerated values leniently
+(case, plurals, synonyms), so schemas describe values instead of enforcing `enum`s. Errors
+and zero-result replies say what to try next (`asc-engine/src/hints.rs`), computed only on
+those paths.
 
-The Python builder assigns new indexes in first-seen order and emits the id tables
-unsorted, pins the class's own fields first so `class_data` deltas stay valid, and zeroes
-checksum and signature (androguard is patched to ignore that). The Rust rebuild instead:
+Text output is one record per line with ` | ` columns, so an agent can grep and cut:
+`dex | Lcls;->name(params)ret | matched`. Strings are quoted with JSON escapes, so every
+record stays on one line. Row *content* matches the Python ASC semantically
+(`benchmark/parity/semantic.py`); the format is asc-rs's own.
 
-1. **collects** every original index the class depends on (bytecode operands, prototypes,
-   catch types, annotation values, static values, debug info) and closes the set over the
-   id tables;
-2. **sorts** the new tables canonically (strings by UTF-16 code units, types by string,
-   protos by return type + parameters, fields/methods by class, name, type/proto);
-3. **rewrites** bytecode operands with the final mapping and re-encodes class data, code
-   items (tries/handlers), debug info, annotations and static values;
-4. **seals** the file with the standard layout (header, ids, class_def, data, map list),
-   Adler-32 checksum and SHA-1 signature.
+## Search
 
-Because the input DEX is valid, the class's own fields sorted canonically keep their
-original order, so `static_values` stays aligned with the field list — the failure mode the
-Python "pin own fields" fix addressed. The rebuild additionally re-orders `static_values`
-to the emitted field order so inconsistent inputs cannot misalign initialisers.
+* **Locate, then scan.** Targets are resolved in the id tables and string data first
+  (string / type queries are regexes over raw MUTF-8 string data; `--literal` uses
+  `memmem`). The code scanner then looks for the located indexes (`memmem` for few targets,
+  `memchr` on opcode or high operand bytes, else a table-driven sweep), and every candidate
+  is verified by walking instruction lengths from the method start. Methods sharing one
+  `code_item` (R8 dedup) are reported together.
+* **Rule sets and compound queries.** `find_many` locates each query on its own, unions the
+  sets per index kind and scans each DEX once; `all` / `none` combine per method. A rule set
+  loads every entry once and returns one batch per rule.
+* **Prefix-skip** (`engine::skip`). For a Deflate entry no cache will keep (one-shot
+  `--no-cache` runs, entries below the L1 minimum), a worker first streams the prefix up to
+  the end of the string data and skips the entry when no query can match. It runs only while
+  it pays (string data early in the entry, most probes skipping); resident hosts never probe,
+  since their cache keeps the inflated entry. Rows never change: an unreadable prefix falls
+  back to the normal path.
+* **Parallelism.** Class lookup probes entries smallest first and stops at the first hit;
+  findrefs inflates largest first and streams batches as entries finish (the CLI reorders
+  them into DEX order). Every root `*.dex` entry counts; a duplicated name resolves to its
+  last record.
+* **Call graph and hierarchy.** A per-DEX CSR call graph (`u16` targets, built on first
+  use, persisted in L2) is walked by signature across DEX files. The class hierarchy is one
+  graph over all `class_def_item`s, kept on the engine; virtual-call resolution uses it.
 
-`dexdump` verifies the checksum and disassembles the output; jadx decompiles it to Java.
+## Class extraction
 
-### Disassembly instead of decompilation
+`getclass` rebuilds the class into a standalone DEX: collect every index it depends on,
+sort the new id tables canonically, rewrite operands and data, seal with checksum and
+signature — the output is spec-valid (`dexdump` and jadx accept it, `--dump-dex` exports it).
+It is rendered as baksmali-style smali. Classes the rebuild refuses (undefined opcodes,
+`invoke-custom`, index overflow) are disassembled in place with a warning. `--method`
+accepts a full signature, a prefix or a bare name.
 
-When the rebuild refuses a class (`RebuildError::is_input_limitation()`: `Bytecode` for an
-undefined or truncated instruction, `Unsupported` for `invoke-custom` / method handles,
-`TooManyItems` for a class whose references overflow 16-bit indexes),
-`Engine::get_class` falls back to disassembling the class in place from the original DEX
-and sets `ClassSource::warning`; `ClassSource::rebuilt` is `None` in that case.
+## Caches
 
-There is no Rust equivalent of androguard's decompiler. `asc-smali` renders the rebuilt
-class as baksmali-style smali: class/field/method headers with access flags, annotations,
-static initialisers, `.registers`, `.param` names and `.line` directives from debug info,
-labels for branches, switch payloads, `fill-array-data` and try/catch blocks. The engine's
-`Rebuilt::bytes` is exposed (and `--dump-dex` on the CLI) for external decompilers.
+Caches are filled by queries themselves, so the "no preprocessing" property holds.
 
-Upstream later added its own smali renderer as a separate `disassemble` command (the Java
-`getclass` stays). Here both commands share one path (`Engine::get_class_method`) and
-differ only as Python's do: `disassemble` leaves out debug directives unless
-`--debuginfo` is given and `-o` writes only the file, while `getclass` keeps `.line` /
-`.param` (`--no-debug-info`) and also prints to stdout. The output stays baksmali-style
-rather than copying dadguard's format (`# CLASS:` / `## METHOD:` comments, `.locals`), and
-`--debug` does not add per-instruction offset comments. `--method 'name(params)ret'`
-(both commands) is normalised as in Python (whitespace dropped from the descriptors) and
-keeps the class header, interfaces and class annotations, no fields, and only that method;
-the rebuilt DEX (`--dump-dex`) still holds the whole class. Unlike Python, a bare name, a
-signature prefix or a Java-style signature also works: the whole class is disassembled and
-the matching methods picked from it (`asc_mcp::class_text`, as MCP `getclass` does).
+* **Disk tiers**, keyed by `ApkKey` (size, mtime, hash of the central directory), one cap:
+  - L1: inflated DEX entries (≥ 4 MiB), with a CRC trailer.
+  - L2: locator tables and call graphs that were costly to build, mapped back in place.
+  - L3: rendered findrefs results, keyed by query, options and the executable.
 
-Query spellings are parsed in one place, `asc_engine::names`: `MemberTarget::parse` reads
-every form of a method / field target, `member_query` builds the query from wherever the
-class was written, `parse_kind` forgives kinds, `parse_condition` / `parse_rule` read CLI
-conditions and MCP string rules. A signature after the name (`m(I)V`, `m(I)`, `m(int,
-String)`, `f:I`) becomes a `MemberSignature` that the method / field locators check against
-the proto and type ids once the name and class have picked the ids, so other overloads are
-never scanned for. MCP rewrites aliased argument keys (`class_name`, `apk_path`, …) before a
-tool runs (`asc-mcp/src/lenient.rs`), and reads enumerated values (`direction`, `spill`,
-`group`, ...) with `choice_arg`, which forgives case, plurals and synonyms; the schemas
-therefore list the values in descriptions, not as `enum`s that strictly sampling clients
-would enforce. What a miss tells the agent is `asc-engine/src/hints.rs`, computed only on
-those paths: over many APKs only from the query and the counts the sweep already has.
+  Writes are temp file + `rename`, never synced: the cache holds nothing that cannot be
+  rebuilt, and `fsync` is very slow on macOS. Files older than the boot are CRC-checked once
+  (a crash may have left torn pages), then touched; damaged files are deleted. The default
+  cap is min(20 % of the disk, 32 GiB) with a free-space reserve; eviction weighs age, size
+  and rebuild cost per tier.
+* **Write queue.** Writer threads (one per 8 CPUs, at most 4, low CPU priority) do the
+  disk work so queries never wait for it. Queued bytes are bounded by min(512 MiB, the
+  memory budget); past it an L1 job keeps only the entry name and the writer re-inflates it
+  later, so a cold sweep's heap stays bounded and L1 still ends up complete.
+* **Memory LRU.** Holds inflated entries and their `SearchState` tables. Heap bytes count in
+  full, file-backed mappings at 1/8 (shared, reclaimable page cache). Once written to L1,
+  an entry's heap copy is swapped for a mapping.
+* **Background prebuild.** After `open_apk` with `warm`, idle low-priority threads map or
+  build the locator tables of cached entries, pausing whenever a query runs.
 
-### Output format
+## Several processes
 
-The text output is asc-rs's own, not the Python tool's: one record per line, columns
-separated by ` | `, so an agent can grep a reply and cut a column. `asc_engine::text` holds
-the two rules every tool uses:
+A `ProcessRegistry` (one file per process in `$XDG_RUNTIME_DIR/droidasc`; Linux and macOS)
+records each process's cache bytes and whether it is serving a request.
 
-* `quoted`: a string value in double quotes, escaped as JSON escapes it (`\"`, `\\`, `\n`,
-  `\t`, `\r`, `\u00XX` for every other control character, DEL and the C1 range included),
-  so a string with a newline stays on its line and reads back with any JSON parser. It
-  is `asc_arsc::quote`, which renders string resources the same way.
-* `value`: the value of a `key=value` pair, quoted only when it is empty or holds
-  whitespace, a quote, a backslash, `=` or a control character (the manifest summary).
+* **Memory.** Without `--memory-mb`, a resident process sizes its LRU to (available memory +
+  bytes held by registered processes) / 4 / processes.
+* **Threads.** Without `--threads`, workers = clamp(4 × CPUs / busy processes, 2, CPUs). A
+  process marks itself busy when a request starts and ends, the registry is re-read every
+  100 ms, and multi-APK sweeps re-check the count between work units, so a burst of
+  servers waking up together shares the CPUs instead of each taking all of them. The
+  factor 4 avoids idle CPUs while the processes with the largest APKs finish.
 
-`RefResult::line` is `dex | Lcls;->name(params)ret | matched`, `Matched` items joined by
-`, `: `Matched::String` quoted, `Matched::Symbol` (a type descriptor,
-`Lcls;->name(params)ret` or `Lcls;->name:type`) as it is, since descriptors never hold
-`, ` or a line break. A class relation row is `dex | Lsub; | extends Lbase;`. Resource
-rows are `0x7f0d0001 | type/name [config] | value`. `RefResult::method` keeps the bare
-`Lcls;->name` the multi-APK SDK folding keys on; `structuredContent` carries
-both (`method`, `signature`) and the matched values unquoted.
+## Front ends
 
-The rows themselves are still the Python tool's: `benchmark/parity/semantic.py` runs both
-on an APK and compares (dex, `Lcls;->name`, set of matched values) per query, dropping
-the signature and field type our side adds.
+**CLI daemon.** One-shot CLI commands are forwarded over a per-user Unix socket to a daemon
+that keeps engines and caches warm. It is a transparent accelerator: no session state, and
+output is byte-identical with or without it (`crates/asc-cli/tests/daemon.rs`).
 
-### Search semantics kept from Python
+* Every command writes through `output::Io`, locally or over the socket.
+* `--debug` and `--no-cache` runs stay local.
+* The socket name hashes the binary, the cache configuration and the umask, so a client
+  only meets a daemon that would print the same.
+* The socket directory must be private, and both ends check the peer uid.
+* A missing daemon is spawned on demand (wait `DROIDASC_DAEMON_WAIT_MS`, default 300 ms)
+  and exits after `DROIDASC_DAEMON_IDLE` seconds idle (default 900).
+* A client hang-up cancels the request.
+* Open engines' class graphs and resource tables count against the memory budget.
+* `DROIDASC_DAEMON=off` disables it.
 
-* String and type queries are **regular expressions** matched against raw MUTF-8 string
-  data (Python used `re` on bytes; Rust uses `regex::bytes`). Two edge cases differ on
-  purpose: a match spanning several `string_data_item`s is attributed to the item where
-  it starts (Python takes the item where it ends, via the next NUL), and `regex` keeps
-  its Unicode semantics, so `.`/`\w`/`\xNN` do not match arbitrary bytes the way Python's
-  byte-`re` does. An empty `string` pattern matches nothing rather than everything.
-  Patterns are UTF-8 while the data is MUTF-8: a literal supplementary character
-  (`😀`, stored as a surrogate pair) never matches, exactly as in Python, and `.` matches
-  one *UTF-8* character — it can match a 2- or 3-byte BMP character (Python's byte `.`
-  cannot) but not either half of a surrogate pair (Python's can, byte by byte). Spell a
-  supplementary character as its surrogate bytes (`\xED\xA0\xBD\xED\xB8\x80`, with
-  `(?-u)`) to find it.
-* `Query::StringLiteral` (`findrefs string --literal`, an extension compatible with the
-  literal string queries of rasc / rust_ASC) skips the regex: the value is MUTF-8 encoded
-  (so a supplementary character does match) and found with `memchr::memmem` over the same
-  region, attributed to the string where it starts. After a hit the rest of that string is
-  skipped, which is exact because a needle without NUL never crosses a terminator. It
-  returns the same rows as the regex `regex::escape(value)`.
-* `Query::Extends` / `Query::Implements` (`findrefs extends` / `impl`) do no code scan:
-  the target descriptor is resolved with the same binary search as a precise class, then
-  every `class_def_item`'s `superclass_idx` / interface list is compared with it (direct
-  relations only, in `class_defs` order). Rows carry `RefResult::relation` and print as
-  `classes.dex | Lsub; extends Lbase;`. Python finds the superclass with a regex over the
-  packed table and keeps 32-byte-aligned matches; because `finditer` does not overlap, a
-  match straddling the preceding `access_flags` could in principle hide an aligned one.
-  The direct comparison has no such blind spot (no row differed on the fixtures).
-  Upstream's "grouped" `find_ref(group=True)` (one result list per key of a multi-key
-  query) is not ported: no CLI path builds a multi-key query.
-* Member queries: with a precise class, the member name is a **substring** match; with a
-  fuzzy or absent class the member name is a regex against the string table.
-  `MemberQuery::exact_name` (`--exact`, MCP `exact`) makes
-  it a whole-name equality under any class constraint, as the Python GUI's exact-member
-  xref does. Without a class the name string is one binary search over the sorted string
-  table; within a class's members names are compared as MUTF-8 bytes (decoded only for
-  non-ASCII strings).
-* Exact descriptors (`getclass`, a precise member-query class) are MUTF-8 encoded before
-  the binary search over the type table, so class names with supplementary characters
-  (stored as surrogate pairs) are found. The search compares in UTF-16 code-unit order
-  (`asc_dex::mutf8::cmp_utf16`, ART's comparison), the order the DEX sorts its strings in;
-  raw MUTF-8 byte order agrees except for `U+0000` (`C0 80`). Python compares decoded
-  code points and needs a linear fallback for the same case.
-* Rebuilt string data is re-encoded as canonical MUTF-8 with a recounted `utf16_size`
-  (as the Python builder now does): an input whose declared length is wrong (accepted on
-  read, see `Dex::string_item_at`) or that holds 4-byte UTF-8 does not carry the defect
-  into the output.
-* Bucket resolution is fuzzy by design; every hit is verified by walking instruction
-  lengths from the method start (or the previously verified offset) to the hit. That
-  walk treats the leading `nop` of a switch / array payload as a one-unit instruction
-  (the Python `INSN_VERIFY` regex does the same), so a reference placed *after* a payload
-  in the same method is dropped. The rebuild walk (`asc_dalvik::walk`) is payload-aware:
-  it skips payload ranges wherever they sit and reports undefined or truncated opcodes
-  instead of silently emitting a half-remapped method.
-* R8 instruction deduplication: several methods sharing one `code_item` are reported
-  together (`MethodRef::Shared`).
+**MCP session.**
+* One `Engine` per opened APK, all on one shared cache.
+* Each tool call runs on its own thread, so a slow query does not block the next message.
+  Panics become `isError` results, and `notifications/cancelled` stops the work.
+* Multi-APK tools (`apks` / `dir`) plan every APK into weighted units on one worker pool,
+  heaviest first, releasing each APK when it is done. Identical DEX across APKs (same CRC
+  and size, confirmed by SHA-256 since both are attacker-controlled) are searched once.
+* Replies are held to a byte budget (`max_bytes`, 16 KiB by default). Past it, the full text
+  is spilled to a file under the cache directory and the reply carries its head, the path
+  and a method index for smali; with `spill: never` the text is paged instead, and the
+  footer holds the next call's arguments.
+* The CLI has the same window through `--limit` / `--max-bytes` / `--offset`.
 
-### Concurrency
+## Resources and the manifest
 
-`get_class_dex` spawns workers over the DEX entries sorted by compressed size (smallest
-first). Each worker first streams a prefix of the entry with zlib-rs — header, id tables
-and string data, as computed by `asc_dex::quick::probe_needed_len` — and answers the
-class probe from that when it covers less than 70% of the DEX; only a hit (or an
-inconclusive prefix, e.g. a 041 container) is inflated fully with libdeflate. The call
-returns through an mpsc channel as soon as one worker reports a hit; the stop flag makes the other
-workers give up before their next entry (with the default libdeflate inflater a DEX cannot
-be abandoned mid-way, so a worker that is already inflating finishes in the background;
-the zlib-rs fallback path polls the flag every 512 KiB). `find_refs` uses scoped threads
-and an mpsc channel and hands out the largest entries first (every entry must be searched,
-so the longest inflate should start immediately); batches reach the caller in completion
-order, exactly like the Python process pool; the CLI (`DexOrder`) holds each entry's batches
-until the earlier entries are complete, so it prints in DEX order (`classes.dex`,
-`classes2.dex`, ..., then other names) and still streams. `scan_classes` (behind MCP `listclass` and the
-multi-APK class counts) also runs largest first, but puts each entry's classes back in its
-central-directory slot, so the listing is in DEX order like the Python `list_classes`.
-`list_classes` fails on the first unreadable entry or bad `class_def`; `scan_classes` keeps
-the classes of the other entries and reports the broken ones.
+`asc-arsc` follows AOSP `libs/androidfw` and decodes lazily: parsing only records where each
+type chunk's entries are, so a large table indexes in under a millisecond. It handles
+multiple package chunks per id, aapt vs aapt2 bag keys and CESU-8 strings. Resolution picks
+values as AOSP would for a default device config. Output matches `aapt2 dump resources`
+apart from aapt2's own notation quirks (`benchmark/arsc-compare`).
 
-A DEX 041 container is split lazily (`asc_dex::container::logical_dex_iter`): every
-logical DEX after the first is a full copy of the container with its header moved to
-offset 0, so the uncached paths hold one such copy at a time. The memory cache keeps all
-of them (`CachedEntry::logical`, accounted in `resident_bytes`).
-
-### Entry selection (kept the same in every command)
-
-These differ from the Python CLI on purpose and apply to `getclass`, `findrefs` and
-`listclass` alike:
-
-* Every root-level `*.dex` entry is a DEX entry. Python's central-directory scan keys
-  on the substring `classes` and only falls back to all root `*.dex` when nothing
-  matches, so an extra `foo.dex` next to `classes.dex` is ignored there.
-* A duplicated entry name resolves to its **last** central-directory record (as zip
-  readers and `Apk::find_entry` do); Python keeps the first (or, in its fallback path,
-  both).
-* `--threads 0` is accepted and runs one worker (the flag is global); Python's
-  `listclass` rejects it.
-* For a class defined by several DEX files, `getclass` opens whichever entry answers its
-  parallel probe first (smallest entries are probed first), which can be any of them.
-
-### Caches
-
-`asc-cache` adds two layers that keep the "no preprocessing" property (they are filled
-lazily by the queries themselves):
-
-* `DiskCache`: three tiers under one cap, all keyed by `ApkKey` (size, mtime and an FNV
-  hash of the central directory), atomic `rename` writes, lazily faulted mmap reads (a
-  `populate`d mapping of every entry of an APK cost more than a getclass reading one of
-  them):
-  - L1 `<dir>/<apk-key>/<entry>`: inflated bytes, then an 8-byte trailer (`ASC1`, CRC-32
-    of the bytes) that the mapping leaves out. The engine only writes entries of at
-    least `min_dex_bytes` (4 MiB): below that, re-inflating is cheaper than the write.
-  - L2 `<dir>/derived/<apk-key>/<name>~<kind>.v<format>.<version>`: a 64-byte header
-    (magic, versions, rebuild cost, payload length, payload CRC-32) and a payload the mapping exposes
-    64-byte aligned (`Derived`). `put_derived` / `get_derived` take an opaque payload;
-    the engine stores `SearchState::persist` there (kind `locators`), only for tables
-    that took `min_derived_cost` (2 ms) or more to build.
-  - L3 `<dir>/rendered/<apk-key>/<fnv of the key>`: a CRC-32 of the rest, the full key
-    (`rendered_key(producer, version, query)`) and the payload; a read compares the key,
-    so a hash collision is a miss.
-  - Integrity: nothing is synced (Rust's `sync_data` is `F_FULLFSYNC` on macOS, about
-    10 ms per 8 MiB file, which doubled cold-cache runs there; the cache holds nothing
-    that cannot be rebuilt). `rename` keeps a running system from showing half a file;
-    a crash can still leave one whose pages never reached the disk (zeros, a cut tail).
-    So a read checks the CRC of an L1 or L2 file whose mtime predates the boot
-    (`/proc/stat` `btime`, `kern.boottime` on Apple; unknown elsewhere, where every read
-    checks) or lies in the future, then touches it, so it is checked once per boot; a
-    damaged file is deleted and read as a miss. Files written since the boot are
-    trusted: the kernel serves them from the page cache. L3 files are small and checked
-    on every read.
-  - `<dir>/sources/<apk-key>`: size, mtime and path of the APK the key came from, written
-    with the first write for it (`note_source`).
-
-  `evict` trims L3 to min(128 MiB, cap / 8) and L2 to cap / 2 in their own orders, then
-  removes over the total: entries of keys whose source is gone or changed (largest
-  first), L1 APK directories by age × size, L3 files by age, L2 files by rebuild µs per
-  byte / (1 + age in hours). Ages count from the newest item. `with_tiers` (or
-  `$DROIDASC_CACHE_TIERS`) turns tiers off: their reads miss and writes are skipped. The cap is a
-  `DiskCapacity`: `Fixed(bytes)` (`--cache-max-mb`, `$DROIDASC_CACHE_MAX_MB`) or `Auto`
-  (default), which `capacity_for(used)` turns into `auto_disk_bytes_for(disk_space(dir),
-  used)` = min(20 % of used + free, 32 GiB, used + free - `auto_disk_reserve(total)`),
-  the reserve being max(1 GiB, 5 % of the file system). `evict` recomputes it on every
-  pass, so a disk filled by someone else shrinks the cache below its current size;
-  `put` refuses (`CacheError::LowDiskSpace`) an entry that would leave less than the
-  reserve free, at the cost of one `statvfs` per entry. `disk_space` returns `None`
-  off Unix, where `Auto` means the old 4 GiB. `budget()` reports cap, usage and free
-  space for `cache stats`, `tier_stats()` the usage per tier. The engine queues writes
-  to background writer threads (one per 8 CPUs, at most 4; writing a 30 MiB entry
-  costs as much as the whole query it came from) and evicts once per burst rather than
-  after every entry; `Engine::flush_cache_writes` / `Drop` wait for the queue. Queued
-  jobs keep their DEX bytes or tables alive, so past 512 MiB of them (or the memory
-  cache's budget when smaller: `--memory-mb`, or this process's share of the auto budget,
-  so sixteen servers sweeping at once do not queue 8 GiB between them) a new L1 write is
-  queued without its bytes and the writer inflates the entry again from the APK (if the
-  APK key still matches and the file is still missing): a cold multi-APK sweep never
-  waits for the disk, its heap stays bounded, and L1 still ends up complete. A new L2
-  job past the bound is released instead (the next query that builds the tables queues
-  them again). Concurrent queries that need
-  the same entry share a single inflate, so a burst of MCP or daemon requests cannot replace
-  each other's locator tables.
-* `MemoryCache<T>`: byte-bounded LRU keyed by `(apk key, entry name)`; the engine stores a
-  `CachedEntry` per entry, which owns the bytes and, per logical DEX, an
-  `Arc<SearchState>` (`OnceLock`s for the string/type/member/instruction locators).
-  `FindRefs::with_state` reuses those tables; `FindRefs::new` builds throw-away ones.
-  An entry is charged `CachedEntry::charged_bytes` on insertion; after each search
-  `recharge` adds the tables it built through `MemoryCache::resize`, which evicts least
-  recently used entries when that crosses the cap. Heap bytes (an inflated entry not yet
-  remapped, a 041 container's logical copies, `SearchState::heap_bytes`) are charged in
-  full, file-backed bytes (an entry mapped from L1 or from the APK, tables viewed in L2,
-  `SearchState::mapped_bytes`) at 1/`MAPPED_CHARGE_DIVISOR` (8): the kernel reclaims
-  clean file pages under pressure and every process mapping the same file shares one
-  copy, so charging them in full made N processes each evict as if they held a private
-  copy and published N times the real footprint to the registry (whose share starts from
-  `MemAvailable`, which already counts reclaimable page cache). They are not free either
-  (address space, page-cache churn, re-reads), so the LRU still bounds them at 8× the cap.
-  An L1 remap (`remap_entry`) and an L2 swap (`write_derived`) resize the entry to its new
-  charge. On Douyin with a filled cache a warm session is charged 71 MB (was 574 MB) for
-  27 MB of anonymous memory. Without `--memory-mb`, `mcp` and the daemon size the cap with `auto_memory_bytes` (a quarter of
-  `available_memory()`, clamped to 64 MiB–2 GiB; 2 GiB where it cannot be read) and sets
-  `memory_auto`: the cache then registers the process in a `ProcessRegistry` (one file per
-  pid in `$XDG_RUNTIME_DIR/droidasc` holding its start time, the bytes its caches hold and
-  whether it is serving a request; stale pids are recognised by the start time and removed by readers) and, at most once a
-  second after charging bytes, resizes itself (`MemoryCache::set_capacity`) to
-  `auto_memory_share` = (available + held by every registered process) / 4 / processes.
-  A fixed `--memory-mb` cache registers too but keeps its size. The registry needs a
-  process start time to tell a reused pid apart: `/proc/<pid>/stat` on Linux,
-  `proc_pidinfo(PROC_PIDTBSDINFO)` on macOS; elsewhere processes do not register.
-* Threads: `Threads::Auto` (no `--threads`) is resolved through `auto_threads` =
-  clamp(4 x CPUs / (1 + other busy registered processes), 2, CPUs), the registry re-read
-  at most every 100 ms. A process is busy while an MCP tool call or a daemon command runs:
-  `Busy::enter` rewrites its entry when the first request starts and when the last ends,
-  so servers waiting for an agent's next call do not count and a burst is seen at once
-  (entries of older versions, which do not say, count while under 5 s old). A multi-APK
-  sweep (`fan_out`) starts `Threads::most` workers and each waits its turn
-  (`Threads::wait_turn`) between units while the count is below its index: the
-  processes of a burst all start before any sees the others, so a count read once at the
-  start would give each every CPU. On 32 CPUs, 16 servers given one warm rules sweep at
-  once after 7 s idle took 2.5–4.3 s that way (512 workers) and 0.25–0.75 s following the
-  count, like `--threads 8`. N servers scanning together then share the CPUs instead
-  of each starting one worker per CPU. The factor 4 is measured: an exact split leaves
-  CPUs idle while the processes holding the largest APKs finish alone (8 servers over
-  312 APKs on 16 CPUs: 223 ms with 2 workers each, 180 ms with 8, 176 ms with 16).
-* Remapping: a freshly inflated entry that goes into the memory cache is queued for the
-  disk writer together with a `Weak` handle to it. Once the file is renamed into place
-  the writer maps it, compares it with the heap bytes, and swaps the LRU slot for a
-  `CachedEntry` over the mapping that shares the old `SearchState`s
-  (`MemoryCache::replace`, only if the slot still holds that entry). Queries that hold
-  the old entry keep using the heap copy until they drop it. Container entries keep
-  their normalised logical copies (owned) and only remap the container itself.
-* Allocator: the first engine with a memory cache fixes glibc's mmap threshold at 1 MiB
-  (`mallopt(M_MMAP_THRESHOLD)`, Linux/glibc only, process-wide). glibc otherwise raises
-  the threshold to every large block freed (up to 32 MiB), after which DEX-sized buffers
-  are carved from the heap arenas, interleaved with long-lived locator tables, and a
-  remapped or evicted entry's bytes stay resident (`malloc_trim` cannot return them).
-
-Mapped files and cache maintenance: entries are only ever replaced by `rename`, never
-rewritten in place, and `evict` / `cache clear` unlink whole directories, so a live
-mapping keeps its inode (POSIX) and stays valid. A third party truncating a cache file in
-place would fault the mapping (SIGBUS), exactly as for disk hits; on Windows a mapped file
-cannot be deleted, so eviction skips it and `cache clear` reports the error.
-
-Stored (uncompressed) entries are borrowed straight from the APK mapping. A cache that
-keeps them (memory LRU, or L2 for their tables) maps their byte range of the APK file
-instead (`DexData::map_region`), so they are file pages, never heap copies.
-
-* L2 locator tables: `asc_findrefs::SearchState` keeps every table as a `Table<T>`, a
-  `Vec` or a bytemuck-checked view into an `Arc<dyn AsRef<[u8]>>` (the mapped file).
-  `persist` writes the built tables after a header with the DEX length, checksum and
-  signature; `from_persisted` checks those and every table's length against the DEX,
-  then views them in place, the call graph too (`CallGraph::view` over its flat
-  little-endian form; copied out only on a big-endian target). A
-  search first `fill_from`s what L2 has for a logical DEX (once per `LogicalDex`), and
-  when it built new tables queues a write with the time it took; the writer then swaps
-  the memory cache's `SearchState` for the mapped one, as for L1 bytes. Lookups stay
-  bounds-checked, so a damaged file can give wrong rows, never a crash.
-* L3 results: `find_refs_opts` looks the query up before searching and records the
-  batches as they stream (`ResultRecorder`; dropped on any error or past 4 MiB); the key
-  includes the query, the `FindOptions` and the executable's size and mtime, so a rebuilt
-  binary never replays the old one's rows. Batches replayed from L3 have source `result`.
-
-`SharedCache` wraps one such cache (memory LRU, disk cache, writer thread) for several
-engines. Because the LRU is keyed by APK, engines over different APKs attached with
-`Engine::with_shared_cache` compete for one byte budget; dropping one of them leaves the
-writer running, and dropping the `SharedCache` lands the queued writes.
-
-### CLI daemon (`asc-cli::daemon`)
-
-The CLI forwards one-shot commands to a per-user daemon over a Unix socket. The daemon is
-only an accelerator: it holds no session state, and the only observable difference is time.
-
-* **One code path.** Every one-shot command writes through `output::Io`: stdout / stderr as
-  `&mut dyn Write`, the working directory relative paths resolve against, and the source of
-  engines. Run locally, `Io` wraps the process's streams and builds a fresh engine; in the
-  daemon, it wraps the connection and takes the engine from a pool keyed by
-  (canonical APK path, threads), at most 64, least recently used closed first, all on one
-  `SharedCache` (the same resident cache and process-registry budget as `mcp`). The engine
-  tracks the APK's size and mtime itself, so a rebuilt APK is reread.
-* **Same bytes.** The client parses the arguments itself and forwards only commands whose
-  output cannot depend on where they run: not `--debug` (timings, engine logs), not
-  `--no-cache` (asks for a cold run). The daemon re-parses them, resolves relative paths
-  against the client's directory for I/O while messages keep the path as given, and declines
-  (the client then runs the command) when it cannot open the APK, since that error names
-  the path. `-o` files are created by the daemon with the client's umask (part of the
-  daemon's identity, below).
-* **Protocol.** Frames of `tag, u32 length, bytes`. The client sends one run request
-  (identity tag, cwd, argv); the daemon answers with stdout chunks (buffered up to 64 KiB,
-  flushed where the command flushes), stderr chunks (sent at once, after the stdout written
-  before them), then the exit status, or a decline before any output. A connection that
-  closes without an exit status after output is reported as an error; before output, the
-  client runs the command itself.
-* **Identity.** The socket name hashes the executable (canonical path, size, mtime, version),
-  the cache configuration (`--cache-dir`, `--cache-max-mb`, `DROIDASC_*` but the
-  `DROIDASC_DAEMON*` switches, `XDG_CACHE_HOME`,
-  `HOME`) and the umask, so a client only ever meets a daemon that would print what it
-  prints. A daemon starting up asks the daemons of other builds of the same executable path
-  and configuration to exit. An `flock` on `<tag>.lock` keeps one daemon per identity.
-* **Start.** A command that finds no daemon spawns `daemon serve` (setsid, stdio to
-  /dev/null) and waits up to 300 ms (`DROIDASC_DAEMON_WAIT_MS`) for its socket, stopping early if the child exits (lost
-  the lock race, cannot bind), then runs locally. Handing the first command to the daemon
-  is faster than running it here (81 vs 256 ms cold on Douyin): the daemon answers before
-  its cache writes land, while a process must land them before it exits.
-* **Security.** The socket directory must be owned by the user with no group / other
-  bits (as must its parent); both ends check the peer uid (`SO_PEERCRED`, `getpeereid`).
-  Socket paths that would not fit `sockaddr_un` disable the daemon.
-* **Cancel and exit.** A thread per request blocks on reading the connection; end of
-  stream sets the request's cancel flag. `findrefs` checks it between DEX entries; `getclass`
-  (`get_class_method_cancellable`), `callgraph` and `hierarchy` (`*_cancellable`) while
-  loading entries, building the class graph and between walk levels, and return
-  `ApkError::Cancelled` (a cancelled class graph is not kept). MCP passes its
-  `notifications/cancelled` flag to the same calls. After 15 minutes without requests
-  (`DROIDASC_DAEMON_IDLE` seconds, read when the daemon starts), or on `daemon stop`, the
-  daemon removes its socket, waits for running requests, lands queued cache writes and exits.
-* **Pool budget.** Open engines keep their class graph and resource table off the memory
-  cache (`Engine::resident_bytes`). After each request the daemon sizes them, most recently
-  used first, closes those beyond half the cache's budget (the latest one always stays), and
-  reserves the rest in the cache (`SharedCache::set_reserved`), which evicts DEX entries to
-  make room and publishes the reserved bytes to the process registry with its own.
-
-### MCP session
-
-`asc-mcp` is the resident front end for agents. `serve` reads one JSON-RPC message per
-line. `initialize`, `ping` and `tools/list` are answered on the reading thread; each tool
-call runs on its own scoped thread (and the engine's worker threads, as in the CLI), so a
-slow query does not hold up the next message, and replies are written as calls finish. To
-keep request order where it matters, the APK a call opens is registered (and gets its
-`apk_id`) before the next line is read, and `close_apk` first joins the calls still
-running. Each call runs under `catch_unwind` (the release profile unwinds for this), so a
-panic in the engine becomes an `isError` result instead of ending the process. Each `open_apk` (or first use of an `apk` path) creates an `Engine` attached
-to the server's `SharedCache`; `open_apk` with `warm` runs `scan_classes`, which inflates
-every entry into the LRU, and then (`prebuild`, default true) starts `Engine::prebuild`
-on a background thread: the instruction, string, type, method and field tables of every
-entry the caches hold are mapped from L2 or built (never inflating: on a budget too
-small for the APK it does nothing) and queued for L2, so the first query of each kind
-only scans. Its workers run at nice 19 and pause between tables while a search of the
-engine runs (`Prebuild::query` guards in `find_refs_opts`, `fill_context`,
-`call_graph`); `SearchState` builds each table under its own lock, so a query that needs
-a table a worker is building waits for that build instead of starting another.
-`close_apk` cancels it (`cancel_prebuild` waits for the workers to finish their table).
-On Douyin, once the prebuild has run (a few hundred ms after `open_apk`), the first
-string / method / field query takes 18 / 1.3 / 9.6 ms instead of 27 / 9.5 / 16 ms, the
-same as when repeated; what remains is the scan. Results are paged over a stable order (entries sorted as
-`classes.dex, classes2.dex, …`), because the engine streams entries as they finish. Tool
-failures are `isError` results, protocol errors JSON-RPC errors; neither ends the session.
-
-Cancellation: the reader keeps a cancel flag per running call (keyed by request id);
-`notifications/cancelled` raises it, the engine stops between entries and inflate chunks,
-and the call's reply is dropped. Engines are built with `asc_apk::Limits::guarded()`
-(per-entry size, expansion ratio, total declared DEX) so a zip bomb fails its APK only.
-
-Multi-APK calls (`multi.rs`): `targets` turns `apks` / `dir` into a sorted path list;
-`Server::sweep` opens each path as a session, `fan_out` plans every APK into weighted units
-(findrefs: one per DEX entry, via `Engine::search_target` / `search_target_entry`) and runs
-all units on one pool of `--threads` workers, ordered heaviest APK first with each APK's
-units together. An APK's plan context (its mapping) is dropped and, under `release`, its
-cache entries evicted as soon as its last unit finishes, so a sweep's resident set is about
-one LRU's worth. Each APK becomes a `Section` of pre-rendered lines; the `Report` is kept
-(last 16 per session) and paged by whole sections up to `max_bytes`, `cursor` naming
-report and section. New multi-APK tools add a `TOOLS` entry and call `sweep` + `report`.
-
-The CLI's one-shot commands use the same `SpillDir` through their own window
-(`asc-cli/src/output.rs`): `--offset` / `--limit` / `--max-bytes` (or `$DROIDASC_LIMIT` /
-`$DROIDASC_MAX_BYTES`) select which records of a `LineSink` reach stdout, `comment` lines
-(`#` headers, totals, tree footers) always do, and once a record is left out the sink keeps
-the whole output and, at `finish`, writes it to the spill directory (or names the `-o`
-file) on a last `#` line with the `--offset` of the next records. With none of the options
-the sink writes exactly what it did before, unbuffered.
-
-Every reply passes through `output::fit` on its way out, after the tool and before the
-`structuredContent` is trimmed (`Structured::Compact`, the `droidasc mcp` default, drops
-top-level values over 256 bytes: clients that show the model text *and* JSON would otherwise
-send rows and smali twice). `fit` holds the text to `max_bytes` (16 KiB): past it, `spill:
-auto` writes the full text to `SpillDir` (`out/` beside the cache tiers, a file per content
-hash, 0600, LRU-pruned to 64 MiB under a lock so a prune never takes a file a reply is about
-to name) and sends its head, the path, a `resource_link` and, for smali, a method index;
-`spill: never` (or no spill directory) cuts it into pages of whole records (a column-0 line
-with the indented lines under it) whose footer is the next call's complete arguments
-(`page`). Tools steer this through two private structured keys: `__full` hands over more
-text than they show inline (the whole class behind a getclass outline, the whole report
-behind its first page), `__fitted` marks text already paged by the tool (a report page,
-paged by its `cursor`), which `fit` never cuts. `getclass` renders the whole class once and
-picks methods from the smali (`class_text.rs`: by exact signature, signature prefix or bare
-name), so a name without a signature is never an error. Hints a model passes back as the
-`cursor` (a JSON object, or `tool {json}` as printed) are taken as the call's arguments.
-
-A findrefs sweep (`asc-engine/src/sweep.rs`) first asks L3 for the APK's rows
-(`Engine::cached_refs`, the key the one-APK path uses too) and plans a single unit that
-replays them; completed APKs are written back (`store_refs`). Otherwise every entry claims
-its central-directory CRC-32 and size in a `DexDedup`; the first claimant of a key leads
-and searches, later ones are planned with weight 1 (after the real work) and wait for the
-leader's batch. All of CRC, size and DEX header are author-controlled, so an APK could
-claim a benign DEX to hide its own code: a follower takes the leader's rows (renamed to
-its entry) only if the SHA-256 of its inflated bytes equals the leader's, and searches
-itself otherwise. The hash is memoized per APK file version and entry, so after the first
-query of a session a verified follower is neither read nor inflated, and never enters the
-memory cache. A leader that unwinds or is cancelled publishes nothing; followers then
-search themselves.
-
-On the Pixel 6 system image (312 APKs, 405 DEX) only 2 tiny DEX repeat, so dedup is idle
-there; the 100-APK corpus (10 apps × copies) repeats 157 of 174 DEX (344 of 391 MiB).
-
-### Call graph and findrefs context
-
-`asc_findrefs::CallGraph` is built per DEX on first use, next to the other locator
-tables in `SearchState` (so it is charged to the memory budget and cached with the
-entry): one walk over every method body the instruction table knows, keeping the
-operand of every `invoke-*` (not `invoke-custom`, whose operand is a call site). A DEX
-has at most 65 536 method ids, so the two CSR tables (callees by caller, callers by
-callee) store `u16` targets: about 4 bytes per distinct edge plus 8 per method id. On
-Douyin (55 DEX) all graphs together are 9.7 M edges, 73 MiB, built in 85 ms on 16
-threads; a walk only builds the graphs of DEX files that reference a frontier method.
-`to_bytes` / `from_bytes` give a flat, 4-byte-aligned form, which L2 stores with the
-other locator tables (`SearchState::persist`); `SearchState::set_call_graph` installs one
-loaded from elsewhere.
-
-`Engine::call_graph` keys methods by signature, since method ids are local to a DEX: each
-level looks the frontier up in every DEX (binary search over the sorted `method_id`
-table), follows that DEX's edges and merges the neighbours. The tree is rendered depth
-first, expanding each method once at its breadth-first (shallowest) depth.
-
-`findrefs` keeps the instruction offset of every hit (`RefResult::sites`). With a
-`RefContext`, the referencing method is rendered alone (`asc_smali::disassemble_method`,
-which also maps each instruction's pc to its line) and the hit lines are marked. The CLI
-renders it in the search workers; MCP renders only the returned page afterwards
-(`Engine::fill_context`), from the DEX files the search left in the memory cache.
-
-### Compound queries, rule sets and the class hierarchy
-
-`FindRefs::find_many` answers several queries with one code scan per index kind: each
-query is located on its own (string regexes keep Python's whole-region `find_iter`
-semantics, so they are not merged into one automaton), the located sets of each kind are
-unioned and scanned once, and every hit goes to each query whose set holds its index. A
-compound query (`Query::All { all, none }`) runs its parts through it and keeps, per
-method, those hit by every `all` part and no `none` part; a rule set
-(`Engine::find_refs_rules`, `search_target_entry_rules` for the multi-APK queue) loads each
-entry once (`search_entry_with`) and returns one batch per rule. Rule sets skip the L3
-result cache.
-
-`Engine::hierarchy` builds a `ClassGraph` from every DEX's `class_def_item`s (interned
-descriptors, `(child, parent, relation)` edges sorted both ways, first definition per
-class) and keeps it on the engine until the APK file changes or `release_memory_cache`
-drops it; it is not charged to the memory budget (Douyin: 0.4 s to build). Overrides are
-read from the class data of the classes the walk reaches. `CallQuery::virtual_calls` uses
-the same graph: callers through up to 256 supertypes' signatures, callees' overrides among
-up to 4096 subclasses each.
-
-### Scan strategy
-
-`CodeScanner::scan` picks a strategy from the query: ≤ 8 targets → `memmem` over each
-target's little-endian operand bytes, verifying the opcode two bytes earlier; string
-queries → `memchr2` over `const-string` / `const-string/jumbo`; other kinds whose targets
-share at most three distinct high operand bytes → `memchr{,2,3}` on that byte at
-`opcode + 3`; otherwise a linear sweep with a 256-entry opcode table. All paths produce
-the same unverified candidates, which the instruction locator then confirms.
-
-### Skipping entries a search cannot match (`engine::skip`)
-
-A search locates its targets in the id tables and string data before it reads code
-(`FindRefs::cannot_match` answers from those alone). For a Deflate entry no cache keeps —
-no memory cache, and an L1 that does not admit it, i.e. one-shot `--no-cache` CLI runs and
-DEX files below the L1 minimum — the worker first streams a prefix with zlib-rs: header,
-every id table and every `string_data_item`. When no query (no rule of a rule set, no
-`all` part of a compound query) can match, the entry is left out and never inflated whole
-(`source=skipped`, `CacheStats::skipped`); otherwise it is inflated with libdeflate as
-usual. The same locators run on the same bytes, and a prefix they cannot read (string
-data cut off, a 041 container, a non-DEX entry) sends the entry down the normal path, so
-rows never change.
-
-The streamed prefix costs about 1.6× per byte what a one-shot libdeflate inflate does and
-is wasted when the entry matches, so a probe only runs while it pays: the string data must
-end within 45 % of the entry (checked first on the first strings' offsets, so the usual
-d8 layout with string data at the end gives up after a 16 KiB chunk), and after four
-probes it continues only while at most half of them found a possible match. On Douyin
-(string data in the first third) a targeted cold query such as `method exec --class
-java.lang.Runtime` leaves out 37 of 55 entries: 77 → 57 ms, peak RSS 328 → 201 MB; the
-47-step replay as one CLI process per step goes 2724 → 2212 ms. Broad queries
-(`field SDK_INT`, `string http://`) and late-string APKs (Chrome) are unchanged. Resident
-hosts (`mcp`, the daemon) never probe: their memory cache keeps the inflated entry for the next
-query.
-
-### Resources and the manifest summary (not in Python)
-
-`asc-arsc` follows AOSP `libs/androidfw` (`ResourceTypes.h`, `LoadedArsc.cpp`) rather than
-a crate: the existing ones parse the whole table into owned structures or only handle the
-default configuration. Parsing walks the chunk headers and records, per package and type,
-where each `ResTable_type` chunk's offset table and entries are; nothing else is decoded
-(Douyin's 12 MB table indexes in under a millisecond, straight from the APK mapping when the
-entry is stored). Names, values and the name index (hashes only, 16 bytes a resource) are
-computed on demand. Details that the format leaves implicit:
-
-* several package chunks can share an id (framework-res keeps flagged resources in extra
-  chunks with their own type and key pools); lookups consult all of them;
-* aapt2 keys array items `ATTR_MIN + i`, aapt `0x02000000 | i`, so bag keys are named by the
-  resource's type (array `[i]`, plurals `one`, attr `^type`, style attrs by name);
-* some obfuscators write CESU-8 (surrogate pairs as two 3-byte sequences); the pool decoder
-  falls back to it before replacing bytes;
-* resolution (`resolve`) picks values as AOSP's `match` / `isBetterThan` would for a request
-  config ([`Config::any_device`]: newest SDK, no locale), follows references with a depth
-  limit and cycle detection, and falls back to the first configuration when none matches.
-
-`benchmark/arsc-compare/compare.py` diffs `droidasc resources` against `aapt2 dump resources`
-per id: name, configuration set, and every value after normalizing the notations. On the
-312 system APKs of a Pixel 6, Douyin, Kuaishou, Meituan, Pinduoduo, Taobao, Xiaohongshu and
-the 100-APK corpus (1.6 M ids, 10.9 M values) the only differences are aapt2's: it prints a
-negative dimension's mantissa unsigned (`-3dp` as `16777213dp`), a fraction unscaled
-(`0.8%` for 80%), styled-string spans after the text, and folds staged ids into their
-finalized resource; four styled strings that contain `"` before a newline cannot be split
-back out of aapt2's text.
-
-The manifest summary is built from `asc_axml::parse_tree` with references resolved through
-the table. Exported: explicit `android:exported`, else implicit through an intent filter
-below targetSdk 31 (from 31 such a component fails to install, reported as such), else
-providers below targetSdk 17, else not; a referenced boolean that differs between
-configurations lists every variant. The effective cleartext policy comes from the network
-security config's base config, then `usesCleartextTraffic`, then the targetSdk default (28).
+The manifest summary resolves references through the table and reports the attack surface:
+exported components (explicit, or implicit through intent filters by targetSdk),
+permissions and the effective cleartext policy.
 
 ## Testing
 
-`cargo test --workspace` runs unit tests per crate plus integration tests that recreate the
-Python regression suite on synthetic fixtures: shared code items keep both methods, map-less
-and class_data-less DEX fall back to class definitions, empty string tables, last string
-searchable, rebuilt DEX validity (checksum, sorted tables, static value alignment), stored
-and Deflate APKs through the engine, and CLI-level class name normalisation.
+`cargo test --workspace` runs unit tests per crate and integration tests on synthetic
+fixtures, covering shared code items, map-less DEX, rebuilt DEX validity, stored and
+Deflate APKs, cache consistency, daemon parity and MCP schemas.

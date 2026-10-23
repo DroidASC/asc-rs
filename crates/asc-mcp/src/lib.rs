@@ -353,7 +353,7 @@ impl Server {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "droidasc", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "Droid ASC: Android APK code search and smali. Pass `apk` (a path) to any tool, or \
+                    "instructions": "asc-rs: Android APK code search and smali. Pass `apk` (a path) to any tool, or \
                         open_apk once and use its apk_id. Usual flow: findrefs with context=\"method\" (finds the code \
                         and shows it, often no getclass needed) -> getclass with method=\"name\" for more of a class \
                         (a large class comes as an outline first) -> callgraph / hierarchy to follow calls. \

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Memory-mapped APK access for Droid ASC: central-directory scan, root-level DEX enumeration and (cancellable) Deflate extraction."
+description = "Memory-mapped APK access for asc-rs: central-directory scan, root-level DEX enumeration and (cancellable) Deflate extraction."
 
 [features]
 default = ["libdeflate"]

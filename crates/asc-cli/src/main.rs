@@ -88,7 +88,7 @@ const RESOURCE_SEARCH_ROWS: usize = 1000;
 const EXIT_PARTIAL: u8 = 2;
 
 #[derive(Parser)]
-#[command(name = "droidasc", about = "ASC tooling entry.", after_help = EXAMPLES, version, disable_version_flag = true)]
+#[command(name = "droidasc", about = "Search and disassemble APK code without preprocessing.", after_help = EXAMPLES, version, disable_version_flag = true)]
 struct Cli {
     /// Print version.
     #[arg(short = 'V', visible_short_alias = 'v', long, action = clap::ArgAction::Version)]

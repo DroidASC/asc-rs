@@ -1,6 +1,6 @@
 //! baksmali-style disassembly of one class.
 //!
-//! This is the built-in "decompile" backend of the Rust port: the rebuilt
+//! This is the built-in "decompile" backend: the rebuilt
 //! single-class DEX is rendered as smali so the output is always available
 //! without an external Java decompiler. The rebuilt DEX itself is a valid
 //! file that external tools (jadx, baksmali, dexdump) can consume as well.
