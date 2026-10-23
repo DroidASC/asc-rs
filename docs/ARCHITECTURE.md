@@ -351,6 +351,49 @@ engines. Because the LRU is keyed by APK, engines over different APKs attached w
 `Engine::with_shared_cache` compete for one byte budget; dropping one of them leaves the
 writer running, and dropping the `SharedCache` lands the queued writes.
 
+### CLI daemon (`asc-cli::daemon`)
+
+The CLI forwards one-shot commands to a per-user daemon over a Unix socket. The daemon is
+only an accelerator: it holds no session state, and the only observable difference is time.
+
+* **One code path.** Every one-shot command writes through `output::Io`: stdout / stderr as
+  `&mut dyn Write`, the working directory relative paths resolve against, and the source of
+  engines. Run locally, `Io` wraps the process's streams and builds a fresh engine; in the
+  daemon, it wraps the connection and takes the engine from a pool keyed by
+  (canonical APK path, threads), at most 64, least recently used closed first, all on one
+  `SharedCache` (the same resident cache and process-registry budget as `mcp`). The engine
+  tracks the APK's size and mtime itself, so a rebuilt APK is reread.
+* **Same bytes.** The client parses the arguments itself and forwards only commands whose
+  output cannot depend on where they run: not `--debug` (timings, engine logs), not
+  `--no-cache` (asks for a cold run). The daemon re-parses them, resolves relative paths
+  against the client's directory for I/O while messages keep the path as given, and declines
+  (the client then runs the command) when it cannot open the APK, since that error names
+  the path. `-o` files are created by the daemon with the client's umask (part of the
+  daemon's identity, below).
+* **Protocol.** Frames of `tag, u32 length, bytes`. The client sends one run request
+  (identity tag, cwd, argv); the daemon answers with stdout chunks (buffered up to 64 KiB,
+  flushed where the command flushes), stderr chunks (sent at once, after the stdout written
+  before them), then the exit status, or a decline before any output. A connection that
+  closes without an exit status after output is reported as an error; before output, the
+  client runs the command itself.
+* **Identity.** The socket name hashes the executable (canonical path, size, mtime, version),
+  the cache configuration (`--cache-dir`, `--cache-max-mb`, `DROIDASC_*`, `XDG_CACHE_HOME`,
+  `HOME`) and the umask, so a client only ever meets a daemon that would print what it
+  prints. A daemon starting up asks the daemons of other builds of the same executable path
+  and configuration to exit. An `flock` on `<tag>.lock` keeps one daemon per identity.
+* **Start.** A command that finds no daemon spawns `daemon serve` (setsid, stdio to
+  /dev/null) and waits up to 300 ms for its socket, stopping early if the child exits (lost
+  the lock race, cannot bind), then runs locally. Handing the first command to the daemon
+  is faster than running it here (81 vs 256 ms cold on Douyin): the daemon answers before
+  its cache writes land, while a process must land them before it exits.
+* **Security.** The socket directory must be owned by the user with no group / other
+  bits (as must its parent); both ends check the peer uid (`SO_PEERCRED`, `getpeereid`).
+  Socket paths that would not fit `sockaddr_un` disable the daemon.
+* **Cancel and exit.** A thread per request blocks on reading the connection; end of
+  stream sets the request's cancel flag, which `findrefs` checks between DEX entries. After
+  15 minutes without requests, or on `daemon stop`, the daemon removes its socket, waits for
+  running requests, lands queued cache writes and exits.
+
 ### MCP session
 
 `asc-mcp` is the resident front end for agents. `serve` reads one JSON-RPC message per

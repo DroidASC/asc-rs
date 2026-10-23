@@ -1,13 +1,17 @@
 //! `droidasc` command line entry.
 
+#[cfg(unix)]
+mod daemon;
+mod output;
+
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::fs::File;
-use std::io::{BufWriter, ErrorKind, Write};
+use output::{Io, LocalEngines};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 const EXAMPLES: &str = "common:
@@ -50,19 +54,23 @@ examples:
   droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
   droidasc mcp --memory-mb 4096
   droidasc cache stats
+  droidasc daemon status
 
 exit status:
   0  success
   1  error (bad arguments, unreadable APK, class not found, output not writable, ...)
   2  findrefs / callgraph finished, but one or more DEX entries could not be searched (details on stderr)
 
-Debug output (--debug) goes to stderr so stdout can be redirected.";
+Debug output (--debug) goes to stderr so stdout can be redirected.
+On Unix, commands answer through a per-user daemon that keeps APKs resident (same output);
+DROIDASC_DAEMON=off runs each command in its own process.";
 
+const EXIT_OK: u8 = 0;
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
 
 /// Subcommand names and aliases (`classes` / `manifest` as in rasc).
-const SUBCOMMANDS: [&str; 15] = [
+const SUBCOMMANDS: [&str; 16] = [
     "getclass",
     "disassemble",
     "listclass",
@@ -78,6 +86,7 @@ const SUBCOMMANDS: [&str; 15] = [
     "gui",
     "mcp",
     "cache",
+    "daemon",
 ];
 
 fn default_threads() -> usize {
@@ -389,6 +398,48 @@ enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
+    /// The per-user daemon that keeps APKs resident for one-shot commands.
+    ///
+    /// Commands start it on first use and answer through it afterwards, with
+    /// the same output as without it; it exits after 15 idle minutes.
+    /// `DROIDASC_DAEMON=off` runs every command in its own process.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+impl Command {
+    /// The APK of a one-shot command (`None` for the resident and
+    /// maintenance commands).
+    fn apk_path(&self) -> Option<&Path> {
+        match self {
+            Command::Getclass { apk_path, .. }
+            | Command::Disassemble { apk_path, .. }
+            | Command::Listclass { apk_path, .. }
+            | Command::Getmanifest { apk_path, .. }
+            | Command::ManifestSummary { apk_path, .. }
+            | Command::Resources { apk_path, .. }
+            | Command::Xml { apk_path, .. }
+            | Command::Findrefs { apk_path, .. }
+            | Command::Callgraph { apk_path, .. }
+            | Command::Hierarchy { apk_path, .. } => Some(apk_path),
+            Command::Gui { .. } | Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => None,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon of this build and cache configuration (if not running).
+    Start,
+    /// Stop every daemon of this user.
+    Stop,
+    /// Show the running daemons.
+    Status,
+    /// Run the daemon in this process (what `start` spawns).
+    #[command(hide = true)]
+    Serve,
 }
 
 /// `mcp --structured`.
@@ -507,7 +558,9 @@ enum Find {
 }
 
 /// `findrefs rules`: every rule in one pass, rows prefixed `rN | `.
+#[allow(clippy::too_many_arguments)] // one call site, each argument a CLI option
 fn findrefs_rules(
+    io: &mut Io<'_>,
     common: &Common,
     apk_path: &Path,
     context: RefContext,
@@ -515,9 +568,9 @@ fn findrefs_rules(
     file: Option<PathBuf>,
     mut specs: Vec<String>,
     t_start: Instant,
-) -> Result<ExitCode, String> {
+) -> Result<u8, String> {
     if let Some(f) = &file {
-        let text = std::fs::read_to_string(f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
+        let text = std::fs::read_to_string(io.path(f)).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
         specs.extend(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from));
     }
     if specs.is_empty() {
@@ -535,9 +588,9 @@ fn findrefs_rules(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    let engine = common.engine(apk_path);
-    let stdout = std::io::stdout();
-    let mut sink = LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())?;
+    let engine = io.engine(common, apk_path);
+    let cancel = io.cancel;
+    let mut sink = io.sink(output.as_ref(), true)?;
     for (i, spec) in specs.iter().enumerate() {
         sink.line(&format!("# r{} {spec}", i + 1));
     }
@@ -545,7 +598,7 @@ fn findrefs_rules(
     let mut totals = vec![0usize; rules.len()];
     let opts = FindOptions { aggregate: true, context };
     engine
-        .find_refs_rules(&rules, opts, &std::sync::atomic::AtomicBool::new(false), &mut |i, batch| {
+        .find_refs_rules(&rules, opts, cancel, &mut |i, batch| {
             if let Some(e) = batch.error {
                 errors.push(format!("{}: {e}", batch.entry_name));
             }
@@ -565,113 +618,13 @@ fn findrefs_rules(
     errors.sort();
     errors.dedup();
     for e in &errors {
-        eprintln!("Warning: {e}");
+        io.note(format_args!("Warning: {e}"));
     }
     if common.debug {
-        eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+        io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
     }
     io_result?;
-    Ok(if errors.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(EXIT_PARTIAL) })
-}
-
-fn create_file(path: &Path) -> Result<File, String> {
-    File::create(path).map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
-fn write_output(path: Option<&PathBuf>, text: &str) -> Result<(), String> {
-    if let Some(p) = path {
-        let mut f = create_file(p)?;
-        f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-        if !text.ends_with('\n') {
-            f.write_all(b"\n").map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-/// Print to stdout, treating a closed pipe (e.g. `| head`) as a clean exit.
-fn emit(text: &str) -> Result<(), String> {
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let res = out
-        .write_all(text.as_bytes())
-        .and_then(|_| if text.ends_with('\n') { Ok(()) } else { out.write_all(b"\n") })
-        .and_then(|_| out.flush());
-    match res {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(format!("cannot write to stdout: {e}")),
-    }
-}
-
-/// Line sink for `findrefs`: stdout plus an optional `-o` file.
-///
-/// A closed stdout (`| head`) silently stops the stdout copy while the file
-/// keeps being written. Any other I/O error is remembered (first one wins),
-/// the failing destination is dropped, and the error is reported at the end.
-struct LineSink<W: Write> {
-    stdout: Option<W>,
-    file: Option<(PathBuf, BufWriter<File>)>,
-    error: Option<String>,
-}
-
-impl<W: Write> LineSink<W> {
-    fn new(stdout: W, output: Option<&PathBuf>) -> Result<LineSink<W>, String> {
-        let file = match output {
-            Some(p) => Some((p.clone(), BufWriter::new(create_file(p)?))),
-            None => None,
-        };
-        Ok(LineSink { stdout: Some(stdout), file, error: None })
-    }
-
-    fn fail(&mut self, msg: String) {
-        if self.error.is_none() {
-            self.error = Some(msg);
-        }
-    }
-
-    fn line(&mut self, line: &str) {
-        if let Some(out) = self.stdout.as_mut() {
-            if let Err(e) = writeln!(out, "{line}") {
-                self.stdout = None;
-                if e.kind() != ErrorKind::BrokenPipe {
-                    self.fail(format!("cannot write to stdout: {e}"));
-                }
-            }
-        }
-        if let Some((path, f)) = self.file.as_mut() {
-            if let Err(e) = writeln!(f, "{line}") {
-                let msg = format!("cannot write {}: {e}", path.display());
-                self.file = None;
-                self.fail(msg);
-            }
-        }
-    }
-
-    /// Flush stdout after a batch so results stream while the search runs.
-    fn flush_stdout(&mut self) {
-        if let Some(out) = self.stdout.as_mut() {
-            if let Err(e) = out.flush() {
-                self.stdout = None;
-                if e.kind() != ErrorKind::BrokenPipe {
-                    self.fail(format!("cannot write to stdout: {e}"));
-                }
-            }
-        }
-    }
-
-    fn finish(mut self) -> Result<(), String> {
-        self.flush_stdout();
-        if let Some((path, mut f)) = self.file.take() {
-            if let Err(e) = f.flush() {
-                self.fail(format!("cannot write {}: {e}", path.display()));
-            }
-        }
-        match self.error.take() {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
-    }
+    Ok(if errors.is_empty() { EXIT_OK } else { EXIT_PARTIAL })
 }
 
 /// Arguments shared by `getclass` and `disassemble`, which differ (as in
@@ -689,92 +642,97 @@ struct ClassArgs {
     dalvik_class: String,
 }
 
-fn getclass(common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), String> {
+fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), String> {
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
-    let engine = common.engine(&args.apk_path);
+    let engine = io.engine(common, &args.apk_path);
     let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
     let mut src = engine.get_class_method(&descriptor, opts, args.method_signature.as_deref()).map_err(|e| e.to_string())?;
     if args.res_names {
         src.source = engine.annotate_resource_ids(&src.source);
     }
     if let Some(w) = &src.warning {
-        eprintln!("Warning: {w}");
+        io.note(format_args!("Warning: {w}"));
     }
     if let Some(p) = &args.dump_dex {
         let rebuilt = src.rebuilt.as_ref().ok_or_else(|| format!("cannot write {}: the class was not rebuilt", p.display()))?;
-        std::fs::write(p, &rebuilt.bytes).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+        io.write_file(p, &rebuilt.bytes)?;
     }
     if common.debug {
-        eprintln!("[DEBUG] Hit DEX: {}", src.dex_name);
-        eprintln!("[DEBUG] APK Scan Time: {} us", src.scan_us);
+        io.note(format_args!("[DEBUG] Hit DEX: {}", src.dex_name));
+        io.note(format_args!("[DEBUG] APK Scan Time: {} us", src.scan_us));
         if let Some(r) = &src.rebuilt {
-            eprintln!(
+            io.note(format_args!(
                 "[DEBUG] Rebuilt DEX: {} bytes, {} strings, {} types, {} protos, {} fields, {} methods ({} with code)",
                 r.stats.size, r.stats.strings, r.stats.types, r.stats.protos, r.stats.fields, r.stats.methods, r.stats.methods_with_code
-            );
+            ));
         }
-        eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
-        eprintln!("{}", "-".repeat(50));
+        io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
+        io.note("-".repeat(50));
     }
-    write_output(args.output.as_ref(), &src.source)?;
+    io.write_output(args.output.as_ref(), &src.source)?;
     if args.output.is_some() && !args.tee {
         return Ok(());
     }
-    emit(&src.source)
+    io.emit(&src.source)
 }
 
-fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
-    let common = cli.common.clone();
-    match cli.command {
+/// Write a tree command's text to `-o` or stdout.
+fn emit_or_write(io: &mut Io<'_>, output: Option<&PathBuf>, text: &str) -> Result<(), String> {
+    match output {
+        Some(p) => io.write_file(p, text.as_bytes()),
+        None => io.emit(text),
+    }
+}
+
+/// Run a one-shot command (everything but `gui`, `mcp`, `cache` and
+/// `daemon`, which [`run`] handles itself) against `io`: the exit status.
+fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instant) -> Result<u8, String> {
+    match command {
         Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
             let args =
                 ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class };
-            getclass(&common, args, t_start)?;
+            getclass(io, common, args, t_start)?;
         }
         Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, apk_path, dalvik_class } => {
             let args =
                 ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, res_names, apk_path, dalvik_class };
-            getclass(&common, args, t_start)?;
+            getclass(io, common, args, t_start)?;
         }
         Command::Listclass { prefix, output, apk_path } => {
-            let engine = common.engine(&apk_path);
-            let classes = engine.list_classes(prefix.as_deref()).map_err(|e| e.to_string())?;
+            let classes = io.engine(common, &apk_path).list_classes(prefix.as_deref()).map_err(|e| e.to_string())?;
             let mut text = String::with_capacity(classes.iter().map(|c| c.descriptor.len() + 1).sum());
             for c in &classes {
                 text.push_str(&c.descriptor);
                 text.push('\n');
             }
             match &output {
-                Some(p) => std::fs::write(p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?,
+                Some(p) => io.write_file(p, text.as_bytes())?,
                 None if text.is_empty() => {}
-                None => emit(&text)?,
+                None => io.emit(&text)?,
             }
             if common.debug {
-                eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+                io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
             }
         }
         Command::Getmanifest { output, resolve, apk_path } => {
-            let engine = common.engine(&apk_path);
+            let engine = io.engine(common, &apk_path);
             let xml = if resolve { engine.manifest_xml_resolved() } else { engine.manifest_xml() }.map_err(|e| e.to_string())?;
-            write_output(output.as_ref(), &xml)?;
-            emit(&xml)?;
+            io.write_output(output.as_ref(), &xml)?;
+            io.emit(&xml)?;
             if common.debug {
-                eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+                io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
             }
         }
         Command::ManifestSummary { json, output, apk_path } => {
-            let summary = common.engine(&apk_path).manifest_summary().map_err(|e| e.to_string())?;
+            let summary = io.engine(common, &apk_path).manifest_summary().map_err(|e| e.to_string())?;
             let text = if json { format!("{:#}", summary.json()) } else { summary.lines().join("\n") };
-            write_output(output.as_ref(), &text)?;
-            emit(&text)?;
+            io.write_output(output.as_ref(), &text)?;
+            io.emit(&text)?;
         }
         Command::Resources { search, literal, field, resolve, limit, output, apk_path, query } => {
-            let engine = common.engine(&apk_path);
-            let stdout = std::io::stdout();
-            let mut sink = match &output {
-                Some(_) => LineSink { stdout: None, ..LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())? },
-                None => LineSink::new(BufWriter::new(stdout.lock()), None)?,
-            };
+            let engine = io.engine(common, &apk_path);
+            let mut note = None;
+            let mut sink = io.sink(output.as_ref(), output.is_none())?;
             match (search, query) {
                 (Some(pattern), _) => {
                     let field = match field.as_str() {
@@ -786,7 +744,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                     let (rows, total) = engine.search_resources(&pattern, literal, field, limit).map_err(|e| e.to_string())?;
                     rows.iter().for_each(|r| sink.line(&r.line()));
                     if total > rows.len() {
-                        eprintln!("Note: {} of {total} matches shown; raise --limit for more", rows.len());
+                        note = Some(format!("Note: {} of {total} matches shown; raise --limit for more", rows.len()));
                     }
                 }
                 (None, Some(q)) if resolve => {
@@ -797,12 +755,16 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 (None, Some(q)) => engine.resource(&q).map_err(|e| e.to_string())?.iter().for_each(|r| sink.line(&r.line())),
                 (None, None) => engine.dump_resources(|r| sink.line(&r.line())).map_err(|e| e.to_string())?,
             }
-            sink.finish()?;
+            let io_result = sink.finish();
+            if let Some(n) = note {
+                io.note(n);
+            }
+            io_result?;
         }
         Command::Xml { output, apk_path, path } => {
-            let xml = common.engine(&apk_path).xml(&path).map_err(|e| e.to_string())?;
-            write_output(output.as_ref(), &xml)?;
-            emit(&xml)?;
+            let xml = io.engine(common, &apk_path).xml(&path).map_err(|e| e.to_string())?;
+            io.write_output(output.as_ref(), &xml)?;
+            io.emit(&xml)?;
         }
         Command::Findrefs { apk_path, context, context_method, find } => {
             let context = match (context, context_method) {
@@ -811,7 +773,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 (None, false) => RefContext::None,
             };
             if let Find::Rules { output, file, rules } = find {
-                return findrefs_rules(&common, &apk_path, context, output, file, rules, t_start);
+                return findrefs_rules(io, common, &apk_path, context, output, file, rules, t_start);
             }
             let (query, output) = match find {
                 Find::Rules { .. } => unreachable!("handled above"),
@@ -841,13 +803,13 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                     output,
                 ),
             };
-            let engine = common.engine(&apk_path);
-            let stdout = std::io::stdout();
-            let mut sink = LineSink::new(BufWriter::new(stdout.lock()), output.as_ref())?;
+            let engine = io.engine(common, &apk_path);
+            let cancel = io.cancel;
+            let mut sink = io.sink(output.as_ref(), true)?;
             let mut errors = Vec::new();
             let opts = FindOptions { aggregate: true, context };
             engine
-                .find_refs_opts(&query, opts, &std::sync::atomic::AtomicBool::new(false), &mut |batch| {
+                .find_refs_opts(&query, opts, cancel, &mut |batch| {
                     if let Some(e) = batch.error {
                         errors.push(format!("{}: {e}", batch.entry_name));
                     }
@@ -859,64 +821,72 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 .map_err(|e| e.to_string())?;
             let io_result = sink.finish();
             for e in &errors {
-                eprintln!("Warning: {e}");
+                io.note(format_args!("Warning: {e}"));
             }
             if common.debug {
                 let st = engine.cache_stats();
-                eprintln!("[DEBUG] Cache: {} inflated, {} disk hits, {} skipped", st.inflates, st.disk_hits, st.skipped);
-                eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+                io.note(format_args!("[DEBUG] Cache: {} inflated, {} disk hits, {} skipped", st.inflates, st.disk_hits, st.skipped));
+                io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
             }
             io_result?;
             if !errors.is_empty() {
-                eprintln!("Warning: {} DEX entr{} could not be searched", errors.len(), if errors.len() == 1 { "y" } else { "ies" });
-                return Ok(ExitCode::from(EXIT_PARTIAL));
+                io.note(format_args!(
+                    "Warning: {} DEX entr{} could not be searched",
+                    errors.len(),
+                    if errors.len() == 1 { "y" } else { "ies" }
+                ));
+                return Ok(EXIT_PARTIAL);
             }
         }
         Command::Callgraph { output, callees, depth, max_nodes, virtual_calls, apk_path, class, method } => {
             let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
             let direction = if callees { Direction::Callees } else { Direction::Callers };
-            let engine = common.engine(&apk_path);
+            let engine = io.engine(common, &apk_path);
             let q = CallQuery { class, method, direction, depth, max_nodes, virtual_calls };
             let tree = engine.call_graph(&q).map_err(|e| e.to_string())?;
             let mut text = tree.lines().join("\n");
             text.push('\n');
             text.push_str(&tree.footer());
             text.push('\n');
-            match &output {
-                Some(p) => std::fs::write(p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?,
-                None => emit(&text)?,
-            }
+            emit_or_write(io, output.as_ref(), &text)?;
             for e in &tree.errors {
-                eprintln!("Warning: {e}");
+                io.note(format_args!("Warning: {e}"));
             }
             if common.debug {
-                eprintln!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros());
+                io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
             }
             if !tree.errors.is_empty() {
-                return Ok(ExitCode::from(EXIT_PARTIAL));
+                return Ok(EXIT_PARTIAL);
             }
         }
         Command::Hierarchy { output, supers, depth, max_nodes, method, apk_path, class } => {
             let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
             let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
-            let tree = common
-                .engine(&apk_path)
+            let tree = io
+                .engine(common, &apk_path)
                 .hierarchy(&HierarchyQuery { class, direction, depth, max_nodes, method })
                 .map_err(|e| e.to_string())?;
             let mut text: String = tree.lines().into_iter().chain(tree.definition_lines()).map(|l| l + "\n").collect();
             text.push_str(&tree.footer());
             text.push('\n');
-            match &output {
-                Some(p) => std::fs::write(p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?,
-                None => emit(&text)?,
-            }
+            emit_or_write(io, output.as_ref(), &text)?;
             for e in &tree.errors {
-                eprintln!("Warning: {e}");
+                io.note(format_args!("Warning: {e}"));
             }
             if !tree.errors.is_empty() {
-                return Ok(ExitCode::from(EXIT_PARTIAL));
+                return Ok(EXIT_PARTIAL);
             }
         }
+        Command::Gui { .. } | Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } => {
+            unreachable!("run handles the resident and maintenance commands")
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
+    let common = cli.common;
+    match cli.command {
         Command::Gui { apk_path } => {
             launch_gui(apk_path, common.threads, common.debug, common.resident_cache())?;
         }
@@ -964,8 +934,26 @@ fn run(cli: Cli, t_start: Instant) -> Result<ExitCode, String> {
                 }
             }
         }
+        Command::Daemon { action } => return daemon_command(&common, action),
+        command => {
+            // Not locked: engine threads log to stderr themselves (`--debug`).
+            let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+            let cancel = AtomicBool::new(false);
+            let mut io = Io::new(&mut out, &mut err, &LocalEngines, &cancel);
+            return run_query(&mut io, &common, command, t_start);
+        }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(EXIT_OK)
+}
+
+#[cfg(unix)]
+fn daemon_command(common: &Common, action: DaemonAction) -> Result<u8, String> {
+    daemon::command(common, &action)
+}
+
+#[cfg(not(unix))]
+fn daemon_command(_common: &Common, _action: DaemonAction) -> Result<u8, String> {
+    Err("the daemon needs Unix sockets; commands run in their own process".into())
 }
 
 #[cfg(feature = "gui")]
@@ -1012,8 +1000,12 @@ fn main() -> ExitCode {
             return if e.use_stderr() { ExitCode::from(1) } else { ExitCode::SUCCESS };
         }
     };
+    #[cfg(unix)]
+    if let Some(code) = daemon::forward(&cli) {
+        return ExitCode::from(code);
+    }
     match run(cli, t_start) {
-        Ok(code) => code,
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("Error: {e}");
             ExitCode::from(1)
@@ -1044,47 +1036,5 @@ mod tests {
         assert!(legacy_gui_args(&argv("droidasc findrefs app.apk string --gui")).is_none());
         assert!(legacy_gui_args(&argv("droidasc gui app.apk --gui")).is_none());
         assert!(legacy_gui_args(&argv("droidasc getclass app.apk com.poc.Main")).is_none());
-    }
-
-    #[test]
-    fn line_sink_keeps_writing_the_file_after_stdout_closes() {
-        struct Closed;
-        impl Write for Closed {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::from(ErrorKind::BrokenPipe))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let dir = std::env::temp_dir().join(format!("droidasc-sink-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("out.txt");
-        let mut sink = LineSink::new(Closed, Some(&path)).unwrap();
-        sink.line("a");
-        sink.flush_stdout();
-        sink.line("b");
-        assert!(sink.stdout.is_none());
-        sink.finish().unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn line_sink_reports_other_stdout_errors() {
-        struct Broken;
-        impl Write for Broken {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("disk full"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut sink = LineSink::new(Broken, None).unwrap();
-        sink.line("a");
-        sink.line("b");
-        let err = sink.finish().unwrap_err();
-        assert!(err.contains("stdout") && err.contains("disk full"), "{err}");
     }
 }

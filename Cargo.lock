@@ -223,6 +223,7 @@ dependencies = [
  "asc-gui",
  "asc-mcp",
  "clap",
+ "libc",
  "serde_json",
  "tempfile",
 ]
