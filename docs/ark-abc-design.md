@@ -306,7 +306,7 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
 10. `[external]` 不等于系统 API：调用返回值的成员、没解析出的程序内静态方法也标 `[external]`。是否拆成两个标记。
 11. 经数组 / 表分发的调用（`handlerList[].handle`）是调用图的断点，只能用 `findrefs method NAME --exact --class RECORD`
     列出同名定义再逐个走；该命令的字面量行只给原始名，应补还原名。
-12. 精确匹配的写法不一致：子命令用 `--exact`，条件和 `--from` 里是 `=NAME`。`--from` / `--unless` 是否下沉到引擎。
+12. 已定：子命令两种精确写法都接受（`--exact` 和 `=NAME`）；`--to` / `--from` / `--unless` 的过滤在引擎的遍历里做，前端只传规则。
 
 ## 10. 进度（2026-11-10）
 
@@ -332,7 +332,7 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
     `--unresolved`、`--entry`。README（中英）和 SKILL.md 已补鸿蒙用法。
   - 审计走查（样本 A，“导出的 EntryAbility 的 deep link 流是否到达网络或 WebView”）：10 条命令、约 500 ms 走完。
     走不下去的地方见第 9 节 9–12。
-- P4 完成。未做：`all` 的排除与嵌套、`--context`、`callgraph --unless`。
+- P4 完成。`all` 的排除与嵌套、`--context`、`callgraph --unless` 后补，见本节末。
 - P3a 完成：daemon 驻留鸿蒙引擎，进程内与 daemon 输出逐字节一致，Android 输出与线协议不变。接缝只有三处：
   `asc_mcp::format::ProgramFormat`（唯一的格式判定）、`Engines::harmony`、`SharedCache::fit_resident_bytes`
   （两种引擎共用一份内存预算，映射字节按 1/8 计）。引擎提供 `stamp` / `is_current`（按文件大小和 mtime 判过期）、
@@ -371,5 +371,15 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
     局部变量约 4.6 万行全部一致；6 个小样本（9.0.0.0、12.0.2.0 等）首次有官方对照；合成夹具由官方工具现场反汇编
     对照（`$ASC_ARK_DISASM`）。列号是 32 位，`0xFFFFFFFF` 表示无列号（官方工具符号扩展成 64 位打印）。13.0.1.0 与
     12.0.6.0 的调试信息格式无差异。`getclass` 默认在函数头列出调试信息里的局部变量名（编译器自己的变量不列）。
-- 待办：`findrefs all` 的排除与嵌套、`--context`、`callgraph --unless`；解包后的 HAP 目录、zip 套 `.app`；
-  `sourceMaps.map`；“路由名 → 导航调用点”没有原语；`[external]` 是否拆成两个标记；14.x 以上版本没有样本。
+  - 查询面对齐：规则只在引擎解析一次（`Query::rule`）。`all` 支持 `!条件` / `--none`；`call:{规则}` 是“调用了匹配该规则的
+    函数”，走调用图的边，可嵌套 8 层，`call:{@FILE}` 读函数清单；`rules` 每条规则搜一次；`--context N|method` 输出
+    `getclass` 清单并在命中行前加 `>`；`callgraph --to/--from/--unless` 都收规则，在遍历里过滤，命中 `--from` 处停止。
+    组合里的 `method:` 指函数本身（单独用仍是定义位置）；`unresolved=N` 只统计本次遍历扫过的 record（原先冷热不一致）。
+    没有调用点取值约束和虚分派。
+  - 输入形态：解包目录（`module.json` + `ets/*.abc`）是一个包（`Root::{Zip, Directory}`、`Lazy::{Entry, Loose}`），
+    `xml` 读的路径跟随符号链接后必须仍在包目录内，`Stamp` 覆盖每个成员；非模块包的 zip 按内容找内层包，
+    上限：一个文件里 4 层、单条目 1 GiB、解压总量 4 GiB、超过 64 MiB 的压缩候选只按扩展名打开。
+  - `ets/sourceMaps.map`：一个 JSON 对象，键 `构建包|所属包|版本|产物路径`，值是 source map v3（样本里 `names` 为空）。
+    只在调试 / 自建包里有，上架样本都没有。abc 调试信息的行号是编译中间文件的 0 基行，不是源码行；map 把它映射回
+    源码行，并能分出构建生成的函数（没有映射行）。只索引顶层字节范围，按需解析一个模块。
+- 待办：前端没有暴露逐指令源码行；一个模块多个 `sources` 只取第一个；`xml` 读解包目录没有大小上限；“路由名 → 导航调用点”没有原语；`[external]` 是否拆成两个标记；14.x 以上版本没有样本。

@@ -74,12 +74,16 @@ format is detected from the file:
 - **Inputs**: a `.hap` / `.hsp`, an `.app` (inner haps may be compressed), a bare `.abc`, or a directory /
   `,` list read as one program; every `ets/*.abc` of a hap is read, and the entry column of a row says which
   one it came from. The files of a directory are recognized by content (the `PANDA` magic, a zip holding
-  `module.json` / `ets/*.abc`), whatever their names and extensions.
+  `module.json` / `ets/*.abc`), whatever their names and extensions. An unpacked package directory
+  (`module.json` and `ets/*.abc`) is the package: manifest, resources and `xml` work on it. Packages inside a
+  zip are found by content, at any depth up to 4 zips in a file (4 GiB inflated in all); an entry carries
+  its whole path, `shop.app/entry.hap/ets/modules.abc`.
 - **Encrypted packages**: a hap from the app store has an encrypted `ets/modules.abc`. It is named in a
   `# warning:` on stderr and left out (`findrefs` / `callgraph` exit with 2); nothing is decrypted. Put the
   decrypted abc next to the hap and pass that directory: code comes from the decrypted file, `module.json`,
   resources and the rest from the hap. The two are paired by the header (version, size, checksum) and the
-  checksum of the body, not by file name.
+  checksum of the body, not by file name; an unpacked hap pairs the same way, with the decrypted file in or
+  next to its directory.
 - **Names**: a class is a record (a module: `&entry/src/main/ets/pages/Index&`, libraries carry a version,
   `&@ohos/lib/Index&1.0.0`, older files have `com.a.b/entry/ets/pages/Index`; a path suffix, `pages/Index`,
   is enough), a method is a function (raw `#~@0>#build` or restored `Index.build`).
@@ -89,10 +93,10 @@ format is detected from the file:
 | `listclass` | classes | records; `--all` adds pseudo records (annotations) |
 | `getclass` / `disassemble` | smali | pandasm-style disassembly; `--method` for one function, `--entry` picks the abc |
 | `getmanifest` / `manifest-summary` | `AndroidManifest.xml` | `module.json` (`--file pack.info` / `pkgContextInfo.json`); in the summary each ability / extension carries `record=`, and a `callbacks` line lists its `onXxx` functions |
-| `findrefs string` / `method` / `all` | ✓ | ✓ (`method` finds where a function is **defined**, not its calls) |
+| `findrefs string` / `method` / `all` / `rules`, `--context` | ✓ | ✓ (`method` finds where a function is **defined**, not its calls; combined with other parts it means "the function is named so"); `!PART` / `--none` exclude; `call:{RULE}` is "calls a function matching RULE" and nests |
 | `findrefs prop` / `global` / `import` / `number` / `call` | — | ✓ |
-| `findrefs type` / `field` / `extends` / `impl` / `rules`, `--context` | ✓ | — |
-| `callgraph` | ✓ | ✓: `--to call:REGEX`, `--from method:NAME`, `--no-defines`, `--unresolved`, `--entry`; no `--virtual` / `--unless` |
+| `findrefs type` / `field` / `extends` / `impl` | ✓ | — (`hierarchy` answers inheritance) |
+| `callgraph` | ✓ | ✓: `--to` / `--from` / `--unless` take rules (`--to call:REGEX` roots at a callee path), `--no-defines`, `--unresolved`, `--entry`; no `--virtual` |
 | `hierarchy` | ✓ | ✓: the parent is read where each class is defined; `CLASS` is a class name, `RECORD->CLASS`, or a parent outside the program, `import:REGEX` / `global:REGEX`; `--method` sees the members of the class literal |
 | `resources` | `resources.arsc` | `resources.index`, same options; QUERY is `0x…`, `string/name`, `$string:name` or `app.string.name` |
 | `xml` | binary XML | prints a text file of the package as it is: `'$profile:main_pages'` (page list, route table) or a path in the package |
@@ -105,12 +109,14 @@ asc findrefs entry.hap import '@ohos:' --requests                      # which s
 asc findrefs entry.hap call '^import:@ohos:net\.http'                  # who calls into the http module
 asc findrefs entry.hap prop request --exact --access call              # calls by member name, any receiver
 asc findrefs entry.hap all 'call:^import:@ohos:net\.http' 'string:^https?://'
+asc findrefs entry.hap all 'call:^import:@ohos:net\.http' '!string:^https?://' --context 3   # an exclusion; with context
+asc findrefs entry.hap call '{string:(?i)oaid}'                        # who calls the functions using that string
 asc hierarchy entry.hap UIAbility --method onCreate                    # who extends UIAbility, who overrides onCreate
 asc xml entry.hap '$profile:main_pages'                                # the page list; the routerMap likewise
 asc resources entry.hap --search 'Sign in' --in value                  # text -> id, then findrefs number ID
 asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
 asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6  # who reaches http
-asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --depth 8 --max-nodes 5000
+asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --unless 'string:(?i)mock' --depth 8 --max-nodes 5000
 ```
 
 A `findrefs` row is `entry | RECORD->function+0xPC | restored name | instruction ; resolved callee`; the second
@@ -153,10 +159,14 @@ much is known:
   the text around it.
 - Where a debug build names its local variables, a function header of `getclass` has a line
   `; locals [from, to): v3 name, …`.
+- A package with `ets/sourceMaps.map` (debug builds only) gets a `source-maps … modules=N` row in
+  `manifest-summary`; `getclass` heads the record with `; source ORIGINAL-PATH` and a function with `line N
+  (source line M)`: `line N` is a line of the compiled intermediate file, from 0, `source line` the line of
+  the source; a function marked `(no source line)` was generated by the build (state accessors, `rerender`).
 
 Limits: a HarmonyOS program is served by the same daemon as APKs (the analyses stay resident), but has no
 disk cache (it opens in milliseconds); `super()` / inherited methods whose parent is outside the
-program, and calls on what a singleton getter returns, stay leaves; `findrefs all` takes no excluded conditions; static ArkTS
+program, and calls on what a singleton getter returns, stay leaves; there are no call-site value constraints (`method:X[arg0=…]`) and no virtual dispatch; static ArkTS
 (`modules_static.abc`) is not supported; abc versions above 24.x have not been checked
 against real samples; a directory mixing DEX and HarmonyOS files is an Android program, so pass the HarmonyOS
 files by their own path.

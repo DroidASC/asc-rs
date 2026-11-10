@@ -75,10 +75,12 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
 
 - **输入**：`.hap` / `.hsp`、`.app`（内层 hap 可以是压缩的）、裸 `.abc`，或一个目录 / `,` 列表（当作一个程序；一个 hap
   里的每个 `ets/*.abc` 都读，行首的 entry 列说明来自哪个）。目录里的文件按内容识别（`PANDA` 魔数、zip 里有
-  `module.json` / `ets/*.abc`），叫什么名字、用什么扩展名都可以。
+  `module.json` / `ets/*.abc`），叫什么名字、用什么扩展名都可以。解包后的包目录（有 `module.json` 和 `ets/*.abc`）
+  与原包等价：清单、资源、`xml` 都能用。zip 里的包也按内容找，可以多层（一个文件里至多 4 层，解压总量至多
+  4 GiB），条目名带完整路径，如 `shop.app/entry.hap/ets/modules.abc`。
 - **加密的包**：应用市场下载的 hap 里 `ets/modules.abc` 是加密的，会在 stderr 以 `# warning:` 点名并跳过（`findrefs` /
   `callgraph` 退出码 2），不做解密。把解密后的 abc 放在 hap 旁边并传这个目录：代码取自解密文件，`module.json`、
-  资源等仍取自 hap。配对只看文件头（版本、大小、校验和）和正文的校验和，不看文件名。
+  资源等仍取自 hap（hap 解包成目录时同理，解密文件放在目录里或目录旁）。配对只看文件头（版本、大小、校验和）和正文的校验和，不看文件名。
 - **名字**：类 = record（一个模块：`&entry/src/main/ets/pages/Index&`，三方库带版本 `&@ohos/lib/Index&1.0.0`，旧版本
   是 `com.a.b/entry/ets/pages/Index`；可以只写路径后缀 `pages/Index`），方法 = 函数（原始名 `#~@0>#build` 或还原名
   `Index.build`）。
@@ -88,10 +90,10 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
 | `listclass` | 类 | record；`--all` 连同注解等伪 record |
 | `getclass` / `disassemble` | smali | pandasm 风格反汇编；`--method` 只看一个函数，`--entry` 指定 abc |
 | `getmanifest` / `manifest-summary` | `AndroidManifest.xml` | `module.json`（`--file pack.info` / `pkgContextInfo.json`）；摘要里每个 ability / extension 带 `record=`，`callbacks` 行列出它的 `onXxx` 函数 |
-| `findrefs string` / `method` / `all` | ✓ | ✓（`method` 找的是函数的**定义位置**，不是调用） |
+| `findrefs string` / `method` / `all` / `rules`，`--context` | ✓ | ✓（`method` 找的是函数的**定义位置**，不是调用；与其他条件组合时指“函数名匹配”）；`!条件` / `--none` 排除；`call:{规则}` 是“调用了匹配该规则的函数”，可嵌套 |
 | `findrefs prop` / `global` / `import` / `number` / `call` | — | ✓ |
-| `findrefs type` / `field` / `extends` / `impl` / `rules`，`--context` | ✓ | — |
-| `callgraph` | ✓ | ✓：`--to call:REGEX`、`--from method:NAME`、`--no-defines`、`--unresolved`、`--entry`；没有 `--virtual` / `--unless` |
+| `findrefs type` / `field` / `extends` / `impl` | ✓ | —（继承关系用 `hierarchy`） |
+| `callgraph` | ✓ | ✓：`--to` / `--from` / `--unless` 都接受规则（`--to call:REGEX` 以被调用路径为根），`--no-defines`、`--unresolved`、`--entry`；没有 `--virtual` |
 | `hierarchy` | ✓ | ✓：父类取自每个类定义处；`CLASS` 可以是类名、`RECORD->CLASS`，或程序外的父类 `import:REGEX` / `global:REGEX`；`--method` 只看类字面量里的成员 |
 | `resources` | `resources.arsc` | `resources.index`，参数相同；QUERY 可写 `0x…`、`string/name`、`$string:name`、`app.string.name` |
 | `xml` | 二进制 XML | 原样打印包内的文本文件：`'$profile:main_pages'`（页面清单、路由表）或包内路径 |
@@ -104,12 +106,14 @@ asc findrefs entry.hap import '@ohos:' --requests                      # 用到�
 asc findrefs entry.hap call '^import:@ohos:net\.http'                  # 谁调用了 http 模块
 asc findrefs entry.hap prop request --exact --access call              # 按成员名找调用，不管接收者
 asc findrefs entry.hap all 'call:^import:@ohos:net\.http' 'string:^https?://'
+asc findrefs entry.hap all 'call:^import:@ohos:net\.http' '!string:^https?://' --context 3   # 排除条件；带上下文
+asc findrefs entry.hap call '{string:(?i)oaid}'                        # 谁调用了用到该字符串的函数
 asc hierarchy entry.hap UIAbility --method onCreate                         # 谁继承 UIAbility、谁重写了 onCreate
 asc xml entry.hap '$profile:main_pages'                                     # 页面清单；routerMap 同理
 asc resources entry.hap --search '登录' --in value                          # 文案 → id，再 findrefs number ID
 asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
 asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6  # 谁能走到 http
-asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --depth 8 --max-nodes 5000
+asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --unless 'string:(?i)mock' --depth 8 --max-nodes 5000
 ```
 
 `findrefs` 的一行是 `entry | RECORD->函数+0xPC | 还原名 | 指令 ; 解析出的被调用者`，第二列可以原样贴给 `getclass` /
@@ -140,9 +144,12 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
   `abc` 行（每个 abc 条目，加密的条目由哪个解密文件顶替）；多个包里相同的 `pack.info` 只列一次。
 - 超过 2048 字节的字符串写成 `"…"… (+N bytes)`，匹配点在截断之后时带 `match at byte N` 和命中处的片段。
 - 调试构建带局部变量名时，`getclass` 的函数头多一行 `; locals [起, 止): v3 name, …`。
+- 包里带 `ets/sourceMaps.map`（调试构建才有）时，`manifest-summary` 多一行 `source-maps … modules=N`；`getclass` 的
+  record 头多一行 `; source 原始路径`，函数头写成 `line N (source line M)`：`line N` 是编译中间文件的行（从 0 计），
+  `source line` 才是源码行；`(no source line)` 的函数是构建生成的（状态变量访问器、`rerender` 等）。
 
 限制：HarmonyOS 程序和 APK 共用同一个 daemon（调用图等分析结果驻留复用），但没有磁盘 cache（打开是毫秒级）；
-父类在程序外的 `super()` / 继承方法、单例 getter 返回的对象上的调用仍是叶子；`findrefs all` 不支持排除条件；
+父类在程序外的 `super()` / 继承方法、单例 getter 返回的对象上的调用仍是叶子；没有调用点取值约束（`method:X[arg0=…]`）和虚分派；
 不支持静态 ArkTS（`modules_static.abc`）；24.x 以上版本的 abc 没有真实样本验证过；
 目录里 DEX 与 HarmonyOS 文件混放时按 Android 程序处理，HarmonyOS 文件要单独给路径。
 
