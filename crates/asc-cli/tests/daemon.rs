@@ -1,6 +1,8 @@
 //! The daemon answers one-shot commands exactly as the process itself would.
 #![cfg(unix)]
 
+use asc_fixture::abc::{call_graph_program, class_hierarchy_program, make_abc, sample_program};
+use asc_fixture::hap::{make_app, make_hap, resource_program, Compression, Hap, SAMPLE_MODULE_JSON};
 use asc_fixture::{make_apk, make_dex};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -59,6 +61,49 @@ impl Env {
             cmd.env("ASC_DAEMON", "off");
         }
         cmd.output().expect("run asc")
+    }
+
+    fn write(&self, name: &str, bytes: &[u8]) {
+        let path = self.work.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// HarmonyOS programs in the working directory: packages, a bare ABC
+    /// file, an `.app`, an app-store package next to its decrypted code, and
+    /// directories that mix formats.
+    fn with_harmony(self) -> Env {
+        use std::os::unix::fs::PermissionsExt;
+        let sample = make_abc();
+        // With a resource index and the files it names.
+        let hap = make_hap(&sample);
+        self.write("entry.hap", &hap);
+        self.write("labels.hap", &make_hap(&resource_program().build().bytes));
+        self.write("two.hap", &Hap::new().modules_abc(&sample).abc("widgets", &sample).module_json("{}").build());
+        self.write("calls.abc", &call_graph_program().build().bytes);
+        self.write("classes.abc", &class_hierarchy_program().build().bytes);
+        self.write("shop.app", &make_app(&[("entry.hap", &hap), ("feature.hap", &hap)], Compression::Deflated));
+        let encrypted = sample_program().encrypted().build().bytes;
+        let store = Hap::new().modules_abc(&encrypted).abc("widgets", &sample).module_json(SAMPLE_MODULE_JSON).build();
+        // Encrypted code alone, and next to the decrypted file that stands in for it.
+        self.write("store.hap", &store);
+        self.write("store/entry.hap", &store);
+        self.write("store/modules.abc", &sample);
+        // A package that does not open, among others and alone.
+        self.write("pkgs/a.hap", &hap);
+        self.write("pkgs/b.hap", b"PK not a zip");
+        self.write("broken.hap", b"PK not a zip");
+        // A package that cannot be read, among others.
+        self.write("locked/a.hap", &hap);
+        self.write("locked/b.hap", &hap);
+        std::fs::set_permissions(self.work.path().join("locked/b.hap"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Other spellings of a program: its entry is named after the file as given.
+        std::os::unix::fs::symlink("calls.abc", self.work.path().join("link.abc")).unwrap();
+        std::os::unix::fs::symlink("store", self.work.path().join("store-link")).unwrap();
+        // DEX code next to HarmonyOS files stays a DEX program.
+        self.write("mixed/app.apk", &make_apk(&[("classes.dex", &make_dex())], true));
+        self.write("mixed/entry.hap", &hap);
+        self
     }
 
     fn start(&self) -> u32 {
@@ -154,6 +199,271 @@ fn daemon_output_is_byte_identical() {
     // Exit status 2 and 1 came through as well.
     assert_eq!(env.run(true, &["findrefs", "broken.apk", "string", "token"]).status.code(), Some(2));
     assert_eq!(env.run(true, &["getclass", "app.apk", "Lnope/Missing;"]).status.code(), Some(1));
+}
+
+/// The cases of a byte-for-byte comparison: each runs in its own process and
+/// through the daemon.
+fn assert_same_output(env: &Env, cases: &[&[&str]]) {
+    for args in cases {
+        let local = env.run(false, args);
+        let remote = env.run(true, args);
+        assert_eq!(String::from_utf8_lossy(&remote.stdout), String::from_utf8_lossy(&local.stdout), "stdout of {args:?}");
+        assert_eq!(String::from_utf8_lossy(&remote.stderr), String::from_utf8_lossy(&local.stderr), "stderr of {args:?}");
+        assert_eq!(remote.status.code(), local.status.code(), "exit status of {args:?}");
+    }
+}
+
+#[test]
+fn daemon_output_is_byte_identical_for_harmony_programs() {
+    let env = Env::new().with_harmony();
+    env.start();
+    let cases: &[&[&str]] = &[
+        &["listclass", "entry.hap"],
+        &["listclass", "entry.hap", "--all"],
+        &["listclass", "entry.hap", "--prefix", "&entry/src/main/ets/pages"],
+        &["listclass", "two.hap"],
+        &["getclass", "entry.hap", "pages/Index"],
+        &["getclass", "entry.hap", "pages/Index", "--method", "Index.build"],
+        &["getclass", "entry.hap", "pages/Missing"],
+        &["getclass", "two.hap", "pages/Index"],
+        &["getclass", "two.hap", "pages/Index", "--entry", "ets/widgets.abc"],
+        &["getclass", "entry.hap", "pages/Index", "--dump-dex", "x.dex"],
+        &["disassemble", "entry.hap", "pages/Index"],
+        &["findrefs", "entry.hap", "string", "https?://", "--threads", "1"],
+        &["findrefs", "entry.hap", "string", "testTag"],
+        &["findrefs", "entry.hap", "string", "nothing-like-this"],
+        &["findrefs", "entry.hap", "prop", "createHttp", "--exact", "--access", "call"],
+        &["findrefs", "entry.hap", "global", "console", "--exact"],
+        &["findrefs", "entry.hap", "import", "@ohos:net\\.http"],
+        &["findrefs", "entry.hap", "import", ".", "--requests"],
+        &["findrefs", "entry.hap", "method", "Index.build", "--exact"],
+        &["findrefs", "entry.hap", "number", "0x1d4b42"],
+        &["findrefs", "entry.hap", "call", "^import:@ohos:net\\.http"],
+        &["findrefs", "entry.hap", "all", "string:^https://", "call:createHttp"],
+        &["findrefs", "entry.hap", "type", "example.Test"],
+        &["findrefs", "entry.hap", "--context", "2", "string", "testTag"],
+        &["getmanifest", "entry.hap"],
+        &["getmanifest", "entry.hap", "--file", "pack.info"],
+        &["manifest-summary", "entry.hap"],
+        &["manifest-summary", "entry.hap", "--json"],
+        &["hierarchy", "entry.hap", "Index"],
+        &["hierarchy", "entry.hap", "UIAbility", "--method", "onCreate"],
+        &["hierarchy", "two.hap", "EntryAbility", "--supers"],
+        &["hierarchy", "two.hap", "EntryAbility", "--supers", "--entry", "ets/widgets.abc"],
+        &["hierarchy", "classes.abc", "Local"],
+        &["hierarchy", "classes.abc", "Base", "--method", "run"],
+        &["hierarchy", "classes.abc", "pages/App->GrandChild", "--supers", "--method", "run"],
+        &["hierarchy", "classes.abc", "^import:", "--depth", "1", "--max-nodes", "3"],
+        &["hierarchy", "classes.abc", "Card", "--supers"],
+        &["hierarchy", "classes.abc", "Nowhere"],
+        &["hierarchy", "classes.abc", "global:Error", "--supers"],
+        &["hierarchy", "classes.abc", "Local", "--limit", "2"],
+        &["hierarchy", "store.hap", "Index"],
+        &["resources", "entry.hap"],
+        &["resources", "entry.hap", "string/EntryAbility_label"],
+        &["resources", "entry.hap", "16777218", "--resolve"],
+        &["resources", "entry.hap", "--search", "^https?://", "--in", "value"],
+        &["resources", "entry.hap", "--search", ".", "--limit", "3"],
+        &["resources", "entry.hap", "string/nothing"],
+        &["resources", "entry.hap", "--search", "x", "--in", "both"],
+        &["resources", "shop.app", "color/brand"],
+        &["resources", "pkgs", "--search", "label", "--in", "name"],
+        &["resources", "two.hap"],
+        &["resources", "calls.abc"],
+        &["xml", "entry.hap", "$profile:main_pages"],
+        &["xml", "entry.hap", "resources/base/profile/main_pages.json"],
+        &["xml", "entry.hap", "$media:icon"],
+        &["xml", "entry.hap", "res/xml/nothing.xml"],
+        &["xml", "shop.app", "$profile:main_pages"],
+        &["xml", "calls.abc", "module.json"],
+        &["getclass", "entry.hap", "pages/Index", "--res-names"],
+        &["getclass", "labels.hap", "pages/Labels", "--res-names"],
+        &["getclass", "labels.hap", "pages/Labels", "--method", "labels", "--res-names"],
+        &["getmanifest", "entry.hap", "--resolve"],
+        // A bare ABC file; its errors name the path as given.
+        &["listclass", "calls.abc"],
+        &["manifest-summary", "calls.abc"],
+        &["getmanifest", "calls.abc", "--file", "pack.info"],
+        &["callgraph", "calls.abc", "star"],
+        &["callgraph", "calls.abc", "star", "--depth", "3", "--from", "method:=cb"],
+        &["callgraph", "calls.abc", "pages/App", "run", "--callees", "--depth", "1", "--unresolved"],
+        &["callgraph", "calls.abc", "--to", "call:createhttp"],
+        &["callgraph", "calls.abc", "--to", "call:^nothing$"],
+        &["callgraph", "calls.abc", "nope"],
+        &["callgraph", "calls.abc", "star", "--virtual"],
+        // Cut output (the spill file is named by content, so both name the same one).
+        &["listclass", "entry.hap", "--limit", "1"],
+        &["findrefs", "entry.hap", "prop", ".", "--offset", "1", "--max-bytes", "4096"],
+        &["callgraph", "calls.abc", "star", "--limit", "3", "--spill-mb", "0"],
+        // An `.app` (its packages inflated), and encrypted code: left out
+        // (exit status 2), or served from the decrypted file next to it.
+        &["listclass", "shop.app"],
+        &["manifest-summary", "shop.app"],
+        &["findrefs", "shop.app", "string", "testTag"],
+        &["findrefs", "store.hap", "string", "testTag"],
+        &["callgraph", "store.hap", "Index.build", "--callees", "--depth", "1"],
+        &["listclass", "store"],
+        &["findrefs", "store", "string", "testTag"],
+        &["manifest-summary", "store"],
+        // Programs of several files: a directory with a package that does
+        // not open, relative paths joined with commas.
+        &["listclass", "pkgs"],
+        &["findrefs", "entry.hap,calls.abc", "string", "testTag"],
+        &["listclass", "store/modules.abc,two.hap"],
+        &["listclass", "locked"],
+        // A link to a program and a roundabout path: rows name the file as given.
+        &["findrefs", "link.abc", "call", "."],
+        &["findrefs", "calls.abc", "call", "."],
+        &["findrefs", "store/../calls.abc", "call", "."],
+        &["findrefs", "store-link", "string", "testTag"],
+        &["manifest-summary", "store/../link.abc"],
+        // DEX code next to HarmonyOS files: a DEX program, which says so.
+        &["listclass", "mixed"],
+        &["findrefs", "mixed", "string", "token", "--threads", "1"],
+        // Declined by the daemon (the error names the path as given).
+        &["listclass", "missing.hap"],
+        &["listclass", "broken.hap"],
+        &["findrefs", "missing.hap", "--context", "2", "string", "x"],
+    ];
+    let before = env.served();
+    assert_same_output(&env, cases);
+    let served = env.served() - before;
+    assert_eq!(served, cases.len() - 3, "every case but the programs that do not open ran in the daemon:\n{}", env.status());
+    // Exit status 2 and 1 came through as well, and the notes of a program.
+    let partial = env.run(true, &["findrefs", "store.hap", "string", "testTag"]);
+    assert_eq!(partial.status.code(), Some(2), "{partial:?}");
+    assert!(String::from_utf8_lossy(&partial.stderr).contains("is encrypted"), "{partial:?}");
+    assert_eq!(env.run(true, &["getclass", "entry.hap", "pages/Missing"]).status.code(), Some(1));
+    let paired = env.run(true, &["listclass", "store"]);
+    assert!(String::from_utf8_lossy(&paired.stderr).contains("served from the decrypted modules.abc"), "{paired:?}");
+}
+
+/// The resident engine of a HarmonyOS program is not served once a file of
+/// the program changed, appeared or went away.
+#[test]
+fn a_changed_harmony_program_is_opened_again() {
+    let env = Env::new().with_harmony();
+    env.start();
+    let records = |program: &str| {
+        let out = env.run(true, &["listclass", program]);
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let local = |program: &str| String::from_utf8_lossy(&env.run(false, &["listclass", program]).stdout).into_owned();
+    let before = env.served();
+
+    // A file replaced by one of another size.
+    let first = records("entry.hap");
+    assert!(first.contains("pages/Index") && !first.contains("pages/App"), "{first}");
+    env.write("entry.hap", &make_hap(&call_graph_program().build().bytes));
+    let second = records("entry.hap");
+    assert!(second.contains("pages/App") && !second.contains("pages/Index"), "the daemon answered from the replaced file:\n{second}");
+    assert_eq!(second, local("entry.hap"));
+
+    // The same size, a later modification time.
+    let path = env.work.path().join("calls.abc");
+    let warm = records("calls.abc");
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5)).unwrap();
+    drop(file);
+    assert_eq!(records("calls.abc"), warm);
+
+    // A directory: a file appears, then another goes away.
+    let paired = records("store");
+    env.write("store/calls.abc", &call_graph_program().build().bytes);
+    let grown = records("store");
+    assert!(grown.contains("pages/App") && grown != paired, "the daemon did not see the new file:\n{grown}");
+    assert_eq!(grown, local("store"));
+    std::fs::remove_file(env.work.path().join("store/modules.abc")).unwrap();
+    let shrunk = env.run(true, &["listclass", "store"]);
+    let shrunk_local = env.run(false, &["listclass", "store"]);
+    assert_eq!(shrunk.stdout, shrunk_local.stdout);
+    assert_eq!(shrunk.stderr, shrunk_local.stderr, "the encrypted entry has nothing standing in for it now");
+    assert!(String::from_utf8_lossy(&shrunk.stderr).contains("is encrypted"), "{shrunk:?}");
+
+    // DEX code appears next to the packages: a DEX program from then on.
+    assert!(records("pkgs").contains("pages/Index"));
+    env.write("pkgs/app.apk", &make_apk(&[("classes.dex", &make_dex())], true));
+    assert_eq!(records("pkgs"), "Lexample/Test;\n");
+    // And goes away again.
+    std::fs::remove_file(env.work.path().join("pkgs/app.apk")).unwrap();
+    assert_eq!(records("pkgs"), local("pkgs"));
+    assert_eq!(env.served() - before, 10, "every command ran in the daemon:\n{}", env.status());
+}
+
+/// Requests on one HarmonyOS program run side by side on its one engine and
+/// answer as each would alone.
+#[test]
+fn parallel_requests_share_a_harmony_engine() {
+    let env = Env::new().with_harmony();
+    env.start();
+    let cases: &[&[&str]] = &[
+        &["callgraph", "calls.abc", "star"],
+        &["callgraph", "calls.abc", "pages/App", "run", "--callees", "--unresolved"],
+        &["callgraph", "calls.abc", "--to", "call:createhttp"],
+        &["findrefs", "calls.abc", "call", "."],
+        &["listclass", "calls.abc"],
+    ];
+    let expected: Vec<Output> = cases.iter().map(|args| env.run(false, args)).collect();
+    let before = env.served();
+    let rounds = 6;
+    std::thread::scope(|scope| {
+        let env = &env;
+        let clients: Vec<_> =
+            (0..rounds * cases.len()).map(|i| scope.spawn(move || (i % cases.len(), env.run(true, cases[i % cases.len()])))).collect();
+        for client in clients {
+            let (case, out) = client.join().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&expected[case].stdout),
+                "stdout of {:?}",
+                cases[case]
+            );
+            assert_eq!(out.stderr, expected[case].stderr, "stderr of {:?}", cases[case]);
+            assert_eq!(out.status.code(), expected[case].status.code());
+        }
+    });
+    assert_eq!(env.served() - before, rounds * cases.len(), "every request ran in the daemon:\n{}", env.status());
+    let status = env.status();
+    assert!(status.contains(", 1 APKs open, "), "one engine served them all: {status}");
+}
+
+/// What open HarmonyOS programs hold on the heap counts against the memory
+/// budget: beyond their share of it the least recently used one closes, and
+/// opens again when it is named.
+#[test]
+fn harmony_programs_beyond_the_memory_share_close() {
+    let env = Env::new().with_harmony();
+    // 700 KiB of padding in each inner package: held inflated while the
+    // `.app` is open. Two do not fit in half of a 2 MiB budget.
+    let padding: Vec<u8> = (0..700u32 << 10).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    let hap = Hap::new().modules_abc(&make_abc()).module_json(SAMPLE_MODULE_JSON).entry("resources.bin", &padding, Compression::Stored);
+    for name in ["one.app", "two.app"] {
+        env.write(name, &make_app(&[("entry.hap", &hap.build())], Compression::Deflated));
+    }
+    let run = |program: &str| {
+        let out = env.run(true, &["--memory-mb", "2", "listclass", program]);
+        assert!(out.status.success(), "{out:?}");
+        out.stdout
+    };
+    let open = || {
+        let out = env.run(true, &["--memory-mb", "2", "daemon", "status"]);
+        let status = String::from_utf8_lossy(&out.stdout).into_owned();
+        let count = status
+            .lines()
+            .filter(|line| line.contains("memory cache 0 of 2 MiB"))
+            .find_map(|line| line.split(", ").find_map(|part| part.strip_suffix(" APKs open")).and_then(|n| n.parse::<usize>().ok()));
+        count.unwrap_or_else(|| panic!("no daemon with a 2 MiB memory cache in {status:?}"))
+    };
+    let small = run("entry.hap");
+    let one = run("one.app");
+    assert_eq!(open(), 2, "a small program stays open next to a large one");
+    let two = run("two.app");
+    assert_eq!(open(), 2, "the older large program closed");
+    assert_eq!(run("one.app"), one, "a closed program opens again");
+    assert_eq!(open(), 2);
+    assert_eq!(run("entry.hap"), small);
+    assert_eq!(run("two.app"), two);
 }
 
 #[test]

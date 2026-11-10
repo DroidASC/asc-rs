@@ -18,8 +18,13 @@ use std::time::Instant;
 
 /// Rows per rule of a single-APK rule set.
 const RULE_LIMIT: usize = 100;
-const HIERARCHY_DEPTH: usize = 16;
-const HIERARCHY_MAX_NODES: usize = 500;
+pub(crate) const HIERARCHY_DEPTH: usize = 16;
+pub(crate) const HIERARCHY_MAX_NODES: usize = 500;
+/// `direction` of the hierarchy tool, with the other spellings models use.
+pub(crate) const HIERARCHY_DIRECTIONS: &[(&str, &[&str])] = &[
+    ("subclasses", &["subclass", "children", "descendants", "implementers", "down"]),
+    ("supers", &["super", "superclasses", "supertypes", "parents", "ancestors", "up"]),
+];
 
 /// One condition: an object as for one query, or a `KIND:VALUE` string as
 /// the CLI takes them (`"method:android.webkit.WebView->loadUrl"`).
@@ -324,12 +329,9 @@ impl Server {
 
     pub(crate) fn hierarchy(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
+        crate::harmony::refuse_on_dex(args, "entry", "")?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("hierarchy needs `class`".into()))?;
-        const CHOICES: &[(&str, &[&str])] = &[
-            ("subclasses", &["subclass", "children", "descendants", "implementers", "down"]),
-            ("supers", &["super", "superclasses", "supertypes", "parents", "ancestors", "up"]),
-        ];
-        let direction = match choice_arg(args, "direction", "subclasses", CHOICES)? {
+        let direction = match choice_arg(args, "direction", "subclasses", HIERARCHY_DIRECTIONS)? {
             "subclasses" => Lineage::Subclasses,
             _ => Lineage::Supers,
         };

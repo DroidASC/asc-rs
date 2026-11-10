@@ -1,5 +1,6 @@
-//! A per-user daemon that keeps opened APKs resident, so a one-shot command
-//! answers from warm caches instead of loading the APK again.
+//! A per-user daemon that keeps opened programs resident (APKs and their
+//! like, HarmonyOS packages), so a one-shot command answers from warm caches
+//! instead of loading the program again.
 //!
 //! The daemon is only an accelerator: it holds no session state, and a
 //! command it runs prints byte for byte what the process would have printed
@@ -8,7 +9,7 @@
 //!
 //! * not forwarded at all: `--debug` (timings), `--no-cache`, and the
 //!   resident or maintenance commands (`mcp`, `cache`, `daemon`);
-//! * declined: arguments the daemon cannot parse, an APK it cannot open
+//! * declined: arguments the daemon cannot parse, a program it cannot open
 //!   (the error names the path as given, which only the client knows).
 //!
 //! One daemon serves one binary and one cache configuration: the socket name
@@ -24,13 +25,20 @@
 //! command. The daemon exits after `daemon.idle` without requests (as
 //! configured for the command that started it).
 //!
-//! The class graphs and resource tables of the APKs it keeps open count
-//! against the memory budget of its cache, the least recently used APKs
-//! closing beyond their share ([`SharedCache::fit_resident`]).
+//! What the open programs hold outside the cache counts against its memory
+//! budget, the least recently used programs closing beyond their share
+//! ([`SharedCache::fit_resident_bytes`]): the class graphs and resource
+//! tables of DEX programs, the inflated packages and call graph analyses of
+//! HarmonyOS programs ([`asc_mcp::harmony::resident_bytes`]). A HarmonyOS
+//! program is opened again once its files change
+//! ([`asc_ark_engine::Engine::is_current`]); the DEX engine checks the same
+//! on every open of its own.
 
 use crate::output::{Engines, Io};
-use crate::{run_query, Cli, Common};
+use crate::{run_program, Cli, Common};
+use asc_ark_engine::EngineError as HarmonyError;
 use asc_engine::{Busy, Engine, SharedCache};
+use asc_mcp::format::ProgramFormat;
 use clap::Parser;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -56,8 +64,9 @@ pub(crate) const SWITCH_ENV: &str = "ASC_DAEMON";
 const RUNTIME_DIR_ENV: &str = "ASC_RUNTIME_DIR";
 /// How often the daemon checks for idleness.
 const IDLE_POLL: Duration = Duration::from_secs(10);
-/// APKs kept open; the least recently used beyond this is closed. Their
-/// inflated DEX stays in the shared memory cache, under its own budget.
+/// Programs kept open; the least recently used beyond this is closed. The
+/// inflated DEX of an APK stays in the shared memory cache, under its own
+/// budget.
 const MAX_ENGINES: usize = 64;
 /// How long `daemon start` waits for a new daemon's socket.
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -463,36 +472,119 @@ struct Daemon {
     quitting: AtomicBool,
 }
 
+/// A program the daemon keeps open: the engine of its format.
+#[derive(Clone)]
+enum Resident {
+    Android(Arc<Engine>),
+    Harmony(Arc<asc_ark_engine::Engine>),
+}
+
+impl Resident {
+    /// What the program holds outside the memory cache, as the budget counts it.
+    fn resident_bytes(&self) -> usize {
+        match self {
+            Resident::Android(engine) => engine.resident_bytes(),
+            Resident::Harmony(engine) => asc_mcp::harmony::resident_bytes(engine),
+        }
+    }
+}
+
+/// `(program path, threads)`: what names an open program. The path of a DEX
+/// program is canonical. That of a HarmonyOS program is the client's
+/// spelling made absolute: its entries are named after its files as given (a
+/// bare `.abc` by its file name), so a link to it is another program here.
+type ProgramKey = (PathBuf, Option<usize>);
+
 #[derive(Default)]
 struct Pool {
-    /// `(canonical APK path, threads)` -> engine and its last use.
-    engines: HashMap<(PathBuf, Option<usize>), (Arc<Engine>, u64)>,
+    /// The open programs, each with its last use.
+    programs: HashMap<ProgramKey, (Resident, u64)>,
     tick: u64,
+}
+
+impl Pool {
+    fn android_key(common: &Common, path: &Path) -> ProgramKey {
+        (fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()), common.config().fixed_threads())
+    }
+
+    fn harmony_key(common: &Common, path: &Path) -> ProgramKey {
+        (path.to_path_buf(), common.config().fixed_threads())
+    }
+
+    /// The program open under `key`, marked as just used.
+    fn touch(&mut self, key: &ProgramKey) -> Option<Resident> {
+        self.tick += 1;
+        let (program, used) = self.programs.get_mut(key)?;
+        *used = self.tick;
+        Some(program.clone())
+    }
+
+    /// Keep `program` open under `key` (in place of what was), closing the
+    /// least recently used program beyond [`MAX_ENGINES`].
+    fn insert(&mut self, key: ProgramKey, program: Resident) {
+        if self.programs.len() >= MAX_ENGINES && !self.programs.contains_key(&key) {
+            let oldest = self.programs.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.programs.remove(&k);
+            }
+        }
+        self.tick += 1;
+        self.programs.insert(key, (program, self.tick));
+    }
 }
 
 impl Engines for Daemon {
     fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine> {
-        let path = fs::canonicalize(apk_path).unwrap_or_else(|_| apk_path.to_path_buf());
+        let key = Pool::android_key(common, apk_path);
         let mut pool = self.engines.lock().expect("engine pool mutex poisoned");
-        pool.tick += 1;
-        let tick = pool.tick;
-        let key = (path, common.config().fixed_threads());
-        if let Some((engine, used)) = pool.engines.get_mut(&key) {
-            *used = tick;
-            return Arc::clone(engine);
-        }
-        if pool.engines.len() >= MAX_ENGINES {
-            let oldest = pool.engines.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone());
-            if let Some(k) = oldest {
-                pool.engines.remove(&k);
-            }
+        if let Some(Resident::Android(engine)) = pool.touch(&key) {
+            return engine;
         }
         // As `Common::engine`, but on the shared resident cache; its debug
         // output is off (`--debug` is never forwarded).
         let engine =
             Arc::new(Engine::new(&key.0).with_threads(common.config().threads()).with_logger(|_| {}).with_shared_cache(&self.cache));
-        pool.engines.insert(key, (Arc::clone(&engine), tick));
+        pool.insert(key, Resident::Android(Arc::clone(&engine)));
         engine
+    }
+
+    fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, HarmonyError> {
+        let key = Pool::harmony_key(common, path);
+        let open = self.engines.lock().expect("engine pool mutex poisoned").touch(&key);
+        // Unlike the DEX engine, this one reads its files once, when it
+        // opens: one whose files changed since is replaced, and a command
+        // still running on it finishes on the files it mapped.
+        if let Some(Resident::Harmony(engine)) = open {
+            if engine.is_current() {
+                return Ok(engine);
+            }
+        }
+        // Opened outside the pool lock (it checksums the code to pair
+        // decrypted files): other requests go on meanwhile. Two requests
+        // may both open a new program; the later one stays in the pool.
+        let engine = Arc::new(common.harmony_engine(&key.0)?);
+        self.engines.lock().expect("engine pool mutex poisoned").insert(key, Resident::Harmony(Arc::clone(&engine)));
+        Ok(engine)
+    }
+}
+
+/// The engines of one request: the daemon's, with the HarmonyOS program the
+/// request was accepted on (opened, or found current, a moment ago).
+struct Lease<'d> {
+    daemon: &'d Daemon,
+    harmony: Option<Arc<asc_ark_engine::Engine>>,
+}
+
+impl Engines for Lease<'_> {
+    fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine> {
+        self.daemon.engine(common, apk_path)
+    }
+
+    fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, HarmonyError> {
+        match &self.harmony {
+            Some(engine) => Ok(Arc::clone(engine)),
+            None => self.daemon.harmony(common, path),
+        }
     }
 }
 
@@ -595,28 +687,34 @@ impl Daemon {
         }
     }
 
-    /// Close the least recently used APKs whose class graphs and resource
-    /// tables exceed their share of the memory budget ([`SharedCache::fit_resident`]).
+    /// Close the least recently used programs when what the open ones hold
+    /// outside the cache exceeds their share of the memory budget
+    /// ([`SharedCache::fit_resident_bytes`]).
     fn trim_pool(&self) {
         // Sized outside the pool lock: an engine building its class graph
         // holds the graph's lock until done.
         let mut open: Vec<_> = {
             let pool = self.engines.lock().expect("engine pool mutex poisoned");
-            pool.engines.iter().map(|(k, (e, used))| (*used, k.clone(), Arc::clone(e))).collect()
+            pool.programs.iter().map(|(k, (program, used))| (*used, k.clone(), program.clone())).collect()
         };
         open.sort_unstable_by_key(|(used, ..)| std::cmp::Reverse(*used));
-        let engines: Vec<&Engine> = open.iter().map(|(_, _, e)| &**e).collect();
-        let closing = self.cache.fit_resident(&engines);
+        // The program in use stays whatever its size; a HarmonyOS one alone
+        // over the share gives its analyses back first.
+        if let Some((_, _, Resident::Harmony(engine))) = open.first() {
+            asc_mcp::harmony::shed_analyses(engine, self.cache.resident_share());
+        }
+        let sizes: Vec<usize> = open.iter().map(|(_, _, program)| program.resident_bytes()).collect();
+        let closing = self.cache.fit_resident_bytes(&sizes);
         if !closing.is_empty() {
             let mut pool = self.engines.lock().expect("engine pool mutex poisoned");
             for i in closing {
-                pool.engines.remove(&open[i].1);
+                pool.programs.remove(&open[i].1);
             }
         }
     }
 
     fn status(&self) -> String {
-        let open = self.engines.lock().expect("engine pool mutex poisoned").engines.len();
+        let open = self.engines.lock().expect("engine pool mutex poisoned").programs.len();
         format!(
             "pid {}, up {} s, {} requests ({} running), {open} APKs open, memory cache {} of {} MiB ({} MiB reserved for open APKs), {} ({})\n",
             std::process::id(),
@@ -667,18 +765,28 @@ impl Daemon {
             return decline(&stream, "not forwardable");
         }
         // Open failures name the path as given: leave them to the client.
-        let apk = cli.command.apk_path().map(|p| Engine::resolve_path(p, &cwd));
-        if !apk.as_deref().is_some_and(Engine::can_open) {
+        let Some(program) = cli.command.apk_path().map(|p| Engine::resolve_path(p, &cwd)) else {
             return decline(&stream, "APK not readable");
-        }
+        };
+        let format = ProgramFormat::of(&program);
+        let harmony = match format {
+            ProgramFormat::Android if Engine::can_open(&program) => None,
+            ProgramFormat::Android => return decline(&stream, "APK not readable"),
+            ProgramFormat::Harmony => match self.harmony(&cli.common, &program) {
+                Ok(engine) => Some(engine),
+                Err(_) => return decline(&stream, "program not readable"),
+            },
+        };
+        let lease = Lease { daemon: self, harmony };
         let cancel = Arc::new(AtomicBool::new(false));
         watch_disconnect(&stream, Arc::clone(&cancel));
         let frames = Rc::new(RefCell::new(Frames { stream, out: Vec::new(), failed: false }));
         let (mut out, mut err) = (FrameOut(Rc::clone(&frames)), FrameErr(Rc::clone(&frames)));
         let code = {
-            let mut io = Io::new(&mut out, &mut err, self, &cancel).with_cwd(&cwd);
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_query(&mut io, &cli.common, cli.command, Instant::now())));
+            let mut io = Io::new(&mut out, &mut err, &lease, &cancel).with_cwd(&cwd);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_program(&mut io, &cli.common, cli.command, format, Instant::now())
+            }));
             match result {
                 Ok(Ok(code)) => code,
                 Ok(Err(e)) => {

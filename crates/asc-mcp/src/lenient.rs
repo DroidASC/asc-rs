@@ -88,7 +88,16 @@ fn findrefs(args: &mut Map<String, Value>) -> bool {
 fn split_class_member(args: &mut Map<String, Value>) -> bool {
     let class = args.get("class").and_then(Value::as_str).map(str::to_string);
     let method = args.get("method").and_then(Value::as_str).map(str::to_string);
-    let split = |s: &str| s.split_once("->").or_else(|| s.rsplit_once('#')).map(|(c, m)| (c.trim().to_string(), m.trim().to_string()));
+    // A HarmonyOS function name (`#~@0>#build`) is full of `#`: it is no `class#method`. Nor is
+    // a value path (`import:@ohos:app.ability.UIAbility#default`), which stays whole.
+    let split = |s: &str| {
+        let path = s.strip_prefix('^').unwrap_or(s);
+        if path.starts_with("import:") || path.starts_with("global:") {
+            return None;
+        }
+        let hashed = if s.starts_with('#') { None } else { s.rsplit_once('#') };
+        s.split_once("->").or(hashed).map(|(c, m)| (c.trim().to_string(), m.trim().to_string()))
+    };
     match (class, method) {
         (Some(c), None) => match split(&c) {
             Some((c, m)) if !c.is_empty() && !m.is_empty() => {
@@ -161,6 +170,13 @@ mod tests {
         let a = normalize("getclass", &json!({"method": "com.a.B#run"})).unwrap();
         assert_eq!(a, json!({"class": "com.a.B", "method": "run"}));
         assert_eq!(normalize("getclass", &json!({"class": "Lc;", "method": "Lc;->run"})), None);
+        // HarmonyOS: a location comes apart at the arrow, a raw function name stays whole.
+        let a = normalize("callgraph", &json!({"class": "&a/b&->#~@0>#build+0x12"})).unwrap();
+        assert_eq!(a, json!({"class": "&a/b&", "method": "#~@0>#build+0x12"}));
+        assert_eq!(normalize("callgraph", &json!({"class": "#~@0>#build"})), None);
+        assert_eq!(normalize("callgraph", &json!({"method": "#*#run"})), None);
+        assert_eq!(normalize("hierarchy", &json!({"class": "import:@ohos:app.ability.UIAbility#default"})), None);
+        assert_eq!(normalize("hierarchy", &json!({"class": "^global:Error$"})), None);
         let a = normalize("manifest_summary", &json!({"cursor": "100"})).unwrap();
         assert_eq!(a, json!({"offset": 100}));
         assert_eq!(normalize("findrefs", &json!({"cursor": "3:2"})), None);

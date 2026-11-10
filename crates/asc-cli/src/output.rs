@@ -14,9 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-/// Supplies the engine a command runs on.
+/// Supplies the engine a command runs on: the DEX engine or the HarmonyOS
+/// one, by the format of the program ([`asc_mcp::format::ProgramFormat`]).
 pub(crate) trait Engines: Sync {
     fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine>;
+
+    /// The engine of the HarmonyOS program at `path`, opened.
+    fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, asc_ark_engine::EngineError>;
 }
 
 /// A fresh engine per command, as a one-shot process uses.
@@ -25,6 +29,14 @@ pub(crate) struct LocalEngines;
 impl Engines for LocalEngines {
     fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine> {
         Arc::new(common.engine(apk_path))
+    }
+
+    fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, asc_ark_engine::EngineError> {
+        let engine = common.harmony_engine(path).map(Arc::new)?;
+        // The process ends with the command: what the engine kept of its
+        // analyses is left to the exit rather than freed piece by piece.
+        std::mem::forget(Arc::clone(&engine));
+        Ok(engine)
     }
 }
 
@@ -100,9 +112,20 @@ impl<'a> Io<'a> {
     }
 
     pub(crate) fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine> {
+        self.engines.engine(common, &self.program_path(apk_path))
+    }
+
+    /// The engine of the HarmonyOS program at `path`.
+    pub(crate) fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, asc_ark_engine::EngineError> {
+        self.engines.harmony(common, &self.program_path(path))
+    }
+
+    /// `apk_path` as this command's process would open it: each path of a
+    /// program on its own (unlike [`Io::path`]).
+    pub(crate) fn program_path<'p>(&self, apk_path: &'p Path) -> Cow<'p, Path> {
         match self.cwd {
-            Some(cwd) => self.engines.engine(common, &Engine::resolve_path(apk_path, cwd)),
-            None => self.engines.engine(common, apk_path),
+            Some(cwd) => Cow::Owned(Engine::resolve_path(apk_path, cwd)),
+            None => Cow::Borrowed(apk_path),
         }
     }
 

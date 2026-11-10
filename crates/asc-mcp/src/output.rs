@@ -257,7 +257,14 @@ fn spilled(req: &Request<'_>, text: &str, content: &str, path: &Path, mut struct
     let fits = text.len() <= budget && req.mode != Spill::Always;
     let mut out = if fits { text.to_string() } else { head(text, HEAD_BYTES.min(budget)) };
     let lines = content.lines().count();
-    let index = if req.tool == "getclass" { method_index(content) } else { Vec::new() };
+    let (index, indexed) = match req.tool {
+        "getclass" => match method_index(content) {
+            // No smali: the disassembly of a HarmonyOS record.
+            methods if methods.is_empty() => (function_index(content), "functions"),
+            methods => (methods, "methods"),
+        },
+        _ => (Vec::new(), "methods"),
+    };
     out.push_str(&format!(
         "# full output ({lines} lines, {} bytes) in {}; read the lines you need from it (grep / read with an offset)",
         content.len(),
@@ -268,7 +275,7 @@ fn spilled(req: &Request<'_>, text: &str, content: &str, path: &Path, mut struct
     }
     out.push('\n');
     if !index.is_empty() {
-        out.push_str(&format!("# methods in that file ({}), by line:\n", index.len()));
+        out.push_str(&format!("# {indexed} in that file ({}), by line:\n", index.len()));
         for (i, (sig, a, b)) in index.iter().enumerate() {
             let line = format!("#   {a}-{b} {sig}\n");
             if out.len() + line.len() > budget {
@@ -285,7 +292,7 @@ fn spilled(req: &Request<'_>, text: &str, content: &str, path: &Path, mut struct
         o.insert("bytes".into(), json!(content.len()));
         o.insert("truncated".into(), json!(!fits));
         if !index.is_empty() {
-            let index: Vec<Value> = index.iter().map(|(sig, a, b)| json!({"method": sig, "lines": [a, b]})).collect();
+            let index: Vec<Value> = index.iter().map(|(sig, a, b)| json!({"method": raw_name(sig), "lines": [a, b]})).collect();
             o.insert("index".into(), Value::Array(index));
         }
     }
@@ -458,6 +465,28 @@ pub fn method_index(text: &str) -> Vec<(String, usize, usize)> {
     out
 }
 
+/// `(header, first line, last line)` of every `.function` in the disassembly
+/// `text` of a HarmonyOS record, 1-based; the header is `RAW  ; RESTORED`
+/// (see [`raw_name`]). A function runs to the line before the next one (less
+/// the blank lines between them).
+pub fn function_index(text: &str) -> Vec<(String, usize, usize)> {
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if let Some(header) = line.strip_prefix(".function ") {
+            out.push((header.to_string(), i + 1, i + 1));
+        } else if let Some(open) = out.last_mut().filter(|_| !line.trim().is_empty()) {
+            open.2 = i + 1;
+        }
+    }
+    out
+}
+
+/// The raw name of a `.function` header, the one `method` takes back; a
+/// smali signature is its own name.
+fn raw_name(header: &str) -> &str {
+    header.split_once("  ; ").map_or(header, |(raw, _)| raw)
+}
+
 /// How much of the structured result to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Structured {
@@ -520,6 +549,14 @@ mod tests {
     fn method_index_names_line_ranges() {
         let smali = ".class LA;\n\n.method public a()V\n    return-void\n.end method\n\n.method static b(I)I\n    return p0\n.end method\n";
         assert_eq!(method_index(smali), [("a()V".to_string(), 3, 5), ("b(I)I".to_string(), 7, 9)]);
+    }
+
+    #[test]
+    fn function_index_names_line_ranges() {
+        let pasm = ".record &a&\n.field u8 x = 0\n\n.function #~@0>#build  ; Index.build\n; vregs 1\n  0000  lda v0\n\n.function func_main_0\n; vregs 0\n";
+        assert_eq!(function_index(pasm), [("#~@0>#build  ; Index.build".to_string(), 4, 6), ("func_main_0".to_string(), 8, 9)]);
+        assert_eq!((raw_name("#~@0>#build  ; Index.build"), raw_name("a()V")), ("#~@0>#build", "a()V"));
+        assert!(method_index(pasm).is_empty());
     }
 
     #[test]

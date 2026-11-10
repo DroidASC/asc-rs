@@ -16,14 +16,14 @@ const RESOURCES_LIMIT: usize = 200;
 
 /// Which records of a summary to show.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Filter {
+pub(crate) enum Filter {
     All,
     /// Exported components, deep links, non-signature permissions,
     /// cleartext domains and warnings: what an outside app can reach.
     Exported,
 }
 
-fn filter_arg(args: &Value, default: Filter) -> Result<Filter, ToolError> {
+pub(crate) fn filter_arg(args: &Value, default: Filter) -> Result<Filter, ToolError> {
     if str_arg(args, "filter")?.is_none() {
         return Ok(default);
     }
@@ -36,7 +36,7 @@ fn filter_arg(args: &Value, default: Filter) -> Result<Filter, ToolError> {
 
 /// `kind`: record kinds (the first word of a record: `provider`,
 /// `uses-permission`, `deeplink`, ...), as a string (comma separated) or a list.
-fn kinds_arg(args: &Value) -> Result<Vec<String>, ToolError> {
+pub(crate) fn kinds_arg(args: &Value) -> Result<Vec<String>, ToolError> {
     let bad = || ToolError("`kind` must be a record kind (provider, activity, ...) or a list of them".into());
     match args.get("kind") {
         None | Some(Value::Null) => Ok(Vec::new()),
@@ -48,7 +48,7 @@ fn kinds_arg(args: &Value) -> Result<Vec<String>, ToolError> {
 
 /// `name`: a case-insensitive regex over the record (plain text when it is
 /// not a valid regex).
-fn name_arg(args: &Value) -> Result<Option<Regex>, ToolError> {
+pub(crate) fn name_arg(args: &Value) -> Result<Option<Regex>, ToolError> {
     let Some(pattern) = str_arg(args, "name")? else { return Ok(None) };
     let re = Regex::new(&format!("(?i){pattern}")).or_else(|_| Regex::new(&format!("(?i){}", regex::escape(pattern))))?;
     Ok(Some(re))

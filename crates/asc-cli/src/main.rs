@@ -2,6 +2,7 @@
 
 #[cfg(unix)]
 mod daemon;
+mod harmony;
 mod output;
 mod settings;
 
@@ -9,6 +10,7 @@ use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::config::Config;
 use asc_engine::{names, CacheConfig, CallQuery, CallRoots, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
 use asc_findrefs::Query;
+use asc_mcp::format::{left_out_note, ProgramFormat};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use output::{Io, LocalEngines, SpillTarget, Window};
 use std::collections::HashMap;
@@ -38,6 +40,12 @@ common:
   *.apk, *.jar, *.zip, *.dex below it) or paths joined with `,`. DEX names then start with
   their archive (services.jar/classes2.dex); archives without classes*.dex are named in a
   `# warning:` line on stderr (deodex them first).
+  HarmonyOS: a .hap / .hsp, an .app, a bare .abc, or a directory / `,` list of them, is
+  answered by listclass, getclass / disassemble, getmanifest, manifest-summary, callgraph and
+  findrefs string / prop / global / import / method / number / call / all. A class is then a record
+  (pages/Index or its full name), --method a function (Index.build or its raw name); the
+  manifest is module.json, each srcEntry joined to its record; an encrypted (app-store)
+  .abc is named on stderr: supply the decrypted file.
   Commands with -o/--output write to stdout when the option is omitted.
   Output is one record per line, columns separated by ` | `; lines starting with `#`
   are headers, totals and hints. --limit / --max-bytes keep stdout short: the whole
@@ -56,6 +64,8 @@ examples:
   asc getmanifest app.apk --resolve
   asc manifest-summary app.apk | grep exported=true
   asc manifest-summary app.apk --json
+  asc manifest-summary entry.hap | grep exported=true
+  asc manifest-summary entry.hap --file pkgContextInfo.json
   asc resources app.apk string/app_name
   asc resources app.apk 0x7f0d0001 --resolve
   asc resources app.apk --search 'https?://' --in value
@@ -86,6 +96,23 @@ examples:
   asc findrefs system/framework impl com.android.internal.telephony.ITelephony
   asc callgraph framework.jar,services.jar,TeleService.apk android.telephony.TelephonyManager getImei
   asc callgraph app.apk --to 'method:java.lang.Runtime->exec' --from 'method:Intent.getStringExtra' --depth 5
+  asc listclass entry.hap --prefix entry/src/main/ets/pages
+  asc getclass entry.hap pages/Index --method Index.build
+  asc findrefs entry.hap string 'https?://'
+  asc findrefs entry.hap prop request --exact --access call
+  asc findrefs entry.hap global console --exact
+  asc findrefs entry.hap import '@ohos:net\\.http#default'
+  asc findrefs entry.hap import '@ohos:' --requests
+  asc findrefs entry.hap method Index.build --exact
+  asc findrefs entry.hap number 0x9e3779b9
+  asc findrefs entry.hap call 'import:@ohos:net\\.http.*\\.request$'
+  asc findrefs entry.hap all 'string:^https?://' 'call:import:@ohos:net\\.http'
+  asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
+  asc callgraph entry.hap '&entry/src/main/ets/pages/Index&->#~@0>#build' --callees --unresolved
+  asc callgraph entry.hap --to 'call:^import:@ohos:net\\.http' --depth 4
+  asc callgraph entry.hap --to 'call:^import:@ohos:net\\.http' --from 'method:=EntryAbility.onCreate' --depth 8
+  asc hierarchy entry.hap 'import:@ohos:app\\.ability\\.UIAbility' --method onCreate
+  asc hierarchy entry.hap EntryAbility --supers
   asc mcp --memory-mb 4096
   asc cache stats
   asc daemon status
@@ -93,7 +120,7 @@ examples:
 exit status:
   0  success
   1  error (bad arguments, unreadable APK, class not found, output not writable, ...)
-  2  findrefs / callgraph finished, but one or more DEX entries could not be searched (details on stderr)
+  2  findrefs / callgraph finished, but one or more DEX (or ABC) entries could not be searched (details on stderr)
 
 Debug output (--debug) goes to stderr so stdout can be redirected.
 On Unix, commands answer through a per-user daemon that keeps APKs resident (same output);
@@ -104,6 +131,24 @@ const EXIT_OK: u8 = 0;
 const RESOURCE_SEARCH_ROWS: usize = 1000;
 /// Exit status when `findrefs` skipped at least one DEX entry.
 const EXIT_PARTIAL: u8 = 2;
+const HARMONY_ONLY_ALL: &str = "--all applies to HarmonyOS programs only (a DEX program has no pseudo records)";
+const HARMONY_ONLY_ENTRY: &str = "--entry applies to HarmonyOS programs only";
+
+/// The error of a findrefs kind or option a DEX program does not have.
+fn harmony_only(what: &str) -> String {
+    format!("{what} applies to HarmonyOS programs only")
+}
+
+/// Run a one-shot command against `io` on the engine of its program's
+/// format: the exit status. `format` is that of the program as `io` opens it
+/// ([`Io::program_path`]). In its own process or in the daemon, a command
+/// runs through here.
+fn run_program(io: &mut Io<'_>, common: &Common, command: Command, format: ProgramFormat, t_start: Instant) -> Result<u8, String> {
+    match format {
+        ProgramFormat::Android => run_query(io, common, command, t_start),
+        ProgramFormat::Harmony => harmony::run(io, common, command, t_start),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "asc", about = "Search and disassemble APK code without preprocessing.", after_help = EXAMPLES, version, disable_version_flag = true)]
@@ -227,6 +272,15 @@ impl Common {
         engine
     }
 
+    /// The engine of a HarmonyOS program: opened here, with `--threads` when given.
+    fn harmony_engine(&self, path: &Path) -> Result<asc_ark_engine::Engine, asc_ark_engine::EngineError> {
+        let engine = asc_ark_engine::Engine::open(path)?;
+        Ok(match self.config().fixed_threads() {
+            Some(threads) => engine.with_threads(threads),
+            None => engine,
+        })
+    }
+
     fn disk_cache(&self) -> Option<DiskCache> {
         self.config().disk_cache()
     }
@@ -276,9 +330,15 @@ enum Command {
         #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method_signature: Option<String>,
         /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
+        /// HarmonyOS: `# type/name "value"` after the instruction that creates
+        /// a `$r('app.type.name')` object (from resources.index).
         #[arg(long)]
         res_names: bool,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// HarmonyOS: take the record from this ABC entry (ets/modules.abc), when
+        /// several define it.
+        #[arg(long, value_name = "NAME")]
+        entry: Option<String>,
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
         dalvik_class: String,
@@ -296,12 +356,18 @@ enum Command {
         #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method_signature: Option<String>,
         /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
+        /// HarmonyOS: `# type/name "value"` after the instruction that creates
+        /// a `$r('app.type.name')` object (from resources.index).
         #[arg(long)]
         res_names: bool,
         /// Write the rebuilt single-class DEX to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// HarmonyOS: take the record from this ABC entry (ets/modules.abc), when
+        /// several define it.
+        #[arg(long, value_name = "NAME")]
+        entry: Option<String>,
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Class name in dotted or Dalvik form, e.g. com.poc.Main or Lcom/poc/Main;.
         dalvik_class: String,
@@ -312,13 +378,19 @@ enum Command {
         /// Only list classes with this package/class prefix (e.g., com.poc or Lcom/poc).
         #[arg(long)]
         prefix: Option<String>,
+        /// HarmonyOS: also list the pseudo records (compiler annotations,
+        /// system module placeholders).
+        #[arg(long)]
+        all: bool,
         /// Write class names to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
     /// Decode AndroidManifest.xml from APK and print it as XML.
+    ///
+    /// HarmonyOS: module.json of each package, re-indented.
     #[command(visible_alias = "manifest")]
     Getmanifest {
         /// Also write the decoded manifest to this file.
@@ -327,13 +399,27 @@ enum Command {
         /// Show resource references (@7F0C0001) by name, from resources.arsc.
         #[arg(short, long)]
         resolve: bool,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// HarmonyOS: print this document instead of module.json: pack.info
+        /// or pkgContextInfo.json.
+        #[arg(long, value_name = "NAME")]
+        file: Option<String>,
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
     /// Summarize the manifest's attack surface, one record per line:
     /// package, application flags, permissions, components (exported or not,
     /// and why), intent filters, deep links, FileProvider paths, network
     /// security config. References are resolved through resources.arsc.
+    ///
+    /// HarmonyOS: module.json and pack.info of each package: bundle, module,
+    /// permissions, each ability / extension (exported or not, and whether
+    /// the manifest says so), skills, deep links. The module, ability and
+    /// extension lines end with `record=NAME`, the record compiled from
+    /// their srcEntry (a name getclass takes), or `record=- (why)`; a
+    /// `callbacks` line lists the record's functions named onXxx. A
+    /// `$type:name` reference is followed by what it stands for in
+    /// resources.index: `label=$string:app_name("Shop")`,
+    /// `pages=$profile:main_pages(resources/base/profile/main_pages.json)`.
     #[command(alias = "manifest_summary")]
     ManifestSummary {
         /// Print JSON instead of lines.
@@ -342,13 +428,25 @@ enum Command {
         /// Also write the output to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// HarmonyOS: summarize this document only: module.json, pack.info,
+        /// or pkgContextInfo.json (the package table, one line per package
+        /// with the number of records it has in the code).
+        #[arg(long, value_name = "NAME")]
+        file: Option<String>,
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
     /// Query resources.arsc: one line per resource and configuration,
     /// `0x7f0d0001 string/app_name [zh-rCN] "value"`.
     ///
     /// With no QUERY and no --search, dumps the whole table.
+    ///
+    /// HarmonyOS: resources.index of each package, rows
+    /// `0x01000000 string/app_name [zh_CN] "value"` (`[base]`: the default
+    /// value, listed first), starting with `PACKAGE | ` in a program of
+    /// several packages. The id is what compiled `$r(...)` objects carry
+    /// (`findrefs number ID`); code that looks a resource up by name holds
+    /// `app.type.name` as a string (`findrefs string`).
     Resources {
         /// Search names and string values with this regex.
         #[arg(long, value_name = "REGEX", conflicts_with = "query")]
@@ -365,20 +463,29 @@ enum Command {
         /// Write the output to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// A resource id (0x7f0d0001) or name (string/app_name, @pkg:type/name).
+        /// HarmonyOS: an id in hex or decimal (0x01000003, 16777219) or a name
+        /// (string/app_name, $string:app_name, app.string.app_name).
         query: Option<String>,
     },
     /// Decode any binary XML file of the APK (res/xml/..., layouts) with
     /// resource references shown by name.
+    ///
+    /// HarmonyOS: print a text file of the package as it is: the page list
+    /// and route table module.json names (`$profile:main_pages`,
+    /// `$profile:router_map`), any other profile, a rawfile.
     Xml {
         /// Also write the decoded XML to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Path inside the APK, e.g. res/xml/network_security_config.xml.
+        /// HarmonyOS: a file resource ($profile:main_pages) or a path inside
+        /// the package (resources/base/profile/main_pages.json; with the
+        /// package ahead of it, entry.hap/resources/..., for one package of several).
         path: String,
     },
     /// Find code references for string/type/method/field across all DEX entries in APK.
@@ -388,8 +495,12 @@ enum Command {
     ///
     /// Field results are labelled `[read]` / `[write]`; `--access read` or
     /// `--access write` keeps only that kind.
+    ///
+    /// HarmonyOS programs take string, prop, global, import, method, number,
+    /// call and all. Rows are `entry | record->function+0xPC | restored name
+    /// | instruction`; the second column is what getclass takes.
     Findrefs {
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// After each result, show the referencing instructions (marked `>`)
         /// with N smali lines around them, and their pc / source line; or
@@ -400,6 +511,8 @@ enum Command {
         #[arg(long, global = true, hide = true)]
         context_method: bool,
         /// For field queries, keep only reads (iget/sget) or writes (iput/sput).
+        /// HarmonyOS: for prop and global, also define (own property
+        /// definitions) and call (the property is called).
         #[arg(long, global = true, value_enum, value_name = "read|write")]
         access: Option<FieldAccessArg>,
         #[command(subcommand)]
@@ -417,6 +530,22 @@ enum Command {
     /// findrefs rule (--to; --from alone walks callees). --to with --from
     /// keeps only the caller paths that start at a --from method (marked
     /// `[from]`); --unless leaves out methods whose code matches a rule.
+    ///
+    /// HarmonyOS: the target is a function, `[RECORD] FUNCTION` or
+    /// `RECORD->FUNCTION` as result rows print it, or `--to call:REGEX`:
+    /// the callers of every callee path the regex matches (the paths of
+    /// `findrefs call`, e.g. 'call:^import:@ohos:net\.http'). `--from
+    /// method:NAME` keeps only the paths from the callers the name
+    /// matches (marked `[from]`); --unless is not supported. A call names
+    /// no callee there, so rows say how each link was made: no mark for a
+    /// proved call, `[new]`, `[this-class]` (this.NAME() matched by name in
+    /// the class of the caller: not guaranteed), `[defines]` (a closure is
+    /// created, not called); callees that are no function of the program
+    /// are leaves: `[external]` (the path starts at an import or a global
+    /// and no function of the program was found for it: system APIs, also
+    /// members of call results) or `[unresolved]` (the callee is a value
+    /// tracking lost); `unresolved=N` counts such call sites of a function.
+    /// A callback the system calls has no callers.
     Callgraph {
         /// Write the tree to this file instead of stdout.
         #[arg(short, long)]
@@ -447,11 +576,26 @@ enum Command {
         /// reached only through it (repeatable).
         #[arg(long, value_name = "RULE")]
         unless: Vec<String>,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// HarmonyOS: leave out the `[defines]` rows (closures a function
+        /// creates, which are not calls) and what is reached only through them.
+        #[arg(long)]
+        no_defines: bool,
+        /// HarmonyOS, with --callees: also list the call sites whose callee
+        /// could not be resolved (`[unresolved]`), not only count them.
+        #[arg(long)]
+        unresolved: bool,
+        /// HarmonyOS: take the root function from this ABC entry
+        /// (ets/modules.abc), when several define it.
+        #[arg(long, value_name = "NAME")]
+        entry: Option<String>,
+        /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
-        /// Declaring class (com.poc.Main or Lcom/poc/Main;).
+        /// Declaring class (com.poc.Main or Lcom/poc/Main;). HarmonyOS: a
+        /// record (pages/Index), or the whole root as result rows print it
+        /// (RECORD->FUNCTION), or a function name alone (Index.build).
         class: Option<String>,
         /// Method name (every overload) or exact signature, e.g. run(I)V.
+        /// HarmonyOS: a function, by its restored (Index.build) or raw name.
         #[arg(requires = "class")]
         method: Option<String>,
     },
@@ -462,6 +606,12 @@ enum Command {
     /// `implements` with --supers), descriptor, defining DEX or `[not in APK]`.
     /// With --method, classes defining it are marked `[defines m(..)V]` and
     /// listed as `override Lsub;->m(..)V dex` lines (`inherited` with --supers).
+    ///
+    /// HarmonyOS: CLASS is a class name (EntryAbility), RECORD->CLASS as rows
+    /// print it, or `import:REGEX` / `global:REGEX` for the subclasses of a
+    /// parent outside the program (import:@ohos:app\.ability\.UIAbility). Rows
+    /// are `RECORD->CONSTRUCTOR | Name`, or a parent's path marked `[external]`
+    /// / `[unresolved]`; --method NAME marks `[defines FUNCTION]`.
     Hierarchy {
         /// Write the tree to this file instead of stdout.
         #[arg(short, long)]
@@ -478,6 +628,9 @@ enum Command {
         /// Mark the classes defining this method: a name or name(params)ret.
         #[arg(long)]
         method: Option<String>,
+        /// HarmonyOS: take the class from this ABC entry (ets/modules.abc).
+        #[arg(long, value_name = "ENTRY")]
+        entry: Option<String>,
         /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Class in dotted or Dalvik form.
@@ -579,13 +732,21 @@ enum StructuredArg {
 enum FieldAccessArg {
     Read,
     Write,
+    /// HarmonyOS only.
+    Define,
+    /// HarmonyOS only.
+    Call,
 }
 
-impl From<FieldAccessArg> for asc_findrefs::FieldAccess {
-    fn from(access: FieldAccessArg) -> Self {
+impl TryFrom<FieldAccessArg> for asc_findrefs::FieldAccess {
+    type Error = String;
+
+    fn try_from(access: FieldAccessArg) -> Result<Self, String> {
         match access {
-            FieldAccessArg::Read => asc_findrefs::FieldAccess::Read,
-            FieldAccessArg::Write => asc_findrefs::FieldAccess::Write,
+            FieldAccessArg::Read => Ok(asc_findrefs::FieldAccess::Read),
+            FieldAccessArg::Write => Ok(asc_findrefs::FieldAccess::Write),
+            FieldAccessArg::Define => Err(harmony_only("--access define")),
+            FieldAccessArg::Call => Err(harmony_only("--access call")),
         }
     }
 }
@@ -697,6 +858,89 @@ enum Find {
         /// The rules.
         rules: Vec<String>,
     },
+    /// HarmonyOS: find property accesses by name (`obj.NAME`, `this.NAME`,
+    /// `obj.NAME(...)`), labelled `[read]` / `[write]` / `[define]` /
+    /// `[call]`; `--access` keeps one kind.
+    Prop {
+        /// Also write every result to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Match NAME as a plain substring instead of a regex.
+        #[arg(long, conflicts_with = "exact")]
+        literal: bool,
+        /// Match the whole name instead of a regex.
+        #[arg(long)]
+        exact: bool,
+        /// Property name pattern (regex).
+        name: String,
+    },
+    /// HarmonyOS: find reads and writes of global bindings by name
+    /// (`console`, `globalThis.NAME`), labelled `[read]` / `[write]`.
+    Global {
+        /// Also write every result to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Match NAME as a plain substring instead of a regex.
+        #[arg(long, conflicts_with = "exact")]
+        literal: bool,
+        /// Match the whole name instead of a regex.
+        #[arg(long)]
+        exact: bool,
+        /// Global name pattern (regex).
+        name: String,
+    },
+    /// HarmonyOS: find uses of imported bindings: the import declarations of
+    /// each record and the instructions that load the binding.
+    Import {
+        /// Also write every result to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Match REQUEST as a plain substring instead of a regex.
+        #[arg(long)]
+        literal: bool,
+        /// Only the import declarations, one row each; no code is scanned.
+        #[arg(long, conflicts_with = "requests")]
+        decl: bool,
+        /// Only the distinct module requests: `request | N records | imported names`.
+        #[arg(long)]
+        requests: bool,
+        /// REQUEST or REQUEST#NAME: a regex over the module request
+        /// (@ohos:net.http, @normalized:N&&&entry/src/main/ets/pages/Index&),
+        /// then the imported name (default, request; `*` is the namespace).
+        value: String,
+    },
+    /// HarmonyOS: find numeric constants: `ldai`, `fldai` and the numbers of
+    /// array and object literals.
+    Number {
+        /// Also write every result to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// 1919810, -1, 0x1d4b42, 1.5, or a range A..B. A 32-bit value
+        /// with the top bit set also finds its negative spelling
+        /// (0x9e3779b9 finds ldai -1640531527).
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+    },
+    /// HarmonyOS: find call sites by resolved callee path, with the known
+    /// argument values: `callthis1 ... ; import:@ohos:net.http#default.createHttp("...")`.
+    ///
+    /// The callee is tracked inside a basic block. Paths start with
+    /// import:REQUEST#NAME, global:NAME, globalThis, this, super, local:FUNCTION
+    /// (defined here), module:NAME (module-level binding); where tracking
+    /// stops they say why: lex(LEVEL,SLOT) is a captured variable, argN a
+    /// parameter, expr a computed value, `?` a value set in another block.
+    /// `X().member` is a member of what calling X returned:
+    /// import:@ohos:net.http#default.createHttp().request.
+    Call {
+        /// Also write every result to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Match PATH as a plain substring instead of a regex.
+        #[arg(long)]
+        literal: bool,
+        /// Callee path pattern (regex), e.g. 'import:@ohos:net\.http.*\.request$'.
+        path: String,
+    },
     /// Find references to fields.
     Field {
         /// Also write every result to this file.
@@ -715,6 +959,32 @@ enum Find {
         #[arg(long)]
         exact: bool,
     },
+}
+
+impl Find {
+    /// The kind, when only a HarmonyOS program has it: the subcommand, or
+    /// the first such `KIND:` among the conditions of `all`.
+    fn harmony_only(&self) -> Option<&'static str> {
+        const CONDITIONS: [&str; 5] = ["prop:", "global:", "import:", "number:", "call:"];
+        match self {
+            Find::Prop { .. } => Some("prop"),
+            Find::Global { .. } => Some("global"),
+            Find::Import { .. } => Some("import"),
+            Find::Number { .. } => Some("number"),
+            Find::Call { .. } => Some("call"),
+            Find::All { none, conditions, .. } => {
+                let mut specs = conditions.iter().chain(none).map(|spec| spec.strip_prefix('!').unwrap_or(spec));
+                specs.find_map(|spec| CONDITIONS.into_iter().find(|kind| spec.starts_with(kind)))
+            }
+            Find::String { .. }
+            | Find::Type { .. }
+            | Find::Extends { .. }
+            | Find::Impl { .. }
+            | Find::Method { .. }
+            | Find::Rules { .. }
+            | Find::Field { .. } => None,
+        }
+    }
 }
 
 /// `findrefs rules`: every rule in one pass, rows prefixed `rN | `.
@@ -868,6 +1138,8 @@ struct ClassArgs {
     dump_dex: Option<PathBuf>,
     method_signature: Option<String>,
     res_names: bool,
+    /// `--entry`: the ABC entry of a HarmonyOS program to look in.
+    entry: Option<String>,
     apk_path: PathBuf,
     dalvik_class: String,
 }
@@ -903,6 +1175,9 @@ fn class_methods(
 }
 
 fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), String> {
+    if args.entry.is_some() {
+        return Err(HARMONY_ONLY_ENTRY.into());
+    }
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = io.engine(common, &args.apk_path);
     let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
@@ -948,19 +1223,25 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
         for note in io.engine(common, apk_path).program_notes() {
             io.note(format_args!("# warning: {note}"));
         }
+        if let Some(note) = left_out_note(&io.program_path(apk_path)) {
+            io.note(format_args!("# warning: {note}"));
+        }
     }
     match command {
-        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
-            let args =
-                ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class };
+        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class } => {
+            let debug_info = !no_debug_info;
+            let args = ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class };
             getclass(io, common, args, t_start)?;
         }
-        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, apk_path, dalvik_class } => {
-            let args =
-                ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, res_names, apk_path, dalvik_class };
+        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, entry, apk_path, dalvik_class } => {
+            let debug_info = debuginfo;
+            let args = ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class };
             getclass(io, common, args, t_start)?;
         }
-        Command::Listclass { prefix, output, apk_path } => {
+        Command::Listclass { prefix, all, output, apk_path } => {
+            if all {
+                return Err(HARMONY_ONLY_ALL.into());
+            }
             let classes = io.engine(common, &apk_path).list_classes(prefix.as_deref()).map_err(|e| e.to_string())?;
             let mut text = String::with_capacity(classes.iter().map(|c| c.descriptor.len() + 1).sum());
             for c in &classes {
@@ -981,7 +1262,10 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
             }
         }
-        Command::Getmanifest { output, resolve, apk_path } => {
+        Command::Getmanifest { output, resolve, file, apk_path } => {
+            if file.is_some() {
+                return Err(harmony_only("--file"));
+            }
             let engine = io.engine(common, &apk_path);
             let xml = if resolve { engine.manifest_xml_resolved() } else { engine.manifest_xml() }.map_err(|e| e.to_string())?;
             io.write_output(output.as_ref(), &xml)?;
@@ -990,7 +1274,10 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
             }
         }
-        Command::ManifestSummary { json, output, apk_path } => {
+        Command::ManifestSummary { json, output, file, apk_path } => {
+            if file.is_some() {
+                return Err(harmony_only("--file"));
+            }
             let summary = io.engine(common, &apk_path).manifest_summary().map_err(|e| e.to_string())?;
             let text = if json { format!("{:#}", summary.json()) } else { summary.lines().join("\n") };
             io.write_output(output.as_ref(), &text)?;
@@ -1044,6 +1331,9 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 (None, true) => RefContext::Method,
                 (None, false) => RefContext::None,
             };
+            if let Some(kind) = find.harmony_only() {
+                return Err(harmony_only(&format!("findrefs {kind}")));
+            }
             if access.is_some() && !matches!(&find, Find::Field { .. }) {
                 return Err("--access is only valid for `findrefs field`".into());
             }
@@ -1052,6 +1342,9 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             }
             let (query, output) = match find {
                 Find::Rules { .. } => unreachable!("handled above"),
+                Find::Prop { .. } | Find::Global { .. } | Find::Import { .. } | Find::Number { .. } | Find::Call { .. } => {
+                    unreachable!("handled above")
+                }
                 Find::All { output, none, conditions } => {
                     // `!COND` among the conditions is one more --none.
                     let (excluded, conditions): (Vec<String>, Vec<String>) = conditions.into_iter().partition(|c| c.starts_with('!'));
@@ -1091,7 +1384,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                     let field = names::member_query("field", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
                         .map_err(|e| e.to_string())?;
                     let query = match access {
-                        Some(access) => Query::FieldAccess { field, access: access.into() },
+                        Some(access) => Query::FieldAccess { field, access: access.try_into()? },
                         None => Query::Field(field),
                     };
                     (query, output)
@@ -1160,7 +1453,31 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 return Ok(EXIT_PARTIAL);
             }
         }
-        Command::Callgraph { output, callees, depth, max_nodes, virtual_calls, to, from, unless, apk_path, class, method } => {
+        Command::Callgraph {
+            output,
+            callees,
+            depth,
+            max_nodes,
+            virtual_calls,
+            to,
+            from,
+            unless,
+            no_defines,
+            unresolved,
+            entry,
+            apk_path,
+            class,
+            method,
+        } => {
+            if no_defines {
+                return Err(harmony_only("--no-defines"));
+            }
+            if unresolved {
+                return Err(harmony_only("--unresolved"));
+            }
+            if entry.is_some() {
+                return Err(HARMONY_ONLY_ENTRY.into());
+            }
             let target = match (class, method, to) {
                 (None, None, None) => None,
                 (None, None, Some(to)) => Some(CallRoots::Matching(io.rule(&to)?)),
@@ -1191,7 +1508,10 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 return Ok(EXIT_PARTIAL);
             }
         }
-        Command::Hierarchy { output, supers, depth, max_nodes, method, apk_path, class } => {
+        Command::Hierarchy { output, supers, depth, max_nodes, method, entry, apk_path, class } => {
+            if entry.is_some() {
+                return Err(HARMONY_ONLY_ENTRY.into());
+            }
             let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
             let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
             let q = HierarchyQuery { class, direction, depth, max_nodes, method };
@@ -1267,7 +1587,9 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
             let cancel = AtomicBool::new(false);
             let mut io = Io::new(&mut out, &mut err, &LocalEngines, &cancel);
-            return run_query(&mut io, &common, command, t_start);
+            // A command without a program is none of these.
+            let format = command.apk_path().map_or(ProgramFormat::Android, ProgramFormat::of);
+            return run_program(&mut io, &common, command, format, t_start);
         }
     }
     Ok(EXIT_OK)
@@ -1303,6 +1625,8 @@ fn main() -> ExitCode {
         eprintln!("Error: {e}");
         return ExitCode::from(1);
     }
+    // The daemon keeps programs of either format resident and tells them
+    // apart itself; only a command that runs here looks at the format.
     #[cfg(unix)]
     if let Some(code) = daemon::forward(&cli) {
         return ExitCode::from(code);

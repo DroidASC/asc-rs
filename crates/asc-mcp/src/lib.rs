@@ -28,10 +28,16 @@
 //!
 //! The class graphs and resource tables of the open APKs count against the
 //! memory budget: beyond their share the least recently used APKs close
-//! ([`SharedCache::fit_resident`]). Their `apk_id`s stay valid; the next call
+//! ([`SharedCache::fit_resident_bytes`]). Their `apk_id`s stay valid; the next call
 //! naming one opens the APK again.
+//!
+//! A HarmonyOS program (`.hap` / `.hsp` / `.app` / `.abc`) opens the same way
+//! and gets an `apk_id` of the same series; the tools that carry over answer
+//! it from its own engine, the others say what does ([`harmony`]).
 
 pub mod class_text;
+pub mod format;
+pub mod harmony;
 mod lenient;
 pub mod multi;
 pub mod output;
@@ -44,6 +50,7 @@ use asc_engine::{
 };
 use asc_findrefs::{FieldAccess, Query};
 use class_text::ClassText;
+use format::ProgramFormat;
 use multi::{Report, Reports, Section};
 use output::{SpillDir, Structured, FITTED, FULL};
 use serde_json::{json, Map, Value};
@@ -237,6 +244,26 @@ pub struct OpenApk {
     pub engine: Engine,
     /// [`Sessions::tick`] of its last use.
     used: AtomicU64,
+    /// The note that the HarmonyOS files of the program are not part of it
+    /// ([`format::left_out_note`]).
+    left_out: Option<&'static str>,
+}
+
+/// An open program of either format, for what is the same about them: how
+/// long ago it was used and what it holds in memory.
+enum OpenProgram {
+    Android(Arc<OpenApk>),
+    Harmony(Arc<harmony::Session>),
+}
+
+impl OpenProgram {
+    /// What it holds outside the memory cache, as the budget counts it.
+    fn resident_bytes(&self) -> usize {
+        match self {
+            OpenProgram::Android(apk) => apk.engine.resident_bytes(),
+            OpenProgram::Harmony(program) => harmony::resident_bytes(&program.engine),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -245,6 +272,8 @@ struct Sessions {
     /// APKs closed to keep within the memory budget, by apk_id: a call
     /// naming one opens it again under the same id.
     closed: HashMap<String, PathBuf>,
+    /// The HarmonyOS programs; their ids come from `next_id` too.
+    harmony: harmony::Sessions,
     next_id: usize,
     tick: u64,
 }
@@ -255,6 +284,13 @@ impl Sessions {
         self.tick += 1;
         apk.used.store(self.tick, Ordering::Relaxed);
         Arc::clone(apk)
+    }
+
+    /// [`Sessions::touch`] for a HarmonyOS program.
+    fn touch_harmony(&mut self, program: Arc<harmony::Session>) -> Arc<harmony::Session> {
+        self.tick += 1;
+        program.touch(self.tick);
+        program
     }
 }
 
@@ -352,6 +388,9 @@ impl Server {
     fn register(&self, line: &str) -> Result<(), ToolError> {
         let msg: Value = serde_json::from_str(line)?;
         let args = msg.get("params").and_then(|p| p.get("arguments")).cloned().unwrap_or(Value::Null);
+        if self.harmony_session(&args)?.is_some() {
+            return Ok(());
+        }
         self.resolve(&args).map(drop)
     }
 
@@ -373,7 +412,10 @@ impl Server {
                         within max_bytes (16 KB): beyond it the full output is written to a file whose path the reply \
                         gives (read the lines you need), or with spill=\"never\" paged (page=N). A `more` / `next` hint \
                         is the complete arguments of the next call. Booleans default to false unless described otherwise. A program \
-                        (several archives) whose archives were left out (no dex) names them in `notes`.",
+                        (several archives) whose archives were left out (no dex) names them in `notes`. HarmonyOS: a .hap / \
+                        .hsp / .app / .abc path (or a directory of them) as `apk` works with listclass (records), getclass \
+                        (disassembly), findrefs, callgraph and manifest_summary; the first reply about it lists its abc \
+                        entries and what findrefs and callgraph take there.",
                 }))
             }
             "ping" => Ok(json!({})),
@@ -398,7 +440,10 @@ impl Server {
                 let result = guarded(name, || {
                     let (text, structured) = match str_arg(args, "cursor")? {
                         Some(cursor) => self.more(name, cursor)?,
-                        None => (tool.run)(self, args, call)?,
+                        None => match self.harmony_session(args)? {
+                            Some(program) => harmony::run(&program, name, args, call)?,
+                            None => (tool.run)(self, args, call)?,
+                        },
                     };
                     let (text, structured) = self.with_program_notes(text, structured);
                     output::fit(name, args, text, structured, self.spill.as_ref())
@@ -430,7 +475,8 @@ impl Server {
     fn with_program_notes(&self, mut text: String, mut structured: Value) -> (String, Value) {
         let Some(id) = structured.get("apk_id").and_then(Value::as_str) else { return (text, structured) };
         let Some(apk) = lock(&self.sessions).apks.iter().find(|a| a.id == id).cloned() else { return (text, structured) };
-        let notes = apk.engine.program_notes();
+        let mut notes = apk.engine.program_notes();
+        notes.extend(apk.left_out.map(String::from));
         if notes.is_empty() {
             return (text, structured);
         }
@@ -475,6 +521,66 @@ impl Server {
         Ok(apk)
     }
 
+    /// The HarmonyOS program `args` name by `apk_id` or by `apk` (opened on
+    /// first use, or again when it was closed); `None` for anything else: an
+    /// Android program, many APKs, no program at all.
+    fn harmony_session(&self, args: &Value) -> Result<Option<Arc<harmony::Session>>, ToolError> {
+        let given = |key: &str| !matches!(args.get(key), None | Some(Value::Null));
+        if given("apks") || given("dir") {
+            return Ok(None);
+        }
+        // Held while opening, so two calls naming a new path get one session.
+        let mut sessions = lock(&self.sessions);
+        // What does not read as a program is left to the DEX side to report.
+        let (id, path) = match str_arg(args, "apk_id").ok().flatten() {
+            Some(id) => {
+                if let Some(open) = sessions.harmony.by_id(id).cloned() {
+                    if open.engine.is_current() {
+                        return Ok(Some(sessions.touch_harmony(open)));
+                    }
+                    // Its files changed: the id opens them again below.
+                    sessions.harmony.close(&open);
+                }
+                match sessions.harmony.take_closed(id) {
+                    Some(path) => (Some(id.to_string()), path),
+                    None => return Ok(None),
+                }
+            }
+            None => {
+                let Some(path) = apk_arg(args).ok().flatten().and_then(|path| canonical(&path).ok()) else { return Ok(None) };
+                match sessions.harmony.by_path(&path).cloned() {
+                    Some(open) if open.engine.is_current() => return Ok(Some(sessions.touch_harmony(open))),
+                    // Its files changed: opened again under the id it has.
+                    Some(stale) => {
+                        sessions.harmony.close(&stale);
+                        sessions.harmony.take_closed(&stale.id);
+                        (Some(stale.id.clone()), path)
+                    }
+                    None if sessions.apks.iter().any(|a| a.path == path) || ProgramFormat::of(&path) != ProgramFormat::Harmony => {
+                        return Ok(None);
+                    }
+                    None => (None, path),
+                }
+            }
+        };
+        let reopened = id.is_some();
+        let id = id.unwrap_or_else(|| format!("apk{}", sessions.next_id));
+        let open = match sessions.harmony.open(id.clone(), path.clone(), self.threads, reopened) {
+            Ok(open) => open,
+            Err(e) => {
+                // The id still names the program once its files are back.
+                if reopened {
+                    sessions.harmony.keep_closed(id, path);
+                }
+                return Err(e);
+            }
+        };
+        if !reopened {
+            sessions.next_id += 1;
+        }
+        Ok(Some(sessions.touch_harmony(open)))
+    }
+
     /// The session for `path`, opening it if needed.
     pub fn open_path(&self, path: &Path) -> Result<Arc<OpenApk>, ToolError> {
         let path = canonical(&path.to_string_lossy())?;
@@ -494,39 +600,59 @@ impl Server {
             .with_limits(self.limits)
             .with_shared_cache(&self.cache);
         // Fail now on a file that is not a readable APK, not on the first query.
-        engine.dex_entries()?;
+        // A HarmonyOS program gets here from a call over many APKs only.
+        match engine.dex_entries() {
+            Ok(entries) if !entries.is_empty() => {}
+            _ if ProgramFormat::of(&path) == ProgramFormat::Harmony => return Err(harmony::not_swept()),
+            without_code => drop(without_code?),
+        }
+        let left_out = format::left_out_note(&path);
         let id = id.unwrap_or_else(|| {
             sessions.next_id += 1;
             format!("apk{}", sessions.next_id - 1)
         });
-        let apk = Arc::new(OpenApk { id, path, engine, used: AtomicU64::new(0) });
+        let apk = Arc::new(OpenApk { id, path, engine, used: AtomicU64::new(0), left_out });
         sessions.apks.push(Arc::clone(&apk));
         Ok(sessions.touch(&apk))
     }
 
-    /// Close the least recently used APKs whose class graphs and resource
-    /// tables exceed their share of the memory budget
-    /// ([`SharedCache::fit_resident`]); their apk_ids open them again.
+    /// Close the least recently used programs when what the open ones hold
+    /// outside the cache exceeds their share of the memory budget
+    /// ([`SharedCache::fit_resident_bytes`]): the class graphs and resource
+    /// tables of APKs, the inflated packages and call graph analyses of
+    /// HarmonyOS programs ([`harmony::resident_bytes`]). Their apk_ids open
+    /// them again.
     pub fn trim_sessions(&self) {
         // Sized outside the sessions lock: an engine building its class
         // graph holds the graph's lock until done.
-        let mut open: Vec<_> = lock(&self.sessions).apks.iter().map(|a| (a.used.load(Ordering::Relaxed), Arc::clone(a))).collect();
+        let mut open: Vec<(u64, OpenProgram)> = {
+            let sessions = lock(&self.sessions);
+            let apks = sessions.apks.iter().map(|apk| (apk.used.load(Ordering::Relaxed), OpenProgram::Android(Arc::clone(apk))));
+            let harmony = sessions.harmony.iter().map(|program| (program.used(), OpenProgram::Harmony(Arc::clone(program))));
+            apks.chain(harmony).collect()
+        };
         open.sort_unstable_by_key(|(used, _)| std::cmp::Reverse(*used));
-        let engines: Vec<&Engine> = open.iter().map(|(_, a)| &a.engine).collect();
-        let closing = self.cache.fit_resident(&engines);
+        if let Some((_, OpenProgram::Harmony(program))) = open.first() {
+            harmony::shed_analyses(&program.engine, self.cache.resident_share());
+        }
+        let sizes: Vec<usize> = open.iter().map(|(_, program)| program.resident_bytes()).collect();
+        let closing = self.cache.fit_resident_bytes(&sizes);
         if closing.is_empty() {
             return;
         }
         let mut sessions = lock(&self.sessions);
         for i in closing {
-            let (used, apk) = &open[i];
+            let (used, program) = &open[i];
             // Used again since it was sized: it stays.
-            if apk.used.load(Ordering::Relaxed) != *used {
-                continue;
+            match program {
+                OpenProgram::Android(apk) if apk.used.load(Ordering::Relaxed) == *used => {
+                    sessions.apks.retain(|a| !Arc::ptr_eq(a, apk));
+                    sessions.closed.insert(apk.id.clone(), apk.path.clone());
+                    apk.engine.cancel_prebuild();
+                }
+                OpenProgram::Harmony(program) if program.used() == *used => sessions.harmony.close(program),
+                OpenProgram::Android(_) | OpenProgram::Harmony(_) => {}
             }
-            sessions.apks.retain(|a| !Arc::ptr_eq(a, apk));
-            sessions.closed.insert(apk.id.clone(), apk.path.clone());
-            apk.engine.cancel_prebuild();
         }
     }
 
@@ -646,6 +772,7 @@ impl Server {
     /// for a spill file.
     fn getclass(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
+        harmony::refuse_on_dex(args, "entry", "")?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("getclass needs `class`".into()))?;
         // Off by default: obfuscated APKs carry meaningless `.line`s, and agents
         // turned them off in 259 of 292 getclass calls of the Grok replay.
@@ -754,6 +881,13 @@ impl Server {
 
     fn callgraph(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
+        for arg in ["entry", "unresolved"] {
+            harmony::refuse_on_dex(args, arg, "")?;
+        }
+        // `defines=false` is the value that asks for something.
+        if !matches!(args.get("defines"), None | Some(Value::Null)) {
+            return Err(ToolError("`defines` applies to HarmonyOS programs only".into()));
+        }
         let rule =
             |key: &str| str_arg(args, key)?.map(|r| names::parse_rule(r).map_err(|e| ToolError(format!("`{key}`: {e}")))).transpose();
         let target = match (str_arg(args, "class")?, str_arg(args, "method")?, rule("to")?) {
@@ -919,6 +1053,7 @@ impl Server {
     }
 
     fn listclass(&self, args: &Value, call: &Call) -> ToolResult {
+        harmony::refuse_on_dex(args, "all", " (a DEX program has no pseudo records)")?;
         if let Some(paths) = multi::targets(args)? {
             return self.listclass_many(args, call, &paths);
         }
@@ -1611,6 +1746,7 @@ pub mod defs {
                 "full": {"type": "boolean", "description": "Whole class even over budget, default false."},
                 "debug_info": {"type": "boolean", "description": ".line / .param, default false."},
                 "resource_names": {"type": "boolean", "description": "`# @type/name` after resource ids, default true."},
+                "entry": {"type": "string", "description": "HarmonyOS: the abc entry."},
             })]), "required": ["class"]},
             "outputSchema": shape(&[
                 ("apk_id", "string"), ("class", "string"), ("dex_name", "string"), ("source", "string"), ("warning", "string?"),
@@ -1678,6 +1814,7 @@ pub mod defs {
             "description": "Classes the APK defines, optionally under a prefix. With apks / dir: count and first classes per APK.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "prefix": {"type": "string", "description": "com.a or Lcom/a"},
+                "all": {"type": "boolean", "description": "HarmonyOS: also pseudo records."},
             }), page_props(super::LISTCLASS_LIMIT), many()])},
             "outputSchema": shape_many(&[("apk_id", "string"), ("total", "integer"), ("next_offset", "integer?"), ("classes", "array")]),
         })
@@ -1744,6 +1881,129 @@ mod tests {
         assert_eq!(hierarchy(json!({"apk_id": "apk1", "class": "java.lang.Object"})), "apk1", "reopened under its id");
         server.trim_sessions();
         assert_eq!(open(), ["apk1"]);
+    }
+
+    #[test]
+    fn harmony_programs_beyond_the_open_limit_close_and_reopen_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let abc = asc_fixture::abc::make_abc();
+        let server = Server::new(Options::new(2, false, CacheConfig::default()));
+        let listclass = |args: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "listclass", "arguments": args}});
+            server.handle_line(&line.to_string()).unwrap()["result"].clone()
+        };
+        for i in 1..=9 {
+            let path = dir.path().join(format!("{i}.abc"));
+            std::fs::write(&path, &abc).unwrap();
+            assert_eq!(listclass(json!({"apk": path}))["structuredContent"]["apk_id"], format!("apk{i}"));
+        }
+        let open = || lock(&server.sessions).harmony.open_ids().join(" ");
+        assert_eq!(open(), "apk2 apk3 apk4 apk5 apk6 apk7 apk8 apk9");
+        // The closed program answers under its id again, without a second introduction.
+        let again = listclass(json!({"apk_id": "apk1"}));
+        assert_eq!(again["structuredContent"]["apk_id"], "apk1");
+        assert!(again["content"][0]["text"].as_str().unwrap().starts_with('&'), "{again}");
+        assert_eq!(open(), "apk3 apk4 apk5 apk6 apk7 apk8 apk9 apk1");
+        // Ids go on from where they were.
+        let apk = dir.path().join("a.apk");
+        std::fs::write(&apk, asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_dex())], true)).unwrap();
+        assert_eq!(listclass(json!({"apk": apk}))["structuredContent"]["apk_id"], "apk10");
+        assert_eq!(
+            listclass(json!({"apk_id": "apk404"}))["content"][0]["text"],
+            "Error: no APK with apk_id \"apk404\"; pass `apk` (a path)"
+        );
+    }
+
+    fn call_tool(server: &Server, name: &str, args: Value) -> Value {
+        let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}});
+        server.handle_line(&line.to_string()).unwrap()["result"].clone()
+    }
+
+    #[test]
+    fn a_changed_harmony_program_is_opened_again_under_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modules.abc");
+        std::fs::write(&path, asc_fixture::abc::make_abc()).unwrap();
+        let server = Server::new(Options::new(2, false, CacheConfig::default()));
+        let records = |args: Value| {
+            let reply = call_tool(&server, "listclass", args);
+            assert_eq!(reply["structuredContent"]["apk_id"], "apk1", "{reply}");
+            reply["structuredContent"]["classes"].as_array().unwrap().iter().map(|class| class["class"].to_string()).collect::<String>()
+        };
+        let first = records(json!({"apk": path}));
+        assert!(first.contains("pages/Index") && !first.contains("pages/App"), "{first}");
+        // Replaced by another program: named by path, then by id.
+        std::fs::write(&path, asc_fixture::abc::call_graph_program().build().bytes).unwrap();
+        let second = records(json!({"apk": path}));
+        assert!(second.contains("pages/App") && !second.contains("pages/Index"), "{second}");
+        std::fs::write(&path, asc_fixture::abc::make_abc()).unwrap();
+        assert_eq!(records(json!({"apk_id": "apk1"})), first);
+        assert_eq!(lock(&server.sessions).harmony.open_ids(), ["apk1"]);
+        // Gone, and back: the id still names it.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(call_tool(&server, "listclass", json!({"apk_id": "apk1"}))["isError"], true);
+        std::fs::write(&path, asc_fixture::abc::make_abc()).unwrap();
+        assert_eq!(records(json!({"apk_id": "apk1"})), first);
+    }
+
+    #[test]
+    fn harmony_programs_count_against_the_memory_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let abc = asc_fixture::abc::call_graph_program().build().bytes;
+        let paths: Vec<PathBuf> = (0..2)
+            .map(|i| {
+                let path = dir.path().join(format!("{i}.abc"));
+                std::fs::write(&path, &abc).unwrap();
+                path
+            })
+            .collect();
+        let apk = dir.path().join("a.apk");
+        std::fs::write(&apk, asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true)).unwrap();
+        let walk = |server: &Server, args: Value| {
+            let mut args = args;
+            args["method"] = json!("star");
+            let reply = call_tool(server, "callgraph", args);
+            assert_ne!(reply["isError"], true, "{reply}");
+            reply["structuredContent"]["apk_id"].clone()
+        };
+        let analyses = |server: &Server, id: &str| lock(&server.sessions).harmony.by_id(id).map(|open| open.engine.memory_use().analyses);
+        let open_ids = |server: &Server| {
+            let sessions = lock(&server.sessions);
+            let mut ids: Vec<String> =
+                sessions.apks.iter().map(|a| a.id.clone()).chain(sessions.harmony.open_ids().iter().map(|id| id.to_string())).collect();
+            ids.sort();
+            ids
+        };
+
+        // A one-byte memory cache: room for nothing but the program used last.
+        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 1, ..CacheConfig::default() }));
+        call_tool(&server, "hierarchy", json!({"apk": apk, "class": "java.lang.Object"}));
+        walk(&server, json!({"apk": paths[0]}));
+        walk(&server, json!({"apk": paths[1]}));
+        server.trim_sessions();
+        assert_eq!(open_ids(&server), ["apk3"], "the APK and the older HarmonyOS program closed");
+        assert!(server.cache.memory_reserved() > 0, "what the open program holds is reserved");
+        assert_eq!(walk(&server, json!({"apk_id": "apk2"})), "apk2", "reopened under its id");
+        server.trim_sessions();
+        assert_eq!(open_ids(&server), ["apk2"]);
+
+        // A budget the mapped code fits in but not the analyses of a walk:
+        // the program used last stays open and gives them back.
+        let held = harmony::resident_bytes(&asc_ark_engine::Engine::open(&paths[0]).unwrap());
+        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 2 * held + 64, ..CacheConfig::default() }));
+        walk(&server, json!({"apk": paths[0]}));
+        assert!(analyses(&server, "apk1").unwrap() > 64);
+        server.trim_sessions();
+        assert_eq!(analyses(&server, "apk1"), Some(0));
+        assert_eq!(walk(&server, json!({"apk_id": "apk1"})), "apk1");
+
+        // Room for all of it: nothing closes, nothing is given back.
+        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() }));
+        walk(&server, json!({"apk": paths[0]}));
+        walk(&server, json!({"apk": paths[1]}));
+        server.trim_sessions();
+        assert_eq!(open_ids(&server), ["apk1", "apk2"]);
+        assert!(analyses(&server, "apk1").unwrap() > 0 && analyses(&server, "apk2").unwrap() > 0);
     }
 
     #[test]

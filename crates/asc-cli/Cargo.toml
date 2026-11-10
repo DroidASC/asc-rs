@@ -12,6 +12,7 @@ name = "asc"
 path = "src/main.rs"
 
 [dependencies]
+asc-ark-engine.workspace = true
 asc-engine.workspace = true
 asc-findrefs.workspace = true
 asc-mcp.workspace = true

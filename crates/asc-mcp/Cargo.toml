@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "asc-rs MCP server: a resident stdio session that keeps APKs open across getclass / findrefs / listclass / getmanifest calls."
 
 [dependencies]
+asc-ark-engine.workspace = true
 asc-engine.workspace = true
 asc-findrefs.workspace = true
 regex.workspace = true
