@@ -61,6 +61,9 @@ record stays on one line. Row *content* matches the Python ASC semantically
   `memchr` on opcode or high operand bytes, else a table-driven sweep), and every candidate
   is verified by walking instruction lengths from the method start. Methods sharing one
   `code_item` (R8 dedup) are reported together.
+  Field hits retain their opcode-derived access: `iget*` / `sget*` are reads and
+  `iput*` / `sput*` are writes. The access filter is applied while hits are split back to
+  their queries, so single queries, `find_many`, compound rules and rendered caches agree.
 * **Rule sets and compound queries.** `find_many` locates each query on its own, unions the
   sets per index kind and scans each DEX once; `all` / `none` combine per method. A rule set
   loads every entry once and returns one batch per rule.

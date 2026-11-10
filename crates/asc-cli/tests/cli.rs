@@ -1,6 +1,6 @@
 //! End-to-end tests of the `droidasc` binary against a synthetic APK.
 
-use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_dex041_container, make_static_field_dex};
+use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_dex041_container, make_field_access_dex, make_static_field_dex};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -176,7 +176,7 @@ fn exact_flag_matches_whole_member_names() {
         assert!(out.status.success(), "{}", stderr(&out));
         stdout(&out)
     };
-    let hit = "classes.dex | Lexample/Statics;->getSecond()I | Lexample/Statics;->SECOND:I\n";
+    let hit = "classes.dex | Lexample/Statics;->getSecond()I | Lexample/Statics;->SECOND:I [read]\n";
     assert_eq!(run(&["SECON"]), hit);
     assert_eq!(run(&["SECOND", "--exact"]), hit);
     assert_eq!(run(&["SECOND", "--exact", "--class", "example.Statics"]), hit);
@@ -184,6 +184,44 @@ fn exact_flag_matches_whole_member_names() {
     for args in [&["SECON", "--exact"][..], &["SECON", "--exact", "--class", "example.Statics"], &["SEC.ND", "--exact"]] {
         assert_eq!(run(args), "", "{args:?}");
     }
+}
+
+#[test]
+fn field_access_is_printed_and_filterable() {
+    let dex = make_field_access_dex();
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex)], false));
+    let p = path(apk.path());
+    let run = |access: Option<&str>| {
+        let mut args = vec!["findrefs", p, "field", "Lexample/Fields;->value:I"];
+        if let Some(access) = access {
+            args.extend_from_slice(&["--access", access]);
+        }
+        let out = droidasc(&args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    let prefix = "classes.dex | Lexample/Fields;->touch()V | Lexample/Fields;->value:I";
+    assert_eq!(run(None), format!("{prefix} [read], Lexample/Fields;->value:I [write]\n"));
+    assert_eq!(run(Some("read")), format!("{prefix} [read]\n"));
+    assert_eq!(run(Some("write")), format!("{prefix} [write]\n"));
+    let before = droidasc(&["findrefs", p, "--access", "read", "field", "Lexample/Fields;->value:I"]);
+    assert!(before.status.success(), "{}", stderr(&before));
+    assert_eq!(stdout(&before), format!("{prefix} [read]\n"));
+
+    let context = droidasc(&["findrefs", p, "field", "Lexample/Fields;->value:I", "--context", "0"]);
+    let text = stdout(&context);
+    assert!(text.contains("pc 0x0 read") && text.contains("pc 0x2 write"), "{text}");
+
+    let bad = droidasc(&["findrefs", p, "field", "value", "--access", "execute"]);
+    assert!(!bad.status.success());
+    assert!(stderr(&bad).contains("invalid value 'execute'"), "{}", stderr(&bad));
+    let wrong_kind = droidasc(&["findrefs", p, "--access", "read", "string", "value"]);
+    assert_eq!(wrong_kind.status.code(), Some(1));
+    assert!(stderr(&wrong_kind).contains("only valid for `findrefs field`"), "{}", stderr(&wrong_kind));
+
+    let help = droidasc(&["findrefs", "--help"]);
+    assert!(help.status.success());
+    assert!(stdout(&help).contains("--access <read|write>"), "{}", stdout(&help));
 }
 
 #[test]

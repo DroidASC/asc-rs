@@ -1,6 +1,6 @@
 use asc_dex::Dex;
 use asc_findrefs::{ClassQuery, CompiledQuery, FindRefs, IdxSet, InsnLocator, MemberQuery, MethodRef, Query, RefKind, StringLocator};
-use asc_fixture::{make_dex, make_static_field_dex};
+use asc_fixture::{make_dex, make_field_access_dex, make_static_field_dex};
 use std::collections::BTreeSet;
 
 fn u32_at(b: &[u8], o: usize) -> u32 {
@@ -574,6 +574,47 @@ fn find_many_matches_one_search_per_query() {
         assert_eq!(many[i], FindRefs::new(&dex).find_ref_compiled(q).unwrap(), "{:?}", queries[i]);
     }
     assert!(!many[0].is_empty() && !many[3].is_empty() && !many[5].is_empty());
+}
+
+#[test]
+fn field_access_is_reported_and_filters_each_site() {
+    use asc_findrefs::FieldAccess::{Read, Write};
+
+    let data = make_field_access_dex();
+    let dex = Dex::with_name(&data, "fields.dex").unwrap();
+    let fr = FindRefs::new(&dex);
+    let member = |name: &str| MemberQuery {
+        class: Some(ClassQuery { pattern: "Lexample/Fields;".into(), precise: true }),
+        name: Some(name.into()),
+        exact_name: true,
+        signature: None,
+    };
+    let check = |name: &str| {
+        let field = member(name);
+        let all = fr.find_ref(&Query::Field(field.clone())).unwrap();
+        let reads = fr.find_ref(&Query::FieldAccess { field: field.clone(), access: Read }).unwrap();
+        let writes = fr.find_ref(&Query::FieldAccess { field, access: Write }).unwrap();
+        assert_eq!(all.len(), 2, "{name}");
+        assert_eq!(all.iter().map(|h| h.field_access).collect::<Vec<_>>(), [Some(Read), Some(Write)], "{name}");
+        assert_eq!(reads.len(), 1, "{name}");
+        assert_eq!(reads[0].field_access, Some(Read));
+        assert_eq!(writes.len(), 1, "{name}");
+        assert_eq!(writes[0].field_access, Some(Write));
+        assert_eq!(reads[0].methods, writes[0].methods);
+    };
+    check("value"); // iget / iput
+    check("COUNT"); // sget / sput
+
+    let queries = [
+        Query::Field(member("value")),
+        Query::FieldAccess { field: member("value"), access: Read },
+        Query::FieldAccess { field: member("value"), access: Write },
+    ];
+    let compiled: Vec<CompiledQuery> = queries.iter().map(|q| CompiledQuery::new(q).unwrap()).collect();
+    let many = fr.find_many(&compiled.iter().collect::<Vec<_>>()).unwrap();
+    assert_eq!(many[0].len(), 2);
+    assert_eq!(many[1][0].field_access, Some(Read));
+    assert_eq!(many[2][0].field_access, Some(Write));
 }
 
 #[test]

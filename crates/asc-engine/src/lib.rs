@@ -58,7 +58,7 @@ pub use asc_apk::archive_of;
 pub use asc_apk::Limits as InflateLimits;
 pub use asc_arsc;
 pub use asc_cache;
-pub use asc_findrefs::{ClassQuery, ClassRelation, MemberQuery};
+pub use asc_findrefs::{ClassQuery, ClassRelation, FieldAccess, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use budget::{available_memory, total_memory, Device, MemoryPolicy};
 pub use callgraph::{CallQuery, CallRoots, CallRow, CallTree, Direction};
@@ -162,6 +162,8 @@ pub struct RefSite {
     pub offset: u32,
     /// Index into the row's `matched` of the constant it references.
     pub matched: usize,
+    /// Whether this site reads or writes a field. `None` for other queries.
+    pub field_access: Option<FieldAccess>,
     /// Code units from the start of the method's code (filled with a context).
     pub pc: Option<u32>,
     /// Source line from the debug info (filled with a context, when known).
@@ -201,13 +203,23 @@ pub enum Matched {
     String(String),
     /// A type descriptor, `Lcls;->name(params)ret` or `Lcls;->name:type`.
     Symbol(String),
+    /// A field symbol and how its instruction uses it.
+    Field { symbol: String, access: FieldAccess },
 }
 
 impl Matched {
     /// The string value or the symbol, unquoted.
     pub fn as_str(&self) -> &str {
         match self {
-            Matched::String(s) | Matched::Symbol(s) => s,
+            Matched::String(s) | Matched::Symbol(s) | Matched::Field { symbol: s, .. } => s,
+        }
+    }
+
+    /// The field access represented by this match.
+    pub fn field_access(&self) -> Option<FieldAccess> {
+        match self {
+            Matched::Field { access, .. } => Some(*access),
+            _ => None,
         }
     }
 }
@@ -219,6 +231,7 @@ impl std::fmt::Display for Matched {
         match self {
             Matched::String(s) => f.write_str(&text::quoted(s)),
             Matched::Symbol(s) => f.write_str(s),
+            Matched::Field { symbol, access } => write!(f, "{symbol} [{}]", access.as_str()),
         }
     }
 }
@@ -2205,8 +2218,11 @@ fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEnt
 
 /// The constant a hit matched, with the note of a call-site constraint
 /// (`Lc;->m(I)V [arg0=1]`) when it has one.
-fn hit_matched(dex: &Dex<'_>, kind: RefKind, idx: u32, note: Option<&str>) -> Result<Matched> {
+fn hit_matched(dex: &Dex<'_>, kind: RefKind, idx: u32, note: Option<&str>, access: Option<FieldAccess>) -> Result<Matched> {
     let m = matched_name(dex, kind, idx)?;
+    if let (RefKind::Field, Some(access)) = (kind, access) {
+        return Ok(Matched::Field { symbol: m.as_str().to_string(), access });
+    }
     Ok(match note {
         Some(note) => Matched::Symbol(format!("{} {note}", m.as_str())),
         None => m,
@@ -2314,21 +2330,21 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
         let mut out = Vec::new();
         for hit in hits {
             let Some(methods) = &hit.methods else { continue };
-            let matched = hit_matched(dex, kind, hit.matched_idx, hit.note.as_deref())?;
+            let matched = hit_matched(dex, kind, hit.matched_idx, hit.note.as_deref(), hit.field_access)?;
             for &m in methods.ids() {
-                let site = RefSite { offset: hit.offset, matched: 0, pc: None, line: None };
+                let site = RefSite { offset: hit.offset, matched: 0, field_access: hit.field_access, pc: None, line: None };
                 out.push(RefResult::method_row(dex, m, vec![matched.clone()], vec![site])?);
             }
         }
         return Ok(out);
     }
-    // method -> (matched (index, note)s, (offset, matched (index, note)) per hit)
-    type Key<'h> = (u32, Option<&'h str>);
+    // method -> (matched (index, note, access)s, (offset, matched key) per hit)
+    type Key<'h> = (u32, Option<&'h str>, Option<FieldAccess>);
     type Group<'h> = (std::collections::BTreeSet<Key<'h>>, Vec<(u32, Key<'h>)>);
     let mut grouped: BTreeMap<u32, Group<'_>> = BTreeMap::new();
     for hit in hits {
         let Some(methods) = &hit.methods else { continue };
-        let key = (hit.matched_idx, hit.note.as_deref());
+        let key = (hit.matched_idx, hit.note.as_deref(), hit.field_access);
         for &m in methods.ids() {
             let g = grouped.entry(m).or_default();
             g.0.insert(key);
@@ -2338,10 +2354,16 @@ pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: 
     let mut out = Vec::with_capacity(grouped.len());
     for (m, (idxs, offsets)) in grouped {
         let idxs: Vec<Key<'_>> = idxs.into_iter().collect();
-        let matched = idxs.iter().map(|&(i, note)| hit_matched(dex, kind, i, note)).collect::<Result<Vec<_>>>()?;
+        let matched = idxs.iter().map(|&(i, note, access)| hit_matched(dex, kind, i, note, access)).collect::<Result<Vec<_>>>()?;
         let sites = offsets
             .into_iter()
-            .map(|(offset, idx)| RefSite { offset, matched: idxs.binary_search(&idx).unwrap_or(0), pc: None, line: None })
+            .map(|(offset, idx)| RefSite {
+                offset,
+                matched: idxs.binary_search(&idx).unwrap_or(0),
+                field_access: idx.2,
+                pc: None,
+                line: None,
+            })
             .collect();
         out.push(RefResult::method_row(dex, m, matched, sites)?);
     }
@@ -2389,6 +2411,9 @@ fn render_context(listing: &asc_smali::MethodListing, sites: &[RefSite], ctx: Re
             (Some(pc), Some(line)) => out.push_str(&format!("pc 0x{pc:x} line {line}")),
             (Some(pc), None) => out.push_str(&format!("pc 0x{pc:x}")),
             _ => out.push_str(&format!("offset 0x{:x}", s.offset)),
+        }
+        if let Some(access) = s.field_access {
+            out.push_str(&format!(" {}", access.as_str()));
         }
     }
     out.push('\n');

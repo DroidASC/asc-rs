@@ -70,6 +70,7 @@ examples:
   droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
   droidasc findrefs app.apk method run --class com.poc.Main --exact
   droidasc findrefs app.apk field apiKey -o field_refs.txt
+  droidasc findrefs app.apk field apiKey --access write
   droidasc findrefs app.apk string token --no-cache
   droidasc findrefs app.apk string token --context 3
   droidasc findrefs app.apk method loadUrl --context-method
@@ -384,6 +385,9 @@ enum Command {
     ///
     /// Exits with status 2 when some DEX entries could not be searched; the
     /// results of the other entries are still printed.
+    ///
+    /// Field results are labelled `[read]` / `[write]`; `--access read` or
+    /// `--access write` keeps only that kind.
     Findrefs {
         /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
@@ -395,6 +399,9 @@ enum Command {
         /// Same as `--context method`.
         #[arg(long, global = true, hide = true)]
         context_method: bool,
+        /// For field queries, keep only reads (iget/sget) or writes (iput/sput).
+        #[arg(long, global = true, value_enum, value_name = "read|write")]
+        access: Option<FieldAccessArg>,
         #[command(subcommand)]
         find: Find,
     },
@@ -566,6 +573,21 @@ fn parse_context(s: &str) -> Result<RefContext, String> {
 enum StructuredArg {
     Compact,
     Full,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum FieldAccessArg {
+    Read,
+    Write,
+}
+
+impl From<FieldAccessArg> for asc_findrefs::FieldAccess {
+    fn from(access: FieldAccessArg) -> Self {
+        match access {
+            FieldAccessArg::Read => asc_findrefs::FieldAccess::Read,
+            FieldAccessArg::Write => asc_findrefs::FieldAccess::Write,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -1016,12 +1038,15 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             io.write_output(output.as_ref(), &xml)?;
             io.emit_records(&xml, output.as_ref())?;
         }
-        Command::Findrefs { apk_path, context, context_method, find } => {
+        Command::Findrefs { apk_path, context, context_method, access, find } => {
             let context = match (context, context_method) {
                 (Some(c), _) => c,
                 (None, true) => RefContext::Method,
                 (None, false) => RefContext::None,
             };
+            if access.is_some() && !matches!(&find, Find::Field { .. }) {
+                return Err("--access is only valid for `findrefs field`".into());
+            }
             if let Find::Rules { output, file, rules } = find {
                 return findrefs_rules(io, common, &apk_path, context, output, file, rules, t_start);
             }
@@ -1062,13 +1087,15 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                     ),
                     output,
                 ),
-                Find::Field { output, name, class_name, fuzzy_class, exact } => (
-                    Query::Field(
-                        names::member_query("field", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
-                            .map_err(|e| e.to_string())?,
-                    ),
-                    output,
-                ),
+                Find::Field { output, name, class_name, fuzzy_class, exact } => {
+                    let field = names::member_query("field", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
+                        .map_err(|e| e.to_string())?;
+                    let query = match access {
+                        Some(access) => Query::FieldAccess { field, access: access.into() },
+                        None => Query::Field(field),
+                    };
+                    (query, output)
+                }
             };
             let engine = io.engine(common, &apk_path);
             let cancel = io.cancel;

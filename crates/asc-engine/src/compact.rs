@@ -7,7 +7,7 @@
 
 use crate::{matched_name, results_from_hits, rows_compiled, FindOptions, Result};
 use asc_dex::Dex;
-use asc_findrefs::{CompiledQuery, FindRefs, Hit, RefKind};
+use asc_findrefs::{CompiledQuery, FieldAccess, FindRefs, Hit, RefKind};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -150,7 +150,7 @@ fn rows_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit]) -> Result<TextRows
     for hit in hits {
         for &m in hit.methods.iter().flat_map(|ms| ms.ids()) {
             if let Some(idxs) = grouped.get_mut(m as usize) {
-                idxs.insert(hit.matched_idx);
+                idxs.insert(hit_key(hit));
             }
         }
     }
@@ -167,19 +167,46 @@ fn rows_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit]) -> Result<TextRows
         text.push_str(" | ");
         text.push_str(&asc_smali::method_signature(dex, m)?);
         text.push_str(" | ");
-        for (i, idx) in idxs.into_sorted().into_iter().enumerate() {
+        for (i, key) in idxs.into_sorted().into_iter().enumerate() {
             if i != 0 {
                 text.push_str(", ");
             }
-            let value = match matched.entry(idx) {
+            let value = match matched.entry(key) {
                 Entry::Occupied(e) => e.into_mut(),
-                Entry::Vacant(e) => e.insert(matched_name(dex, kind, idx)?.to_string()),
+                Entry::Vacant(e) => {
+                    let (idx, access) = split_hit_key(key);
+                    let mut value = matched_name(dex, kind, idx)?.to_string();
+                    if let Some(access) = access {
+                        value.push_str(&format!(" [{}]", access.as_str()));
+                    }
+                    e.insert(value)
+                }
             };
             text.push_str(value);
         }
         out.end_row();
     }
     Ok(out)
+}
+
+fn hit_key(hit: &Hit) -> u32 {
+    // FindRefs bounds matched indexes below DEX bytes / 4, so the shift
+    // cannot discard bits even for jumbo string indexes.
+    (hit.matched_idx << 2)
+        | match hit.field_access {
+            None => 0,
+            Some(FieldAccess::Read) => 1,
+            Some(FieldAccess::Write) => 2,
+        }
+}
+
+fn split_hit_key(key: u32) -> (u32, Option<FieldAccess>) {
+    let access = match key & 3 {
+        1 => Some(FieldAccess::Read),
+        2 => Some(FieldAccess::Write),
+        _ => None,
+    };
+    (key >> 2, access)
 }
 
 /// A method's distinct matched indexes. Most methods match one or two

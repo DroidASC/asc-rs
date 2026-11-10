@@ -49,6 +49,7 @@ grep / cut work. A `findrefs` row is `dex | method (full signature) | matched`:
 ```
 classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
 classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
+classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/Store;->count:I [write]
 ```
 
 - Classes are `com.a.B` or `Lcom/a/B;`.
@@ -57,6 +58,8 @@ classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Pa
   regex / substring; `=name` is exact.
 - A signature picks that overload: `run(I)V`, parameters only `run(I)`, Java style `run(int, String)`;
   fields `f:I`.
+- Field references are labelled `[read]` for `iget*` / `sget*` and `[write]` for `iput*` / `sput*`.
+  `findrefs app.apk field TARGET --access read` (or `write`) keeps only that access; omitting it prints both.
 - Conditions are `KIND:VALUE` (`string:`, `literal:`, `type:`, `method:`, `field:`); in `rules` they combine
   with `&`, or come from `--file`, one per line.
 - An empty result prints `hint:` lines on stderr: DEX entries searched, case sensitivity, a framework class
@@ -83,6 +86,8 @@ classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Pa
   `apk` path opens it; the `apk_id` in replies can stand in for the path. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
   APKs in one call. Replies stay within `max_bytes` (default 16384); the rest is spilled to a file or paged,
   per `spill`.
+  Field queries accept `"access": "read"` / `"write"`; `field_accesses` aligns with `matched`, and contextual
+  sites also carry `access`.
 
   ```json
   { "mcpServers": { "droidasc": { "command": "/absolute/path/to/droidasc", "args": ["mcp"] } } }
