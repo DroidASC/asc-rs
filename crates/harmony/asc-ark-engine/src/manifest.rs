@@ -39,7 +39,7 @@ use asc_abc::{Abc, Class, ClassEntry};
 use asc_hap::{Ability, HapError, ModuleJson, PackInfo, PageList, PkgContextInfo, RecordNames, Route, RouterMap};
 use serde_json::{json, Value};
 
-use crate::program::{EntryInfo, EntryStatus, Program};
+use crate::program::{EntryInfo, EntryStatus, Program, SOURCE_MAPS};
 use crate::{resources, text, Engine, EngineError, Result};
 
 /// The first words of the `pack.info` lines that are about one module;
@@ -249,6 +249,9 @@ pub struct PackageManifest {
     pub routes: Vec<RouteCode>,
     /// The ABC entries of the package, in program order.
     pub code: Vec<CodeEntry>,
+    /// How many modules `ets/sourceMaps.map` of the package maps to their
+    /// source, for a package (of a debug build) that has the file.
+    pub source_maps: Option<usize>,
     pub pack_sharing: PackSharing,
     /// Documents that could not be read, one line each.
     pub notes: Vec<String>,
@@ -581,6 +584,14 @@ impl PackageManifest {
             manifest.components().map(|component| component.src_entry.as_deref().map(|src_entry| link(manifest, src_entry))).collect()
         });
         let records = pkg_context.as_ref().map(|table| code.records(table));
+        let source_maps = match program.source_maps(index) {
+            Some(Ok((maps, _))) => Some(maps.len()),
+            Some(Err(reason)) => {
+                notes.push(format!("{SOURCE_MAPS}: {reason}"));
+                None
+            }
+            None => None,
+        };
         Some(PackageManifest {
             name,
             module,
@@ -592,6 +603,7 @@ impl PackageManifest {
             pages: Vec::new(),
             routes: Vec::new(),
             code: program.entries_of(Some(index)).filter_map(|entry| CodeEntry::of(program, entry)).collect(),
+            source_maps,
             pack_sharing: PackSharing::Own,
             notes,
             references: HashMap::new(),
@@ -721,8 +733,15 @@ impl PackageManifest {
     /// The lines of `module.json` as `asc-hap` summarizes it, with the join:
     /// the `module`, `ability` and `extension` lines end with the record of
     /// their `srcEntry`, and a `callbacks` line follows each that has some.
-    /// The `abc` lines of the package's code follow the `module` line; the
-    /// `page` and `route` lines come last.
+    /// The `abc` lines of the package's code follow the `module` line (and a
+    /// `source-maps` line those); the `page` and `route` lines come last.
+    /// The `abc` lines of the package's code, and a `source-maps` line when
+    /// the package has the file: `getclass` then names source files and lines.
+    fn code_lines(&self) -> impl Iterator<Item = String> + '_ {
+        let source_maps = self.source_maps.map(|modules| format!("source-maps {SOURCE_MAPS} modules={modules}"));
+        self.code.iter().map(CodeEntry::line).chain(source_maps)
+    }
+
     fn module_lines(&self, manifest: &ModuleJson, several_entries: bool) -> Vec<String> {
         let mut out = Vec::new();
         // The summary has one `ability` / `extension` line per component, in the order of `components()`.
@@ -741,7 +760,7 @@ impl PackageManifest {
             out.push(line);
             out.extend(code.and_then(|code| Self::callbacks_line(&name, code)));
             if kind == "module" {
-                out.extend(self.code.iter().map(CodeEntry::line));
+                out.extend(self.code_lines());
             }
         }
         out.extend(self.pages.iter().map(|page| PageList::line(&page.page) + &Self::record_suffix(&page.link, several_entries)));
@@ -831,7 +850,7 @@ impl PackageManifest {
         let module = || match &self.module {
             Some(module) => own_names(self.module_lines(module, manifest.several_entries)),
             // A package without a manifest still says what code it has.
-            None => self.code.iter().map(CodeEntry::line).collect(),
+            None => self.code_lines().collect(),
         };
         let mut lines = match document {
             Some(Document::Module) => module(),
@@ -869,6 +888,9 @@ impl PackageManifest {
         let mut v = json!({"package": self.name, "notes": self.notes});
         v["documents"] = Document::ALL.into_iter().filter(|document| self.has(*document)).map(Document::file_name).collect();
         v["abc"] = self.code.iter().map(CodeEntry::json).collect();
+        if let Some(modules) = self.source_maps {
+            v["source_maps"] = json!({"path": SOURCE_MAPS, "modules": modules});
+        }
         if let PackSharing::SameAs(first) = &self.pack_sharing {
             v["pack_info_same_as"] = json!(first);
         }

@@ -47,7 +47,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use asc_abc::{Abc, ClassEntry};
 
 pub use edges::EdgeKind;
-use edges::{Edge, FnRef, RecordEdges, Target};
+pub(crate) use edges::FnRef;
+use edges::{Edge, RecordEdges, Target};
 pub(crate) use modules::RecordId;
 pub use modules::{FormCount, RequestForm};
 use modules::{Importers, Layout, Packages};
@@ -55,6 +56,7 @@ use modules::{Importers, Layout, Packages};
 use crate::hierarchy::{self, ClassRef};
 use crate::refs::method::name_matches;
 use crate::refs::CallPaths;
+use crate::refs::{self, Query};
 use crate::refs::{chunks, run_units, Regions, RECORD_CHUNK};
 use crate::scopes::{ExportedDefinitions, ScopeTables, Scopes};
 use crate::track::Tracker;
@@ -104,6 +106,9 @@ pub enum CallRoots {
     /// `^import:@ohos:net\.http`. The paths are the ones `findrefs call:`
     /// prints.
     Leaf(Pattern),
+    /// Every function a rule matches: those whose code matches its
+    /// conditions, a `method:` condition naming the functions themselves.
+    Matching(Query),
 }
 
 impl CallRoots {
@@ -132,13 +137,20 @@ pub struct CallQuery {
     /// Callees: also list the unresolved call sites as leaves, not only
     /// count them.
     pub unresolved: bool,
+    /// Callers only: keep just the branches that end at a function this
+    /// rule matches (the paths from such a function to a root), and stop
+    /// there.
+    pub from: Option<Query>,
+    /// Leave out every function one of these rules matches, with
+    /// everything reached only through it.
+    pub unless: Vec<Query>,
 }
 
 impl CallQuery {
     /// 2 levels, at most 500 nodes, definitions shown, unresolved call
     /// sites counted.
     pub fn new(roots: CallRoots, direction: Direction) -> CallQuery {
-        CallQuery { roots, direction, depth: 2, max_nodes: 500, defines: true, unresolved: false }
+        CallQuery { roots, direction, depth: 2, max_nodes: 500, defines: true, unresolved: false, from: None, unless: Vec::new() }
     }
 }
 
@@ -185,6 +197,8 @@ pub struct CallRow {
     /// For a function whose edges were computed: its call sites that are
     /// unresolved leaves.
     pub unresolved: Option<usize>,
+    /// [`CallQuery::from`] matches it.
+    pub from: bool,
 }
 
 /// Result of [`Engine::call_graph`].
@@ -201,6 +215,10 @@ pub struct CallTree {
     pub truncated: bool,
     /// Records whose edges the walk looked at.
     pub records_scanned: usize,
+    /// Functions left out because a rule of [`CallQuery::unless`] matches them.
+    pub pruned: usize,
+    /// With [`CallQuery::from`]: what it kept of the walk.
+    pub reached: Option<Reached>,
     /// What the program leaves out (encrypted entries).
     pub notes: Vec<String>,
 }
@@ -212,8 +230,8 @@ impl CallTree {
     /// `[this-class]`, `[inherited]`, `[reassigned]`, `[defines]` for the
     /// kind of link ([`EdgeKind`]), `[external]` / `[unresolved]` for a leaf,
     /// `x3` for several call sites, `unresolved=N` for the call sites of a
-    /// function that lead nowhere, `[ENTRY]` when `with_entry`, and
-    /// `(repeated)`.
+    /// function that lead nowhere, `[ENTRY]` when `with_entry`, `[from]`
+    /// for a function [`CallQuery::from`] matches, and `(repeated)`.
     pub fn lines(&self, with_entry: bool) -> Vec<String> {
         self.rows
             .iter()
@@ -246,6 +264,9 @@ impl CallTree {
                 if let (true, CallNode::Function { entry, .. }) = (with_entry, &row.node) {
                     line.push_str(&format!(" [{entry}]"));
                 }
+                if row.from {
+                    line.push_str(" [from]");
+                }
                 if row.repeated {
                     line.push_str(" (repeated)");
                 }
@@ -265,14 +286,37 @@ impl CallTree {
             self.depth,
             self.records_scanned
         );
+        if let Some(reached) = self.reached {
+            footer.push_str(&format!("; {} from functions reached", reached.from));
+        }
+        if self.pruned > 0 {
+            footer.push_str(&format!("; {} functions left out by unless", self.pruned));
+        }
         if self.truncated {
             footer.push_str("; truncated (raise max_nodes or lower depth)");
+        }
+        if let Some(Reached { from: 0, walked }) = self.reached {
+            footer.push_str(&format!(
+                "\n# from: none of the {walked} callers walked matches (depth {}); a path ends where a callback is called by the \
+                 system or through a value ([unresolved] call sites): raise depth, or walk the callees of the function",
+                self.depth
+            ));
         }
         for note in &self.notes {
             footer.push_str(&format!("\n# {note}"));
         }
         footer
     }
+}
+
+/// What [`CallQuery::from`] kept of a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reached {
+    /// The distinct functions the rule matches among those walked: where
+    /// the paths of the tree start.
+    pub from: usize,
+    /// The distinct functions walked, before the rows on no such path were dropped.
+    pub walked: usize,
 }
 
 /// One edge of the graph, for [`Engine::call_edges`].
@@ -481,7 +525,7 @@ impl Neighbors {
 }
 
 impl<'e> Session<'e> {
-    fn new(engine: &'e Engine) -> Session<'e> {
+    pub(crate) fn new(engine: &'e Engine) -> Session<'e> {
         let program = &engine.program;
         let abcs: Vec<Option<Abc<'e>>> = (0..program.len()).map(|index| program.abc(index)).collect();
         let regions = abcs.iter().map(|abc| abc.as_ref().map(Regions::of)).collect();
@@ -516,11 +560,58 @@ impl<'e> Session<'e> {
         self.abcs.get(entry as usize).copied().flatten()
     }
 
+    /// The readable entries of the program, by index.
+    pub(crate) fn readable(&self) -> impl Iterator<Item = (u32, Abc<'e>)> + '_ {
+        self.abcs.iter().enumerate().filter_map(|(index, abc)| Some((u32::try_from(index).ok()?, (*abc)?)))
+    }
+
+    pub(crate) fn entry_name(&self, entry: u32) -> &'e str {
+        self.engine.program.info(entry as usize).map_or("", |info| info.name.as_str())
+    }
+
+    pub(crate) fn threads(&self) -> usize {
+        self.engine.threads
+    }
+
+    pub(crate) fn cache(&self) -> &GraphCache {
+        &self.cache
+    }
+
+    /// The call sites of the function at method offset `method` of record
+    /// `id` (whose slot is `slot`) that lead to a function of `wanted`, in
+    /// code order: the offset of the instruction, the kind of the link and
+    /// the callee. A definition is not a call.
+    pub(crate) fn calls_into(
+        &self,
+        slot: &Slot,
+        id: RecordId,
+        method: u32,
+        wanted: &HashSet<FnRef>,
+        out: &mut Vec<(u32, EdgeKind, FnRef)>,
+    ) {
+        let Some(edges) = self.edges(slot, id) else { return };
+        for edge in edges.of(method) {
+            if let (Target::Function(callee), false) = (edge.target, edge.kind == EdgeKind::Defines) {
+                if wanted.contains(&callee) {
+                    out.push((edge.pc, edge.kind, callee));
+                }
+            }
+        }
+    }
+
+    /// `RECORD->FUNCTION` of `function`, as the rows of a tree print it, and its restored name.
+    pub(crate) fn location(&self, function: FnRef) -> (String, String) {
+        match self.describe(&Node::Function(function)) {
+            CallNode::Function { record, function, restored, .. } => (format!("{record}->{function}"), restored),
+            CallNode::Leaf { path, .. } => (path, String::new()),
+        }
+    }
+
     fn regions(&self, entry: u32) -> Option<&Regions<'e>> {
         self.regions.get(entry as usize)?.as_ref()
     }
 
-    fn slot(&self, id: RecordId) -> Arc<Slot> {
+    pub(crate) fn slot(&self, id: RecordId) -> Arc<Slot> {
         self.cache.slot(id)
     }
 
@@ -822,10 +913,13 @@ impl<'e> Session<'e> {
         Ok(roots)
     }
 
-    /// The call sites of `function` that are unresolved leaves, when the
-    /// edges of its record were computed.
-    fn unresolved_of(&self, function: FnRef) -> Option<usize> {
-        let slot = self.slot(self.record_of(function)?);
+    /// The call sites of `function` that are unresolved leaves, when its
+    /// record is one of `scanned`, those the walk looked at. (Not: when its
+    /// edges are known. What earlier queries left in the cache must not
+    /// show in the rows.)
+    fn unresolved_of(&self, function: FnRef, scanned: &HashSet<RecordId>) -> Option<usize> {
+        let record = self.record_of(function).filter(|record| scanned.contains(record))?;
+        let slot = self.slot(record);
         let edges = slot.edges.get()?;
         Some(edges.of(function.method).iter().filter(|edge| matches!(edge.target, Target::Leaf { external: false, .. })).count())
     }
@@ -840,7 +934,28 @@ impl<'e> Session<'e> {
             (CallRoots::Leaf(_), Direction::Callees) => {
                 return Err(EngineError::Query("a leaf has no callees: a callee path is a root for callers only".to_owned()));
             }
+            (CallRoots::Matching(rule), _) => {
+                let mut matched: Vec<FnRef> = refs::matching(rule, self, cancel)?.into_iter().collect();
+                if matched.is_empty() {
+                    return Err(EngineError::Query("no function matches the root rule".to_owned()));
+                }
+                // In program order, whatever order the set gives them in.
+                matched.sort_unstable();
+                matched.into_iter().map(Node::Function).collect()
+            }
         };
+        if query.from.is_some() && query.direction == Direction::Callees {
+            return Err(EngineError::Query("`from` keeps paths of a callers walk: walk the callers of the target instead".to_owned()));
+        }
+        let from = query.from.as_ref().map(|rule| refs::matching(rule, self, cancel)).transpose()?;
+        let mut unless: HashSet<FnRef> = HashSet::new();
+        for rule in &query.unless {
+            unless.extend(refs::matching(rule, self, cancel)?);
+        }
+        let is_function_of = |set: &HashSet<FnRef>, node: &Node| matches!(node, Node::Function(function) if set.contains(function));
+        let is_from = |node: &Node| from.as_ref().is_some_and(|from| is_function_of(from, node));
+        let mut pruned: HashSet<Node> = roots.iter().filter(|root| is_function_of(&unless, root)).cloned().collect();
+        let roots: Vec<Node> = roots.into_iter().filter(|root| !pruned.contains(root)).collect();
         // Level by level: the neighbors of every node first met at that level.
         let mut level_of: HashMap<Node, usize> = HashMap::new();
         let mut truncated = false;
@@ -852,7 +967,10 @@ impl<'e> Session<'e> {
             }
             if !level_of.contains_key(root) {
                 level_of.insert(root.clone(), 0);
-                frontier.push(root.clone());
+                // A `from` function ends its paths.
+                if !is_from(root) {
+                    frontier.push(root.clone());
+                }
             }
         }
         let mut neighbors: HashMap<Node, Neighbors> = HashMap::new();
@@ -870,17 +988,30 @@ impl<'e> Session<'e> {
                     if level_of.contains_key(&neighbor.node) {
                         continue;
                     }
+                    if is_function_of(&unless, &neighbor.node) {
+                        pruned.insert(neighbor.node.clone());
+                        continue;
+                    }
                     if level_of.len() >= query.max_nodes {
                         truncated = true;
                         continue;
                     }
                     level_of.insert(neighbor.node.clone(), level + 1);
-                    next.push(neighbor.node.clone());
+                    if !is_from(&neighbor.node) {
+                        next.push(neighbor.node.clone());
+                    }
                 }
             }
             neighbors.extend(found);
             frontier = next;
         }
+        let reached = from.as_ref().map(|_| {
+            let walked = level_of.keys().filter(|node| matches!(node, Node::Function(_))).count();
+            let starts: Vec<Node> = level_of.keys().filter(|node| is_from(node)).cloned().collect();
+            let keep = on_paths_to(&neighbors, &level_of, &starts);
+            level_of.retain(|node, _| keep.contains(node));
+            Reached { from: starts.len(), walked }
+        });
 
         // Depth first: a node is expanded where it is first met at its own level.
         let mut rows: Vec<CallRow> = Vec::new();
@@ -892,10 +1023,11 @@ impl<'e> Session<'e> {
         stack.retain(|pending| root_seen.insert(pending.node.clone()));
         while let Some(Pending { node, depth, parent, kind, sites }) = stack.pop() {
             let expand = level_of.get(&node) == Some(&depth) && !expanded.contains(&node);
-            let unresolved = if let Node::Function(function) = &node { self.unresolved_of(*function) } else { None };
+            let unresolved = if let Node::Function(function) = &node { self.unresolved_of(*function, &scanned) } else { None };
             let has_more =
                 neighbors.get(&node).is_some_and(|neighbors| neighbors.0.iter().any(|neighbor| level_of.contains_key(&neighbor.node)));
-            rows.push(CallRow { depth, parent, node: self.describe(&node), kind, sites, repeated: !expand && has_more, unresolved });
+            let from = is_from(&node);
+            rows.push(CallRow { depth, parent, node: self.describe(&node), kind, sites, repeated: !expand && has_more, unresolved, from });
             if !expand {
                 continue;
             }
@@ -916,9 +1048,32 @@ impl<'e> Session<'e> {
             leaves: level_of.len() - functions,
             truncated,
             records_scanned: scanned.len(),
+            pruned: pruned.len(),
+            reached,
             notes: self.engine.notes().to_vec(),
         })
     }
+}
+
+/// The nodes of a walk from which one of `starts` is reached through the
+/// links of `neighbors`, `starts` among them: what `from` keeps.
+fn on_paths_to(neighbors: &HashMap<Node, Neighbors>, level_of: &HashMap<Node, usize>, starts: &[Node]) -> HashSet<Node> {
+    let mut above: HashMap<&Node, Vec<&Node>> = HashMap::new();
+    for (node, below) in neighbors {
+        for neighbor in below.0.iter().filter(|neighbor| level_of.contains_key(&neighbor.node)) {
+            above.entry(&neighbor.node).or_default().push(node);
+        }
+    }
+    let mut keep: HashSet<Node> = starts.iter().cloned().collect();
+    let mut pending: Vec<&Node> = starts.iter().collect();
+    while let Some(node) = pending.pop() {
+        for parent in above.get(node).into_iter().flatten() {
+            if keep.insert((*parent).clone()) {
+                pending.push(parent);
+            }
+        }
+    }
+    keep
 }
 
 impl Engine {
@@ -1019,8 +1174,16 @@ mod tests {
 
     #[test]
     fn rows_print_like_the_dex_tree() {
-        let row =
-            |depth, parent, node, kind, sites, repeated, unresolved| CallRow { depth, parent, node, kind, sites, repeated, unresolved };
+        let row = |depth, parent, node, kind, sites, repeated, unresolved| CallRow {
+            depth,
+            parent,
+            node,
+            kind,
+            sites,
+            repeated,
+            unresolved,
+            from: false,
+        };
         let index = "&entry/src/main/ets/pages/Index&";
         let tree = CallTree {
             direction: Direction::Callees,
@@ -1044,6 +1207,8 @@ mod tests {
             leaves: 2,
             truncated: true,
             records_scanned: 1,
+            pruned: 0,
+            reached: None,
             notes: vec!["x is encrypted".into()],
         };
         assert_eq!(

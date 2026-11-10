@@ -1,8 +1,8 @@
 //! HarmonyOS programs (`.hap` / `.hsp` / `.app` / `.abc`) behind the commands
 //! of the DEX side: `listclass`, `getclass` / `disassemble`, `getmanifest`,
 //! `manifest-summary`, `resources`, `xml` (the text files of a package),
-//! `findrefs` (string, prop, global, import, method, number, call, all),
-//! `callgraph` and `hierarchy`.
+//! `findrefs` (string, prop, global, import, method, number, call, all,
+//! rules), `callgraph` and `hierarchy`.
 //!
 //! This is a thin dispatch ahead of the layer both formats will share. The
 //! engine comes from [`Io::harmony`]: opened for this command in a one-shot
@@ -14,27 +14,27 @@ use crate::output::Io;
 use crate::{ClassArgs, Command, Common, FieldAccessArg, Find, EXIT_OK, EXIT_PARTIAL, RESOURCE_SEARCH_ROWS};
 use asc_ark_engine::{
     Access, CallQuery, CallRoots, ClassQuery, Direction, Document, Engine, EngineError, EntryStatus, HierarchyQuery, Lineage, ListOptions,
-    Manifest, NameFilter, Pattern, Query, ResourceField, ResourceTables,
+    Manifest, NameFilter, Pattern, Query, RefBatch, RefContext, ResourceField, ResourceTables,
 };
-use asc_mcp::harmony::{function_roots, leaf_roots, no_callers_hint, no_class_hint, no_leaf_hint, CallerFilter, TreeText};
+use asc_mcp::harmony::{function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots, TreeText};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 /// The `findrefs` kinds that work on a HarmonyOS program.
-const SEARCHES: &str = "string, prop, global, import, method, number, call, all";
+const SEARCHES: &str = "string, prop, global, import, method, number, call, all, rules";
 /// What `callgraph` takes on a HarmonyOS program.
 const WALKS: &str =
-    "[RECORD] FUNCTION or --to call:PATTERN, --from method:NAME, --callees, --depth, --max-nodes, --no-defines, --unresolved, --entry";
+    "[RECORD] FUNCTION or --to RULE, --from RULE, --unless RULE, --callees, --depth, --max-nodes, --no-defines, --unresolved, --entry";
 
 /// What a `findrefs` kind or option the engine does not have says.
 fn unsupported_search(what: &str) -> String {
     format!("findrefs {what} is not supported for HarmonyOS programs yet (supported: findrefs {SEARCHES})")
 }
 
-/// As [`unsupported_search`], for a `callgraph` option.
-fn unsupported_walk(what: &str) -> String {
-    format!("callgraph {what} is not supported for HarmonyOS programs yet (supported: callgraph {WALKS})")
+/// What `callgraph` needs to be told on a HarmonyOS program.
+fn no_target() -> String {
+    format!("callgraph needs a target (callgraph takes: {WALKS}; RECORD->FUNCTION as result rows print it is a target too)")
 }
 
 fn dex_only(flag: &str) -> String {
@@ -75,13 +75,20 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             EXIT_OK
         }
         Command::Findrefs { apk_path, context, context_method, access, entry, find } => {
-            if context.is_some() || context_method {
-                return Err(unsupported_search("--context"));
-            }
+            let context = match (context, context_method) {
+                (Some(asc_engine::RefContext::Lines(lines)), _) => RefContext::Lines(lines),
+                (Some(asc_engine::RefContext::Method), _) | (None, true) => RefContext::Method,
+                (Some(asc_engine::RefContext::None), _) | (None, false) => RefContext::None,
+            };
             match search(io, find, access)? {
                 Search::Refs { query, output } => {
                     let engine = open(io, common, &apk_path)?;
-                    findrefs(io, &engine, &query, entry.as_deref(), output.as_ref())?
+                    findrefs(io, &engine, &query, entry.as_deref(), context, output.as_ref())?
+                }
+                Search::Rules { specs, rules, output } => {
+                    let engine = open(io, common, &apk_path)?;
+                    let asked = Rules { specs: &specs, rules: &rules, entry: entry.as_deref(), context };
+                    findrefs_rules(io, &engine, &asked, output.as_ref())?
                 }
                 Search::Requests { pattern, output } => {
                     let engine = open(io, common, &apk_path)?;
@@ -150,22 +157,27 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             if virtual_calls {
                 return Err(dex_only("--virtual"));
             }
-            if !unless.is_empty() {
-                return Err(unsupported_walk("--unless"));
-            }
-            if unresolved && !callees {
+            let parsed = |arg: &str, spec: &str| io.harmony_rule(spec).map_err(|e| format!("{arg}: {e}"));
+            let mut from = from.map(|spec| parsed("--from", &spec)).transpose()?;
+            let unless = unless.iter().map(|spec| parsed("--unless", spec)).collect::<Result<Vec<_>, _>>()?;
+            let to_rule = to.as_deref().map(|spec| parsed("--to", spec)).transpose()?;
+            let target = CallTarget { class, method, to: to_rule, entry };
+            let mut direction = if callees { Direction::Callees } else { Direction::Callers };
+            let roots = match target.roots(direction)? {
+                Some(_) if from.is_some() && callees => return Err("--from keeps caller paths: leave out --callees".into()),
+                Some(roots) => roots,
+                // As on the DEX side: `--from` alone walks the callees of the functions it matches.
+                None => {
+                    direction = Direction::Callees;
+                    CallRoots::Matching(from.take().ok_or_else(no_target)?)
+                }
+            };
+            if unresolved && direction == Direction::Callers {
                 return Err("--unresolved lists callees: add --callees".into());
             }
-            let from = from.map(|rule| CallerFilter::parse(&rule, "--from")).transpose()?;
-            if from.is_some() && callees {
-                return Err("--from keeps caller paths: leave out --callees".into());
-            }
-            let target = CallTarget { class, method, to, entry };
-            let direction = if callees { Direction::Callees } else { Direction::Callers };
-            let query =
-                CallQuery { depth, max_nodes, defines: !no_defines, unresolved, ..CallQuery::new(target.roots(direction)?, direction) };
+            let query = CallQuery { depth, max_nodes, defines: !no_defines, unresolved, from, unless, ..CallQuery::new(roots, direction) };
             let engine = open(io, common, &apk_path)?;
-            callgraph(io, &engine, &query, from.as_ref(), target.to.as_deref(), output.as_ref())?
+            callgraph(io, &engine, &query, to.as_deref(), output.as_ref())?
         }
         Command::Hierarchy { output, supers, depth, max_nodes, method, entry, apk_path, class } => {
             let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
@@ -459,6 +471,12 @@ enum Search {
         pattern: Pattern,
         output: Option<PathBuf>,
     },
+    /// `rules`: several rules, each as it was written.
+    Rules {
+        specs: Vec<String>,
+        rules: Vec<Query>,
+        output: Option<PathBuf>,
+    },
 }
 
 /// A name pattern: a regex, or with `--literal` / `--exact` plain text.
@@ -467,6 +485,15 @@ fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
         (_, true) => Ok(Pattern::exact(text)),
         (true, false) => Ok(Pattern::contains(text)),
         (false, false) => Pattern::regex(text).map_err(|e| e.to_string()),
+    }
+}
+
+/// As [`pattern`], for the name of a property, a global or a function:
+/// `=NAME` is the exact name too, as a condition writes it.
+fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
+    match text.strip_prefix('=') {
+        Some(name) if !literal && !exact => Ok(Pattern::exact(name)),
+        _ => pattern(text, literal, exact),
     }
 }
 
@@ -481,22 +508,33 @@ impl From<FieldAccessArg> for Access {
     }
 }
 
-/// One condition of `findrefs all`.
-fn condition(io: &Io<'_>, spec: &str) -> Result<Query, String> {
-    let kind = spec.split_once(':').map_or(spec, |(kind, _)| kind);
-    match kind {
-        // Parsed as the DEX side parses them: one syntax for the text conditions of both.
-        "string" | "literal" => match io.condition(spec)? {
-            asc_findrefs::Query::String(pattern) => Query::string_regex(&pattern).map_err(|e| e.to_string()),
-            asc_findrefs::Query::StringLiteral(text) => Ok(Query::string_literal(text)),
-            _ => Err(unsupported_search(spec)),
-        },
-        _ if Query::KINDS.contains(&kind) => Query::condition(spec).map_err(|e| e.to_string()),
-        _ => Err(format!(
-            "findrefs {kind}: is not supported for HarmonyOS programs yet (supported: {})",
-            Query::KINDS.map(|kind| format!("{kind}:")).join(", ")
-        )),
+/// The kind of a condition as it is written (`!` aside), when the engine has it.
+fn known_kind(spec: &str) -> Result<(), String> {
+    let spec = spec.trim_start().trim_start_matches('!').trim_start();
+    let kind = spec.split_once(':').map_or(spec, |(kind, _)| kind).trim();
+    // Not `KIND:VALUE` at all: the engine says what is.
+    if Query::KINDS.contains(&kind) || !spec.contains(':') || !kind.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Ok(());
     }
+    Err(format!(
+        "findrefs {kind}: is not supported for HarmonyOS programs yet (supported: {})",
+        Query::KINDS.map(|kind| format!("{kind}:")).join(", ")
+    ))
+}
+
+/// One condition of `findrefs all`, without its `!`.
+fn condition(io: &Io<'_>, spec: &str) -> Result<Query, String> {
+    known_kind(spec)?;
+    match io.harmony_rule(spec)? {
+        Query::All(_) => Err(format!("{spec:?} is several conditions; give one KIND:VALUE here")),
+        query => Ok(query),
+    }
+}
+
+/// One rule of `findrefs rules`.
+fn rule(io: &Io<'_>, spec: &str) -> Result<Query, String> {
+    Query::rule_parts(spec).into_iter().try_for_each(known_kind)?;
+    io.harmony_rule(spec)
 }
 
 /// The search `find` asks for and its `-o` file.
@@ -509,9 +547,11 @@ fn search(io: &Io<'_>, find: Find, access: Option<FieldAccessArg>) -> Result<Sea
     let kind = match find {
         Find::String { output, literal: true, value } => return refs(Query::string_literal(value), output),
         Find::String { output, literal: false, value } => return refs(Query::string_regex(&value).map_err(|e| e.to_string())?, output),
-        Find::Prop { output, literal, exact, name } => return refs(Query::Prop { name: pattern(&name, literal, exact)?, access }, output),
+        Find::Prop { output, literal, exact, name } => {
+            return refs(Query::Prop { name: name_pattern(&name, literal, exact)?, access }, output)
+        }
         Find::Global { output, literal, exact, name } => {
-            return refs(Query::global(pattern(&name, literal, exact)?, access).map_err(|e| e.to_string())?, output);
+            return refs(Query::global(name_pattern(&name, literal, exact)?, access).map_err(|e| e.to_string())?, output);
         }
         Find::Import { output, literal, decl, requests, value } => {
             let query = Query::import(&value, literal).map_err(|e| e.to_string())?;
@@ -531,26 +571,43 @@ fn search(io: &Io<'_>, find: Find, access: Option<FieldAccessArg>) -> Result<Sea
                 None => without_pc(&name).to_owned(),
             };
             return refs(
-                Query::method(&spec, |name| pattern(name, false, exact).map_err(EngineError::Query)).map_err(|e| e.to_string())?,
+                Query::method(&spec, |name| name_pattern(name, false, exact).map_err(EngineError::Query)).map_err(|e| e.to_string())?,
                 output,
             );
         }
         Find::Number { output, value } => return refs(Query::Number(value.parse().map_err(|e: EngineError| e.to_string())?), output),
+        // `call '{RULE}'`: the calls of the functions a rule matches, as in a condition.
+        Find::Call { output, literal: false, path } if path.starts_with('{') => {
+            return refs(condition(io, &format!("call:{path}"))?, output)
+        }
         Find::Call { output, literal, path } => return refs(Query::Call(pattern(&path, literal, false)?), output),
         Find::All { output, none, conditions } => {
-            if !none.is_empty() || conditions.iter().any(|condition| condition.starts_with('!')) {
-                return Err(unsupported_search("all with excluded conditions"));
-            }
-            let mut queries = conditions.iter().map(|spec| condition(io, spec)).collect::<Result<Vec<_>, _>>()?;
+            // `!COND` among the conditions is one more --none.
+            let (excluded, conditions): (Vec<String>, Vec<String>) = conditions.into_iter().partition(|spec| spec.starts_with('!'));
+            let parse = |specs: &[String]| {
+                specs.iter().map(|spec| condition(io, spec.strip_prefix('!').unwrap_or(spec))).collect::<Result<Vec<_>, _>>()
+            };
+            let all = parse(&conditions)?;
+            let mut none = parse(&none)?;
+            none.extend(parse(&excluded)?);
             // One condition is that query itself, as on the DEX side.
-            let query = if queries.len() == 1 { queries.remove(0) } else { Query::All(queries) };
-            return refs(query, output);
+            return refs(Query::compound(all, none).map_err(|e| e.to_string())?, output);
+        }
+        Find::Rules { output, file, rules: mut specs } => {
+            if let Some(file) = &file {
+                let text = std::fs::read_to_string(io.path(file)).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+                specs.extend(text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).map(String::from));
+            }
+            if specs.is_empty() {
+                return Err("findrefs rules needs at least one rule".into());
+            }
+            let rules = specs.iter().map(|spec| rule(io, spec)).collect::<Result<Vec<_>, _>>()?;
+            return Ok(Search::Rules { specs, rules, output });
         }
         Find::Type { .. } => "type",
         Find::Extends { .. } => "extends",
         Find::Impl { .. } => "impl",
         Find::Field { .. } => "field",
-        Find::Rules { .. } => "rules",
     };
     Err(unsupported_search(kind))
 }
@@ -577,30 +634,29 @@ fn module_requests(
 struct CallTarget {
     class: Option<String>,
     method: Option<String>,
-    to: Option<String>,
+    /// `--to RULE`, parsed.
+    to: Option<Query>,
     entry: Option<String>,
 }
 
 impl CallTarget {
     /// The roots of a walk in `direction`: the function `RECORD FUNCTION`
     /// names, or one argument as result rows print it (`RECORD->FUNCTION`,
-    /// `RECORD->FUNCTION+0xPC`) or a function name alone; or the callee
-    /// paths `--to call:PATTERN` matches.
-    fn roots(&self, direction: Direction) -> Result<CallRoots, String> {
+    /// `RECORD->FUNCTION+0xPC`) or a function name alone; or what `--to
+    /// RULE` matches: the callee paths of a lone `call:PATTERN`, else the
+    /// functions of the rule. `None` without a target.
+    fn roots(self, direction: Direction) -> Result<Option<CallRoots>, String> {
         let entry = self.entry.as_deref();
-        match (&self.class, &self.method, &self.to) {
-            (None, _, None) => {
-                Err("callgraph needs a target: [RECORD] FUNCTION (or RECORD->FUNCTION, as result rows print it) or --to call:PATTERN"
-                    .into())
-            }
-            (Some(_), _, Some(_)) => Err("give the target as [RECORD] FUNCTION or as --to call:PATTERN, not both".into()),
+        match (self.class, self.method, self.to) {
+            (None, _, None) => Ok(None),
+            (Some(_), _, Some(_)) => Err("give the target as [RECORD] FUNCTION or as --to RULE, not both".into()),
             (None, _, Some(_)) if entry.is_some() => Err("--entry picks the root function: it does not go with --to".into()),
-            (None, _, Some(_)) if direction == Direction::Callees => {
+            (None, _, Some(Query::Call(_))) if direction == Direction::Callees => {
                 Err("--to call:PATTERN walks the callers of a callee path: leave out --callees".into())
             }
-            (None, _, Some(to)) => leaf_roots(to, "--to"),
-            (Some(record), Some(function), None) => Ok(function_roots(Some(record), function, entry)),
-            (Some(spec), None, None) => Ok(function_roots(None, spec, entry)),
+            (None, _, Some(to)) => Ok(Some(rule_roots(to))),
+            (Some(record), Some(function), None) => Ok(Some(function_roots(Some(&record), &function, entry))),
+            (Some(spec), None, None) => Ok(Some(function_roots(None, &spec, entry))),
         }
     }
 }
@@ -616,17 +672,10 @@ fn unreadable_entries_in(engine: &Engine, entry: Option<&str>) -> Result<usize, 
     Ok(entries.into_iter().filter(|entry| entry.status != EntryStatus::Readable).count())
 }
 
-/// The tree of `query`, with `from` the caller paths it keeps: the exit
-/// status, [`EXIT_PARTIAL`] when part of the program could not be walked.
-/// `to`: the `--to` rule, for the hint of a walk that found no callee path.
-fn callgraph(
-    io: &mut Io<'_>,
-    engine: &Engine,
-    query: &CallQuery,
-    from: Option<&CallerFilter>,
-    to: Option<&str>,
-    output: Option<&PathBuf>,
-) -> Result<u8, String> {
+/// The tree of `query`: the exit status, [`EXIT_PARTIAL`] when part of the
+/// program could not be walked. `to`: the `--to` rule, for the hint of a
+/// walk that found no callee path.
+fn callgraph(io: &mut Io<'_>, engine: &Engine, query: &CallQuery, to: Option<&str>, output: Option<&PathBuf>) -> Result<u8, String> {
     let mut tree = engine.call_graph(query, io.cancel).map_err(|e| match &e {
         EngineError::Ambiguous { candidates, .. } if several_entries_define(candidates) => {
             format!("{e}\n(name the entry, the first column, with --entry)")
@@ -636,9 +685,10 @@ fn callgraph(
     })?;
     // Said on stderr when the program opened.
     tree.notes.clear();
-    let shown = TreeText::of(&tree, engine.has_several_entries(), from);
+    let shown = TreeText::of(&tree, engine.has_several_entries());
     io.emit_tree(output, &shown.lines, &shown.footer)?;
-    if let (Some(to), true) = (to, tree.rows.is_empty()) {
+    // Without rows though no `--from` dropped them: no callee path matched.
+    if let (Some(to), true, CallRoots::Leaf(_)) = (to, tree.rows.is_empty() && tree.reached.is_none(), &query.roots) {
         io.note(format_args!("hint: {}", no_leaf_hint(to, "findrefs call")));
     } else if let Some(hint) = no_callers_hint(&tree, "`findrefs prop NAME --exact --access call`") {
         io.note(format_args!("hint: {hint}"));
@@ -676,16 +726,24 @@ fn hierarchy(io: &mut Io<'_>, engine: &Engine, query: &HierarchyQuery, output: O
 /// One row per reference, entry by entry in program order (of the entries
 /// `entry` names, when given): the exit status, [`EXIT_PARTIAL`] when part of
 /// what was to be searched could not be.
-fn findrefs(io: &mut Io<'_>, engine: &Engine, query: &Query, entry: Option<&str>, output: Option<&PathBuf>) -> Result<u8, String> {
+fn findrefs(
+    io: &mut Io<'_>,
+    engine: &Engine,
+    query: &Query,
+    entry: Option<&str>,
+    context: RefContext,
+    output: Option<&PathBuf>,
+) -> Result<u8, String> {
     // Before the output file is made: an entry that is not there is the whole answer.
     let unreadable = unreadable_entries_in(engine, entry)?;
     let cancel = io.cancel;
     let mut sink = io.sink(output, true)?;
     let mut errors = Vec::new();
     let summary = engine
-        .find_refs_in(query, entry, cancel, &mut |batch| {
+        .find_refs_in(query, entry, cancel, &mut |mut batch| {
+            engine.fill_context(&batch.entry_name, &mut batch.rows, context);
             for row in &batch.rows {
-                sink.line(&row.line(&batch.entry_name));
+                sink.line(&row.text(&batch.entry_name));
             }
             sink.flush_stdout();
             if let Some(error) = batch.error {
@@ -709,6 +767,80 @@ fn findrefs(io: &mut Io<'_>, engine: &Engine, query: &Query, entry: Option<&str>
     }
     io_result?;
     // Entries left out whole (encrypted, damaged) were named when the program opened.
+    let unsearched = unreadable + errors.len();
+    if unsearched == 0 {
+        return Ok(EXIT_OK);
+    }
+    io.note(format_args!("Warning: {unsearched} ABC entr{} could not be searched", if unsearched == 1 { "y" } else { "ies" }));
+    Ok(EXIT_PARTIAL)
+}
+
+/// What `findrefs rules` asks for.
+struct Rules<'a> {
+    /// The rules as they were written, for the `# rN` lines.
+    specs: &'a [String],
+    rules: &'a [Query],
+    entry: Option<&'a str>,
+    context: RefContext,
+}
+
+/// `findrefs rules`: the rows of every rule, prefixed `rN | `, entry by
+/// entry as on the DEX side, between a `# rN RULE` line and a `# rN N
+/// results` line per rule. Each rule is one search of the program.
+fn findrefs_rules(io: &mut Io<'_>, engine: &Engine, asked: &Rules<'_>, output: Option<&PathBuf>) -> Result<u8, String> {
+    let unreadable = unreadable_entries_in(engine, asked.entry)?;
+    let cancel = io.cancel;
+    let mut found: Vec<Vec<RefBatch>> = Vec::with_capacity(asked.rules.len());
+    for rule in asked.rules {
+        let mut batches = Vec::new();
+        engine.find_refs_in(rule, asked.entry, cancel, &mut |batch| batches.push(batch)).map_err(|e| e.to_string())?;
+        found.push(batches);
+    }
+    let mut sink = io.sink(output, true)?;
+    for (index, spec) in asked.specs.iter().enumerate() {
+        sink.comment(&format!("# r{} {spec}", index + 1));
+    }
+    let mut errors = Vec::new();
+    let mut totals = vec![0usize; found.len()];
+    let entries = found.iter().map(Vec::len).max().unwrap_or(0);
+    for entry in 0..entries {
+        for (index, batches) in found.iter_mut().enumerate() {
+            let Some(batch) = batches.get_mut(entry) else { continue };
+            if let Some(error) = &batch.error {
+                errors.push(format!("{}: {error}", batch.entry_name));
+            }
+            totals[index] += batch.rows.len();
+            engine.fill_context(&batch.entry_name, &mut batch.rows, asked.context);
+            for row in &batch.rows {
+                let text = row.text(&batch.entry_name);
+                // Context lines keep their indentation after the prefix.
+                let record: Vec<String> = text
+                    .lines()
+                    .enumerate()
+                    .map(|(line, text)| if line == 0 { format!("r{} | {text}", index + 1) } else { format!("r{} |{text}", index + 1) })
+                    .collect();
+                sink.line(&record.join("\n"));
+            }
+        }
+        sink.flush_stdout();
+    }
+    for (index, total) in totals.iter().enumerate() {
+        sink.comment(&format!("# r{} {total} results", index + 1));
+    }
+    let io_result = sink.finish();
+    errors.sort();
+    errors.dedup();
+    for error in &errors {
+        io.note(format_args!("Warning: {error}"));
+    }
+    if errors.is_empty() {
+        for (index, rule) in asked.rules.iter().enumerate().filter(|(index, _)| totals[*index] == 0) {
+            for hint in engine.no_results_hints(rule, cancel) {
+                io.note(format_args!("hint: r{}: {hint}", index + 1));
+            }
+        }
+    }
+    io_result?;
     let unsearched = unreadable + errors.len();
     if unsearched == 0 {
         return Ok(EXIT_OK);

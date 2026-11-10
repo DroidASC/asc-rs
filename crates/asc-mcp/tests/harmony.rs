@@ -325,8 +325,11 @@ fn what_is_not_supported_yet_says_what_is() {
     let inputs = Inputs::new();
     let hap = inputs.sample_hap();
     let kinds = KINDS;
-    let to = "`to` takes call:PATTERN on a HarmonyOS program: a regex over callee paths as findrefs call prints them, e.g. \
-              call:^import:@ohos:net\\.http";
+    let no_rule = |rule: &str| {
+        format!(
+            "{rule:?} is not a condition: write KIND:VALUE with KIND one of string, literal, prop, global, import, method, number, call"
+        )
+    };
     let cases: [(&str, Value, String); 36] = [
         (
             "getmanifest",
@@ -376,8 +379,8 @@ fn what_is_not_supported_yet_says_what_is() {
         ),
         ("hierarchy", json!({}), "hierarchy needs `class`: a class name, RECORD->CLASS as rows print it, or import:REGEX".into()),
         ("callgraph", json!({"class": "pages/Index", "method": "build", "virtual": true}), "`virtual` is DEX-only".into()),
-        ("callgraph", json!({"to": "string:token"}), to.into()),
-        ("callgraph", json!({"to": "method:java.lang.Runtime->exec"}), to.into()),
+        ("callgraph", json!({"to": "string:no-such-text"}), "no function matches the root rule".into()),
+        ("callgraph", json!({"to": "type:java.lang.Runtime"}), format!("`to`: {}", no_rule("type:java.lang.Runtime"))),
         (
             "callgraph",
             json!({"to": "call:x", "entry": "ets/modules.abc"}),
@@ -387,20 +390,16 @@ fn what_is_not_supported_yet_says_what_is() {
         (
             "callgraph",
             json!({}),
-            "callgraph needs `class` + `method` (or `class`: RECORD->FUNCTION as rows print it), or `to`: call:REGEX".into(),
+            "callgraph needs `class` + `method` (or `class`: RECORD->FUNCTION as rows print it), or `to`: a rule (call:REGEX for \
+             callee paths), or `from`: a rule"
+                .into(),
         ),
         (
             "callgraph",
             json!({"class": "pages/Index", "method": "build", "direction": "callees", "from": "method:x"}),
             "`from` keeps caller paths: it goes with direction=callers (the default) or `to`".into(),
         ),
-        (
-            "callgraph",
-            json!({"class": "pages/Index", "method": "build", "from": "string:x"}),
-            "`from` takes method:[RECORD->]NAME on a HarmonyOS program: NAME a regex over function names, =NAME the exact name, e.g. \
-             method:=EntryAbility.onNewWant"
-                .into(),
-        ),
+        ("callgraph", json!({"class": "pages/Index", "method": "build", "from": "field:x"}), format!("`from`: {}", no_rule("field:x"))),
         (
             "callgraph",
             json!({"class": "pages/Index", "method": "nowhere"}),
@@ -409,18 +408,19 @@ fn what_is_not_supported_yet_says_what_is() {
         ("callgraph", json!({"class": "pages/Nope", "method": "build"}), "record pages/Nope not found".into()),
         (
             "callgraph",
-            json!({"class": "pages/Index", "method": "build", "unless": "method:check"}),
-            format!(
-                "callgraph `unless` {NOT_YET} (callgraph takes: class + method or to=call:REGEX, from=method:NAME, direction, depth, \
-                 max_nodes, defines, unresolved, entry)"
-            ),
+            json!({"class": "pages/Index", "method": "build", "unless": ["method:check", "!string:x"]}),
+            "`unless`: a rule needs a condition without `!` (`!` only removes functions)".into(),
         ),
         ("findrefs", json!({"kind": "field", "name": "message"}), format!("findrefs kind=field {NOT_YET} {kinds}")),
         ("findrefs", json!({"kind": "extends", "value": "Index"}), format!("findrefs kind=extends {NOT_YET} {kinds}")),
         ("findrefs", json!({"rule": "type:Index"}), format!("findrefs kind=type {NOT_YET} {kinds}")),
-        ("findrefs", json!({"rules": [{"kind": "string", "value": "token"}]}), format!("findrefs rules {NOT_YET} {kinds}")),
-        ("findrefs", json!({"all": ["string:a", "!string:b"]}), format!("findrefs with excluded conditions (`!`) {NOT_YET} {kinds}")),
-        ("findrefs", json!({"kind": "string", "value": "token", "context": 3}), format!("findrefs context {NOT_YET} {kinds}")),
+        ("findrefs", json!({"rules": ["string:token", "type:Index"]}), format!("rule r2: findrefs kind=type {NOT_YET} {kinds}")),
+        ("findrefs", json!({"all": ["!string:b"]}), "`all` needs at least one condition".into()),
+        (
+            "findrefs",
+            json!({"kind": "string", "value": "token", "context": "some"}),
+            "`context` must be a non-negative integer or \"method\"".into(),
+        ),
         (
             "findrefs",
             json!({"kind": "string", "value": "token", "access": "read"}),
@@ -961,8 +961,10 @@ fn the_introduction_says_what_the_tools_take_once() {
          access=read|write|define|call; global: global name regex (exact / literal), access=read|write; import: REQUEST[#NAME], REQUEST a \
          regex over the module request (@ohos:net.http), decl=true for the declarations only, requests=true for the distinct requests; method: \
          [RECORD->]FUNCTION, where it is defined (or `class` + `name`; exact); number: 1919810, 0x1d4b42, 1.5 or A..B; call: regex over \
-         the resolved callee (import:@ohos:net.http#default.createHttp, global:console.log, this.x); all=[conditions]: functions \
-         matching every one; entry=NAME (also listclass): only that abc entry or package (entry.hap), as rows name it: a resource id is \
+         the resolved callee (import:@ohos:net.http#default.createHttp, global:console.log, this.x), or {RULE}: the calls that lead \
+         to a function RULE matches (call:{string:token}; nests); all=[conditions]: functions matching every one, none=[conditions]: \
+         minus those matching any (in a rule: `a & b & !c`; there method:NAME is the function of that name itself); rules=[rule, \
+         ...]: several searches, rows `r1 | ...`; context=N or \"method\": the listing around each hit; entry=NAME (also listclass): only that abc entry or package (entry.hap), as rows name it: a resource id is \
          unique within one package only"
     );
     assert_eq!(
@@ -984,8 +986,10 @@ fn the_introduction_says_what_the_tools_take_once() {
     assert_eq!(
         head[5],
         "# callgraph: class=RECORD + method=FUNCTION (or class=RECORD->FUNCTION as rows print it, or method alone), direction, depth, \
-         max_nodes; or to=\"call:REGEX\" for the callers of every callee path matching (the paths of kind=call, e.g. \
-         call:^import:@ohos:net\\.http); from=\"method:NAME\" keeps only the paths from the callers matching (`[from]`); defines=false \
+         max_nodes; or to=RULE: \"call:REGEX\" for the callers of every callee path matching (the paths of kind=call, e.g. \
+         call:^import:@ohos:net\\.http), any other rule for the functions it matches (to=\"string:^https?://\"); from=RULE keeps only \
+         the paths from the functions matching (`[from]`; alone: their callees), unless=RULE (or a list) leaves out the functions \
+         matching and what only they reach; in these rules method:NAME is the function of that name (=NAME exact); defines=false \
          leaves out `[defines]` (a closure is created, not called); unresolved=true lists the unresolved call sites of callees; `entry`. \
          Rows: `[super]` proved; `[this-class]` / `[inherited]` / `[instance]` matched by name, `[reassigned]` through a \
          decorated class: not guaranteed; `[external]` / `[unresolved]` are leaves, no function of the program"
@@ -1383,9 +1387,12 @@ fn callgraph_walks_both_ways_with_the_arguments_of_the_dex_tool() {
             "0 Util->#*#star | star",
             "  1 <- Util->#*#helper | helper",
             "    2 <- App->#*@0*#cb | run.cb [from]",
-            "# 9 rows, 6 distinct functions, 0 leaves (callers, depth 3); 3 records scanned",
-            "# from: 3 of 9 rows shown: 1 path from 1 matching function",
+            "# 3 rows, 3 distinct functions, 0 leaves (callers, depth 3); 3 records scanned; 1 from functions reached",
         ]
+    );
+    assert_eq!(
+        (&ok(&replies[9])["reached"], &ok(&replies[9])["rows"][2]["from"], ok(&replies[9])["rows"][1].get("from")),
+        (&json!(1), &json!(true), None)
     );
     // The rows shown point at each other.
     let kept = ok(&replies[9])["rows"].as_array().unwrap();
@@ -1557,4 +1564,137 @@ fn entry_is_refused_on_a_dex_program() {
     for reply in &replies {
         assert_eq!(error(reply), "`entry` applies to HarmonyOS programs only");
     }
+}
+
+/// The shapes of input the `asc` commands take reach the tools the same
+/// way: an unpacked package, packages inside zips, source maps.
+#[test]
+fn unpacked_packages_and_zips_of_packages_open() {
+    let inputs = Inputs::new();
+    let debug = asc_fixture::hap::make_debug_hap(&make_abc());
+    let unpacked = inputs.path("entry");
+    asc_fixture::hap::unpack(&debug, Path::new(&unpacked));
+    let app = make_app(&[("entry.hap", &debug)], Compression::Deflated);
+    let bundle = inputs.file("bundle.zip", &Hap::new().entry("out/shop.app", &app, Compression::Deflated).build());
+    let replies = session(&[
+        call(1, "listclass", json!({"apk": unpacked})),
+        call(2, "manifest_summary", json!({"apk": unpacked, "filter": "all"})),
+        call(3, "getclass", json!({"apk": unpacked, "class": "pages/Index", "method": "Index.build"})),
+        call(4, "resources", json!({"apk": unpacked, "xml": "$profile:main_pages"})),
+        call(5, "listclass", json!({"apk": bundle})),
+        call(6, "getclass", json!({"apk": bundle, "class": "pages/Index"})),
+    ]);
+    assert_eq!(ok(&replies[0])["program"]["entries"][0]["name"], "ets/modules.abc");
+    assert!(text(&replies[0]).contains("HarmonyOS program, 1 abc entry"), "{}", text(&replies[0]));
+    assert!(rows(&replies[1]).contains(&"source-maps ets/sourceMaps.map modules=2"), "{:?}", rows(&replies[1]));
+    assert!(rows(&replies[1]).iter().any(|line| line.starts_with("ability EntryAbility ") && line.contains(" record=&entry/")));
+    assert!(text(&replies[2]).contains(", line 12 (source line 4)\n"), "{}", text(&replies[2]));
+    assert!(text(&replies[3]).contains("pages/Index"), "{}", text(&replies[3]));
+    assert_eq!(ok(&replies[4])["program"]["entries"][0]["name"], "out/shop.app/entry.hap/ets/modules.abc");
+    assert!(text(&replies[5]).contains(", line 12 (source line 4)\n"), "{}", text(&replies[5]));
+}
+
+/// The rows of a reply about the call graph program, records shortened and
+/// the entry column dropped.
+fn short_calls(reply: &Value) -> Vec<String> {
+    short_tree(reply).iter().map(|line| line.replace("modules.abc | ", "")).collect()
+}
+
+#[test]
+fn rules_exclude_nest_and_fence_as_on_the_dex_side() {
+    let inputs = Inputs::new();
+    let abc = inputs.file("modules.abc", &call_graph_program().build().bytes);
+    let replies = session(&[
+        call(1, "listclass", json!({"apk": abc})),
+        call(2, "findrefs", json!({"apk_id": "apk1", "all": ["prop:=make", "prop:=then"], "none": ["prop:=size"]})),
+        call(3, "findrefs", json!({"apk_id": "apk1", "rule": "prop:=make & prop:=then & !prop:=nothing"})),
+        call(4, "findrefs", json!({"apk_id": "apk1", "rule": "call:{method:=star}"})),
+        call(5, "findrefs", json!({"apk_id": "apk1", "kind": "call", "value": "{method:=star}"})),
+        call(6, "findrefs", json!({"apk_id": "apk1", "rule": "method:helper & !prop:=then"})),
+        call(
+            7,
+            "findrefs",
+            json!({"apk_id": "apk1", "rules": ["prop:=then & !prop:=size", {"kind": "call", "value": "{method:=star}"}, "prop:=nope"], "limit": 1}),
+        ),
+        call(8, "findrefs", json!({"apk_id": "apk1", "kind": "prop", "value": "=then", "context": 1})),
+        call(9, "findrefs", json!({"apk_id": "apk1", "rules": ["prop:=then"], "context": 0})),
+        call(10, "callgraph", json!({"apk_id": "apk1", "method": "star", "unless": "method:=helper"})),
+        call(11, "callgraph", json!({"apk_id": "apk1", "method": "star", "unless": ["global:=console & prop:=log", "method:^func_main"]})),
+        call(12, "callgraph", json!({"apk_id": "apk1", "to": "prop:=log", "depth": 1, "defines": false})),
+        call(13, "callgraph", json!({"apk_id": "apk1", "from": "method:=cb", "depth": 1})),
+        call(14, "callgraph", json!({"apk_id": "apk1", "method": "star", "from": "method:=make"})),
+        call(15, "findrefs", json!({"apk_id": "apk1", "rule": "call:{method:=star}", "offset": 1})),
+    ]);
+    let both = "App->#*#run+0x6 | run | prop +0x6 ldobjbyname \"make\" [call] && prop +0x3a ldobjbyname \"then\" [call]";
+    assert_eq!(short_calls(&replies[1])[0], both);
+    assert_eq!(ok(&replies[2])["total"], 0);
+    let star = [
+        "App->#*#run+0x1e | run | callarg0 ; -> Util->#*#star (star)",
+        "Util->#*#helper+0x2 | helper | callarg0 ; -> Util->#*#star (star)",
+    ];
+    assert_eq!(short_calls(&replies[3])[..2], star);
+    assert_eq!(text(&replies[4]), text(&replies[3]));
+    assert_eq!(short_calls(&replies[5])[0], "Util->#*#helper+0x0 | helper | method");
+
+    // A rule set: each rule under its header, cut at `limit` rows with the call that continues it.
+    assert_eq!(
+        short_calls(&replies[6]),
+        [
+            "# r1 prop:=then & !prop:=size: 1 results",
+            "r1 | App->#*#run+0x3a | run | prop +0x3a ldobjbyname \"then\" [call]",
+            "# r2 {\"kind\":\"call\",\"value\":\"{method:=star}\"}: 2 results",
+            "r2 | App->#*#run+0x1e | run | callarg0 ; -> Util->#*#star (star)",
+            "r2 | more | 1 more: findrefs {\"apk_id\":\"apk1\",\"kind\":\"call\",\"offset\":1,\"value\":\"{method:=star}\"}",
+            "# r3 prop:=nope: 0 results",
+        ]
+    );
+    let sets = ok(&replies[6])["rules"].as_array().unwrap();
+    assert_eq!(sets.iter().map(|rule| (&rule["rule"], &rule["total"], &rule["returned"])).collect::<Vec<_>>().len(), 3);
+    assert_eq!((&sets[1]["total"], &sets[1]["returned"], &sets[1]["next"]["offset"]), (&json!(2), &json!(1), &json!(1)));
+    assert_eq!(sets[2]["next"], json!(null));
+    // The follow-up is a call like any other.
+    assert_eq!(short_calls(&replies[14])[0], star[1]);
+
+    // The listing around a hit, in the text and in the row.
+    assert_eq!(
+        short_calls(&replies[7])[..5],
+        [
+            "App->#*#run+0x3a | run | ldobjbyname \"then\" [call]",
+            "  @ pc 0x3a",
+            "      0038  lda a3",
+            "  >   003a  ldobjbyname \"then\"",
+            "      003e  callarg0",
+        ]
+    );
+    let row = &ok(&replies[7])["results"][0];
+    assert_eq!(row["sites"], json!([0x3a]));
+    assert!(row["context"].as_str().unwrap().starts_with("  @ pc 0x3a\n      0038  lda a3\n"), "{row}");
+    assert_eq!(short_calls(&replies[8])[2..4], ["r1 |  @ pc 0x3a", "r1 |  >   003a  ldobjbyname \"then\""]);
+
+    // The ends and fences of a walk.
+    assert_eq!(
+        short_tree(&replies[9]),
+        [
+            "0 Util->#*#star | star",
+            "  1 <- App->#*#run | run unresolved=1",
+            "    2 <- App->func_main_0 | func_main_0 x2",
+            "  1 <- Util->func_main_0 | func_main_0 [defines]",
+            "# 4 rows, 4 distinct functions, 0 leaves (callers, depth 2); 3 records scanned; 1 functions left out by unless",
+        ]
+    );
+    assert_eq!(ok(&replies[9])["pruned"], 1);
+    assert_eq!(ok(&replies[10])["pruned"], 3);
+    assert_eq!(short_tree(&replies[10]).len(), 3);
+    assert_eq!(
+        short_tree(&replies[11])[..3],
+        ["0 Util->#*#helper | helper", "  1 <- App->#*#run | run x3 unresolved=1", "  1 <- App->#*@0*#cb | run.cb"]
+    );
+    assert_eq!(short_tree(&replies[12])[..2], ["0 App->#*@0*#cb | run.cb", "  1 -> Util->#*#helper | helper"]);
+    assert_eq!(ok(&replies[12])["direction"], "callees");
+    let nowhere = text(&replies[13]);
+    assert!(
+        nowhere.contains("; 0 from functions reached\n# from: none of the 6 callers walked matches (depth 2); a path ends where "),
+        "{nowhere}"
+    );
+    assert_eq!(ok(&replies[13])["reached"], 0);
 }

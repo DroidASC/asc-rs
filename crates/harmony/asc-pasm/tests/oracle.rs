@@ -1641,7 +1641,7 @@ impl<'a> Comparer<'a> {
         code: &Code<'a>,
         context: &dyn Fn() -> String,
     ) -> bool {
-        let opts = Options { lines: true, locals: true, ic_slots: true, literal_limit: usize::MAX, string_limit: usize::MAX };
+        let opts = Options { lines: true, locals: true, ic_slots: true, literal_limit: usize::MAX, string_limit: usize::MAX, source: None };
         self.listing.clear();
         write_function(&mut self.listing, &self.subject.abc, class, method, &opts).unwrap();
         let listing = std::mem::take(&mut self.listing);

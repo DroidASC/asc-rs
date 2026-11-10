@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 /// Rows per rule of a single-APK rule set.
-const RULE_LIMIT: usize = 100;
+pub(crate) const RULE_LIMIT: usize = 100;
 pub(crate) const HIERARCHY_DEPTH: usize = 16;
 pub(crate) const HIERARCHY_MAX_NODES: usize = 500;
 /// `direction` of the hierarchy tool, with the other spellings models use.

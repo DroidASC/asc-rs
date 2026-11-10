@@ -11,15 +11,18 @@
 //! records once, their offsets become region ids, and the code scan compares
 //! ids.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::AtomicBool;
 
 use asc_abc::{Abc, ClassEntry, Literal};
 use asc_arkisa::{DecodeError, OperandKind};
 
 use super::{
-    chunks, pc_of, run_units, Condition, Env, Function, Hit, IdSet, Pattern, Record, RecordHit, Worker, MAX_LITERAL_DEPTH, RECORD_CHUNK,
+    chunks, pc_of, run_units, Condition, Env, Function, Hit, IdSet, ListedFunction, Pattern, Record, RecordHit, Worker, MAX_LITERAL_DEPTH,
+    RECORD_CHUNK,
 };
+use crate::callgraph::{FnRef, Session};
 use crate::ops::OpTable;
 use crate::{records, EngineError, Result};
 
@@ -70,32 +73,75 @@ pub(crate) fn name_matches(name: &Pattern, raw: &str, restored: impl FnOnce() ->
     }
 }
 
-impl<'a> Methods<'a> {
-    pub(crate) fn prepare(env: &Env<'_, 'a>, record: Option<&str>, name: &Pattern) -> Result<Methods<'a>> {
-        let abc = env.abc;
+/// File offsets of the functions of the entry of `env` that `name` names,
+/// in the records `record` names (all, when `None`).
+pub(crate) fn named_functions(env: &Env<'_, '_>, record: Option<&str>, name: &Pattern) -> Result<HashSet<u32>> {
+    let abc = env.abc;
+    let classes: Vec<u32> = abc.class_index().map_err(|source| EngineError::Abc { entry: env.entry.to_owned(), source })?.iter().collect();
+    let units: Vec<Range<usize>> = chunks(classes.len(), RECORD_CHUNK).collect();
+    let found = run_units(units.len(), env.workers, env.cancel, |unit| {
+        let mut offsets = Vec::new();
+        for &off in &classes[units[unit].clone()] {
+            // An unreadable record or function is reported by the code scan.
+            let Ok(ClassEntry::Local(class)) = abc.class_entry(off) else { continue };
+            if record.is_some_and(|wanted| !records::names_record(&String::from_utf8_lossy(class.name()), wanted)) {
+                continue;
+            }
+            let Ok(methods) = class.methods() else { continue };
+            for method in methods.map_while(|method| method.ok()) {
+                let Ok(raw) = method.name() else { continue };
+                let raw = raw.to_str();
+                if name_matches(name, &raw, || class.restore_function_name(&raw)) {
+                    offsets.push(method.offset());
+                }
+            }
+        }
+        offsets
+    })?;
+    Ok(found.into_iter().flatten().collect())
+}
+
+/// The functions of the program a list names: each line by its raw or its
+/// restored name, in the record it gives (any, without one).
+pub(crate) fn listed_functions(session: &Session<'_>, listed: &[ListedFunction], cancel: &AtomicBool) -> Result<HashSet<FnRef>> {
+    let mut by_name: HashMap<&str, Vec<Option<&str>>> = HashMap::new();
+    for function in listed {
+        by_name.entry(function.function.as_str()).or_default().push(function.record.as_deref());
+    }
+    let mut out = HashSet::new();
+    for (entry, abc) in session.readable() {
         let classes: Vec<u32> =
-            abc.class_index().map_err(|source| EngineError::Abc { entry: env.entry.to_owned(), source })?.iter().collect();
+            abc.class_index().map_err(|source| EngineError::Abc { entry: session.entry_name(entry).to_owned(), source })?.iter().collect();
         let units: Vec<Range<usize>> = chunks(classes.len(), RECORD_CHUNK).collect();
-        let found = run_units(units.len(), env.workers, env.cancel, |unit| {
+        let found = run_units(units.len(), session.threads(), cancel, |unit| {
             let mut offsets = Vec::new();
             for &off in &classes[units[unit].clone()] {
-                // An unreadable record or function is reported by the code scan.
                 let Ok(ClassEntry::Local(class)) = abc.class_entry(off) else { continue };
-                if record.is_some_and(|wanted| !records::names_record(&String::from_utf8_lossy(class.name()), wanted)) {
-                    continue;
-                }
+                let record = String::from_utf8_lossy(class.name());
+                let in_record = |wanted: &[Option<&str>]| {
+                    wanted.iter().any(|wanted| wanted.is_none_or(|wanted| records::names_record(&record, wanted)))
+                };
                 let Ok(methods) = class.methods() else { continue };
                 for method in methods.map_while(|method| method.ok()) {
                     let Ok(raw) = method.name() else { continue };
                     let raw = raw.to_str();
-                    if name_matches(name, &raw, || class.restore_function_name(&raw)) {
+                    let by_raw = by_name.get(&*raw).is_some_and(|wanted| in_record(wanted));
+                    if by_raw || by_name.get(class.restore_function_name(&raw).as_str()).is_some_and(|wanted| in_record(wanted)) {
                         offsets.push(method.offset());
                     }
                 }
             }
             offsets
         })?;
-        let offsets: HashSet<u32> = found.into_iter().flatten().collect();
+        out.extend(found.into_iter().flatten().map(|method| FnRef { entry, method }));
+    }
+    Ok(out)
+}
+
+impl<'a> Methods<'a> {
+    pub(crate) fn prepare(env: &Env<'_, 'a>, record: Option<&str>, name: &Pattern) -> Result<Methods<'a>> {
+        let abc = env.abc;
+        let offsets = named_functions(env, record, name)?;
         let ids = if offsets.is_empty() { IdSet::default() } else { IdSet::locate(env, |off| offsets.contains(&off))? };
         Ok(Methods { abc, offsets, ids, operands: OpTable::build(Operands::of) })
     }

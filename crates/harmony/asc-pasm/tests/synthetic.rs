@@ -736,3 +736,48 @@ fn every_opcode_renders_with_any_operands() {
         }
     }
 }
+
+/// What a source map says of the lines of the debug info: the record
+/// names the file, each function its source line, the first one it has.
+#[test]
+fn source_lines_follow_the_lines_of_the_debug_info() {
+    let mut code = Asm::new();
+    code.op("ldundefined", []).op("sta", [0.into()]).op("lda", [0.into()]).op("return", []);
+    let mut builder = AbcBuilder::new();
+    let function = AbcFunction::new("#*#named", AbcCode::new(3, 5, code)).debug(AbcDebugInfo::rows("a.ets", 4, &[(0, 4), (1, 5), (3, 7)]));
+    builder.record(AbcRecord::new(RECORD).function(function));
+    let data = builder.build().bytes;
+    let abc = Abc::parse(&data).unwrap();
+    let class = abc.find_record(RECORD.as_bytes()).unwrap().unwrap().local().unwrap();
+    let method = class.methods().unwrap().next().unwrap().unwrap();
+    let header = |lines: &[Option<u32>], whole: bool, every_line: bool| {
+        let source = asc_pasm::SourceLines { file: "src/a file.ets", lines };
+        let opts = Options { source: Some(source), lines: every_line, ..Options::default() };
+        let mut text = String::new();
+        if whole {
+            write_record(&mut text, &abc, &class, &opts).unwrap();
+        } else {
+            write_function(&mut text, &abc, &class, &method, &opts).unwrap();
+        }
+        text
+    };
+    let line_of = |text: &str| text.lines().find(|line| line.starts_with("; vregs")).unwrap().rsplit(", line ").next().unwrap().to_owned();
+
+    // Line 4 of the compiled file is line 9 of the source.
+    let mapped = [None, None, None, None, Some(9), Some(10)];
+    let record = header(&mapped, true, false);
+    assert!(record.lines().nth(2).unwrap().starts_with("; source src/a file.ets (by the source map: "), "{record}");
+    assert_eq!(line_of(&record), "4 (source line 9)");
+    // A function on its own says the same, below no header: the record's names the file.
+    assert_eq!(line_of(&header(&mapped, false, false)), "4 (source line 9)");
+    // The first line is the build's own: the next one that has a source stands for the function.
+    let later = [None, None, None, None, None, Some(10)];
+    assert_eq!(line_of(&header(&later, true, false)), "4 (source line 10 at line 5)");
+    // No line of it has one, or the map ends before it.
+    assert_eq!(line_of(&header(&[None; 8], true, false)), "4 (no source line)");
+    assert_eq!(line_of(&header(&[Some(1)], false, false)), "4 (no source line)");
+    // With every line in the listing, each says its own.
+    let woven = header(&mapped, true, true);
+    let lines: Vec<&str> = woven.lines().filter(|line| line.starts_with("  ; line ")).collect();
+    assert_eq!(lines, ["  ; line 4 (source line 9)", "  ; line 5 (source line 10)", "  ; line 7"]);
+}

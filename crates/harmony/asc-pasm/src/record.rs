@@ -73,7 +73,13 @@ fn kind_text(class: &Class<'_>, name: &RecordName<'_>) -> &'static str {
 }
 
 /// `.record <name>`, a summary line, and the module record.
-pub(crate) fn write_header<W: Write>(out: &mut W, abc: &Abc<'_>, class: &Class<'_>, info: &RecordInfo<'_>) -> fmt::Result {
+pub(crate) fn write_header<W: Write>(
+    out: &mut W,
+    abc: &Abc<'_>,
+    class: &Class<'_>,
+    info: &RecordInfo<'_>,
+    opts: &Options<'_>,
+) -> fmt::Result {
     let name = String::from_utf8_lossy(class.name());
     out.write_str(".record ")?;
     write_name(out, &name)?;
@@ -110,6 +116,13 @@ pub(crate) fn write_header<W: Write>(out: &mut W, abc: &Abc<'_>, class: &Class<'
     out.write_str(", ")?;
     write_count(out, class.num_methods, "function")?;
     out.write_char('\n')?;
+    if let Some(source) = &opts.source {
+        out.write_str("; source ")?;
+        write_name(out, source.file)?;
+        out.write_str(
+            " (by the source map: \"line N\" of a function is a line of the compiled file, from 0; \"source line\" is the line here)\n",
+        )?;
+    }
 
     match &info.module {
         Ok(Some(module)) => ModuleText { abc, module }.write_sections(out, info.phases),

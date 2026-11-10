@@ -29,7 +29,7 @@ pub(crate) fn write_label<W: Write>(out: &mut W, pc: usize) -> fmt::Result {
 /// up once, here.
 pub(crate) struct InsnPrinter<'r, 'a> {
     abc: &'r Abc<'a>,
-    opts: &'r Options,
+    opts: &'r Options<'r>,
     record: &'r RecordInfo<'a>,
     region: Result<Region<'a>, AbcError>,
     /// Registers from this number on are arguments; `None` when the method
@@ -43,7 +43,7 @@ impl<'r, 'a> InsnPrinter<'r, 'a> {
         method: &Method<'a>,
         record: &'r RecordInfo<'a>,
         num_vregs: Option<u32>,
-        opts: &'r Options,
+        opts: &'r Options<'r>,
     ) -> InsnPrinter<'r, 'a> {
         InsnPrinter { abc, opts, record, region: method.region(), num_vregs }
     }

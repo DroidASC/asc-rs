@@ -539,10 +539,12 @@ impl Engine {
     /// package when `path` starts with that package's name.
     fn files_at(&self, path: &str) -> Result<Vec<(String, String, Vec<u8>)>> {
         let packages = self.program.packages();
+        // The longest name: a package inside another starts with the name of that one.
         let named = packages
             .iter()
             .enumerate()
-            .find_map(|(position, package)| Some((position, path.strip_prefix(package.name.as_str())?.strip_prefix('/')?)));
+            .filter_map(|(position, package)| Some((position, path.strip_prefix(package.name.as_str())?.strip_prefix('/')?)))
+            .min_by_key(|(_, inner)| inner.len());
         let candidates: Vec<(usize, &str)> = match named {
             Some(named) => vec![named],
             None => (0..packages.len()).map(|position| (position, path)).collect(),

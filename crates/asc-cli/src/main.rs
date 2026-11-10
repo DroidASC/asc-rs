@@ -510,14 +510,15 @@ enum Command {
     /// `--access write` keeps only that kind.
     ///
     /// HarmonyOS programs take string, prop, global, import, method, number,
-    /// call and all. Rows are `entry | record->function+0xPC | restored name
-    /// | instruction`; the second column is what getclass takes.
+    /// call, all and rules. Rows are `entry | record->function+0xPC |
+    /// restored name | instruction`; the second column is what getclass takes.
     Findrefs {
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// After each result, show the referencing instructions (marked `>`)
         /// with N smali lines around them, and their pc / source line; or
-        /// `method` for the whole referencing method.
+        /// `method` for the whole referencing method. HarmonyOS: lines of
+        /// the function's listing, as getclass prints it.
         #[arg(long, global = true, value_name = "N|method", value_parser = parse_context, conflicts_with = "context_method")]
         context: Option<RefContext>,
         /// Same as `--context method`.
@@ -552,9 +553,11 @@ enum Command {
     /// HarmonyOS: the target is a function, `[RECORD] FUNCTION` or
     /// `RECORD->FUNCTION` as result rows print it, or `--to call:REGEX`:
     /// the callers of every callee path the regex matches (the paths of
-    /// `findrefs call`, e.g. 'call:^import:@ohos:net\.http'). `--from
-    /// method:NAME` keeps only the paths from the callers the name
-    /// matches (marked `[from]`); --unless is not supported. A call names
+    /// `findrefs call`, e.g. 'call:^import:@ohos:net\.http'); any other
+    /// --to rule targets the functions it matches. --from and --unless
+    /// take rules as above, with the HarmonyOS conditions (see `findrefs
+    /// all`); there `method:NAME` is the function of that name itself
+    /// (`--from 'method:^EntryAbility\.on'`). A call names
     /// no callee there, so rows say how each link was made: no mark for a
     /// proved call, `[new]`, `[super]` (the parent's constructor or method),
     /// `[this-class]` / `[inherited]` / `[instance]` (a method matched by
@@ -852,6 +855,14 @@ enum Find {
     /// FILE lists (one per line; findrefs output works). `!CONDITION` is
     /// one more --none. The last column lists what each condition matched,
     /// in order.
+    ///
+    /// HarmonyOS: the conditions are string:REGEX, literal:TEXT, prop:NAME,
+    /// global:NAME, import:REQUEST[#NAME], number:N, call:PATH-REGEX and
+    /// method:[RECORD->]NAME (NAME a regex, `=NAME` exact). Among several
+    /// conditions method: is the function of that name itself (alone: where
+    /// it is defined). call:{RULE} is a call that leads to a function whose
+    /// code matches RULE, call:{@FILE} to a function FILE lists (one per
+    /// line; findrefs and callgraph output works).
     All {
         /// Also write every result to this file.
         #[arg(short, long)]
@@ -870,6 +881,9 @@ enum Find {
     /// impl:CLASS), or several joined with `&` for a compound rule, `!`
     /// before the ones a method must not match. `&` inside `{}` or `()`, or
     /// written `\&`, belongs to its condition.
+    ///
+    /// HarmonyOS: the conditions of `all`; a `&` joins only ahead of
+    /// `KIND:` (record names hold `&`). Each rule is one search.
     Rules {
         /// Also write every result to this file.
         #[arg(short, long)]
@@ -893,7 +907,7 @@ enum Find {
         /// Match the whole name instead of a regex.
         #[arg(long)]
         exact: bool,
-        /// Property name pattern (regex).
+        /// Property name pattern (regex; `=NAME` is --exact).
         name: String,
     },
     /// HarmonyOS: find reads and writes of global bindings by name
@@ -908,7 +922,7 @@ enum Find {
         /// Match the whole name instead of a regex.
         #[arg(long)]
         exact: bool,
-        /// Global name pattern (regex).
+        /// Global name pattern (regex; `=NAME` is --exact).
         name: String,
     },
     /// HarmonyOS: find uses of imported bindings: the import declarations of
@@ -960,7 +974,9 @@ enum Find {
         /// Match PATH as a plain substring instead of a regex.
         #[arg(long)]
         literal: bool,
-        /// Callee path pattern (regex), e.g. 'import:@ohos:net\.http.*\.request$'.
+        /// Callee path pattern (regex), e.g. 'import:@ohos:net\.http.*\.request$';
+        /// or '{RULE}': the calls that lead to a function whose code
+        /// matches RULE (a rule as for `all`), '{@FILE}' to one FILE lists.
         path: String,
     },
     /// Find references to fields.

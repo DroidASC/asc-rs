@@ -579,10 +579,53 @@ fn callgraph_walks_callers_and_callee_paths() {
             "0 Util->#*#star | star",
             "  1 <- Util->#*#helper | helper",
             "    2 <- App->#*@0*#cb | run.cb [from]",
-            "# 9 rows, 6 distinct functions, 0 leaves (callers, depth 3); 3 records scanned",
-            "# from: 3 of 9 rows shown: 1 path from 1 matching function",
+            "# 3 rows, 3 distinct functions, 0 leaves (callers, depth 3); 3 records scanned; 1 from functions reached",
         ]
     );
+    // A rule about the code works the same: `run` is the function with `p.then()`, and a path ends there.
+    let by_code = short_tree(&inputs.lines(&["callgraph", &abc, "star", "--depth", "3", "--from", "prop:=then"]));
+    assert_eq!(by_code[1], "  1 <- App->#*#run | run unresolved=1 [from]");
+    assert!(!by_code.iter().any(|line| line.contains("App->func_main_0")), "{by_code:?}");
+    // --unless leaves functions out, with what only they reach (repeatable).
+    assert_eq!(
+        short_tree(&inputs.lines(&["callgraph", &abc, "star", "--unless", "method:=helper"])),
+        [
+            "0 Util->#*#star | star",
+            "  1 <- App->#*#run | run unresolved=1",
+            "    2 <- App->func_main_0 | func_main_0 x2",
+            "  1 <- Util->func_main_0 | func_main_0 [defines]",
+            "# 4 rows, 4 distinct functions, 0 leaves (callers, depth 2); 3 records scanned; 1 functions left out by unless",
+        ]
+    );
+    let fenced = ["callgraph", &abc, "star", "--unless", "global:=console & prop:=log", "--unless", "method:^func_main"];
+    assert_eq!(
+        short_tree(&inputs.lines(&fenced)),
+        [
+            "0 Util->#*#star | star",
+            "  1 <- App->#*#run | run unresolved=1",
+            "# 2 rows, 2 distinct functions, 0 leaves (callers, depth 2); 3 records scanned; 3 functions left out by unless",
+        ]
+    );
+    // --to takes any rule: the functions it matches are the roots; --from alone walks callees.
+    assert_eq!(
+        short_tree(&inputs.lines(&["callgraph", &abc, "--to", "prop:=log", "--depth", "1", "--no-defines"])),
+        [
+            "0 Util->#*#helper | helper",
+            "  1 <- App->#*#run | run x3 unresolved=1",
+            "  1 <- App->#*@0*#cb | run.cb",
+            "# 3 rows, 3 distinct functions, 0 leaves (callers, depth 1); 3 records scanned",
+        ]
+    );
+    assert_eq!(
+        short_tree(&inputs.lines(&["callgraph", &abc, "--from", "method:=cb", "--depth", "1"])),
+        [
+            "0 App->#*@0*#cb | run.cb",
+            "  1 -> Util->#*#helper | helper",
+            "# 2 rows, 2 distinct functions, 0 leaves (callees, depth 1); 1 records scanned",
+        ]
+    );
+    let out = inputs.run(&["callgraph", &abc, "--to", "prop:=nowhere"]);
+    assert_eq!((out.status.code(), stderr(&out).as_str()), (Some(1), "Error: no function matches the root rule\n"));
     let nowhere = inputs.lines(&["callgraph", &abc, "star", "--from", "method:=make"]);
     assert_eq!(nowhere.len(), 2, "{nowhere:?}");
     assert!(nowhere[1].starts_with("# from: none of the 6 callers walked matches (depth 2); a path ends where "), "{nowhere:?}");
@@ -764,14 +807,14 @@ fn what_is_not_supported_yet_says_what_is() {
     let hap = inputs.sample_hap();
     let classes = "(a class is named as rows print it, RECORD->CLASS, or by its name alone; a parent outside the program by \
                    import:REGEX or global:REGEX over its path; findrefs method NAME lists the functions of a name, constructors among them)";
-    let walks = "(supported: callgraph [RECORD] FUNCTION or --to call:PATTERN, --from method:NAME, --callees, --depth, --max-nodes, \
-                 --no-defines, --unresolved, --entry)";
-    let to = "--to takes call:PATTERN on a HarmonyOS program: a regex over callee paths as findrefs call prints them, e.g. \
-              call:^import:@ohos:net\\.http";
-    let searches = "(supported: findrefs string, prop, global, import, method, number, call, all)";
+    let walks = "(callgraph takes: [RECORD] FUNCTION or --to RULE, --from RULE, --unless RULE, --callees, --depth, --max-nodes, \
+                 --no-defines, --unresolved, --entry; RECORD->FUNCTION as result rows print it is a target too)";
+    let no_rule =
+        "\"type:x\" is not a condition: write KIND:VALUE with KIND one of string, literal, prop, global, import, method, number, call";
+    let searches = "(supported: findrefs string, prop, global, import, method, number, call, all, rules)";
     let conditions = "(supported: string:, literal:, prop:, global:, import:, method:, number:, call:)";
     let not_yet = "is not supported for HarmonyOS programs yet";
-    let cases: [(&[&str], String); 47] = [
+    let cases: [(&[&str], String); 52] = [
         (
             &["getmanifest", "--resolve"],
             "getmanifest --resolve is DEX-only: module.json is printed as it is; manifest-summary puts what a $type:name reference \
@@ -815,29 +858,25 @@ fn what_is_not_supported_yet_says_what_is() {
             "a parent path outside the program has no supertypes here: it is a root for subclasses only".into(),
         ),
         (&["callgraph", "pages/Index", "build", "--virtual"], "--virtual is DEX-only".into()),
-        (&["callgraph", "pages/Index", "build", "--unless", "method:check"], format!("callgraph --unless {not_yet} {walks}")),
-        (&["callgraph", "--to", "string:token"], to.into()),
+        (&["callgraph", "pages/Index", "build", "--unless", "type:x"], format!("--unless: {no_rule}")),
+        (&["callgraph", "--to", "type:x"], format!("--to: {no_rule}")),
         (&["callgraph", "--to", "call:("], "--to: invalid pattern: regex parse error:\n    (\n    ^\nerror: unclosed group".into()),
         (&["callgraph", "--to", "call:x", "--callees"], "--to call:PATTERN walks the callers of a callee path: leave out --callees".into()),
         (
             &["callgraph", "--to", "call:x", "--entry", "ets/modules.abc"],
             "--entry picks the root function: it does not go with --to".into(),
         ),
-        (&["callgraph", "pages/Index", "--to", "call:x"], "give the target as [RECORD] FUNCTION or as --to call:PATTERN, not both".into()),
-        (
-            &["callgraph"],
-            "callgraph needs a target: [RECORD] FUNCTION (or RECORD->FUNCTION, as result rows print it) or --to call:PATTERN".into(),
-        ),
+        (&["callgraph", "pages/Index", "--to", "call:x"], "give the target as [RECORD] FUNCTION or as --to RULE, not both".into()),
+        (&["callgraph"], format!("callgraph needs a target {walks}")),
         (&["callgraph", "pages/Index", "build", "--unresolved"], "--unresolved lists callees: add --callees".into()),
         (
             &["callgraph", "pages/Index", "build", "--callees", "--from", "method:x"],
             "--from keeps caller paths: leave out --callees".into(),
         ),
+        (&["callgraph", "pages/Index", "build", "--from", "type:x"], format!("--from: {no_rule}")),
         (
-            &["callgraph", "pages/Index", "build", "--from", "string:x"],
-            "--from takes method:[RECORD->]NAME on a HarmonyOS program: NAME a regex over function names, =NAME the exact name, e.g. \
-             method:=EntryAbility.onNewWant"
-                .into(),
+            &["callgraph", "pages/Index", "build", "--from", "!string:x"],
+            "--from: a rule needs a condition without `!` (`!` only removes functions)".into(),
         ),
         (
             &["callgraph", "pages/Index", "nowhere"],
@@ -849,9 +888,14 @@ fn what_is_not_supported_yet_says_what_is() {
         (&["findrefs", "field", "message"], format!("findrefs field {not_yet} {searches}")),
         (&["findrefs", "type", "Index"], format!("findrefs type {not_yet} {searches}")),
         (&["findrefs", "extends", "Index"], format!("findrefs extends {not_yet} {searches}")),
-        (&["findrefs", "rules", "string:token"], format!("findrefs rules {not_yet} {searches}")),
-        (&["findrefs", "all", "string:a", "!string:b"], format!("findrefs all with excluded conditions {not_yet} {searches}")),
-        (&["findrefs", "all", "string:a", "--none", "string:b"], format!("findrefs all with excluded conditions {not_yet} {searches}")),
+        (&["findrefs", "rules"], "findrefs rules needs at least one rule".into()),
+        (&["findrefs", "rules", "string:a & type:Index"], format!("findrefs type: {not_yet} {conditions}")),
+        (&["findrefs", "rules", "--file", "nowhere.txt"], "cannot read nowhere.txt: No such file or directory (os error 2)".into()),
+        (&["findrefs", "all", "!string:b"], "a rule needs a condition without `!` (`!` only removes functions)".into()),
+        (&["findrefs", "all", "string:a", "--none", "type:Index"], format!("findrefs type: {not_yet} {conditions}")),
+        (&["findrefs", "all", "string:a & prop:b"], "\"string:a & prop:b\" is several conditions; give one KIND:VALUE here".into()),
+        (&["findrefs", "all", "call:{string:a"], "call:{string:a: expected `}` at the end of the set".into()),
+        (&["findrefs", "call", "{@nowhere.txt}"], "cannot read function list nowhere.txt: No such file or directory (os error 2)".into()),
         (&["findrefs", "all", "type:Index"], format!("findrefs type: {not_yet} {conditions}")),
         (&["findrefs", "all", "prop:"], "prop: needs a value".into()),
         (
@@ -863,7 +907,6 @@ fn what_is_not_supported_yet_says_what_is() {
             "a global is read or written, not call: use `prop` or `call` for members".into(),
         ),
         (&["findrefs", "import", "@ohos:net.http#default", "--requests"], "--requests lists module requests: leave out the #NAME".into()),
-        (&["findrefs", "string", "token", "--context", "3"], format!("findrefs --context {not_yet} {searches}")),
         (&["getclass", "pages/Index", "--dump-dex", "out.dex"], "--dump-dex is DEX-only".into()),
         (&["disassemble", "pages/Index", "--debuginfo"], "--debuginfo is DEX-only".into()),
     ];
@@ -1531,4 +1574,164 @@ fn findrefs_and_listclass_keep_to_an_entry_or_a_package() {
     for args in [&["findrefs", &apk, "string", "x", "--entry", "classes.dex"][..], &["listclass", &apk, "--entry", "classes.dex"]] {
         assert_eq!(inputs.error(args), "Error: --entry applies to HarmonyOS programs only\n", "{args:?}");
     }
+}
+
+/// A package unpacked into a directory is that package; packages are found
+/// through zips; the source maps of a debug build reach `getclass`.
+#[test]
+fn unpacked_packages_zips_of_packages_and_source_maps() {
+    let inputs = Inputs::new();
+    let debug = asc_fixture::hap::make_debug_hap(&make_abc());
+    let hap = inputs.file("packed/entry.hap", &debug);
+    let unpacked = inputs.path("entry");
+    asc_fixture::hap::unpack(&debug, &unpacked);
+    let unpacked = unpacked.to_str().unwrap();
+
+    // The same answers, the package named after the directory instead of the file.
+    for args in [
+        &["manifest-summary"][..],
+        &["manifest-summary", "--json"],
+        &["resources"],
+        &["listclass"],
+        &["findrefs", "string", "."],
+        &["getclass", "pages/Index"],
+        &["callgraph", "pages/Index", "Index.build", "--callees"],
+        &["xml", "$profile:main_pages"],
+        &["xml", "ets/sourceMaps.map"],
+    ] {
+        let of_directory = inputs.lines(&[&args[..1], &[unpacked], &args[1..]].concat());
+        let of_file = inputs.lines(&[&args[..1], &[hap.as_str()], &args[1..]].concat());
+        let renamed: Vec<String> = of_file.iter().map(|line| line.replace("entry.hap", "entry")).collect();
+        assert_eq!(of_directory, renamed, "{args:?}");
+    }
+    let summary = inputs.lines(&["manifest-summary", unpacked]);
+    assert!(summary.contains(&"source-maps ets/sourceMaps.map modules=2".to_owned()), "{summary:?}");
+    assert!(summary.iter().any(|line| line.starts_with("page pages/Index record=")), "{summary:?}");
+    assert_eq!(inputs.lines(&["xml", unpacked, "$profile:main_pages"]), SAMPLE_MAIN_PAGES.lines().collect::<Vec<_>>());
+    assert!(inputs.error(&["xml", unpacked, "../packed/entry.hap"]).contains("not found"));
+
+    let function = inputs.lines(&["getclass", unpacked, "pages/Index", "--method", "Index.build"]);
+    assert!(function[1].ends_with(", line 12 (source line 4)"), "{function:?}");
+    let record = inputs.lines(&["getclass", &hap, "entryability/EntryAbility"]);
+    assert!(record[2].starts_with("; source entry/src/main/ets/entryability/EntryAbility.ets (by the source map: "), "{record:?}");
+    assert!(record.iter().any(|line| line.ends_with(", line 6 (no source line)")), "{record:?}");
+
+    // An `.app` inside a zip: entries carry the whole path.
+    let app = make_app(&[("entry.hap", &debug), ("feature.hap", &debug)], Compression::Deflated);
+    let bundle = inputs.file("bundle.zip", &Hap::new().entry("out/shop.app", &app, Compression::Deflated).build());
+    let rows = inputs.lines(&["findrefs", &bundle, "string", "testTag"]);
+    let mut entries = first_columns(&rows);
+    entries.dedup();
+    assert_eq!(entries, ["out/shop.app/entry.hap/ets/modules.abc", "out/shop.app/feature.hap/ets/modules.abc"]);
+    let kept = inputs.lines(&["listclass", &bundle, "--entry", "out/shop.app/feature.hap"]);
+    assert_eq!(kept.len(), 2, "{kept:?}");
+}
+
+/// Rows of the call graph program without the entry column, records shortened.
+fn short_calls(lines: &[String]) -> Vec<String> {
+    short_tree(lines).iter().map(|line| line.replace("modules.abc | ", "")).collect()
+}
+
+#[test]
+fn findrefs_excludes_nests_and_runs_rule_sets() {
+    let inputs = Inputs::new();
+    let abc = inputs.file("modules.abc", &call_graph_program().build().bytes);
+    let find = |args: &[&str]| {
+        let mut argv = vec!["findrefs", abc.as_str()];
+        argv.extend(args);
+        short_calls(&inputs.lines(&argv))
+    };
+    // `!COND` and --none take functions away; one row per function is left.
+    let props = find(&["all", "prop:=make", "prop:=then"]);
+    assert_eq!(props, ["App->#*#run+0x6 | run | prop +0x6 ldobjbyname \"make\" [call] && prop +0x3a ldobjbyname \"then\" [call]"]);
+    assert!(find(&["all", "prop:=make", "prop:=then", "!prop:=nothing"]).is_empty());
+    assert!(find(&["all", "prop:=make", "prop:=then", "--none", "prop:=nothing"]).is_empty());
+    assert_eq!(find(&["all", "prop:=make", "prop:=then", "!prop:=size", "--none", "string:no-such-text"]), props);
+    assert_eq!(find(&["all", "prop:=get", "!prop:=then"]), ["Box->#~@0<#make+0x0 | Box.make | prop +0x0 ldthisbyname \"get\" [call]"]);
+    // Among conditions `method:` is the function itself; alone it is where the function is defined.
+    assert_eq!(find(&["all", "method:=run", "prop:=then"]), ["App->#*#run+0x3a | run | prop +0x3a ldobjbyname \"then\" [call]"]);
+    assert_eq!(find(&["all", "prop:=get", "!method:^Box\\."]), ["App->#*#run+0x16 | run | prop +0x16 ldobjbyname \"get\" [call]"]);
+    assert_eq!(find(&["all", "method:helper", "!prop:=then"]), ["Util->#*#helper+0x0 | helper | method"]);
+    assert_eq!(find(&["all", "method:=helper"]), ["Util->func_main_0+0x0 | func_main_0 | definefunc #*#helper, 0  ; helper"]);
+
+    // `call:{RULE}`: the calls that lead to a function the rule matches, to any depth of braces.
+    let star = find(&["call", "{method:=star}"]);
+    assert_eq!(
+        star,
+        [
+            "App->#*#run+0x1e | run | callarg0 ; -> Util->#*#star (star)",
+            "Util->#*#helper+0x2 | helper | callarg0 ; -> Util->#*#star (star)"
+        ]
+    );
+    assert_eq!(find(&["all", "call:{method:=star}"]), star);
+    assert_eq!(find(&["call", "{global:=console & prop:=log}"]).len(), 4);
+    let two_up = find(&["all", "call:{call:{method:=star}}", "!method:=run"]);
+    assert_eq!(two_up.len(), 2, "{two_up:?}");
+    assert!(two_up[0].starts_with("App->func_main_0+0x9 | func_main_0 | call +0x9 callarg0 ; -> App->#*#run (run)"), "{two_up:?}");
+    assert!(two_up[1].starts_with("App->#*@0*#cb+0x2 | run.cb | call +0x2 callarg0 ; -> Util->#*#helper (helper)"), "{two_up:?}");
+    // `{@FILE}`: the functions a file lists, as earlier output prints them.
+    let list = inputs.file("star.txt", &inputs.run(&["callgraph", &abc, "star", "--depth", "0"]).stdout);
+    assert_eq!(find(&["call", &format!("{{@{list}}}")]), star);
+
+    // `=NAME` is the exact name in a subcommand too, as --exact is.
+    for kind in [&["prop", "then"][..], &["global", "console"], &["method", "helper"]] {
+        let exact = find(&[kind[0], kind[1], "--exact"]);
+        assert!(!exact.is_empty(), "{kind:?}");
+        assert_eq!(find(&[kind[0], &format!("={}", kind[1])]), exact, "{kind:?}");
+    }
+
+    // rules: every rule one search, rows prefixed by rule between the `# rN` lines.
+    let rules = inputs.file("rules.txt", b"# more rules\n\nprop:=nope\n");
+    let out = inputs.run(&["findrefs", &abc, "rules", "prop:=then & !prop:=size", "call:{method:=star}", "--file", &rules]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        short_calls(&stdout(&out).lines().map(String::from).collect::<Vec<_>>()),
+        [
+            "# r1 prop:=then & !prop:=size",
+            "# r2 call:{method:=star}",
+            "# r3 prop:=nope",
+            "r1 | App->#*#run+0x3a | run | prop +0x3a ldobjbyname \"then\" [call]",
+            "r2 | App->#*#run+0x1e | run | callarg0 ; -> Util->#*#star (star)",
+            "r2 | Util->#*#helper+0x2 | helper | callarg0 ; -> Util->#*#star (star)",
+            "# r1 1 results",
+            "# r2 2 results",
+            "# r3 0 results",
+        ]
+    );
+    assert_eq!(stderr(&out), "");
+    // A rule alone is that search: the rows of `findrefs prop`, prefixed.
+    let alone = find(&["rules", "prop:=then"]);
+    assert_eq!(alone[1], format!("r1 | {}", find(&["prop", "then", "--exact"])[0]));
+}
+
+#[test]
+fn findrefs_context_lists_the_code_around_each_hit() {
+    let inputs = Inputs::new();
+    let abc = inputs.file("modules.abc", &call_graph_program().build().bytes);
+    let around = inputs.lines(&["findrefs", &abc, "prop", "then", "--exact", "--context", "1"]);
+    assert_eq!(
+        short_calls(&around),
+        [
+            "App->#*#run+0x3a | run | ldobjbyname \"then\" [call]",
+            "  @ pc 0x3a",
+            "      0038  lda a3",
+            "  >   003a  ldobjbyname \"then\"",
+            "      003e  callarg0",
+        ]
+    );
+    // Every site of a conjunction, windows apart.
+    let sites = inputs.lines(&["findrefs", &abc, "all", "prop:=make", "prop:=then", "--context", "0"]);
+    assert_eq!(sites[1..], ["  @ pc 0x6, pc 0x3a", "  >   0006  ldobjbyname \"make\"", "  --", "  >   003a  ldobjbyname \"then\""]);
+    // The whole function is what getclass prints, once for the rows that follow each other in it.
+    let whole = inputs.lines(&["findrefs", &abc, "prop", "^(size|other)$", "--context-method"]);
+    let listing = inputs.lines(&["getclass", &abc, "lib/Box", "--method", "Box.get"]);
+    assert_eq!(whole[1], "  @ pc 0x0");
+    let shown: Vec<&str> = whole[2..2 + listing.len()].iter().map(|line| &line[4..]).collect();
+    assert_eq!(shown, listing);
+    assert_eq!(whole[2 + listing.len() + 1..], ["  @ pc 0x6", "  # the function is listed with the row above"]);
+    // A context is part of its record: --limit counts rows, and a rule set keeps the prefix.
+    let cut = inputs.lines(&["findrefs", &abc, "prop", ".", "--context", "1", "--limit", "1", "--spill-mb", "0"]);
+    assert!(cut.len() >= 4 && cut[1].starts_with("  @ pc ") && cut.last().unwrap().starts_with("# records 1-1 of "), "{cut:?}");
+    let prefixed = inputs.lines(&["findrefs", &abc, "rules", "prop:=then", "--context", "0"]);
+    assert_eq!(prefixed[2..4], ["r1 |  @ pc 0x3a", "r1 |  >   003a  ldobjbyname \"then\""]);
 }

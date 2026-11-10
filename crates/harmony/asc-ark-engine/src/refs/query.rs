@@ -171,8 +171,72 @@ pub enum Query {
     /// Call sites whose resolved callee path matches, e.g.
     /// `import:@ohos:net.http#default.createHttp`.
     Call(Pattern),
-    /// Functions that every one of the queries matches in.
+    /// Functions that every one of the queries matches in, and none of
+    /// its [`Query::Not`] parts. Among several conditions a
+    /// [`Query::Method`] is about the function itself, the one so named,
+    /// not about the functions that define it.
     All(Vec<Query>),
+    /// A part of [`Query::All`] that a function must not match.
+    Not(Box<Query>),
+    /// Call sites that lead to a function of the set (`call:{RULE}`,
+    /// `call:{@FILE}`), by any edge of the call graph that is a call.
+    CallTo(FunctionSet),
+}
+
+/// Functions of the program, as a `{...}` after `call:` names them.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum FunctionSet {
+    /// The functions a rule matches: those whose code matches every
+    /// condition of it and none of its `!` ones; a `method:` condition
+    /// names the functions themselves.
+    Matching(Box<Query>),
+    /// The functions a file lists.
+    Listed(Vec<ListedFunction>),
+}
+
+/// One line of a function list: `RECORD->FUNCTION` as result rows print
+/// it, or a function name alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedFunction {
+    /// The canonical record name, or a path suffix of it.
+    pub record: Option<String>,
+    /// The raw name, the restored name or a dotted suffix of it.
+    pub function: String,
+}
+
+impl FunctionSet {
+    /// The functions `text` lists, one per line; blank lines and `#`
+    /// comments are skipped. A line findrefs or callgraph printed works as
+    /// it is: its first `RECORD->FUNCTION` token is the function (without
+    /// the `+0xPC` of a findrefs row); any other line is a function name.
+    pub fn listed(text: &str) -> FunctionSet {
+        let mut functions: Vec<ListedFunction> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let mut located = line.split_whitespace().filter_map(|token| token.split_once("->"));
+                match located.find(|(record, function)| !record.is_empty() && !function.is_empty()) {
+                    Some((record, function)) => {
+                        ListedFunction { record: Some(record.to_owned()), function: without_pc(function).to_owned() }
+                    }
+                    None => ListedFunction { record: None, function: line.to_owned() },
+                }
+            })
+            .collect();
+        functions.sort_by(|a, b| (&a.record, &a.function).cmp(&(&b.record, &b.function)));
+        functions.dedup();
+        FunctionSet::Listed(functions)
+    }
+}
+
+/// `function` without the `+0xPC` a findrefs row appends to it.
+fn without_pc(function: &str) -> &str {
+    match function.rsplit_once("+0x") {
+        Some((name, pc)) if !name.is_empty() && !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_hexdigit()) => name,
+        _ => function,
+    }
 }
 
 impl Query {
@@ -223,31 +287,52 @@ impl Query {
         Ok(Query::Method { record, name: name(function)? })
     }
 
-    /// A condition as `findrefs all` takes them: `string:REGEX`,
+    /// One condition as `findrefs all` takes them: `string:REGEX`,
     /// `literal:TEXT`, `prop:NAME`, `global:NAME`, `import:REQUEST[#NAME]`,
-    /// `method:[RECORD->]NAME`, `number:N`, `call:REGEX`. `NAME` is a regex,
-    /// or `=NAME` for the exact name.
+    /// `method:[RECORD->]NAME`, `number:N`, `call:REGEX`, `call:{RULE}`.
+    /// `NAME` is a regex, or `=NAME` for the exact name.
     ///
     /// # Errors
-    /// [`EngineError::Query`] for an unknown kind or a missing value,
-    /// [`EngineError::Pattern`] for an invalid regex.
+    /// [`EngineError::Query`] for an unknown kind, a missing value or
+    /// several conditions, [`EngineError::Pattern`] for an invalid regex.
     pub fn condition(spec: &str) -> Result<Query> {
-        let unknown =
-            || EngineError::Query(format!("{spec:?} is not a condition: write KIND:VALUE with KIND one of {}", Query::KINDS.join(", ")));
-        let (kind, value) = spec.split_once(':').ok_or_else(unknown)?;
-        if value.is_empty() {
-            return Err(EngineError::Query(format!("{kind}: needs a value")));
+        match Query::rule(spec, None)? {
+            Query::All(_) => Err(EngineError::Query(format!("{spec:?} is several conditions; give one KIND:VALUE here"))),
+            query => Ok(query),
         }
-        match kind {
-            "string" => Query::string_regex(value),
-            "literal" => Ok(Query::string_literal(value)),
-            "prop" => Ok(Query::Prop { name: Pattern::name(value)?, access: None }),
-            "global" => Ok(Query::Global { name: Pattern::name(value)?, access: None }),
-            "import" => Query::import(value, false),
-            "method" => Query::method(value, Pattern::name),
-            "number" => Ok(Query::Number(value.parse()?)),
-            "call" => Ok(Query::Call(Pattern::regex(value)?)),
-            _ => Err(unknown()),
+    }
+
+    /// A rule: conditions joined with `&`, `!` before the ones a function
+    /// must not match (see [`super::rule`] for the syntax). `call:{@FILE}`
+    /// reads `FILE` relative to `dir` (the current directory when `None`).
+    ///
+    /// # Errors
+    /// As [`Query::condition`]; [`EngineError::Query`] for a rule without
+    /// a condition a function has to match, or a file that does not read.
+    pub fn rule(spec: &str, dir: Option<&std::path::Path>) -> Result<Query> {
+        super::rule::parse(spec, dir)
+    }
+
+    /// The parts of a rule, as written: what stands between the `&` that
+    /// join conditions (each still with its `!`). For a front end that
+    /// reads the kinds its own way.
+    pub fn rule_parts(spec: &str) -> Vec<&str> {
+        super::rule::parts(spec)
+    }
+
+    /// The functions matching every query of `all` and none of `none`: one
+    /// query alone is that query itself.
+    ///
+    /// # Errors
+    /// [`EngineError::Query`] when `all` is empty: exclusions only remove functions.
+    pub fn compound(mut all: Vec<Query>, none: Vec<Query>) -> Result<Query> {
+        match (all.len(), none.is_empty()) {
+            (0, _) => Err(EngineError::Query("a rule needs a condition without `!` (`!` only removes functions)".to_owned())),
+            (1, true) => Ok(all.remove(0)),
+            _ => {
+                all.extend(none.into_iter().map(|query| Query::Not(Box::new(query))));
+                Ok(Query::All(all))
+            }
         }
     }
 
@@ -264,7 +349,26 @@ impl Query {
             Query::Method { .. } => "method",
             Query::Number(_) => "number",
             Query::Call(_) => "call",
+            Query::CallTo(_) => "call",
             Query::All(_) => "all",
+            Query::Not(_) => "not",
+        }
+    }
+
+    /// Whether answering takes the call graph: a `call:{...}` somewhere in it.
+    pub(crate) fn needs_graph(&self) -> bool {
+        match self {
+            Query::CallTo(_) => true,
+            Query::All(parts) => parts.iter().any(Query::needs_graph),
+            Query::Not(part) => part.needs_graph(),
+            Query::StringRegex(_)
+            | Query::StringLiteral(_)
+            | Query::Prop { .. }
+            | Query::Global { .. }
+            | Query::Import { .. }
+            | Query::Method { .. }
+            | Query::Number(_)
+            | Query::Call(_) => false,
         }
     }
 }

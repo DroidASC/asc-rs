@@ -49,7 +49,9 @@ use std::time::Instant;
 
 pub use asc_abc::RecordKind;
 pub use asc_hap;
-pub use callgraph::{CallEdge, CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EdgeKind, FormCount, GraphSize, RequestForm};
+pub use callgraph::{
+    CallEdge, CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EdgeKind, FormCount, GraphSize, Reached, RequestForm,
+};
 pub use error::{EngineError, Result};
 pub use hierarchy::{ClassDefinition, ClassNode, ClassRow, DefinedMethod, HierarchyQuery, HierarchyTree, Lineage, ParentKind};
 pub use manifest::{CodeLink, Document, DocumentText, EntryCode, Manifest, ManifestLine, PackageManifest, PackageRecords};
@@ -57,7 +59,9 @@ pub use measure::{CallResolution, CalleeRoot, ResolutionOptions, ResolvedCapture
 pub use ops::Access;
 pub use program::{EntryInfo, EntryStatus, Format, Stamp, StandIn};
 pub use records::{ListOptions, NameFilter, RecordListing};
-pub use refs::{NumberQuery, Pattern, Query, RefBatch, RefRow, RefSite, RefSummary, RequestListing};
+pub use refs::{
+    FunctionSet, ListedFunction, NumberQuery, Pattern, Query, RefBatch, RefContext, RefRow, RefSite, RefSummary, RequestListing,
+};
 pub use resources::{ChainEnd, PackageFile, ResolvedResource, ResourceField, ResourceRow, ResourceTables};
 pub use scopes::{ScopeStats, Unresolved};
 
@@ -143,9 +147,11 @@ impl Drop for Engine {
 }
 
 impl Engine {
-    /// Open `path`: a `.hap` / `.hsp`, an `.app`, a bare `.abc`, a directory
-    /// of those (every `*.hap`, `*.hsp`, `*.app` and `*.abc` below it), or
-    /// several paths joined with `,`.
+    /// Open `path`: a `.hap` / `.hsp`, an `.app` or another zip that holds
+    /// packages (also inside further zips), a bare `.abc`, the directory a
+    /// package was unpacked into (`module.json` with `ets/*.abc` next to
+    /// it), a directory of those (every such file and directory below it),
+    /// or several paths joined with `,`.
     ///
     /// # Errors
     /// A path that does not exist, a lone file that is neither a zip nor an
@@ -258,15 +264,17 @@ impl Engine {
     /// one; [`EngineError::Disassembly`] when the record is malformed.
     pub fn get_class(&self, query: &ClassQuery<'_>) -> Result<ClassSource> {
         let located = records::resolve_record(&self.program, query.record, query.entry)?;
+        let record = String::from_utf8_lossy(located.class.name()).into_owned();
+        // The source of a debug build, when its package packs source maps.
+        let map = self.program.module_map(located.entry, &record);
         let (function, text) = match query.function {
-            None => (None, disasm::record(&located.abc, &located.class)?),
+            None => (None, disasm::record_from(&located.abc, &located.class, map.as_ref())?),
             Some(name) => {
                 let method = records::resolve_function(&located, name)?;
                 let raw = method.name().map(|name| name.to_str().into_owned()).unwrap_or_default();
-                (Some(raw), disasm::function(&located.abc, &located.class, &method)?)
+                (Some(raw), disasm::function_from(&located.abc, &located.class, &method, map.as_ref())?)
             }
         };
-        let record = String::from_utf8_lossy(located.class.name()).into_owned();
         Ok(ClassSource { entry: located.entry.to_owned(), record, function, text })
     }
 
@@ -302,16 +310,32 @@ impl Engine {
         let mut summary = RefSummary { notes: self.notes().to_vec(), ..RefSummary::default() };
         // One cache for the whole search, whatever is released meanwhile.
         let cache = self.graph_cache();
+        // The function sets of its `call:{...}` conditions come first, from the whole program.
+        let prepared = refs::Prepared::new(self, query, cancel)?;
+        let graph = prepared.graph();
+        let scope = refs::Scope { cache: &cache, graph: graph.as_ref(), workers: self.threads, cancel };
         for (index, abc) in self.program.readable().filter(|(index, _)| selected.contains(index)) {
             let name = self.program.info(index).map_or("", |info| info.name.as_str());
             let entry = refs::Entry { name, index: u32::try_from(index).unwrap_or(u32::MAX), abc };
-            let batch = refs::search_entry(&entry, query, &cache, self.threads, cancel)?;
+            let batch = refs::search_entry(&entry, query, &scope)?;
             summary.entries += 1;
             summary.total_results += batch.rows.len();
             sink(batch);
         }
         summary.total_us = started.elapsed().as_micros();
         Ok(summary)
+    }
+
+    /// Fill the [`RefRow::context`] of `rows`, which a search found in the
+    /// ABC entry `entry` (in the order it gave them): the listing of each
+    /// row's function around its sites. A whole function
+    /// ([`RefContext::Method`]) is listed with the first of consecutive rows
+    /// in it; the others say so. Rows in record fields, and rows of an entry
+    /// the program does not have, are left as they are.
+    pub fn fill_context(&self, entry: &str, rows: &mut [RefRow], context: RefContext) {
+        if let Some(abc) = self.abc(entry) {
+            refs::fill_context(&abc, rows, context);
+        }
     }
 
     /// The distinct module requests of the program (`@ohos:net.http`,

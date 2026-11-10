@@ -863,3 +863,126 @@ fn a_search_can_be_kept_to_an_entry_or_a_package() {
     assert_eq!(lines_in(&lone, &query, Some("b.hsp")).len(), 2);
     assert_eq!(lines_in(&lone, &query, Some("ets/widgets.abc")).len(), 1);
 }
+
+#[test]
+fn excluded_conditions_take_functions_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &program().build().bytes);
+    let rule = |spec: &str| Query::rule(spec, None).unwrap();
+    let functions = |spec: &str| -> Vec<String> {
+        let found = find(&engine, &rule(spec));
+        found.into_iter().map(|row| row.split(" | ").next().unwrap().to_owned()).collect()
+    };
+    // The functions that log, and those among them that do not ask for `request`.
+    let logs = functions("global:=console & prop:=log");
+    assert_eq!(logs, ["#~@0>#load", "#*#broken", &format!("{UTIL} #*#helper")]);
+    assert_eq!(functions("global:=console & prop:=log & !prop:=request"), ["#*#broken"]);
+    assert_eq!(functions("global:=console & !prop:=request & prop:=log"), ["#*#broken"]);
+    // A condition nothing matches takes nothing away; one everything matches leaves nothing.
+    assert_eq!(functions("global:=console & prop:=log & !prop:=nothing & !string:nothing-like-this"), logs);
+    assert!(functions("global:=console & !global:.").is_empty());
+    // One condition and exclusions: one row per function, as for several conditions.
+    let rows = find(&engine, &rule("prop:=request & !global:=console"));
+    assert!(rows.is_empty(), "{rows:?}");
+    let rows = find(&engine, &rule("number:7 & !prop:=nothing"));
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|row| row.contains(" | number +0x")), "{rows:?}");
+    // The same compound from its parts.
+    let built = Query::compound(vec![condition("global:=console"), condition("prop:=log")], vec![condition("prop:=request")]).unwrap();
+    assert_eq!(find(&engine, &built), find(&engine, &rule("global:=console & prop:=log & !prop:=request")));
+    assert!(matches!(Query::compound(Vec::new(), vec![condition("prop:.")]), Err(EngineError::Query(_))));
+    assert!(matches!(Query::compound(vec![condition("prop:.")], Vec::new()), Ok(Query::Prop { .. })));
+    // An exclusion on its own is no search.
+    let alone = engine.find_refs(&Query::Not(Box::new(condition("prop:."))), &AtomicBool::new(false), &mut |_| {});
+    assert!(matches!(alone, Err(EngineError::Query(_))));
+}
+
+#[test]
+fn among_conditions_a_method_names_the_function_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &program().build().bytes);
+    let rule = |spec: &str| Query::rule(spec, None).unwrap();
+    // Alone it is where the function is defined: a row in the function that makes it.
+    assert_eq!(find(&engine, &rule("method:=Net.load")).len(), 1);
+    assert!(find(&engine, &rule("method:=Net.load"))[0].starts_with("func_main_0 | defineclasswithbuffer "));
+    // With other conditions it is the function of that name.
+    assert_eq!(
+        find(&engine, &rule("method:=Net.load & string:^https://")),
+        ["#~@0>#load | string +0x1b lda.str \"https://example.com/api\""]
+    );
+    assert!(find(&engine, &rule("method:=Net.size & string:^https://")).is_empty());
+    assert_eq!(find(&engine, &rule(&format!("method:{UTIL}->. & global:=console"))).len(), 1);
+    // Excluded, it takes the function away.
+    let logs = find(&engine, &rule("global:=console & prop:=log & !method:=helper"));
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    assert!(logs.iter().all(|row| !row.contains("helper")), "{logs:?}");
+    // Names alone: the functions, with nothing to show of their code.
+    let (named, _) = rows(&engine, &rule("method:^Net\\. & !method:=size"));
+    assert_eq!(named.iter().map(short).collect::<Vec<_>>(), ["#~@0=#Net | method", "#~@0>#load | method"]);
+    assert!(named.iter().all(|row| row.sites.is_empty() && matches!(row.site, RefSite::Code { pc: 0, .. })));
+    assert!(find(&engine, &rule("method:=Net.load & method:=Net.size")).is_empty());
+    // Rows do not depend on the thread count.
+    let one = open(dir.path(), &program().build().bytes).with_threads(1);
+    for spec in ["global:=console & prop:=log & !prop:=request", "method:^Net\\. & !method:=size", "method:. & prop:. & !number:7"] {
+        assert_eq!(find(&one, &rule(spec)), find(&engine, &rule(spec)), "{spec}");
+    }
+}
+
+#[test]
+fn context_is_the_listing_around_each_site() {
+    use asc_ark_engine::RefContext;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &program().build().bytes);
+    let with = |query: &Query, context: RefContext| -> Vec<String> {
+        let mut out = Vec::new();
+        engine
+            .find_refs(query, &AtomicBool::new(false), &mut |mut batch| {
+                engine.fill_context(&batch.entry_name, &mut batch.rows, context);
+                out.extend(batch.rows.iter().map(|row| row.text(&batch.entry_name)));
+            })
+            .unwrap();
+        out
+    };
+    let url = condition("string:^https://example\\.com/api$");
+    let found = with(&url, RefContext::Lines(1));
+    let row = found.iter().find(|row| row.contains("->#~@0>#load+0x1b ")).unwrap_or_else(|| panic!("{found:?}"));
+    let lines: Vec<&str> = row.lines().collect();
+    assert_eq!(lines.len(), 5, "{row}");
+    assert!(lines[0].ends_with(" | lda.str \"https://example.com/api\""), "{row}");
+    assert_eq!(lines[1], "  @ pc 0x1b");
+    assert!(lines[2].starts_with("      00") && lines[4].starts_with("      00"), "{row}");
+    assert_eq!(lines[3], "  >   001b  lda.str \"https://example.com/api\"");
+    // No context: the row alone; zero lines: the sites alone.
+    assert!(with(&url, RefContext::None).iter().any(|plain| plain == lines[0]));
+    assert!(with(&url, RefContext::Lines(0)).iter().any(|sites| sites.lines().count() == 3 && sites.starts_with(lines[0])));
+
+    // The whole function is the listing getclass prints, and is listed once for consecutive rows in it.
+    let listing = engine.get_class(&asc_ark_engine::ClassQuery { record: NET, function: Some("#~@0>#load"), entry: None }).unwrap().text;
+    let whole = with(&condition("prop:."), RefContext::Method);
+    let in_load: Vec<&String> = whole.iter().filter(|row| row.contains("->#~@0>#load+")).collect();
+    assert!(in_load.len() >= 2, "{whole:?}");
+    let plain: String = in_load[0].lines().skip(2).map(|line| format!("{}\n", &line[4..])).collect();
+    assert_eq!(plain, listing);
+    assert_eq!(in_load[0].lines().filter(|line| line.starts_with("  > ")).count(), 1);
+    assert_eq!(in_load[1].lines().skip(1).collect::<Vec<_>>().len(), 2, "{}", in_load[1]);
+    assert!(in_load[1].ends_with("\n  # the function is listed with the row above"), "{}", in_load[1]);
+
+    // A conjunction marks every site of its conditions; labels and try ranges are lines like any other.
+    let both = Query::All(vec![condition("string:^https://"), condition("call:createHttp$")]);
+    let [row] = &with(&both, RefContext::Lines(0))[..] else { panic!("one row") };
+    assert_eq!(row.lines().nth(1), Some("  @ pc 0xe, pc 0x1b"));
+    assert_eq!(row.lines().filter(|line| line.starts_with("  > ")).count(), 2);
+    assert!(row.contains("\n  --\n"), "{row}");
+    let guarded = with(&Query::All(vec![condition("method:=guarded"), condition("call:.")]), RefContext::Method);
+    assert!(
+        guarded[0].contains("\n      .try 0 [0004, 000c) catchall -> L_000d\n")
+            && guarded[0].contains("\n    L_000d:")
+            && guarded[0].contains("  ; handler of try 0"),
+        "{}",
+        guarded[0]
+    );
+    // A reference in a record field has no code around it.
+    let fields = with(&condition("string:."), RefContext::Lines(2));
+    let field_rows: Vec<&String> = fields.iter().filter(|row| row.contains(" field ")).collect();
+    assert!(!field_rows.is_empty() && field_rows.iter().all(|row| row.lines().count() == 1), "{field_rows:?}");
+}

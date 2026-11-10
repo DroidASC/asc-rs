@@ -97,7 +97,7 @@ impl Engine {
                 "a call is matched by its callee path (import:REQUEST#NAME.member, global:NAME.member, this.member, local:FUNCTION, this@FUNCTION.member, argN@FUNCTION, lex(L,S), argN, callee().member, ?): `findrefs call .` lists them all"
                     .to_owned(),
             ),
-            Query::Number(_) | Query::All(_) => {}
+            Query::Number(_) | Query::All(_) | Query::Not(_) | Query::CallTo(_) => {}
         }
         hints
     }

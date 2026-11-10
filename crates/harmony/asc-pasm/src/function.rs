@@ -35,6 +35,29 @@ fn kind_text(kind: FunctionKind) -> Option<&'static str> {
     }
 }
 
+/// Most rows of a line table looked at for a line with a source. Line
+/// number programs are as long as the file says; real functions have fewer.
+const MAX_SOURCE_ROWS: usize = 4096;
+
+/// After the first line of a function, what a source map says of it:
+/// ` (source line 21)`, a line of the file the header of the record names.
+/// The build may put lines of its own ahead of the user's, so a first line
+/// without a source gives way to the first line of the function that has
+/// one, ` (source line 21 at line 118)`. ` (no source line)` is a function
+/// the source has no line for: one the build wrote.
+fn write_function_source<W: Write>(out: &mut W, opts: &Options<'_>, method: &Method<'_>, first: u32) -> fmt::Result {
+    let Some(source) = &opts.source else { return Ok(()) };
+    let later = || {
+        let rows = method.debug_info().ok().flatten()?.line_rows().ok()?;
+        rows.take(MAX_SOURCE_ROWS).map_while(Result::ok).find_map(|row| Some((row.line, source.of(row.line)?)))
+    };
+    match source.of(first).map(|line| (first, line)).or_else(later) {
+        Some((compiled, line)) if compiled == first => write!(out, " (source line {line})"),
+        Some((compiled, line)) => write!(out, " (source line {line} at line {compiled})"),
+        None => out.write_str(" (no source line)"),
+    }
+}
+
 /// `.function <raw name>  ; <restored name>` and the summary line.
 fn write_header<W: Write>(
     out: &mut W,
@@ -42,7 +65,7 @@ fn write_header<W: Write>(
     record: &RecordInfo<'_>,
     method: &Method<'_>,
     code: Option<&Code<'_>>,
-    opts: &Options,
+    opts: &Options<'_>,
 ) -> fmt::Result {
     out.write_str(".function ")?;
     match method.name() {
@@ -78,7 +101,10 @@ fn write_header<W: Write>(
     if !opts.lines {
         // With `lines` the listing itself carries every line.
         match method.debug_info().and_then(|info| info.map(|info| info.first_line()).transpose()) {
-            Ok(Some(Some(line))) => write!(out, ", line {line}")?,
+            Ok(Some(Some(line))) => {
+                write!(out, ", line {line}")?;
+                write_function_source(out, opts, method, line)?;
+            }
             Ok(Some(None) | None) => {}
             Err(error) => {
                 out.write_str(", line ")?;
@@ -257,7 +283,7 @@ impl<'a> Lines<'a> {
     }
 
     /// Write `; line N` when the instruction at `pc` starts a new line.
-    fn advance<W: Write>(&mut self, out: &mut W, pc: usize) -> fmt::Result {
+    fn advance<W: Write>(&mut self, out: &mut W, pc: usize, opts: &Options<'_>) -> fmt::Result {
         let Some(rows) = &mut self.rows else { return Ok(()) };
         while let Some(row) = rows.next_if(|row| row.as_ref().map_or(true, |row| row.pc as usize <= pc)) {
             match row {
@@ -274,7 +300,11 @@ impl<'a> Lines<'a> {
         // Compiler-generated code carries line -1.
         if self.written != Some(self.pending) && i32::try_from(self.pending).is_ok() {
             self.written = Some(self.pending);
-            writeln!(out, "  ; line {}", self.pending)?;
+            write!(out, "  ; line {}", self.pending)?;
+            if let Some(line) = opts.source.and_then(|source| source.of(self.pending)) {
+                write!(out, " (source line {line})")?;
+            }
+            out.write_char('\n')?;
         }
         Ok(())
     }
@@ -398,7 +428,7 @@ pub(crate) fn write_function<W: Write>(
     abc: &Abc<'_>,
     record: &RecordInfo<'_>,
     method: &Method<'_>,
-    opts: &Options,
+    opts: &Options<'_>,
 ) -> fmt::Result {
     let code = match method.code() {
         Ok(code) => code,
@@ -429,7 +459,7 @@ pub(crate) fn write_function<W: Write>(
             Ok(insn) => {
                 markers.write_at(out, abc, method, insn.pc)?;
                 if let Some(lines) = &mut lines {
-                    lines.advance(out, insn.pc)?;
+                    lines.advance(out, insn.pc, opts)?;
                 }
                 write!(out, "  {:04x}  ", insn.pc)?;
                 printer.write(out, &insn)?;

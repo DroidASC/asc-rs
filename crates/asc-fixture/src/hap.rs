@@ -1,12 +1,15 @@
 //! In-memory HarmonyOS packages: a `.hap` (one module: `ets/*.abc`,
 //! `module.json`, resources) and an `.app` (the bundle: haps plus
-//! `pack.info`), and the `resources.index` of a module ([`ResourceTable`]).
+//! `pack.info`), and the `resources.index` of a module ([`ResourceTable`]);
+//! [`unpack`] writes one out as the directory a user unzips it into.
 
-use std::io::{Cursor, Write};
+use std::fs;
+use std::io::{Cursor, Read, Write};
+use std::path::Path;
 
 use asc_abc::FunctionKind;
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipWriter};
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::abc::{
     sample_program, AbcAnnotation, AbcBuilder, AbcCode, AbcField, AbcFieldValue, AbcFunction, AbcLiteral, AbcModule, AbcRecord, AbcType,
@@ -455,6 +458,12 @@ impl Hap {
         self.entry("resources.index", &table.build(), Compression::Stored)
     }
 
+    /// Add `ets/sourceMaps.map`, the source maps of a debug build.
+    #[must_use]
+    pub fn source_maps(self, json: &str) -> Hap {
+        self.entry("ets/sourceMaps.map", json.as_bytes(), Compression::Deflated)
+    }
+
     /// Add `pack.info`.
     #[must_use]
     pub fn pack_info(self, json: &str) -> Hap {
@@ -495,6 +504,67 @@ pub fn make_hap(modules_abc: &[u8]) -> Vec<u8> {
         .build()
 }
 
+/// `ets/sourceMaps.map` for the sample program of [`crate::abc`], as a
+/// debug build writes it: one source map per compiled module. Line 12 of
+/// the compiled page, where the debug info puts `Index.build`, comes from
+/// line 4 of `Index.ets`; the map of the ability ends before line 6, where
+/// its `onCreate` is, as it does for code the build appends.
+pub const SAMPLE_SOURCE_MAPS: &str = r#"{
+  "entry|entry|1.0.0|src/main/ets/pages/Index.ts": {
+    "version": 3,
+    "file": "Index.ets",
+    "sourceRoot": "",
+    "sources": ["entry/src/main/ets/pages/Index.ets"],
+    "names": [],
+    "mappings": ";;;;;;;;;;;;AAGA;AACA",
+    "entry-package-info": "entry|1.0.0"
+  },
+  "entry|entry|1.0.0|src/main/ets/entryability/EntryAbility.ts": {
+    "version": 3,
+    "file": "EntryAbility.ets",
+    "sourceRoot": "",
+    "sources": ["entry/src/main/ets/entryability/EntryAbility.ets"],
+    "names": [],
+    "mappings": "AAAA;AACA",
+    "entry-package-info": "entry|1.0.0"
+  }
+}
+"#;
+
+/// [`make_hap`] of a debug build: with [`SAMPLE_SOURCE_MAPS`] (deflated).
+pub fn make_debug_hap(modules_abc: &[u8]) -> Vec<u8> {
+    Hap::new()
+        .modules_abc(modules_abc)
+        .source_maps(SAMPLE_SOURCE_MAPS)
+        .module_json(SAMPLE_MODULE_JSON)
+        .resource_index(&sample_resources())
+        .entry("resources/base/profile/main_pages.json", SAMPLE_MAIN_PAGES.as_bytes(), Compression::Deflated)
+        .pack_info(SAMPLE_PACK_INFO)
+        .build()
+}
+
+/// Unpack `archive` (a zip, say a `.hap`) into `dir`, every entry at its
+/// path below it, the way a user unzips a package to look inside.
+///
+/// # Panics
+/// When `archive` is not a zip, an entry's name leaves `dir`, or a file
+/// cannot be written.
+pub fn unpack(archive: &[u8], dir: &Path) {
+    let mut zip = ZipArchive::new(Cursor::new(archive)).expect("the archive is a zip");
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).expect("zip entry reads");
+        let path = dir.join(entry.enclosed_name().expect("entry name stays inside the directory"));
+        if entry.is_dir() {
+            fs::create_dir_all(&path).expect("directory is created");
+            continue;
+        }
+        fs::create_dir_all(path.parent().expect("a file has a directory")).expect("directory is created");
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).expect("zip entry inflates");
+        fs::write(&path, data).expect("file is written");
+    }
+}
+
 /// An `.app`: the `(name, bytes)` haps, each stored as `inner` says (real
 /// bundles have both stored and deflated inner haps), plus
 /// [`SAMPLE_PACK_INFO`] as `pack.info`.
@@ -505,10 +575,6 @@ pub fn make_app(haps: &[(&str, &[u8])], inner: Compression) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
-
-    use zip::ZipArchive;
-
     use super::*;
 
     fn entries(archive: &[u8]) -> Vec<(String, CompressionMethod, Vec<u8>)> {
@@ -594,6 +660,15 @@ mod tests {
         assert!(names.contains(&"resources/base/profile/router_map.json".to_owned()), "{names:?}");
         assert_eq!(routed_program().build().bytes[..8], asc_abc::MAGIC);
         assert_eq!(entries(&make_library_hsp()).len(), 3);
+    }
+
+    /// [`unpack`] is exercised where a directory may be made: by the tests of the engine.
+    #[test]
+    fn a_debug_hap_packs_its_source_maps() {
+        let listed = entries(&make_debug_hap(&crate::abc::make_abc()));
+        assert_eq!((listed[1].0.as_str(), listed[1].1), ("ets/sourceMaps.map", CompressionMethod::Deflated));
+        assert_eq!(listed[1].2, SAMPLE_SOURCE_MAPS.as_bytes());
+        assert!(listed.iter().any(|(name, ..)| name == "module.json") && listed.iter().any(|(name, ..)| name == "resources.index"));
     }
 
     #[test]

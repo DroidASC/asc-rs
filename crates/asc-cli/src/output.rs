@@ -106,6 +106,12 @@ impl<'a> Io<'a> {
         condition::parse_rule_in(spec, self.cwd).map_err(|e| e.to_string())
     }
 
+    /// A rule on a HarmonyOS program, read as [`Io::rule`] reads one of the
+    /// DEX side: the files it names are relative to the client's directory.
+    pub(crate) fn harmony_rule(&self, spec: &str) -> Result<asc_ark_engine::Query, String> {
+        asc_ark_engine::Query::rule(spec, self.cwd).map_err(|e| e.to_string())
+    }
+
     /// One findrefs condition, read as [`Io::rule`] does.
     pub(crate) fn condition(&self, spec: &str) -> Result<Query, String> {
         condition::parse_condition_in(spec, self.cwd).map_err(|e| e.to_string())

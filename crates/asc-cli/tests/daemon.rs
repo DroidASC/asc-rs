@@ -92,6 +92,9 @@ impl Env {
         self.write("labels.hap", &make_hap(&resource_program().build().bytes));
         self.write("two.hap", &Hap::new().modules_abc(&sample).abc("widgets", &sample).module_json("{}").build());
         self.write("calls.abc", &call_graph_program().build().bytes);
+        // Read relative to the client's directory, by the client and by the daemon.
+        self.write("listed.txt", b"# functions\nstar\n");
+        self.write("rules.txt", b"# rules\nprop:=then\ncall:{@listed.txt}\n");
         self.write("classes.abc", &class_hierarchy_program().build().bytes);
         self.write("shop.app", &make_app(&[("entry.hap", &hap), ("feature.hap", &hap)], Compression::Deflated));
         let encrypted = sample_program().encrypted().build().bytes;
@@ -130,6 +133,15 @@ impl Env {
         // DEX code next to HarmonyOS files stays a DEX program.
         self.write("mixed/app.apk", &make_apk(&[("classes.dex", &make_dex())], true));
         self.write("mixed/entry.hap", &hap);
+        // A debug build with its source maps, as a file and unpacked into a
+        // directory; two unpacked packages side by side; an `.app` in a zip.
+        let debug = asc_fixture::hap::make_debug_hap(&sample);
+        self.write("debug.hap", &debug);
+        asc_fixture::hap::unpack(&debug, &self.work.path().join("unpacked"));
+        asc_fixture::hap::unpack(&hap, &self.work.path().join("apps/entry"));
+        asc_fixture::hap::unpack(&make_library_hsp(), &self.work.path().join("apps/library"));
+        let app = make_app(&[("entry.hap", &hap), ("feature.hap", &hap)], Compression::Deflated);
+        self.write("bundle.zip", &Hap::new().entry("out/shop.app", &app, Compression::Deflated).build());
         self
     }
 
@@ -313,6 +325,33 @@ fn daemon_output_is_byte_identical_for_harmony_programs() {
         &["getmanifest", "calls.abc", "--file", "pack.info"],
         &["callgraph", "calls.abc", "star"],
         &["callgraph", "calls.abc", "star", "--depth", "3", "--from", "method:=cb"],
+        // Rules at the ends of a walk, and what they leave out.
+        &["callgraph", "calls.abc", "star", "--depth", "3", "--from", "prop:=then"],
+        &["callgraph", "calls.abc", "star", "--from", "method:=make"],
+        &["callgraph", "calls.abc", "star", "--unless", "method:=helper"],
+        &["callgraph", "calls.abc", "star", "--unless", "global:=console & prop:=log", "--unless", "method:^func_main"],
+        &["callgraph", "calls.abc", "--to", "prop:=log", "--depth", "1"],
+        &["callgraph", "calls.abc", "--to", "call:{method:=star} & !method:=helper"],
+        &["callgraph", "calls.abc", "--from", "method:=cb"],
+        &["callgraph", "calls.abc", "--to", "prop:=nowhere"],
+        &["callgraph", "calls.abc", "star", "--unless", "type:x"],
+        // Excluded conditions, sets of functions, rule sets and the code around a hit.
+        &["findrefs", "calls.abc", "all", "prop:=make", "prop:=then", "!prop:=size"],
+        &["findrefs", "calls.abc", "all", "prop:=get", "--none", "prop:=then"],
+        &["findrefs", "calls.abc", "all", "method:helper", "!prop:=then"],
+        &["findrefs", "calls.abc", "all", "!prop:=then"],
+        &["findrefs", "calls.abc", "call", "{method:=star}"],
+        &["findrefs", "calls.abc", "all", "call:{call:{method:=star}}", "!method:=run"],
+        &["findrefs", "calls.abc", "call", "{@listed.txt}"],
+        &["findrefs", "calls.abc", "call", "{@nowhere.txt}"],
+        &["findrefs", "calls.abc", "prop", "=then"],
+        &["findrefs", "calls.abc", "rules", "prop:=then & !prop:=size", "call:{method:=star}", "prop:=nope"],
+        &["findrefs", "calls.abc", "rules", "--file", "rules.txt", "--context", "1"],
+        &["findrefs", "calls.abc", "rules"],
+        &["findrefs", "calls.abc", "prop", "then", "--exact", "--context", "1"],
+        &["findrefs", "calls.abc", "prop", ".", "--context", "method", "--limit", "3"],
+        &["findrefs", "calls.abc", "all", "prop:=make", "prop:=then", "--context", "0"],
+        &["findrefs", "entry.hap", "string", "https?://", "--context-method"],
         &["callgraph", "calls.abc", "pages/App", "run", "--callees", "--depth", "1", "--unresolved"],
         &["callgraph", "calls.abc", "--to", "call:createhttp"],
         &["callgraph", "calls.abc", "--to", "call:^nothing$"],
@@ -375,6 +414,29 @@ fn daemon_output_is_byte_identical_for_harmony_programs() {
         // DEX code next to HarmonyOS files: a DEX program, which says so.
         &["listclass", "mixed"],
         &["findrefs", "mixed", "string", "token", "--threads", "1"],
+        // A package unpacked into a directory answers as the file does; the
+        // source maps of a debug build name source files and lines.
+        &["listclass", "unpacked"],
+        &["manifest-summary", "unpacked"],
+        &["manifest-summary", "unpacked", "--json"],
+        &["manifest-summary", "debug.hap"],
+        &["resources", "unpacked", "string/EntryAbility_label"],
+        &["xml", "unpacked", "$profile:main_pages"],
+        &["xml", "unpacked", "ets/sourceMaps.map"],
+        &["xml", "unpacked", "../debug.hap"],
+        &["getclass", "unpacked", "pages/Index"],
+        &["getclass", "debug.hap", "pages/Index", "--method", "Index.build"],
+        &["getclass", "debug.hap", "entryability/EntryAbility"],
+        &["findrefs", "unpacked", "string", "testTag"],
+        &["callgraph", "unpacked", "pages/Index", "Index.build", "--callees"],
+        &["manifest-summary", "apps"],
+        &["resources", "apps", "--search", "label", "--in", "name"],
+        &["findrefs", "apps", "string", ".", "--entry", "library"],
+        // Packages inside zips inside a zip, named by the whole path.
+        &["listclass", "bundle.zip"],
+        &["manifest-summary", "bundle.zip"],
+        &["findrefs", "bundle.zip", "string", "testTag", "--entry", "out/shop.app/feature.hap"],
+        &["xml", "bundle.zip", "out/shop.app/entry.hap/resources/base/profile/main_pages.json"],
         // Declined by the daemon (the error names the path as given).
         &["listclass", "missing.hap"],
         &["listclass", "broken.hap"],

@@ -1,25 +1,30 @@
 //! Opening a HarmonyOS program: the ABC files a path names.
 //!
 //! A path is a `.hap` / `.hsp` (zip with `ets/*.abc`), an `.app` (zip of
-//! such packages), a bare `.abc` file, a directory of those, or several
-//! paths joined with `,`. Whatever it is, the result is a flat list of ABC
-//! entries named like the DEX side names its entries: `ets/modules.abc` for a
-//! lone package, `entry.hap/ets/modules.abc` when the program has several
-//! packages or comes from an `.app`.
+//! such packages) or any zip that holds those, a bare `.abc` file, a package
+//! unpacked into a directory (`module.json` with `ets/*.abc` next to it), a
+//! directory of those, or several paths joined with `,`. Whatever it is, the
+//! result is a flat list of ABC entries named like the DEX side names its
+//! entries: `ets/modules.abc` for a lone package, `entry.hap/ets/modules.abc`
+//! when the program has several packages or comes from an `.app`,
+//! `shop.app/entry.hap/ets/modules.abc` through every zip on the way.
 //!
-//! Stored entries are used in place from the file mapping (also through a
-//! stored inner package of an `.app`). A Deflate inner package or ABC entry is
-//! inflated into memory and kept for the life of the program.
+//! Stored entries are used in place from the file mapping (also through
+//! stored inner packages). A Deflate inner package or ABC entry is inflated
+//! into memory and kept for the life of the program; [`MAX_INFLATED_TOTAL`]
+//! bounds what all of them take. The files of an unpacked package are mapped
+//! one by one.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use asc_abc::{Abc, AbcError, Header};
-use asc_apk::{Apk, Limits, METHOD_STORED};
+use asc_apk::{Apk, Limits, Prefix, PrefixStep, METHOD_STORED};
+use asc_hap::SourceMaps;
 
 use crate::manifest::Document;
 use crate::{EngineError, Result};
@@ -29,7 +34,22 @@ const MAX_DEPTH: usize = 8;
 /// Most bytes one Deflate entry (an inner package of an `.app`, or an ABC
 /// entry someone recompressed) may inflate to: it is held in memory.
 const MAX_INFLATED_BYTES: u64 = 1 << 30;
+/// Most bytes all Deflate inner packages and entries of one program may
+/// inflate to together: what a zip of zips of zips can make the program hold.
+const MAX_INFLATED_TOTAL: u64 = 4 << 30;
+/// How many packages may lie inside one another below a file: an `.app` in
+/// a zip with its `.hap` is two.
+const MAX_NESTING: usize = 4;
+/// A zip that is no package itself and has at most this many entries has
+/// every one of them looked at for a package inside; a larger one only
+/// those named like one ([`has_archive_extension`]).
+const SNIFFED_ENTRIES: usize = 64;
+/// A Deflate entry of such a zip that is larger than this, compressed, is
+/// only looked into when it is named `.hap`, `.hsp` or `.app`.
+const MAX_SNIFFED_DEFLATE: u64 = 64 << 20;
 const ZIP_MAGIC: &[u8] = b"PK";
+/// How a zip entry that is itself a zip starts.
+const ZIP_LOCAL_HEADER: &[u8] = b"PK\x03\x04";
 
 /// What kind of HarmonyOS input a file is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,8 +64,9 @@ pub enum Format {
 
 impl Format {
     /// The format of the file at `path`, by content first (the `PANDA` magic;
-    /// a zip holding `module.json`, `ets/*.abc` or `*.hap` / `*.hsp`), then
-    /// by extension. `None` for anything else, a directory included.
+    /// a zip holding `module.json`, `ets/*.abc`, `*.hap` / `*.hsp`, or a zip
+    /// that does, a few levels down), then by extension. `None` for
+    /// anything else, a directory included.
     pub fn detect(path: &Path) -> Option<Format> {
         if !path.is_file() {
             return None;
@@ -55,7 +76,7 @@ impl Format {
         if read == magic.len() && magic == asc_abc::MAGIC {
             return Some(Format::Abc);
         }
-        let by_content = if magic.starts_with(ZIP_MAGIC) { Apk::open(path).ok().and_then(|zip| Format::of_zip(&zip)) } else { None };
+        let by_content = if magic.starts_with(ZIP_MAGIC) { open_archive(path).ok().and_then(|zip| Format::of_zip(&zip)) } else { None };
         by_content.or_else(|| Format::of_extension(path))
     }
 
@@ -63,7 +84,7 @@ impl Format {
     /// at least one HarmonyOS input: what a front end asks before choosing
     /// this engine.
     pub fn accepts(spec: &Path) -> bool {
-        sources(spec).is_ok_and(|files| files.iter().any(|file| Format::detect(&file.path).is_some()))
+        sources(spec).is_ok_and(|files| files.iter().any(|file| file.unpacked.is_some() || Format::detect(&file.path).is_some()))
     }
 
     fn of_extension(path: &Path) -> Option<Format> {
@@ -77,17 +98,15 @@ impl Format {
     }
 
     fn of_zip(zip: &Apk) -> Option<Format> {
-        let mut found = None;
-        // Only the names are looked at; no entry is kept.
-        let scan = zip.entries_filtered(|name| {
-            if is_package(name) {
-                found = Some(Format::App);
-            } else if found.is_none() && (name == b"module.json" || is_abc(name)) {
-                found = Some(Format::Hap);
-            }
-            false
-        });
-        scan.ok().and(found)
+        let listing = Listing::of(zip).ok()?;
+        if listing.entries.iter().any(|(_, role)| *role == Role::Package) {
+            Some(Format::App)
+        } else if listing.is_module {
+            Some(Format::Hap)
+        } else {
+            let mut budget = MAX_INFLATED_TOTAL;
+            listing.holds_packages(zip, MAX_NESTING, &mut budget).then_some(Format::App)
+        }
     }
 }
 
@@ -99,6 +118,154 @@ fn is_abc(name: &[u8]) -> bool {
 /// A root-level `*.hap` / `*.hsp`: a module package inside an `.app`.
 fn is_package(name: &[u8]) -> bool {
     !name.contains(&b'/') && (name.ends_with(b".hap") || name.ends_with(b".hsp"))
+}
+
+fn has_extension(name: &[u8], extensions: &[&[u8]]) -> bool {
+    let extension = name.rsplit(|&byte| byte == b'.').next().unwrap_or_default();
+    extensions.iter().any(|known| extension.eq_ignore_ascii_case(known))
+}
+
+/// A name that says the entry is a package, wherever it lies in its zip.
+fn has_package_extension(name: &[u8]) -> bool {
+    has_extension(name, &[b"hap", b"hsp", b"app"])
+}
+
+/// A name that says the entry may be a package or hold some, wherever it
+/// lies in its zip: `.hap`, `.hsp`, `.app`, `.zip`.
+fn has_archive_extension(name: &[u8]) -> bool {
+    has_package_extension(name) || has_extension(name, &[b"zip"])
+}
+
+/// A file of a module package that only some queries read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnDemand {
+    /// `resources.index`.
+    Resources,
+    /// `ets/sourceMaps.map`.
+    SourceMaps,
+}
+
+/// What a file of a module package is to a program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// `ets/*.abc`.
+    Code,
+    Document(Document),
+    OnDemand(OnDemand),
+}
+
+impl Part {
+    /// Every file of a package the program opens, apart from its code.
+    const BESIDE_CODE: [Part; 5] = [
+        Part::Document(Document::Module),
+        Part::Document(Document::Pack),
+        Part::Document(Document::PkgContext),
+        Part::OnDemand(OnDemand::Resources),
+        Part::OnDemand(OnDemand::SourceMaps),
+    ];
+
+    fn file_name(self) -> Option<&'static str> {
+        match self {
+            Part::Code => None,
+            Part::Document(document) => Some(document.file_name()),
+            Part::OnDemand(OnDemand::Resources) => Some(RESOURCE_INDEX),
+            Part::OnDemand(OnDemand::SourceMaps) => Some(SOURCE_MAPS),
+        }
+    }
+
+    fn of_name(name: &[u8]) -> Option<Part> {
+        if is_abc(name) {
+            return Some(Part::Code);
+        }
+        let on_demand = |which: OnDemand| Part::OnDemand(which).file_name().is_some_and(|own| own.as_bytes() == name);
+        let document = Document::of_entry(name).map(Part::Document);
+        document.or_else(|| [OnDemand::Resources, OnDemand::SourceMaps].into_iter().find(|which| on_demand(*which)).map(Part::OnDemand))
+    }
+}
+
+/// What an entry of a zip is to a program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Part(Part),
+    /// A package by its name ([`is_package`]).
+    Package,
+    /// A package if its content says so.
+    Maybe,
+}
+
+/// The entries of a zip a program may read, in central directory order.
+struct Listing {
+    entries: Vec<(asc_apk::Entry, Role)>,
+    /// Whether the zip is a module package: `module.json` or `ets/*.abc` at
+    /// its root.
+    is_module: bool,
+}
+
+impl Listing {
+    /// Only the names are looked at. A module package and an Android
+    /// archive hold packages by name alone, as an `.app` does; in any
+    /// other zip the entries that may be one by their content are kept too.
+    fn of(zip: &Apk) -> asc_apk::Result<Listing> {
+        let (mut total, mut is_module, mut is_android) = (0usize, false, false);
+        let kept = zip.entries_filtered(|name| {
+            total += 1;
+            is_module |= name == b"module.json" || is_abc(name);
+            is_android |= name == b"AndroidManifest.xml" || name == b"classes.dex";
+            Part::of_name(name).is_some() || is_package(name) || has_archive_extension(name) || total <= SNIFFED_ENTRIES
+        })?;
+        let sniffs = !is_module && !is_android;
+        let entries = kept
+            .into_iter()
+            .filter_map(|entry| {
+                let name = entry.name.as_bytes();
+                let role = match Part::of_name(name) {
+                    Some(part) => Role::Part(part),
+                    None if is_package(name) => Role::Package,
+                    None if sniffs && (total <= SNIFFED_ENTRIES || has_archive_extension(name)) && Listing::may_open(&entry) => Role::Maybe,
+                    None => return None,
+                };
+                Some((entry, role))
+            })
+            .collect();
+        Ok(Listing { entries, is_module })
+    }
+
+    /// Whether an entry that is not a package by its name is worth opening
+    /// to see: to tell, a Deflate one has to be inflated whole, which only
+    /// a small one, or one named like a package, is worth.
+    fn may_open(entry: &asc_apk::Entry) -> bool {
+        let name = entry.name.as_bytes();
+        !name.ends_with(b"/") && (entry.method == METHOD_STORED || entry.comp_size <= MAX_SNIFFED_DEFLATE || has_package_extension(name))
+    }
+
+    /// Whether one of the entries that may be a package is one, or holds
+    /// one `depth` zips down. `budget` is what may still be inflated to find out.
+    fn holds_packages(&self, zip: &Apk, depth: usize, budget: &mut u64) -> bool {
+        self.entries.iter().filter(|(_, role)| *role == Role::Maybe).any(|(entry, _)| {
+            if depth == 0 || !is_zip(zip, entry) || (entry.method != METHOD_STORED && entry.uncomp_size > *budget) {
+                return false;
+            }
+            let Ok(inner) = zip.open_nested(entry) else { return false };
+            *budget = budget.saturating_sub(inner.owned_bytes() as u64);
+            Listing::of(&inner).is_ok_and(|listing| {
+                listing.is_module
+                    || listing.entries.iter().any(|(_, role)| *role == Role::Package)
+                    || listing.holds_packages(&inner, depth - 1, budget)
+            })
+        })
+    }
+}
+
+/// Whether `entry` of `zip` starts like a zip: a stored one is looked at in
+/// place, of a Deflate one only the first block is inflated.
+fn is_zip(zip: &Apk, entry: &asc_apk::Entry) -> bool {
+    if entry.method == METHOD_STORED {
+        return zip.raw_payload(entry).is_ok_and(|payload| payload.starts_with(ZIP_LOCAL_HEADER));
+    }
+    match zip.inflate_until(entry, |_| PrefixStep::Continue(ZIP_LOCAL_HEADER.len())) {
+        Ok(Prefix::Complete(start) | Prefix::Partial(start) | Prefix::Aborted(start)) => start.starts_with(ZIP_LOCAL_HEADER),
+        Err(_) => false,
+    }
 }
 
 /// Whether an ABC entry can be queried.
@@ -137,6 +304,8 @@ enum Source {
     Stored { container: usize, entry: asc_apk::Entry },
     /// A bare `.abc` file: the whole mapping.
     Bare { container: usize, file_name: String },
+    /// A file of an unpacked package: the whole mapping.
+    Loose { container: usize },
     /// A Deflate zip entry, inflated when the program was opened.
     Inflated(Vec<u8>),
 }
@@ -153,7 +322,9 @@ struct AbcEntry {
 }
 
 /// The name of the compiled resource table at the root of a module package.
-const RESOURCE_INDEX: &[u8] = b"resources.index";
+const RESOURCE_INDEX: &str = "resources.index";
+/// The name of the source maps a debug build packs with its code.
+pub(crate) const SOURCE_MAPS: &str = "ets/sourceMaps.map";
 
 /// A zip entry that is read when it is first asked for: in place when it is
 /// stored, inflated once and kept when it is Deflate.
@@ -164,34 +335,106 @@ struct LazyEntry {
     inflated: OnceLock<std::result::Result<Vec<u8>, String>>,
 }
 
-/// A module package (`.hap` / `.hsp`) or application package (`.app`) of a
-/// program, with the metadata documents at its root.
+/// A file of a package that only some queries read.
+enum Lazy {
+    Entry(LazyEntry),
+    /// A file of an unpacked package: mapped, so read when it is touched.
+    Loose {
+        container: usize,
+    },
+}
+
+/// Where the files of a package are.
+enum Root {
+    /// A zip, in `Program::containers`.
+    Zip(usize),
+    /// The directory a package was unpacked into.
+    Directory(PathBuf),
+}
+
+/// `ets/sourceMaps.map` of a package and what was found in it.
+struct PackedSourceMaps {
+    file: Lazy,
+    /// Where each module is in the file, or why the file does not read;
+    /// worked out the first time a query asks.
+    index: OnceLock<std::result::Result<SourceMaps, String>>,
+}
+
+/// A module package (`.hap` / `.hsp`, or the directory one was unpacked
+/// into), an application package (`.app`) or a zip of those, with the
+/// metadata documents at its root.
 pub(crate) struct Package {
     /// The prefix of its entries (`entry.hap`), or for a lone file, whose
     /// entries have none, the file's name.
     pub(crate) name: String,
     documents: Vec<(Document, Source)>,
-    /// The zip the package is, in `Program::containers`.
-    container: usize,
+    root: Root,
     /// Its `resources.index`, when it has one.
-    resources: Option<LazyEntry>,
+    resources: Option<Lazy>,
+    /// Its `ets/sourceMaps.map`, when it has one.
+    source_maps: Option<PackedSourceMaps>,
     /// Whether it holds other packages (an `.app`) instead of a module.
     pub(crate) is_bundle: bool,
     /// The `.app` it is inside of, by index, for an inner package.
     pub(crate) parent: Option<usize>,
 }
 
-/// One file of a program and the name its entries are prefixed with (empty
-/// for a lone file).
+/// One file of a program, or the directory of an unpacked package, and the
+/// name its entries are prefixed with (empty for a lone one).
 struct SourceFile {
     path: PathBuf,
     label: String,
     /// Read while listing it, so a [`Stamp`] needs no second `stat`.
     meta: fs::Metadata,
+    /// The files of the package, when `path` is a directory one was
+    /// unpacked into.
+    unpacked: Option<Vec<Member>>,
+}
+
+/// One file of an unpacked package that the program opens.
+struct Member {
+    /// As the package names it: `ets/modules.abc`.
+    name: String,
+    part: Part,
+    path: PathBuf,
+    meta: fs::Metadata,
+}
+
+impl Member {
+    fn at(dir: &Path, name: &str, part: Part) -> Option<Member> {
+        let path = dir.join(name);
+        // Follows links, as the walk does.
+        let meta = fs::metadata(&path).ok().filter(fs::Metadata::is_file)?;
+        Some(Member { name: name.to_owned(), part, path, meta })
+    }
+
+    /// The files of the package unpacked into `dir`; `None` when `dir` is
+    /// not one: a package has `module.json` and, next to it, `ets/*.abc`.
+    /// The code comes first, in name order, then the files beside it.
+    fn of_package(dir: &Path) -> Option<Vec<Member>> {
+        if !dir.join(Document::Module.file_name()).is_file() {
+            return None;
+        }
+        let mut code: Vec<String> = fs::read_dir(dir.join("ets"))
+            .ok()?
+            .filter_map(|entry| Some(format!("ets/{}", entry.ok()?.file_name().to_str()?)))
+            .filter(|name| is_abc(name.as_bytes()))
+            .collect();
+        code.sort();
+        let mut members: Vec<Member> = code.iter().filter_map(|name| Member::at(dir, name, Part::Code)).collect();
+        if members.is_empty() {
+            return None;
+        }
+        members.extend(Part::BESIDE_CODE.into_iter().filter_map(|part| Member::at(dir, part.file_name()?, part)));
+        Some(members)
+    }
 }
 
 /// Which files a program is read from, with their sizes and modification
-/// times: what the DEX side calls the version of an opened program. Two
+/// times: what the DEX side calls the version of an opened program. Of an
+/// unpacked package these are its directory and the files a program opens
+/// (code, documents, resource index, source maps); the files `xml` prints
+/// are read anew every time. Two
 /// stamps of one path are equal when opening it again would read the same
 /// files ([`Engine::is_current`](crate::Engine::is_current)).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +451,19 @@ impl Stamp {
     }
 
     fn of_sources(files: &[SourceFile]) -> Stamp {
-        Stamp(files.iter().map(|file| (file.path.clone(), file.meta.len(), file.meta.modified().ok())).collect())
+        let of = |path: &Path, meta: &fs::Metadata| (path.to_path_buf(), meta.len(), meta.modified().ok());
+        let mut stamp = Vec::with_capacity(files.len());
+        for file in files {
+            match &file.unpacked {
+                None => stamp.push(of(&file.path, &file.meta)),
+                // The size and time of a directory say nothing its files do not.
+                Some(members) => {
+                    stamp.push((file.path.clone(), 0, None));
+                    stamp.extend(members.iter().map(|member| of(&member.path, &member.meta)));
+                }
+            }
+        }
+        Stamp(stamp)
     }
 }
 
@@ -216,7 +471,7 @@ impl Stamp {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ProgramBytes {
     /// On the heap: Deflate inner packages and entries, inflated when the
-    /// program was opened.
+    /// program was opened or when a query first read them.
     pub(crate) inflated: usize,
     /// Read in place from the mapped files (code and documents; not the
     /// rest of a package): pages the system reads on demand and may drop again.
@@ -237,6 +492,19 @@ pub(crate) struct Program {
     /// The files as they were listed, before any of them was mapped: a file
     /// replaced while the program opened makes the stamp stale, not wrong.
     stamp: Stamp,
+    /// Bytes inflated while opening, against [`MAX_INFLATED_TOTAL`].
+    inflated: u64,
+    /// The first zip that lay too deep to be opened ([`MAX_NESTING`]).
+    too_deep: Option<String>,
+}
+
+/// How much of a program there was at some point, to go back to.
+struct Mark {
+    containers: usize,
+    packages: usize,
+    entries: usize,
+    notes: usize,
+    inflated: u64,
 }
 
 impl Program {
@@ -250,6 +518,8 @@ impl Program {
             notes: Vec::new(),
             stand_ins: Vec::new(),
             stamp: Stamp::of_sources(&files),
+            inflated: 0,
+            too_deep: None,
         };
         let lone = files.len() == 1;
         for file in &files {
@@ -259,6 +529,9 @@ impl Program {
                 Err(err) if lone => return Err(err),
                 Err(err) => program.notes.push(format!("{}: skipped: {}", file.label, without_path(&err))),
             }
+        }
+        if let Some(name) = program.too_deep.take() {
+            program.notes.push(format!("{name}: skipped: zips more than {MAX_NESTING} deep in a file are not opened"));
         }
         program.pair_decrypted();
         for entry in &program.entries {
@@ -306,15 +579,20 @@ impl Program {
         for source in sources {
             match source {
                 Source::Inflated(inflated) => bytes.inflated += inflated.capacity(),
-                Source::Stored { .. } | Source::Bare { .. } => bytes.mapped += self.source_bytes(source).len(),
+                Source::Stored { .. } | Source::Bare { .. } | Source::Loose { .. } => bytes.mapped += self.source_bytes(source).len(),
             }
         }
-        for index in self.packages.iter().filter_map(|package| package.resources.as_ref()) {
-            match index.inflated.get() {
-                Some(inflated) => bytes.inflated += inflated.as_ref().map_or(0, Vec::capacity),
-                None if index.entry.method == METHOD_STORED => bytes.mapped += usize::try_from(index.entry.uncomp_size).unwrap_or(0),
-                // A Deflate index nobody asked for yet: nothing is held.
-                None => {}
+        let lazy =
+            self.packages.iter().flat_map(|package| package.resources.iter().chain(package.source_maps.iter().map(|maps| &maps.file)));
+        for file in lazy {
+            match file {
+                Lazy::Loose { container } => bytes.mapped += self.containers[*container].lone_data().map_or(0, <[u8]>::len),
+                Lazy::Entry(entry) => match entry.inflated.get() {
+                    Some(inflated) => bytes.inflated += inflated.as_ref().map_or(0, Vec::capacity),
+                    None if entry.entry.method == METHOD_STORED => bytes.mapped += usize::try_from(entry.entry.uncomp_size).unwrap_or(0),
+                    // A Deflate entry nobody asked for yet: nothing is held.
+                    None => {}
+                },
             }
         }
         bytes
@@ -341,7 +619,7 @@ impl Program {
         match source {
             // Read once when the program was opened; the mapping has not changed since.
             Source::Stored { container, entry } => self.containers[*container].raw_payload(entry).unwrap_or_default(),
-            Source::Bare { container, .. } => self.containers[*container].lone_data().unwrap_or_default(),
+            Source::Bare { container, .. } | Source::Loose { container } => self.containers[*container].lone_data().unwrap_or_default(),
             Source::Inflated(bytes) => bytes,
         }
     }
@@ -364,33 +642,78 @@ impl Program {
         self.entries.get(index)?.package
     }
 
-    /// The bytes of `resources.index` of package `package`: `None` when the
-    /// package has none, the reason when the entry cannot be read. A stored
-    /// entry is read in place from the mapping; a Deflate one is inflated
-    /// the first time and kept.
-    pub(crate) fn resource_index(&self, package: usize) -> Option<std::result::Result<&[u8], String>> {
-        let index = self.packages.get(package)?.resources.as_ref()?;
-        let zip = &self.containers[index.container];
-        if index.entry.method == METHOD_STORED {
-            return Some(zip.raw_payload(&index.entry).map_err(|err| err.to_string()));
+    /// The bytes of a file of a package that is read on demand: a stored
+    /// entry and a loose file in place from the mapping, a Deflate entry
+    /// inflated the first time and kept. The reason when it cannot be read.
+    fn lazy_bytes<'p>(&'p self, file: &'p Lazy) -> std::result::Result<&'p [u8], String> {
+        let entry = match file {
+            Lazy::Loose { container } => return Ok(self.containers[*container].lone_data().unwrap_or_default()),
+            Lazy::Entry(entry) => entry,
+        };
+        let zip = &self.containers[entry.container];
+        if entry.entry.method == METHOD_STORED {
+            return zip.raw_payload(&entry.entry).map_err(|err| err.to_string());
         }
         let inflated =
-            index.inflated.get_or_init(|| zip.read_entry(&index.entry).map(std::borrow::Cow::into_owned).map_err(|err| err.to_string()));
-        Some(inflated.as_deref().map_err(String::clone))
+            entry.inflated.get_or_init(|| zip.read_entry(&entry.entry).map(std::borrow::Cow::into_owned).map_err(|err| err.to_string()));
+        inflated.as_deref().map_err(String::clone)
+    }
+
+    /// The bytes of `resources.index` of package `package`: `None` when the
+    /// package has none, the reason when the entry cannot be read.
+    pub(crate) fn resource_index(&self, package: usize) -> Option<std::result::Result<&[u8], String>> {
+        Some(self.lazy_bytes(self.packages.get(package)?.resources.as_ref()?))
+    }
+
+    /// `ets/sourceMaps.map` of package `package`, with its bytes: `None`
+    /// when the package has none, the reason when it does not read. The
+    /// file is walked once, the first time this is asked.
+    pub(crate) fn source_maps(&self, package: usize) -> Option<std::result::Result<(&SourceMaps, &[u8]), String>> {
+        let maps = self.packages.get(package)?.source_maps.as_ref()?;
+        let bytes = match self.lazy_bytes(&maps.file) {
+            Ok(bytes) => bytes,
+            Err(reason) => return Some(Err(reason)),
+        };
+        let index = maps.index.get_or_init(|| SourceMaps::index(bytes).map_err(|err| err.to_string()));
+        Some(index.as_ref().map(|index| (index, bytes)).map_err(String::clone))
+    }
+
+    /// The source map of the module `record` of ABC entry `entry` was
+    /// compiled from, when the entry's package has source maps that read
+    /// and name the record.
+    pub(crate) fn module_map(&self, entry: &str, record: &str) -> Option<asc_hap::ModuleMap> {
+        let index = self.entries.iter().position(|candidate| candidate.info.name == entry)?;
+        let (maps, bytes) = self.source_maps(self.package_of(index)?)?.ok()?;
+        maps.module(bytes, record)?.ok()
     }
 
     /// Whether package `package` has a file at `path`: only the names of
     /// its zip are looked at.
     pub(crate) fn has_file(&self, package: usize, path: &str) -> bool {
-        let Some(package) = self.packages.get(package) else { return false };
-        self.containers[package.container].entries_filtered(|name| name == path.as_bytes()).is_ok_and(|found| !found.is_empty())
+        match self.packages.get(package).map(|package| &package.root) {
+            None => false,
+            Some(Root::Zip(container)) => {
+                self.containers[*container].entries_filtered(|name| name == path.as_bytes()).is_ok_and(|found| !found.is_empty())
+            }
+            Some(Root::Directory(dir)) => loose_file(dir, path).is_some(),
+        }
     }
 
-    /// The file `path` of package `package`, read from its zip now: `None`
-    /// when the package has no such entry. Nothing of it is kept.
+    /// The file `path` of package `package`, read from its zip or its
+    /// directory now: `None` when the package has no such file. Nothing of
+    /// it is kept.
     pub(crate) fn file(&self, package: usize, path: &str) -> Result<Option<std::borrow::Cow<'_, [u8]>>> {
         let Some(package) = self.packages.get(package) else { return Ok(None) };
-        let zip = &self.containers[package.container];
+        let zip = match &package.root {
+            Root::Zip(container) => &self.containers[*container],
+            Root::Directory(dir) => {
+                let Some(file) = loose_file(dir, path) else { return Ok(None) };
+                return match fs::read(&file) {
+                    Ok(bytes) => Ok(Some(bytes.into())),
+                    Err(source) => Err(EngineError::Io { path: file, source }),
+                };
+            }
+        };
         // The zip of a package is one archive: an entry is found by its name alone.
         let Some(entry) = zip.entries_filtered(|name| name == path.as_bytes())?.pop() else { return Ok(None) };
         Ok(Some(zip.read_entry(&entry)?))
@@ -421,74 +744,149 @@ impl Program {
     }
 
     fn add_file(&mut self, file: &SourceFile) -> Result<()> {
+        let shown = if file.label.is_empty() { name_of(&file.path) } else { file.label.clone() };
+        if let Some(members) = &file.unpacked {
+            self.add_unpacked(file, members, &shown);
+            return Ok(());
+        }
         let apk = open_archive(&file.path)?;
         let data = apk.lone_data().unwrap_or_default();
         if data.starts_with(&asc_abc::MAGIC) {
-            let file_name = name_of(&file.path);
-            let name = if file.label.is_empty() { file_name.clone() } else { file.label.clone() };
             let container = self.push_container(apk);
-            self.push_entry(name, Source::Bare { container, file_name }, None);
+            self.push_entry(shown, Source::Bare { container, file_name: name_of(&file.path) }, None);
             return Ok(());
         }
-        let shown = if file.label.is_empty() { name_of(&file.path) } else { file.label.clone() };
-        let found = self.add_package(apk, &file.label, &shown, Nesting::Allowed)?;
+        let found = self.add_package(apk, &file.label, &shown, MAX_NESTING)?;
         if found == 0 {
             self.notes.push(format!("{shown}: no ets/*.abc"));
         }
         Ok(())
     }
 
-    /// Add a package, named `shown`: its ABC entries (prefixed with
-    /// `prefix`), its metadata documents and, for an `.app`, its inner
-    /// packages. Returns how many ABC entries were added.
-    fn add_package(&mut self, zip: Apk, prefix: &str, shown: &str, nesting: Nesting) -> Result<usize> {
-        let members = zip.entries_filtered(|name| {
-            is_abc(name)
-                || name == RESOURCE_INDEX
-                || Document::of_entry(name).is_some()
-                || (nesting == Nesting::Allowed && is_package(name))
-        })?;
-        let container = self.push_container(zip);
+    fn push_package(&mut self, name: &str, root: Root) -> usize {
         self.packages.push(Package {
-            name: shown.to_owned(),
+            name: name.to_owned(),
             documents: Vec::new(),
-            container,
+            root,
             resources: None,
+            source_maps: None,
             is_bundle: false,
             parent: None,
         });
-        let package = self.packages.len() - 1;
-        let mut found = 0;
+        self.packages.len() - 1
+    }
+
+    /// Give package `package` a file that is read when a query asks for it.
+    fn set_on_demand(&mut self, package: usize, which: OnDemand, file: Lazy) {
+        let package = &mut self.packages[package];
+        match which {
+            OnDemand::Resources => package.resources = Some(file),
+            OnDemand::SourceMaps => package.source_maps = Some(PackedSourceMaps { file, index: OnceLock::new() }),
+        }
+    }
+
+    /// Add the package unpacked into the directory `file`, named `shown`:
+    /// each of its files is mapped on its own. One that does not open is
+    /// left out and noted.
+    fn add_unpacked(&mut self, file: &SourceFile, members: &[Member], shown: &str) {
+        let package = self.push_package(shown, Root::Directory(file.path.clone()));
         for member in members {
-            let name = if prefix.is_empty() { member.name.clone() } else { format!("{prefix}/{}", member.name) };
-            if member.name.as_bytes() == RESOURCE_INDEX {
-                // Read when a query asks for it.
-                self.packages[package].resources = Some(LazyEntry { container, entry: member, inflated: OnceLock::new() });
-                continue;
-            }
-            if is_package(member.name.as_bytes()) {
-                self.packages[package].is_bundle = true;
-                // A broken inner package does not take the others with it.
-                let inner = self.containers[container].open_nested(&member).map_err(EngineError::from);
-                let position = self.packages.len();
-                match inner.and_then(|inner| self.add_package(inner, &name, &name, Nesting::Inner)) {
-                    Ok(0) => self.notes.push(format!("{name}: no ets/*.abc")),
-                    Ok(n) => found += n,
-                    Err(err) => self.notes.push(format!("{name}: skipped: {err}")),
+            let name = if file.label.is_empty() { member.name.clone() } else { format!("{}/{}", file.label, member.name) };
+            let container = match open_archive(&member.path) {
+                Ok(apk) => self.push_container(apk),
+                Err(err) => {
+                    self.notes.push(format!("{name}: skipped: {}", without_path(&err)));
+                    continue;
                 }
-                // Not there when the inner package did not open.
-                if let Some(inner) = self.packages.get_mut(position) {
-                    inner.parent = Some(package);
-                }
-                continue;
-            }
-            let document = Document::of_entry(member.name.as_bytes());
-            let source = if member.method == METHOD_STORED {
-                self.containers[container].raw_payload(&member).map(|_| Source::Stored { container, entry: member })
-            } else {
-                self.containers[container].read_entry(&member).map(|bytes| Source::Inflated(bytes.into_owned()))
             };
-            match (source, document) {
+            match member.part {
+                Part::Code => self.push_entry(name, Source::Loose { container }, Some(package)),
+                Part::Document(document) => self.packages[package].documents.push((document, Source::Loose { container })),
+                Part::OnDemand(which) => self.set_on_demand(package, which, Lazy::Loose { container }),
+            }
+        }
+    }
+
+    fn mark(&self) -> Mark {
+        Mark {
+            containers: self.containers.len(),
+            packages: self.packages.len(),
+            entries: self.entries.len(),
+            notes: self.notes.len(),
+            inflated: self.inflated,
+        }
+    }
+
+    /// Forget what was added since `mark`.
+    fn rewind(&mut self, mark: &Mark) {
+        self.containers.truncate(mark.containers);
+        self.packages.truncate(mark.packages);
+        self.entries.truncate(mark.entries);
+        self.notes.truncate(mark.notes);
+        self.inflated = mark.inflated;
+    }
+
+    /// Whether the Deflate entry `member` may still be inflated.
+    ///
+    /// # Errors
+    /// When what it declares takes the program past [`MAX_INFLATED_TOTAL`].
+    fn check_room(&self, member: &asc_apk::Entry) -> Result<()> {
+        if self.inflated.saturating_add(member.uncomp_size) <= MAX_INFLATED_TOTAL {
+            return Ok(());
+        }
+        Err(EngineError::Archive(asc_apk::ApkError::LimitExceeded {
+            name: member.name.clone(),
+            reason: format!("the program would inflate more than {MAX_INFLATED_TOTAL} bytes in all"),
+        }))
+    }
+
+    /// `member` of zip `container` as bytes the program keeps: in place
+    /// when it is stored, inflated now when it is Deflate.
+    fn read_now(&mut self, container: usize, member: asc_apk::Entry) -> Result<Source> {
+        if member.method == METHOD_STORED {
+            self.containers[container].raw_payload(&member)?;
+            return Ok(Source::Stored { container, entry: member });
+        }
+        self.check_room(&member)?;
+        let bytes = self.containers[container].read_entry(&member)?.into_owned();
+        self.inflated = self.inflated.saturating_add(bytes.len() as u64);
+        Ok(Source::Inflated(bytes))
+    }
+
+    /// `member` of zip `container` as a zip of its own: in place when it
+    /// is stored, inflated and kept when it is Deflate.
+    fn open_inner(&mut self, container: usize, member: &asc_apk::Entry) -> Result<Apk> {
+        if member.method != METHOD_STORED {
+            self.check_room(member)?;
+        }
+        let inner = self.containers[container].open_nested(member)?;
+        self.inflated = self.inflated.saturating_add(inner.owned_bytes() as u64);
+        Ok(inner)
+    }
+
+    /// Add a package, named `shown`: its ABC entries (prefixed with
+    /// `prefix`), its metadata documents and the packages inside it, down
+    /// to `depth` more zips. Returns how many ABC entries were added.
+    fn add_package(&mut self, zip: Apk, prefix: &str, shown: &str, depth: usize) -> Result<usize> {
+        let listing = Listing::of(&zip)?;
+        let container = self.push_container(zip);
+        let package = self.push_package(shown, Root::Zip(container));
+        let mut found = 0;
+        for (member, role) in listing.entries {
+            let name = if prefix.is_empty() { member.name.clone() } else { format!("{prefix}/{}", member.name) };
+            let document = match role {
+                Role::Package | Role::Maybe => {
+                    found += self.add_inner(package, &member, &name, role, depth);
+                    continue;
+                }
+                Role::Part(Part::OnDemand(which)) => {
+                    self.set_on_demand(package, which, Lazy::Entry(LazyEntry { container, entry: member, inflated: OnceLock::new() }));
+                    continue;
+                }
+                Role::Part(Part::Document(document)) => Some(document),
+                Role::Part(Part::Code) => None,
+            };
+            match (self.read_now(container, member), document) {
                 (Ok(source), Some(document)) => self.packages[package].documents.push((document, source)),
                 (Ok(source), None) => {
                     self.push_entry(name, source, Some(package));
@@ -498,6 +896,54 @@ impl Program {
             }
         }
         Ok(found)
+    }
+
+    /// Add `member` of package `holder` as a package inside it, named
+    /// `name`. One that is only a package if its content says so
+    /// ([`Role::Maybe`]) has to be a zip with code or documents of its
+    /// own, at some depth; anything else leaves no trace. Returns how many
+    /// ABC entries were added.
+    fn add_inner(&mut self, holder: usize, member: &asc_apk::Entry, name: &str, role: Role, depth: usize) -> usize {
+        let Root::Zip(container) = self.packages[holder].root else { return 0 };
+        let tentative = role == Role::Maybe;
+        if tentative && !is_zip(&self.containers[container], member) {
+            return 0;
+        }
+        if depth == 0 {
+            // Kept apart from the notes: those of a zip that turns out to hold no package are dropped.
+            self.too_deep.get_or_insert_with(|| name.to_owned());
+            return 0;
+        }
+        // A holder of packages by name is one even if none of them opens.
+        self.packages[holder].is_bundle |= !tentative;
+        let mark = self.mark();
+        let added = self.open_inner(container, member).and_then(|inner| self.add_package(inner, name, name, depth - 1));
+        let has_documents = self.packages.iter().skip(mark.packages).any(|package| !package.documents.is_empty());
+        let found = match added {
+            Ok(0) if tentative && !has_documents => {
+                self.rewind(&mark);
+                return 0;
+            }
+            Ok(0) => {
+                self.notes.push(format!("{name}: no ets/*.abc"));
+                0
+            }
+            Ok(found) => found,
+            // A broken inner package does not take the others with it.
+            Err(err) => {
+                self.rewind(&mark);
+                // A zip of another kind that does not read is not this program's to report.
+                if !tentative || has_archive_extension(name.as_bytes()) {
+                    self.notes.push(format!("{name}: skipped: {err}"));
+                }
+                return 0;
+            }
+        };
+        self.packages[holder].is_bundle = true;
+        if let Some(inner) = self.packages.get_mut(mark.packages) {
+            inner.parent = Some(holder);
+        }
+        found
     }
 
     fn push_container(&mut self, apk: Apk) -> usize {
@@ -597,14 +1043,6 @@ impl Program {
     }
 }
 
-/// Whether a package may hold inner packages: an `.app` does, a package
-/// inside one does not.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Nesting {
-    Allowed,
-    Inner,
-}
-
 /// `err` as a note about a labelled file says it: an I/O error without the
 /// path, which the label already stands for. The note then reads the same
 /// however the program's path was spelled (relative, absolute, through a
@@ -648,18 +1086,23 @@ fn sources(spec: &Path) -> Result<Vec<SourceFile>> {
         let meta = fs::metadata(&part).map_err(io)?;
         if !meta.is_dir() {
             let label = if several { name_of(&part) } else { String::new() };
-            out.push(SourceFile { path: part, label, meta });
+            out.push(SourceFile { path: part, label, meta, unpacked: None });
             continue;
         }
         let mut files = Vec::new();
         walk(&part, MAX_DEPTH, &mut files).map_err(io)?;
-        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.sort_by(|a, b| a.path.cmp(&b.path));
         let top = several.then(|| name_of(&part));
-        for (path, meta) in files {
-            let below = path.strip_prefix(&part).unwrap_or(&path);
+        for mut file in files {
+            let below = file.path.strip_prefix(&part).unwrap_or(&file.path);
             let rel = below.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
-            let label = top.as_ref().map_or_else(|| rel.clone(), |top| format!("{top}/{rel}"));
-            out.push(SourceFile { path, label, meta });
+            file.label = match &top {
+                // The directory itself, unpacked: it has no path below it.
+                _ if rel.is_empty() => name_of(&part),
+                Some(top) => format!("{top}/{rel}"),
+                None => rel,
+            };
+            out.push(file);
         }
     }
     let mut seen = HashSet::new();
@@ -687,24 +1130,46 @@ fn sources(spec: &Path) -> Result<Vec<SourceFile>> {
     }
 }
 
-/// The HarmonyOS files of `dir`, `depth` levels down: what [`Format::detect`]
-/// recognizes, by content before the name, so a package or a dumped ABC file
-/// is found whatever it is called. That reads the first bytes of every file,
-/// and the names in every zip.
-fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, fs::Metadata)>) -> std::io::Result<()> {
+/// The HarmonyOS files of `dir`, `depth` levels down, not yet labelled:
+/// what [`Format::detect`] recognizes, by content before the name, so a
+/// package or a dumped ABC file is found whatever it is called. That reads
+/// the first bytes of every file, and the names in every zip.
+///
+/// A directory a package was unpacked into ([`Member::of_package`]) is one
+/// package. Of what else it holds only the files right in it are looked at
+/// (a decrypted `.abc` dropped next to `module.json`): what lies deeper are
+/// the package's own files, as inside the zip it came from.
+fn walk(dir: &Path, depth: usize, out: &mut Vec<SourceFile>) -> std::io::Result<()> {
+    let unpacked = Member::of_package(dir);
+    let is_package = unpacked.is_some();
+    if let Some(members) = unpacked {
+        out.push(SourceFile { path: dir.to_path_buf(), label: String::new(), meta: fs::metadata(dir)?, unpacked: Some(members) });
+    }
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         // Follows links, like the DEX side.
         let Ok(meta) = fs::metadata(&path) else { continue };
         if meta.is_dir() {
-            if depth > 0 {
+            if depth > 0 && !is_package {
                 walk(&path, depth - 1, out)?;
             }
         } else if Format::detect(&path).is_some() {
-            out.push((path, meta));
+            out.push(SourceFile { path, label: String::new(), meta, unpacked: None });
         }
     }
     Ok(())
+}
+
+/// The file `inner` names inside the unpacked package at `root`: a plain
+/// relative path that, links followed, stays inside the package.
+fn loose_file(root: &Path, inner: &str) -> Option<PathBuf> {
+    let relative = Path::new(inner);
+    if inner.is_empty() || !relative.components().all(|part| matches!(part, Component::Normal(_))) {
+        return None;
+    }
+    let root = fs::canonicalize(root).ok()?;
+    let file = fs::canonicalize(root.join(relative)).ok()?;
+    (file.starts_with(&root) && file.is_file()).then_some(file)
 }
 
 #[cfg(test)]

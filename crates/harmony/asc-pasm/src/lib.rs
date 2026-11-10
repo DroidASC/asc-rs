@@ -54,7 +54,7 @@ use text::write_error;
 /// Rendering options. The defaults suit a language model reading the
 /// listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Options {
+pub struct Options<'a> {
     /// Most items of a literal array shown inline; the rest is summed up as
     /// `… (+N more)`.
     pub literal_limit: usize,
@@ -73,14 +73,37 @@ pub struct Options {
     /// builds carry no such names and get no line. On by default: the names
     /// cost nothing where there are none, and make `v3` readable where there are.
     pub locals: bool,
+    /// The source the record was compiled from, when a source map says:
+    /// the record's header names the file, and the line of a function gets
+    /// its line there, `line 116 (source line 21)`, or `(no source line)`
+    /// for a function the build added.
+    pub source: Option<SourceLines<'a>>,
 }
 
-impl Options {
+/// What a source map says of the lines the debug info of a record names:
+/// they are lines of the file the build compiled, not of the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLines<'a> {
+    /// The source file, as the source map names it.
+    pub file: &'a str,
+    /// For each line of the compiled file, counted from 0 as the debug
+    /// info counts: the line of `file` it was made from, counted from 1.
+    pub lines: &'a [Option<u32>],
+}
+
+impl SourceLines<'_> {
+    /// The source line behind line `compiled` of the debug info.
+    pub(crate) fn of(&self, compiled: u32) -> Option<u32> {
+        self.lines.get(usize::try_from(compiled).ok()?).copied().flatten()
+    }
+}
+
+impl Options<'_> {
     pub const DEFAULT_LITERAL_LIMIT: usize = 256;
     pub const DEFAULT_STRING_LIMIT: usize = 2048;
 }
 
-impl Default for Options {
+impl Default for Options<'_> {
     fn default() -> Self {
         Options {
             literal_limit: Self::DEFAULT_LITERAL_LIMIT,
@@ -88,6 +111,7 @@ impl Default for Options {
             ic_slots: false,
             lines: false,
             locals: true,
+            source: None,
         }
     }
 }
@@ -111,9 +135,9 @@ pub enum Error {
 /// # Errors
 /// [`Error::Fmt`] when `out` fails. Malformed members are reported inside
 /// the listing.
-pub fn write_record<W: fmt::Write>(out: &mut W, abc: &Abc<'_>, class: &Class<'_>, opts: &Options) -> Result<(), Error> {
+pub fn write_record<W: fmt::Write>(out: &mut W, abc: &Abc<'_>, class: &Class<'_>, opts: &Options<'_>) -> Result<(), Error> {
     let info = RecordInfo::load(class);
-    record::write_header(out, abc, class, &info)?;
+    record::write_header(out, abc, class, &info, opts)?;
 
     let mut fields = match class.fields() {
         Ok(fields) => fields,
@@ -171,7 +195,7 @@ pub fn write_function<W: fmt::Write>(
     abc: &Abc<'_>,
     class: &Class<'_>,
     method: &Method<'_>,
-    opts: &Options,
+    opts: &Options<'_>,
 ) -> Result<(), Error> {
     function::write_function(out, abc, &RecordInfo::load(class), method, opts)?;
     Ok(())
@@ -191,7 +215,7 @@ pub fn write_instruction<W: fmt::Write>(
     abc: &Abc<'_>,
     method: &Method<'_>,
     insn: &Instruction<'_>,
-    opts: &Options,
+    opts: &Options<'_>,
 ) -> Result<(), Error> {
     let needs_record = ModuleOperand::of(insn.opcode).is_some() || insn.opcode.operand_of(OperandKind::MethodId).is_some();
     let info = if needs_record {

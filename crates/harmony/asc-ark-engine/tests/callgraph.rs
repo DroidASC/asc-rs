@@ -819,3 +819,144 @@ fn requests_are_led_by_their_module_and_by_the_package_table() {
     assert_eq!(rows[0], format!("  1 -> {PACKAGED_TOOL}->#*#tool | tool [entry.hap/ets/modules.abc]"));
     assert_eq!(rows[1], format!("  1 -> {PACKAGED_KIT}->#*#kit | kit [lib.hsp/ets/modules.abc]"));
 }
+
+fn rule(spec: &str) -> asc_ark_engine::Query {
+    asc_ark_engine::Query::rule(spec, None).unwrap()
+}
+
+#[test]
+fn rules_are_roots_ends_and_fences_of_a_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &program());
+    let star = CallRoots::function(&format!("{UTIL}->star"));
+    let tree = |query: &CallQuery| engine.call_graph(query, &AtomicBool::new(false)).unwrap();
+    let whole = lines(&engine, &query(star.clone(), Direction::Callers, 3));
+
+    // `unless` leaves a function out, with what only it reaches.
+    let fenced = CallQuery { unless: vec![rule("method:=helper")], ..query(star.clone(), Direction::Callers, 3) };
+    let rows = lines(&engine, &fenced);
+    assert!(rows.len() < whole.len() && !rows.iter().any(|row| row.contains("helper") || row.contains("cb")), "{rows:?}");
+    assert_eq!(rows[..2], ["0 Util->#*#star | star", "  1 <- App->#*#run | run unresolved=1"]);
+    assert_eq!(tree(&fenced).pruned, 1);
+    assert!(tree(&fenced).footer().contains("; 1 functions left out by unless"));
+    // By what its code does: the functions that log are `helper` (and `Other`'s, which nothing here reaches).
+    let by_code = CallQuery { unless: vec![rule("global:=console & prop:=log")], ..query(star.clone(), Direction::Callers, 3) };
+    assert_eq!(lines(&engine, &by_code), rows);
+    // Several rules add up; a root can be left out too.
+    let both = CallQuery { unless: vec![rule("method:=helper"), rule("method:=run")], ..query(star.clone(), Direction::Callers, 3) };
+    assert_eq!(lines(&engine, &both), ["0 Util->#*#star | star", "  1 <- Util->func_main_0 | func_main_0 [defines]"]);
+    assert_eq!(tree(&both).pruned, 2);
+    let no_root = tree(&CallQuery { unless: vec![rule("method:=star")], ..query(star.clone(), Direction::Callers, 3) });
+    assert!(no_root.rows.is_empty() && no_root.pruned == 1, "{no_root:?}");
+
+    // `from` keeps the paths that start at a matching function, and ends them there.
+    let from = CallQuery { from: Some(rule("method:=cb")), ..query(star.clone(), Direction::Callers, 3) };
+    assert_eq!(
+        lines(&engine, &from),
+        ["0 Util->#*#star | star", "  1 <- Util->#*#helper | helper", "    2 <- App->#*@0*#cb | run.cb [from]"]
+    );
+    let kept = tree(&from);
+    assert_eq!((kept.reached.map(|reached| reached.from), kept.functions), (Some(1), 3));
+    assert!(kept.rows[2].from && !kept.rows[1].from);
+    assert!(kept.footer().contains("; 1 from functions reached"), "{}", kept.footer());
+    // By code: `run` is the function with the unresolved `p.then()`; nothing above it is walked.
+    let by_code = CallQuery { from: Some(rule("prop:=then")), ..query(star.clone(), Direction::Callers, 3) };
+    let rows = lines(&engine, &by_code);
+    assert_eq!(rows[1], "  1 <- App->#*#run | run unresolved=1 [from]");
+    assert!(!rows.iter().any(|row| row.contains("App->func_main_0")), "{rows:?}");
+    // None reached: no rows, and the footer says how far the walk went.
+    let nowhere = tree(&CallQuery { from: Some(rule("method:=make")), ..query(star.clone(), Direction::Callers, 3) });
+    assert!(nowhere.rows.is_empty());
+    assert!(
+        nowhere.footer().contains("; 0 from functions reached\n# from: none of the 6 callers walked matches (depth 3)"),
+        "{}",
+        nowhere.footer()
+    );
+    // `from` and `unless` together; `from` is for callers only.
+    let fenced_from =
+        CallQuery { from: Some(rule("method:=run")), unless: vec![rule("method:=helper")], ..query(star.clone(), Direction::Callers, 3) };
+    assert_eq!(lines(&engine, &fenced_from), ["0 Util->#*#star | star", "  1 <- App->#*#run | run unresolved=1 [from]"]);
+    let down =
+        engine.call_graph(&CallQuery { from: Some(rule("method:=run")), ..query(star, Direction::Callees, 1) }, &AtomicBool::new(false));
+    assert!(matches!(down, Err(EngineError::Query(_))), "{down:?}");
+
+    // A rule as the roots: the functions it matches, in program order.
+    let roots = CallRoots::Matching(rule("prop:=then"));
+    assert_eq!(
+        lines(&engine, &query(roots.clone(), Direction::Callers, 1)),
+        ["0 App->#*#run | run unresolved=1", "  1 <- App->func_main_0 | func_main_0 x2"]
+    );
+    assert_eq!(
+        lines(&engine, &query(roots, Direction::Callees, 1))[..2],
+        ["0 App->#*#run | run unresolved=1", "  1 -> Util->#*#helper | helper x3"]
+    );
+    let named = lines(&engine, &query(CallRoots::Matching(rule("method:^Box\\.(get|size)$")), Direction::Callers, 0));
+    assert_eq!(named, ["0 Box->#~@0>#get | Box.get", "0 Box->#~@0>#size | Box.size"]);
+    let none =
+        engine.call_graph(&query(CallRoots::Matching(rule("prop:=nothing-like-this")), Direction::Callers, 1), &AtomicBool::new(false));
+    assert!(matches!(none, Err(EngineError::Query(message)) if message == "no function matches the root rule"));
+}
+
+#[test]
+fn calls_into_a_set_of_functions_are_rows() {
+    use asc_ark_engine::{FunctionSet, Query};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &program());
+    let find = |query: &Query| -> Vec<String> {
+        let mut out = Vec::new();
+        engine
+            .find_refs(query, &AtomicBool::new(false), &mut |batch| {
+                out.extend(batch.rows.iter().map(|row| short(&row.line("")).trim_start_matches(" | ").to_owned()));
+            })
+            .unwrap();
+        out
+    };
+    // One level of a callers walk, with the instruction of each call: a definition is not a call.
+    assert_eq!(
+        find(&rule("call:{method:=star}")),
+        [
+            "App->#*#run+0x1e | run | callarg0 ; -> Util->#*#star (star)",
+            "Util->#*#helper+0x2 | helper | callarg0 ; -> Util->#*#star (star)"
+        ]
+    );
+    // By name in the class of the caller: the link says so.
+    let size = find(&rule("call:{method:=Box.size}"));
+    assert_eq!(size, ["Box->#~@0>#get+0x4 | Box.get | callarg0 ; -> Box->#~@0>#size (Box.size) [this-class]"]);
+    let made = find(&rule("call:{method:=Box.constructor}"));
+    assert!(made.len() == 1 && made[0].ends_with(" ; -> Box->#~@0=#Box (Box.constructor) [new]"), "{made:?}");
+    // The set is a rule: by code, with exclusions, and nested one level up.
+    assert_eq!(find(&rule("call:{global:=console & prop:=log & !method:^func_main}")).len(), find(&rule("call:{method:=helper}")).len());
+    let two_up = find(&rule("call:{call:{method:=star}}"));
+    assert!(two_up.iter().any(|row| row.starts_with("App->func_main_0+")) && two_up.iter().any(|row| row.contains("cb+")), "{two_up:?}");
+    assert!(
+        two_up.iter().all(|row| row.contains(" ; -> App->#*#run (run)") || row.contains(" ; -> Util->#*#helper (helper)")),
+        "{two_up:?}"
+    );
+    // A condition like any other: in a conjunction, and excluded.
+    let callers = find(&rule("call:{method:=helper} & !method:=cb"));
+    assert_eq!(callers.len(), 1, "{callers:?}");
+    assert!(callers[0].starts_with("App->#*#run+0x2 | run | call +0x2 callarg0 ; -> Util->#*#helper (helper), +0x"), "{callers:?}");
+    assert!(callers[0].ends_with(" (+1 more)"), "{callers:?}");
+    assert_eq!(find(&rule("prop:=then & !call:{method:=star}")), Vec::<String>::new());
+    assert_eq!(find(&rule("prop:=get & !call:{method:=star}")).len(), 1);
+    // An empty set matches nothing, and takes nothing away.
+    assert!(find(&rule("call:{method:=nowhere}")).is_empty());
+    assert_eq!(find(&rule("prop:=then & !call:{method:=nowhere}")).len(), 1);
+
+    // The functions of a list: rows as findrefs and callgraph print them, or names.
+    let listed = |text: &str| Query::CallTo(FunctionSet::listed(text));
+    let star = find(&rule("call:{method:=star}"));
+    assert_eq!(find(&listed(&format!("x.abc | {UTIL}->#*#star+0x0 | star | returnundefined\n"))), star);
+    assert_eq!(find(&listed(&format!("# a tree\n0 {UTIL}->#*#star | star\n  1 <- {APP}->#*#run | run\n"))).len(), star.len() + 1);
+    assert_eq!(find(&listed("star\n")), star);
+    assert_eq!(find(&listed("util/Util->star\n")), star);
+    assert!(find(&listed("pages/App->star\n")).is_empty());
+    let list = dir.path().join("functions.txt");
+    std::fs::write(&list, "star\n").unwrap();
+    assert_eq!(find(&Query::rule("call:{@functions.txt}", Some(dir.path())).unwrap()), star);
+    assert_eq!(find(&Query::rule(&format!("call:{{@{}}}", list.display()), None).unwrap()), star);
+    // As the roots of a walk: the callers of the callers.
+    let roots = CallRoots::Matching(rule("call:{method:=star}"));
+    // (No count of unresolved call sites at depth 0: a row says what its walk looked at, not what earlier queries left.)
+    assert_eq!(lines(&engine, &query(roots, Direction::Callers, 0)), ["0 App->#*#run | run", "0 Util->#*#helper | helper"]);
+}

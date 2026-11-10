@@ -12,6 +12,8 @@
 //! - [`ResourceIndex`]: `resources.index`, the compiled resource table:
 //!   what the ids in compiled `$r(...)` calls and the `$string:name`
 //!   references of `module.json` stand for.
+//! - [`SourceMaps`]: `ets/sourceMaps.map` of a debug build, from the lines of
+//!   the compiled files the code was made from to the source.
 //!
 //! Every JSON type offers the same two texts: `summary()`, one fact per line
 //! for `grep`, and `pretty()`, the document itself re-indented. The
@@ -46,6 +48,7 @@ mod pkg_context;
 mod profile;
 mod record;
 mod resource;
+mod source_map;
 mod value;
 
 pub use module::{
@@ -60,6 +63,7 @@ pub use resource::{
     Attr, IndexFormat, Qualifier, QualifierKey, Qualifiers, Resource, ResourceIndex, ResourceIndexError, ResourceRef, ResourceType,
     ResourceValue, Resources, UnknownResourceType,
 };
+pub use source_map::{ModuleMap, SourceMapError, SourceMaps};
 pub use value::Note;
 
 /// Why a metadata document could not be read at all.

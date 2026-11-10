@@ -19,7 +19,7 @@ mod callgraph;
 mod hierarchy;
 mod resources;
 
-pub use callgraph::{function_roots, leaf_roots, no_callers_hint, no_leaf_hint, CallerFilter, TreeText};
+pub use callgraph::{function_roots, no_callers_hint, no_leaf_hint, rule_roots, TreeText};
 pub use hierarchy::no_class_hint;
 
 use crate::res::{self, Filter};
@@ -29,7 +29,7 @@ use crate::{
 };
 use asc_ark_engine::{
     text, Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, Manifest, ManifestLine, NameFilter,
-    Pattern, Query, RefRow, RefSite,
+    Pattern, Query, RefContext, RefRow, RefSite,
 };
 use asc_engine::{names, Threads, MAPPED_CHARGE_DIVISOR};
 use serde_json::{json, Value};
@@ -472,15 +472,29 @@ struct Spec<'a> {
     declarations_only: bool,
 }
 
+/// A pattern, as the CLI reads one: a regex, or with `literal` / `exact`
+/// plain text.
+fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
+    match (literal, exact) {
+        (_, true) => Ok(Pattern::exact(text)),
+        (true, false) => Ok(Pattern::contains(text)),
+        (false, false) => Pattern::regex(text),
+    }
+}
+
+/// As [`pattern`], for the name of a property, a global or a function:
+/// `=NAME` is the exact name too, as a condition writes it.
+fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
+    match text.strip_prefix('=') {
+        Some(name) if !literal && !exact => Ok(Pattern::exact(name)),
+        _ => pattern(text, literal, exact),
+    }
+}
+
 impl Spec<'_> {
-    /// A name pattern, as the CLI reads one: a regex, or with `literal` /
-    /// `exact` plain text.
-    fn pattern(&self, text: &str) -> Result<Pattern, EngineError> {
-        match (self.literal, self.exact) {
-            (_, true) => Ok(Pattern::exact(text)),
-            (true, false) => Ok(Pattern::contains(text)),
-            (false, false) => Pattern::regex(text),
-        }
+    /// The name of a property or a global, as the CLI reads one.
+    fn name(&self, text: &str) -> Result<Pattern, EngineError> {
+        name_pattern(text, self.literal, self.exact)
     }
 }
 
@@ -509,13 +523,13 @@ impl RefKind {
         RefKind {
             name: "prop",
             aliases: &["property", "propertie"],
-            query: |spec| Ok(Query::Prop { name: spec.pattern(&spec.value)?, access: spec.access }),
+            query: |spec| Ok(Query::Prop { name: spec.name(&spec.value)?, access: spec.access }),
             usage: "property name regex (exact / literal), access=read|write|define|call",
         },
         RefKind {
             name: "global",
             aliases: &[],
-            query: |spec| Query::global(spec.pattern(&spec.value)?, spec.access),
+            query: |spec| Query::global(spec.name(&spec.value)?, spec.access),
             usage: "global name regex (exact / literal), access=read|write",
         },
         RefKind {
@@ -531,9 +545,7 @@ impl RefKind {
         RefKind {
             name: "method",
             aliases: &["function", "func"],
-            query: |spec| {
-                Query::method(without_pc(&spec.value), |name| if spec.exact { Ok(Pattern::exact(name)) } else { Pattern::regex(name) })
-            },
+            query: |spec| Query::method(without_pc(&spec.value), |name| name_pattern(name, false, spec.exact)),
             usage: "[RECORD->]FUNCTION, where it is defined (or `class` + `name`; exact)",
         },
         RefKind {
@@ -545,8 +557,13 @@ impl RefKind {
         RefKind {
             name: "call",
             aliases: &[],
-            query: |spec| Ok(Query::Call(if spec.literal { Pattern::contains(&*spec.value) } else { Pattern::regex(&spec.value)? })),
-            usage: "regex over the resolved callee (import:@ohos:net.http#default.createHttp, global:console.log, this.x)",
+            query: |spec| match (spec.literal, spec.value.starts_with('{')) {
+                (true, _) => Ok(Query::Call(Pattern::contains(&*spec.value))),
+                (false, true) => Query::condition(&format!("call:{}", spec.value)),
+                (false, false) => Ok(Query::Call(Pattern::regex(&spec.value)?)),
+            },
+            usage: "regex over the resolved callee (import:@ohos:net.http#default.createHttp, global:console.log, this.x), or \
+                    {RULE}: the calls that lead to a function RULE matches (call:{string:token}; nests)",
         },
     ];
 
@@ -558,7 +575,12 @@ impl RefKind {
     /// `kind: what value is` of every kind, for the program's introduction.
     fn usages() -> String {
         let kinds: Vec<String> = RefKind::ALL.iter().map(|kind| format!("{}: {}", kind.name, kind.usage)).collect();
-        format!("{}; all=[conditions]: functions matching every one", kinds.join("; "))
+        format!(
+            "{}; all=[conditions]: functions matching every one, none=[conditions]: minus those matching any (in a rule: `a & b & \
+             !c`; there method:NAME is the function of that name itself); rules=[rule, ...]: several searches, rows `r1 | ...`; \
+             context=N or \"method\": the listing around each hit",
+            kinds.join("; ")
+        )
     }
 
     fn find(kind: &str) -> Result<&'static RefKind, ToolError> {
@@ -593,31 +615,70 @@ enum Search {
     Refs(Query),
     /// `kind=import` with `requests`: the distinct module requests.
     Requests(Pattern),
+    /// `rules`: several searches, answered one after the other.
+    Rules(Vec<Rule>),
 }
 
-/// Where the next condition of a rule starts after a `&`: at `KIND:` or
-/// `!KIND:`. Any other `&` is text: record names and module requests are
-/// full of them (`&entry/src/main/ets/pages/Index&`).
-fn starts_condition(rest: &str) -> bool {
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix('!').unwrap_or(rest);
-    let word: &str = rest.split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or_default();
-    !word.is_empty() && rest[word.len()..].starts_with(':')
+/// One rule of `rules`.
+#[derive(Debug)]
+struct Rule {
+    /// The arguments of a findrefs call that asks for this rule alone.
+    asked: Value,
+    query: Query,
 }
 
-/// The conditions of a rule: its parts between the `&` that join conditions.
-fn rule_parts(rule: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    for (at, _) in rule.match_indices('&') {
-        let escaped = rule[..at].ends_with('\\');
-        if !escaped && starts_condition(&rule[at + 1..]) {
-            parts.push(rule[start..at].trim());
-            start = at + 1;
+/// The conditions a call names: those a function has to match and those it
+/// must not.
+#[derive(Default)]
+struct Conditions {
+    all: Vec<Query>,
+    none: Vec<Query>,
+}
+
+impl Conditions {
+    /// One more condition as an object.
+    fn object(args: &Value, key: &str) -> Result<Query, ToolError> {
+        match Search::of_object(args)? {
+            Search::Refs(query) => Ok(query),
+            Search::Requests(_) | Search::Rules(_) => Err(ToolError(format!("`requests` is a listing, not a condition of `{key}`"))),
         }
     }
-    parts.push(rule[start..].trim());
-    parts
+
+    /// The parts of a rule string: `!` ones are excluded.
+    fn rule(&mut self, rule: &str) -> Result<(), ToolError> {
+        for part in Query::rule_parts(rule) {
+            match part.strip_prefix('!') {
+                Some(excluded) => self.none.push(Search::of_condition(excluded.trim_start())?),
+                None => self.all.push(Search::of_condition(part)?),
+            }
+        }
+        Ok(())
+    }
+
+    /// The list under `key` (`all` / `none`): condition objects or rule strings.
+    fn list(&mut self, args: &Value, key: &str) -> Result<(), ToolError> {
+        let not_a_list = || ToolError(format!("`{key}` must be a list of condition objects (or KIND:VALUE strings)"));
+        let list = match args.get(key) {
+            None | Some(Value::Null) => return Ok(()),
+            Some(Value::Array(list)) => list,
+            Some(_) => return Err(not_a_list()),
+        };
+        for condition in list {
+            match (condition, key) {
+                (Value::String(rule), "none") => {
+                    let mut excluded = Conditions::default();
+                    excluded.rule(rule.strip_prefix('!').unwrap_or(rule))?;
+                    self.none.extend(excluded.all);
+                    self.none.extend(excluded.none);
+                }
+                (Value::String(rule), _) => self.rule(rule)?,
+                (Value::Object(_), "none") => self.none.push(Conditions::object(condition, key)?),
+                (Value::Object(_), _) => self.all.push(Conditions::object(condition, key)?),
+                _ => return Err(not_a_list()),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Search {
@@ -665,66 +726,70 @@ impl Search {
     /// it: a string search by the DEX side's syntax (one syntax for both),
     /// any other kind by [`Query::condition`].
     fn of_condition(spec: &str) -> Result<Query, ToolError> {
-        if spec.starts_with('!') {
-            return Err(unsupported_search("with excluded conditions (`!`)"));
-        }
         let Some((kind, value)) = spec.split_once(':') else {
             // Not `KIND:VALUE` at all: the DEX side says what is.
             return Err(names::parse_rule(spec).map_or_else(|e| ToolError(e.to_string()), |_| unsupported_search(spec)));
         };
         let known = RefKind::find(kind)?;
-        match known.name {
-            "string" | "literal" => match names::parse_condition(&format!("{}:{value}", known.name))? {
-                asc_findrefs::Query::String(pattern) => Ok(Query::string_regex(&pattern)?),
-                asc_findrefs::Query::StringLiteral(text) => Ok(Query::string_literal(text)),
-                _ => Err(unsupported_search(spec)),
-            },
-            name => Ok(Query::condition(&format!("{name}:{value}"))?),
+        Ok(Query::condition(&format!("{}:{value}", known.name))?)
+    }
+
+    /// The rules of `rules`, each with how it was asked: a rule string, or
+    /// an object as for one call.
+    fn of_rules(args: &Value) -> Result<Search, ToolError> {
+        let Some(Value::Array(list)) = args.get("rules") else {
+            return Err(ToolError("`rules` must be a list of rule strings (or findrefs condition objects)".into()));
+        };
+        if list.is_empty() {
+            return Err(ToolError("`rules` is empty".into()));
         }
+        if asks_for(args, "kind") || asks_for(args, "all") || asks_for(args, "rule") {
+            return Err(ToolError("give either `rules` or one query (`kind` / `rule` / `all`), not both".into()));
+        }
+        let mut rules = Vec::with_capacity(list.len());
+        for (index, rule) in list.iter().enumerate() {
+            let named = |e: ToolError| ToolError(format!("rule r{}: {}", index + 1, e.0));
+            let asked = match rule {
+                Value::String(rule) => json!({ "rule": rule }),
+                Value::Object(_) => rule.clone(),
+                _ => return Err(ToolError(format!("rule {} is not an object (or a rule string)", index + 1))),
+            };
+            match Search::of_call(&asked).map_err(named)? {
+                Search::Refs(query) => rules.push(Rule { asked, query }),
+                Search::Requests(_) | Search::Rules(_) => {
+                    return Err(ToolError(format!("rule r{}: a rule is one search, not a listing or a rule set", index + 1)))
+                }
+            }
+        }
+        Ok(Search::Rules(rules))
     }
 
-    /// The conditions a rule string joins with `&`.
-    fn of_rule(rule: &str) -> Result<Vec<Query>, ToolError> {
-        rule_parts(rule).into_iter().map(Search::of_condition).collect()
-    }
-
-    /// What `args` ask for: `kind` + `value`, a `rule`, or `all` (objects
-    /// or `KIND:VALUE` strings). One condition is that query itself, as on
-    /// the DEX side; several are the functions matching every one.
+    /// What `args` ask for: `kind` + `value`, a `rule`, `all` / `none`
+    /// (objects or `KIND:VALUE` strings), or `rules`. One condition is that
+    /// query itself, as on the DEX side; several are the functions matching
+    /// every one of `all` and none of `none`.
     fn of_call(args: &Value) -> Result<Search, ToolError> {
         if asks_for(args, "rules") {
-            return Err(unsupported_search("rules"));
+            return Search::of_rules(args);
         }
-        if args.get("none").and_then(Value::as_array).is_some_and(|none| !none.is_empty()) {
-            return Err(unsupported_search("with excluded conditions (`none`)"));
-        }
-        let mut queries = match (str_arg(args, "rule")?, args.get("all")) {
-            (Some(rule), _) => Search::of_rule(rule)?,
-            (None, None | Some(Value::Null)) => return Search::of_object(args),
+        let mut conditions = Conditions::default();
+        let rule = str_arg(args, "rule")?;
+        match (rule, args.get("all")) {
+            (Some(rule), _) => conditions.rule(rule)?,
+            (None, None | Some(Value::Null)) => match Search::of_object(args)? {
+                Search::Refs(query) => conditions.all.push(query),
+                listing => return Ok(listing),
+            },
             (None, Some(Value::Array(_))) if asks_for(args, "kind") => {
                 return Err(ToolError("give `kind` (one query) or `all` (several conditions), not both".into()));
             }
-            (None, Some(Value::Array(all))) => {
-                let mut queries = Vec::new();
-                for condition in all {
-                    match condition {
-                        Value::String(rule) => queries.extend(Search::of_rule(rule)?),
-                        Value::Object(_) => match Search::of_object(condition)? {
-                            Search::Refs(query) => queries.push(query),
-                            Search::Requests(_) => return Err(ToolError("`requests` is a listing, not a condition of `all`".into())),
-                        },
-                        _ => return Err(ToolError("`all` must be a list of condition objects (or KIND:VALUE strings)".into())),
-                    }
-                }
-                queries
-            }
-            (None, Some(_)) => return Err(ToolError("`all` must be a list of condition objects (or KIND:VALUE strings)".into())),
-        };
-        match queries.len() {
-            0 => Err(ToolError("`all` needs at least one condition".into())),
-            1 => Ok(Search::Refs(queries.remove(0))),
-            _ => Ok(Search::Refs(Query::All(queries))),
+            (None, Some(_)) => conditions.list(args, "all")?,
         }
+        conditions.list(args, "none")?;
+        if conditions.all.is_empty() && rule.is_none() {
+            return Err(ToolError("`all` needs at least one condition".into()));
+        }
+        Ok(Search::Refs(Query::compound(conditions.all, conditions.none)?))
     }
 }
 
@@ -750,17 +815,99 @@ fn row_json(entry: &str, row: &RefRow) -> Value {
     } else if let RefSite::Field { name } = &row.site {
         v["field"] = json!(name);
     }
+    if let Some(context) = &row.context {
+        v["sites"] = json!(row.sites);
+        v["context"] = json!(context);
+    }
     v
+}
+
+/// The arguments of a findrefs call that continues `rule` at `offset`.
+fn follow_up(rule: &Rule, args: &Value, apk_id: &str, offset: usize) -> Value {
+    let mut next = rule.asked.clone();
+    next["apk_id"] = json!(apk_id);
+    next["offset"] = json!(offset);
+    if let Some(entry) = args.get("entry").filter(|entry| !entry.is_null()) {
+        next["entry"] = entry.clone();
+    }
+    next
+}
+
+/// findrefs with `rules`: every rule searched, its first `limit` rows
+/// prefixed `rN | ` under a `# rN ...: N results` line, as on the DEX side.
+/// Each rule is one search of the program.
+fn findrefs_rules(session: &Session, args: &Value, rules: &[Rule], context: RefContext, call: &Call) -> ToolResult {
+    let limit = usize_arg(args, "limit")?.unwrap_or(crate::rules::RULE_LIMIT).max(1);
+    let entry = str_arg(args, "entry")?;
+    let engine = &session.engine;
+    let unreadable = engine.entries_in(entry).map_err(|e| entry_error(engine, e))?;
+    let unreadable = unreadable.into_iter().filter(|entry| entry.status != EntryStatus::Readable).count();
+    let mut text = String::new();
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    for (index, rule) in rules.iter().enumerate() {
+        let name = format!("r{}", index + 1);
+        let mut total = 0;
+        let mut page: Vec<(String, Value)> = Vec::new();
+        engine.find_refs_in(&rule.query, entry, &call.cancel, &mut |mut batch| {
+            total += batch.rows.len();
+            let room = (limit - page.len()).min(batch.rows.len());
+            let shown = &mut batch.rows[..room];
+            engine.fill_context(&batch.entry_name, shown, context);
+            page.extend(shown.iter().map(|row| (row.text(&batch.entry_name), row_json(&batch.entry_name, row))));
+            if let Some(error) = batch.error {
+                errors.push(format!("{}: {error}", batch.entry_name));
+            }
+        })?;
+        let asked = match rule.asked.get("rule").and_then(Value::as_str) {
+            Some(spec) if rule.asked.as_object().is_some_and(|asked| asked.len() == 1) => spec.to_owned(),
+            _ => rule.asked.to_string(),
+        };
+        text.push_str(&format!("# {name} {asked}: {total} results\n"));
+        for (row, _) in &page {
+            for (line, row_line) in row.lines().enumerate() {
+                // Context lines keep their indentation after the prefix.
+                text.push_str(&if line == 0 { format!("{name} | {row_line}\n") } else { format!("{name} |{row_line}\n") });
+            }
+        }
+        let next = (page.len() < total).then(|| follow_up(rule, args, &session.id, page.len()));
+        if let Some(next) = &next {
+            text.push_str(&format!("{name} | more | {} more: findrefs {next}\n", total - page.len()));
+        }
+        let hints = if total == 0 { no_results_hints(engine, &rule.query, &call.cancel) } else { Vec::new() };
+        for hint in &hints {
+            text.push_str(&format!("# {name} hint: {hint}\n"));
+        }
+        out.push(json!({
+            "rule": name,
+            "query": rule.asked,
+            "total": total,
+            "hints": hints,
+            "returned": page.len(),
+            "results": page.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
+            "next": next,
+        }));
+    }
+    errors.sort();
+    errors.dedup();
+    for error in &errors {
+        text.push_str(&format!("# Warning: {error}\n"));
+    }
+    let unsearched = unreadable + errors.len();
+    Ok((text, json!({"apk_id": session.id, "rules": out, "errors": errors, "unsearched_entries": unsearched})))
 }
 
 /// One row per reference, entry by entry in program order.
 fn findrefs(session: &Session, args: &Value, call: &Call) -> ToolResult {
-    if asks_for(args, "context") {
-        return Err(unsupported_search("context"));
-    }
+    let context = match crate::context_arg(args)? {
+        asc_engine::RefContext::None => RefContext::None,
+        asc_engine::RefContext::Lines(lines) => RefContext::Lines(lines),
+        asc_engine::RefContext::Method => RefContext::Method,
+    };
     let query = match Search::of_call(args)? {
         Search::Refs(query) => query,
         Search::Requests(pattern) => return module_requests(session, args, &pattern),
+        Search::Rules(rules) => return findrefs_rules(session, args, &rules, context, call),
     };
     let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
     let entry = str_arg(args, "entry")?;
@@ -771,12 +918,15 @@ fn findrefs(session: &Session, args: &Value, call: &Call) -> ToolResult {
     let mut rows = Vec::new();
     let mut errors = Vec::new();
     let mut total = 0;
-    let summary = engine.find_refs_in(&query, entry, &call.cancel, &mut |batch| {
+    let summary = engine.find_refs_in(&query, entry, &call.cancel, &mut |mut batch| {
         // Only the page is rendered.
-        let skip = offset.saturating_sub(total);
+        let skip = offset.saturating_sub(total).min(batch.rows.len());
         total += batch.rows.len();
         let room = limit - rows.len();
-        rows.extend(batch.rows.iter().skip(skip).take(room).map(|row| (row.line(&batch.entry_name), row_json(&batch.entry_name, row))));
+        let end = (skip + room).min(batch.rows.len());
+        let page = &mut batch.rows[skip..end];
+        engine.fill_context(&batch.entry_name, page, context);
+        rows.extend(page.iter().map(|row| (row.text(&batch.entry_name), row_json(&batch.entry_name, row))));
         if let Some(error) = batch.error {
             errors.push(format!("{}: {error}", batch.entry_name));
         }
@@ -1031,13 +1181,41 @@ mod tests {
         assert_eq!(asked(objects).unwrap(), both);
 
         // Only `&` ahead of a KIND: joins: record names and module requests keep theirs.
+        let kept = asked(json!({"rule": "call:import:@normalized:N&&&a/b&#x & string:a&b"})).unwrap();
+        assert!(kept.contains("N&&&a/b&#x") && kept.contains("a&b"), "{kept}");
+    }
+
+    #[test]
+    fn conditions_are_excluded_in_every_spelling() {
+        let without = asked(json!({"rule": "prop:=request & !string:https?://"})).unwrap();
+        assert!(without.starts_with("Refs(All([Prop {") && without.ends_with("Not(StringRegex(Regex(\"https?://\")))]))"), "{without}");
+        for same in [
+            json!({"all": ["prop:=request", "!string:https?://"]}),
+            json!({"all": ["prop:=request"], "none": ["string:https?://"]}),
+            json!({"all": ["prop:=request"], "none": ["!string:https?://"]}),
+            json!({"all": ["prop:=request"], "none": [{"kind": "string", "value": "https?://"}]}),
+            json!({"kind": "prop", "value": "request", "exact": true, "none": ["string:https?://"]}),
+            json!({"kind": "prop", "value": "=request", "none": ["string:https?://"]}),
+            json!({"rule": "property:=request & !strings:https?://"}),
+        ] {
+            assert_eq!(asked(same.clone()).unwrap(), without, "{same}");
+        }
+        // A set of functions is a condition like any other, in a rule and as a value.
+        let nested = asked(json!({"rule": "call:{string:token & !method:=test}"})).unwrap();
+        assert!(nested.starts_with("Refs(CallTo(Matching(All([StringRegex(") && nested.contains("Not(Method {"), "{nested}");
+        assert_eq!(asked(json!({"kind": "call", "value": "{string:token & !method:=test}"})).unwrap(), nested);
+        // `=NAME` is the exact name wherever a name is given; with `exact` the text is taken as it is.
         assert_eq!(
-            rule_parts("method:&a/b&->f & call:import:@normalized:N&&&a/b&#x"),
-            ["method:&a/b&->f", "call:import:@normalized:N&&&a/b&#x"]
+            asked(json!({"kind": "global", "value": "=console"})),
+            asked(json!({"kind": "global", "value": "console", "exact": true}))
         );
-        assert_eq!(rule_parts("string:a&b"), ["string:a&b"]);
-        assert_eq!(rule_parts(r"string:a\&literal:b"), [r"string:a\&literal:b"]);
-        assert_eq!(rule_parts("string:a & !literal:b"), ["string:a", "!literal:b"]);
+        assert_eq!(asked(json!({"kind": "method", "value": "=build"})), asked(json!({"kind": "method", "value": "build", "exact": true})));
+        assert!(asked(json!({"kind": "prop", "value": "=a", "exact": true})).unwrap().contains("Exact(\"=a\")"));
+
+        let rules =
+            asked(json!({"rules": ["string:a & !prop:b", {"kind": "prop", "value": "c"}, {"all": ["string:d", "number:1"]}]})).unwrap();
+        assert!(rules.starts_with("Rules([Rule { asked: Object {\"rule\": String(\"string:a & !prop:b\")}, query: All(["), "{rules}");
+        assert_eq!(rules.matches("Rule {").count(), 3, "{rules}");
     }
 
     #[test]
@@ -1047,9 +1225,28 @@ mod tests {
         assert_eq!(asked(json!({"kind": "field", "class": "La;", "name": "b"})), not_yet("kind=field"));
         assert_eq!(asked(json!({"rule": "type:La;"})), not_yet("kind=type"));
         assert_eq!(asked(json!({"rule": "string:a & type:La;"})), not_yet("kind=type"));
-        assert_eq!(asked(json!({"rule": "string:a & !string:b"})), not_yet("with excluded conditions (`!`)"));
-        assert_eq!(asked(json!({"kind": "string", "value": "a", "none": ["string:b"]})), not_yet("with excluded conditions (`none`)"));
-        assert_eq!(asked(json!({"rules": [{"kind": "string", "value": "a"}]})), not_yet("rules"));
+        assert_eq!(asked(json!({"rule": "string:a & !type:La;"})), not_yet("kind=type"));
+        assert_eq!(
+            asked(json!({"rule": "!string:b"})),
+            Err("a rule needs a condition without `!` (`!` only removes functions)".to_owned())
+        );
+        assert_eq!(asked(json!({"none": ["string:b"]})), Err(format!("findrefs needs `kind` ({kinds}) and `value`")));
+        assert_eq!(asked(json!({"all": [], "none": ["string:b"]})), Err("`all` needs at least one condition".to_owned()));
+        assert_eq!(asked(json!({"rules": []})), Err("`rules` is empty".to_owned()));
+        assert_eq!(
+            asked(json!({"rules": ["string:a"], "kind": "string"})),
+            Err("give either `rules` or one query (`kind` / `rule` / `all`), not both".to_owned())
+        );
+        assert_eq!(asked(json!({"rules": ["string:a", "type:La;"]})), not_yet("kind=type").map_err(|e| format!("rule r2: {e}")));
+        assert_eq!(
+            asked(json!({"rules": [{"kind": "import", "value": "net", "requests": true}]})),
+            Err("rule r1: a rule is one search, not a listing or a rule set".to_owned())
+        );
+        assert_eq!(
+            asked(json!({"all": ["string:a"], "none": [{"kind": "import", "value": "net", "requests": true}]})),
+            Err("`requests` is a listing, not a condition of `none`".to_owned())
+        );
+        assert_eq!(asked(json!({"rule": "call:{string:a"})), Err("call:{string:a: expected `}` at the end of the set".to_owned()));
         assert_eq!(asked(json!({"kind": "string"})), Err("a string query needs `value`".to_owned()));
         assert_eq!(asked(json!({})), Err(format!("findrefs needs `kind` ({kinds}) and `value`")));
         assert_eq!(asked(json!({"rule": "nonsense"})).map_err(|e| e.contains("nonsense")), Err(true));
