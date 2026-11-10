@@ -207,6 +207,7 @@ pub(crate) fn needs_program(q: &Query) -> bool {
         | Query::MethodSet(_)
         | Query::Defined(_)
         | Query::Field(_)
+        | Query::FieldAccess { .. }
         | Query::Extends(_)
         | Query::Implements(_) => false,
     }
@@ -238,6 +239,7 @@ fn nested_rules<'q>(q: &'q Query, out: &mut Vec<&'q Query>) {
         | Query::MethodSet(_)
         | Query::Defined(_)
         | Query::Field(_)
+        | Query::FieldAccess { .. }
         | Query::Extends(_)
         | Query::Implements(_) => {}
     }

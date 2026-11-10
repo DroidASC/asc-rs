@@ -1,7 +1,7 @@
 //! MCP sessions against synthetic APKs, driven through `serve`.
 
 use asc_engine::CacheConfig;
-use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_rich_dex};
+use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_field_access_dex, make_rich_dex};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -230,6 +230,37 @@ fn findrefs_context_and_callgraph() {
     assert_eq!(replies[5]["result"]["isError"], true);
     assert!(text(&replies[5]).contains("use callers, callees"), "{}", text(&replies[5]));
     assert!(text(&replies[6]).contains("no method Lexample/Rich;->missing"), "{}", text(&replies[6]));
+}
+
+#[test]
+fn field_access_is_reported_filtered_and_structured() {
+    let dex = make_field_access_dex();
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex)], false));
+    let path = apk.path().to_str().unwrap();
+    let field = "Lexample/Fields;->value:I";
+    let replies = session(&[
+        call(1, "findrefs", json!({"apk": path, "kind": "field", "value": field, "context": 0})),
+        call(2, "findrefs", json!({"apk": path, "kind": "field", "value": field, "access": "read"})),
+        call(3, "findrefs", json!({"apk": path, "kind": "field", "value": field, "access": "write"})),
+        call(4, "findrefs", json!({"apk": path, "kind": "field", "value": field, "access": "get"})),
+        call(5, "findrefs", json!({"apk": path, "kind": "method", "value": "touch", "access": "read"})),
+    ]);
+
+    let all = ok(&replies[0]);
+    assert_eq!(all["total"], 1);
+    assert_eq!(all["results"][0]["field_accesses"], json!(["read", "write"]));
+    assert_eq!(all["results"][0]["sites"][0]["access"], "read");
+    assert_eq!(all["results"][0]["sites"][1]["access"], "write");
+    assert!(text(&replies[0]).contains(&format!("{field} [read], {field} [write]")), "{}", text(&replies[0]));
+
+    assert_eq!(ok(&replies[1])["results"][0]["field_accesses"], json!(["read"]));
+    assert!(text(&replies[1]).contains("[read]") && !text(&replies[1]).contains("[write]"));
+    assert_eq!(ok(&replies[2])["results"][0]["field_accesses"], json!(["write"]));
+    assert!(text(&replies[2]).contains("[write]") && !text(&replies[2]).contains("[read]"));
+    assert_eq!(ok(&replies[3])["results"], ok(&replies[1])["results"]);
+
+    assert_eq!(replies[4]["result"]["isError"], true);
+    assert!(text(&replies[4]).contains("only valid with `kind: \"field\"`"), "{}", text(&replies[4]));
 }
 
 #[test]

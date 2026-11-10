@@ -11,6 +11,32 @@ pub enum RefKind {
     Field,
 }
 
+/// How a Dalvik field instruction uses its referenced field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FieldAccess {
+    Read,
+    Write,
+}
+
+impl FieldAccess {
+    /// Classify a field opcode. Reads are `iget*` / `sget*`; writes are
+    /// `iput*` / `sput*`.
+    pub const fn from_opcode(opcode: u8) -> Option<Self> {
+        match opcode {
+            0x52..=0x58 | 0x60..=0x66 => Some(FieldAccess::Read),
+            0x59..=0x5f | 0x67..=0x6d => Some(FieldAccess::Write),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FieldAccess::Read => "read",
+            FieldAccess::Write => "write",
+        }
+    }
+}
+
 impl RefKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -278,6 +304,18 @@ mod tests {
         assert!(!prefilter_is_selective(&[0x00]));
         assert!(!prefilter_is_selective(&[0x12, 0xff]));
         assert!(!prefilter_is_selective(&[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn every_field_opcode_has_the_right_access() {
+        for opcode in 0u8..=u8::MAX {
+            let expected = match opcode {
+                0x52..=0x58 | 0x60..=0x66 => Some(FieldAccess::Read),
+                0x59..=0x5f | 0x67..=0x6d => Some(FieldAccess::Write),
+                _ => None,
+            };
+            assert_eq!(FieldAccess::from_opcode(opcode), expected, "opcode 0x{opcode:02x}");
+        }
     }
 
     /// Every scan strategy on `region` for `targets`, as (label, candidates).

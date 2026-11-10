@@ -13,7 +13,8 @@ decompiling it first. Every command takes the APK path first; class names may be
 
 - One record per line, columns separated by ` | `; lines starting with `#` are headers,
   totals and hints. Grep it freely.
-- findrefs rows: `dex | Lcls;->method(params)ret | matched`, matched strings JSON-quoted.
+- findrefs rows: `dex | Lcls;->method(params)ret | matched`, matched strings JSON-quoted. Field
+  matches end in `[read]` (`iget*` / `sget*`) or `[write]` (`iput*` / `sput*`).
 - Keep replies short with `--limit N` (records) or `--max-bytes N`. When cut, the last line
   names a file with the whole output: grep that file, or rerun with the `--offset` it gives.
 
@@ -33,7 +34,7 @@ droidasc findrefs app.apk string 'https?://' --limit 50
 | attack surface | `droidasc manifest-summary app.apk` (`| grep exported=true`, `--json`) |
 | who uses a string | `droidasc findrefs app.apk string 'regex'` (`(?i)` ignores case, `--literal` for plain text) |
 | who calls a method | `droidasc findrefs app.apk method 'android.webkit.WebView->loadUrl'` |
-| who reads / writes a field | `droidasc findrefs app.apk field 'android.os.Build->SERIAL'` |
+| who reads / writes a field | `droidasc findrefs app.apk field 'android.os.Build->SERIAL'` (`--access read` or `--access write` to filter) |
 | who uses a type | `droidasc findrefs app.apk type android.content.ClipboardManager` |
 | subclasses / implementers | `droidasc findrefs app.apk extends android.webkit.WebViewClient` (`impl` for interfaces); all levels: `droidasc hierarchy app.apk android.app.Service` |
 | several queries at once | `droidasc findrefs app.apk rules 'method:java.lang.Runtime->exec' 'string:(?i)password'` (rows prefixed `r1 |`, `r2 |`; `--file` for many) |
@@ -50,6 +51,7 @@ droidasc findrefs app.apk string 'https?://' --limit 50
 Member targets accept `Lcom/a/B;->name(sig)`, `com.a.B->name`, `com.a.B#name`, `com.a.B.name`,
 or `B.name` (any package). A name alone is a substring / regex (`=name` or a signature: exact). A signature picks that
 overload: `run(I)V`, `run(I)` (any return), `run(int, String)`; `f:I` a field of that type.
+Field output always says `[read]` or `[write]`; without `--access`, a method that does both lists both.
 
 ## Several archives as one program
 

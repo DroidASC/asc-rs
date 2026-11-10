@@ -303,8 +303,14 @@ impl Engine {
     pub fn no_results_hints(&self, query: &Query, entries: usize) -> Vec<String> {
         let mut out = vec![format!("searched {entries} DEX entr{}", if entries == 1 { "y" } else { "ies" })];
         match query {
-            Query::Method(m) | Query::Field(m) => {
-                out.extend(self.member_query_hint(m, matches!(query, Query::Method(_))).or_else(|| query_hint(query)));
+            Query::Method(m) => {
+                out.extend(self.member_query_hint(m, true, None).or_else(|| query_hint(query)));
+            }
+            Query::Field(m) => {
+                out.extend(self.member_query_hint(m, false, None).or_else(|| query_hint(query)));
+            }
+            Query::FieldAccess { field, access } => {
+                out.extend(self.member_query_hint(field, false, Some(*access)).or_else(|| query_hint(query)));
             }
             _ => out.extend(query_hint(query)),
         }
@@ -313,7 +319,7 @@ impl Engine {
 
     /// For a member query with an exact class: whether the class or the
     /// member is absent, or the member exists but no code references it.
-    fn member_query_hint(&self, m: &MemberQuery, methods: bool) -> Option<String> {
+    fn member_query_hint(&self, m: &MemberQuery, methods: bool, field_access: Option<asc_findrefs::FieldAccess>) -> Option<String> {
         let class = &m.class.as_ref().filter(|c| c.precise)?.pattern;
         let kind = if methods { "method" } else { "field" };
         let members = self.class_member_list(class, methods);
@@ -325,7 +331,14 @@ impl Engine {
         };
         let member_name = |s: &str| s.split(['(', ':']).next().unwrap_or(s).to_string();
         let defined: Vec<&String> = members.iter().filter(|s| member_name(s) == *name).collect();
-        let access = if methods { "calls it" } else { "reads or writes it" };
+        let access = if methods {
+            "calls it".to_string()
+        } else {
+            match field_access {
+                Some(a) => format!("{}s it", a.as_str()),
+                None => "reads or writes it".to_string(),
+            }
+        };
         Some(match &m.signature {
             _ if defined.is_empty() => {
                 format!("{class} has no {kind} {name:?}; it has {}", list_some(&closest_members(&members, Some(name))))
@@ -352,10 +365,14 @@ pub fn query_hint(query: &Query) -> Option<String> {
             "string patterns are case-sensitive regexes: prefix (?i) to ignore case".into()
         }
         Query::StringLiteral(_) => "literal matches are case-sensitive; a string regex with (?i) ignores case".into(),
-        Query::Method(MemberQuery { signature: Some(sig), .. }) | Query::Field(MemberQuery { signature: Some(sig), .. }) => {
+        Query::Method(MemberQuery { signature: Some(sig), .. })
+        | Query::Field(MemberQuery { signature: Some(sig), .. })
+        | Query::FieldAccess { field: MemberQuery { signature: Some(sig), .. }, .. } => {
             format!("only members of signature {sig} match: drop it for every overload")
         }
-        Query::Method(MemberQuery { exact_name: true, .. }) | Query::Field(MemberQuery { exact_name: true, .. }) => {
+        Query::Method(MemberQuery { exact_name: true, .. })
+        | Query::Field(MemberQuery { exact_name: true, .. })
+        | Query::FieldAccess { field: MemberQuery { exact_name: true, .. }, .. } => {
             "findrefs lists references, not definitions; the name is matched exactly (without = or a signature it is a pattern)".into()
         }
         Query::Extends(_) | Query::Implements(_) => {
@@ -376,6 +393,9 @@ pub fn query_hint(query: &Query) -> Option<String> {
         }
         Query::Defined(_) => {
             "this lists method definitions (no call site); override:/in: need the class to be defined in the program".into()
+        }
+        Query::FieldAccess { access, .. } => {
+            format!("only field {}s are listed: drop the access filter to include both reads and writes", access.as_str())
         }
         Query::String(_) | Query::Type(_) | Query::Method(_) | Query::Field(_) => return None,
     })

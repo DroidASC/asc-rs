@@ -140,7 +140,7 @@ impl CompiledQuery {
                 ))
             }
             Query::Defined(d) => Parts::Defined(d.clone()),
-            Query::Field(m) => Parts::Member(compile_member(m, RefKind::Field)?),
+            Query::Field(m) | Query::FieldAccess { field: m, .. } => Parts::Member(compile_member(m, RefKind::Field)?),
             Query::Extends(d) => Parts::Relation(ClassRelation::Extends, asc_dex::mutf8::encode(d)),
             Query::Implements(d) => Parts::Relation(ClassRelation::Implements, asc_dex::mutf8::encode(d)),
             Query::All { all, none } => {

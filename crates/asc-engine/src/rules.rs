@@ -11,7 +11,7 @@ use crate::{
 };
 use asc_apk::Entry;
 use asc_cache::Tier;
-use asc_findrefs::{CompiledQuery, Compound, Defined, FindRefs, Query};
+use asc_findrefs::{CompiledQuery, Compound, Defined, FieldAccess, FindRefs, Query};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
@@ -33,8 +33,8 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
     let parts: Vec<&CompiledQuery> = code_all.iter().chain(&code_none).copied().collect();
     let hits = fr.find_many(&parts)?;
     let n = code_all.len();
-    // method -> per code `all` part, its (offset, matched index, note) hits
-    type PartHits<'h> = Vec<(u32, u32, Option<&'h str>)>;
+    // method -> per code `all` part, its (offset, matched index, note, field access) hits
+    type PartHits<'h> = Vec<(u32, u32, Option<&'h str>, Option<FieldAccess>)>;
     let mut methods: BTreeMap<u32, Vec<PartHits<'_>>> = BTreeMap::new();
     if n == 0 {
         // No code part proposes methods: seed from the first definition part.
@@ -50,7 +50,7 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
                     // The first part proposes the methods, the others can only keep them.
                     let slot = if p == 0 { Some(methods.entry(m).or_insert_with(|| vec![Vec::new(); n])) } else { methods.get_mut(&m) };
                     if let Some(slot) = slot {
-                        slot[p].push((h.offset, h.matched_idx, h.note.as_deref()));
+                        slot[p].push((h.offset, h.matched_idx, h.note.as_deref(), h.field_access));
                     }
                 }
             }
@@ -78,15 +78,22 @@ pub(crate) fn compound_rows(fr: &FindRefs<'_, '_, '_>, c: &Compound, opts: FindO
         let mut matched = Vec::new();
         let mut sites = Vec::new();
         for (part, part_hits) in code_all.iter().zip(per_part) {
-            let mut idxs: Vec<(u32, Option<&str>)> = part_hits.iter().map(|&(_, i, note)| (i, note)).collect();
+            let mut idxs: Vec<(u32, Option<&str>, Option<FieldAccess>)> =
+                part_hits.iter().map(|&(_, i, note, access)| (i, note, access)).collect();
             idxs.sort_unstable();
             idxs.dedup();
             let base = matched.len();
-            for &(i, note) in &idxs {
-                matched.push(hit_matched(dex, part.kind(), i, note)?);
+            for &(i, note, access) in &idxs {
+                matched.push(hit_matched(dex, part.kind(), i, note, access)?);
             }
-            for (offset, i, note) in part_hits {
-                sites.push(RefSite { offset, matched: base + idxs.binary_search(&(i, note)).unwrap_or(0), pc: None, line: None });
+            for (offset, i, note, access) in part_hits {
+                sites.push(RefSite {
+                    offset,
+                    matched: base + idxs.binary_search(&(i, note, access)).unwrap_or(0),
+                    field_access: access,
+                    pc: None,
+                    line: None,
+                });
             }
         }
         for label in &def_labels {

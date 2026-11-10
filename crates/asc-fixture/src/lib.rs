@@ -1,6 +1,7 @@
 //! Hand-built DEX files for tests (ported from the Python `dex_fixture.py`).
 //!
-//! `make_dex`, `make_static_field_dex` and `make_apk` are byte-stable: other
+//! `make_dex`, `make_static_field_dex`, `make_field_access_dex` and
+//! `make_apk` are byte-stable: other
 //! crates' tests depend on their exact layout. Richer fixtures are produced by
 //! [`DexBuilder`], a small two-phase assembler (declare the constant pool,
 //! resolve it to canonical sorted ids, then add classes with bytecode that
@@ -184,6 +185,48 @@ pub fn make_static_field_dex() -> Vec<u8> {
     let cdef = pack_u32s(&[0, 1, 1, 0, 0xffff_ffff, 0, class_data, static_values]);
     b.buf[class_defs as usize..class_defs as usize + 32].copy_from_slice(&cdef);
     b.finish([(6, string_ids), (3, type_ids), (1, proto_ids), (2, field_ids), (1, method_ids), (1, class_defs)], data_off)
+}
+
+/// A DEX whose one method reads and writes both an instance field (`value:I`)
+/// and a static field (`COUNT:I`). It exercises the four Dalvik field opcode
+/// families: `iget`, `iput`, `sget` and `sput`.
+pub fn make_field_access_dex() -> Vec<u8> {
+    const OBJ: &str = "Ljava/lang/Object;";
+    const CLASS: &str = "Lexample/Fields;";
+
+    let mut d = DexBuilder::new();
+    d.type_(OBJ).field(CLASS, "COUNT", "I").field(CLASS, "value", "I").method(CLASS, "touch", "V", &[]);
+    let ids = d.resolve();
+    let count = ids.field(CLASS, "COUNT", "I");
+    let value = ids.field(CLASS, "value", "I");
+    let le16 = |v: u32| (v as u16).to_le_bytes();
+
+    let mut code = Vec::new();
+    code.extend_from_slice(&[0x52, 0x10]); // iget v0, v1, value
+    code.extend_from_slice(&le16(value));
+    code.extend_from_slice(&[0x59, 0x10]); // iput v0, v1, value
+    code.extend_from_slice(&le16(value));
+    code.extend_from_slice(&[0x60, 0x00]); // sget v0, COUNT
+    code.extend_from_slice(&le16(count));
+    code.extend_from_slice(&[0x67, 0x00]); // sput v0, COUNT
+    code.extend_from_slice(&le16(count));
+    code.extend_from_slice(&[0x0e, 0x00]); // return-void
+
+    let mut ids = ids;
+    ids.add_class(ClassSpec {
+        descriptor: CLASS.into(),
+        access: 0x1,
+        superclass: Some(OBJ.into()),
+        static_fields: vec![(count, 0x1 | 0x8)],
+        instance_fields: vec![(value, 0x1)],
+        virtual_methods: vec![MethodSpec {
+            idx: ids.method(CLASS, "touch", "V", &[]),
+            access: 0x1,
+            code: Some(CodeSpec { registers: 2, ins: 1, insns: code, ..Default::default() }),
+        }],
+        ..Default::default()
+    });
+    ids.finish()
 }
 
 /// Build an in-memory APK (zip) from `(name, bytes)` entries.

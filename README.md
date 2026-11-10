@@ -56,12 +56,15 @@ DEX 名带上所属文件（`services.jar/classes2.dex`），`callgraph` 行尾�
 ```
 classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
 classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
+classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/Store;->count:I [write]
 ```
 
 - 类名可写 `com.a.B` 或 `Lcom/a/B;`。
 - 成员在 CLI、MCP 和规则里写法统一：`Lcom/a/B;->name(I)V`、`com.a.B->name`、`com.a.B#name`、`com.a.B.name`、
   `B.name`（不带包名的类匹配任意包）。只写名字是 regex / 子串，`=name` 精确匹配。
 - 带签名时只命中该重载：`run(I)V`、只写参数的 `run(I)`、Java 写法 `run(int, String)`，字段 `f:I`。
+- 字段引用按 Dalvik opcode 标记 `[read]`（`iget*` / `sget*`）或 `[write]`（`iput*` / `sput*`）。
+  `findrefs app.apk field TARGET --access read` 或 `--access write` 只保留对应引用；不指定时两者都打印。
 - 条件写作 `KIND:VALUE`（`string:`、`literal:`、`type:`、`method:`、`field:`），`rules` 中可用 `&` 组合，
   也可以用 `--file` 每行一条。
 - 查不到时 stderr 会给出 `hint:`：搜了多少 DEX、大小写、APK 未定义的 framework 类、最接近的类或已有的方法等。
@@ -84,6 +87,8 @@ classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Pa
   `listclass`、`getmanifest`、`manifest_summary`、`resources`，传 `apk` 路径即打开，回复里的 `apk_id` 可代替路径。
   `findrefs`、`listclass`、`manifest_summary`、`resources` 可用 `apks` / `dir` 一次处理多个 APK。回复控制在
   `max_bytes`（默认 16384）内，超出部分按 `spill` 写文件或分页。
+  field 查询可传 `"access": "read"` / `"write"`；结果的 `field_accesses` 与 `matched` 对齐，带 context 时每个
+  site 也有 `access`。
 
   ```json
   { "mcpServers": { "droidasc": { "command": "/absolute/path/to/droidasc", "args": ["mcp"] } } }

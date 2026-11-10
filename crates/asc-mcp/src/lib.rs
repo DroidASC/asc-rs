@@ -42,7 +42,7 @@ use asc_engine::{
     condition, hints, names, Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits,
     Matched, RefBatch, RefContext, RefResult, SharedCache, SmaliOptions, Threads,
 };
-use asc_findrefs::Query;
+use asc_findrefs::{FieldAccess, Query};
 use class_text::ClassText;
 use multi::{Report, Reports, Section};
 use output::{SpillDir, Structured, FITTED, FULL};
@@ -1215,12 +1215,19 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
         if args.get("kind").is_some() {
             return Err(ToolError("give either `rule` or `kind`, not both".into()));
         }
+        if args.get("access").is_some() {
+            return Err(ToolError("`access` is only valid with `kind: \"field\"`".into()));
+        }
         return Ok(names::parse_rule(rule)?);
     }
     let kind = str_arg(args, "kind")?.ok_or_else(|| {
         ToolError("findrefs needs `kind` (string, type, method, field, extends or impl), or `rule`, `all` / `rules`".into())
     })?;
     let kind = names::parse_kind(kind)?;
+    let access = field_access_arg(args)?;
+    if kind != "field" && access.is_some() {
+        return Err(ToolError("`access` is only valid with `kind: \"field\"`".into()));
+    }
     Ok(match kind {
         "string" | "literal" | "type" | "extends" | "impl" => {
             let value = match str_arg(args, "value")? {
@@ -1259,6 +1266,8 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
             )?;
             if kind == "method" {
                 Query::Method(m)
+            } else if let Some(access) = access {
+                Query::FieldAccess { field: m, access }
             } else {
                 Query::Field(m)
             }
@@ -1269,12 +1278,23 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
 /// `direction` of callgraph, with the spellings models also use.
 const CALL_DIRECTIONS: &[(&str, &[&str])] =
     &[("callers", &["caller", "up", "incoming", "in"]), ("callees", &["callee", "down", "outgoing", "out"])];
+const FIELD_ACCESSES: &[(&str, &[&str])] = &[("read", &["get", "load"]), ("write", &["put", "set", "store"])];
 /// `group` of a multi-APK findrefs.
 const GROUPS: &[(&str, &[&str])] = &[("none", &["no", "off", "false"]), ("package", &["pkg", "packages"])];
 
 /// The findrefs arguments that define the query (not the APKs, paging or view).
 const FINDREFS_QUERY_KEYS: &[&str] =
-    &["rule", "kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "all", "none", "sdk_prefixes"];
+    &["rule", "kind", "value", "literal", "name", "class", "fuzzy_class", "exact", "access", "all", "none", "sdk_prefixes"];
+
+fn field_access_arg(args: &Value) -> Result<Option<FieldAccess>, ToolError> {
+    if str_arg(args, "access")?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(match choice_arg(args, "access", "read", FIELD_ACCESSES)? {
+        "read" => FieldAccess::Read,
+        _ => FieldAccess::Write,
+    }))
+}
 
 /// The `keys` present in `args`, for the arguments of a follow-up call.
 fn query_args(args: &Value, keys: &[&str]) -> Map<String, Value> {
@@ -1288,12 +1308,13 @@ fn describe_query(args: &Value) -> String {
         return rule.to_string();
     }
     let kind = s("kind").unwrap_or("?");
+    let access = s("access").map(|a| format!(" {a}")).unwrap_or_default();
     match (s("value"), s("class"), s("name")) {
-        (Some(v), _, _) => format!("{kind} {v:?}"),
-        (None, Some(c), Some(n)) => format!("{kind} {c}->{n}"),
-        (None, Some(c), None) => format!("{kind} {c}"),
-        (None, None, Some(n)) => format!("{kind} {n}"),
-        _ => kind.to_string(),
+        (Some(v), _, _) => format!("{kind}{access} {v:?}"),
+        (None, Some(c), Some(n)) => format!("{kind}{access} {c}->{n}"),
+        (None, Some(c), None) => format!("{kind}{access} {c}"),
+        (None, None, Some(n)) => format!("{kind}{access} {n}"),
+        _ => format!("{kind}{access}"),
     }
 }
 
@@ -1417,8 +1438,25 @@ fn context_arg(args: &Value) -> Result<RefContext, ToolError> {
 fn ref_json(r: &RefResult, context: RefContext) -> Value {
     let matched: Vec<&str> = r.matched.iter().map(Matched::as_str).collect();
     let mut v = json!({"dex": r.dex_name, "method": r.method, "signature": r.signature, "matched": matched});
+    if r.matched.iter().any(|m| m.field_access().is_some()) {
+        v["field_accesses"] = json!(r.matched.iter().map(|m| m.field_access().map(FieldAccess::as_str)).collect::<Vec<_>>());
+    }
     if context != RefContext::None {
-        v["sites"] = r.sites.iter().map(|s| json!({"pc": s.pc, "line": s.line, "matched": matched.get(s.matched)})).collect();
+        v["sites"] = r
+            .sites
+            .iter()
+            .map(|s| {
+                let mut site = json!({
+                    "pc": s.pc,
+                    "line": s.line,
+                    "matched": matched.get(s.matched),
+                });
+                if let Some(access) = s.field_access {
+                    site["access"] = json!(access.as_str());
+                }
+                site
+            })
+            .collect();
         v["context"] = json!(r.context);
     }
     v
@@ -1596,6 +1634,7 @@ pub mod defs {
                 "class": {"type": "string", "description": "Declaring class; without package: any package."},
                 "fuzzy_class": {"type": "boolean", "description": "class is a regex, default false."},
                 "exact": {"type": "boolean"},
+                "access": {"type": "string", "description": "For field only: read (iget/sget) or write (iput/sput); omitted includes both and labels every match."},
                 "context": {"type": ["integer", "string", "boolean"], "description": "Lines of smali around each hit, or \"method\"."},
                 "collapse_sdks": {"type": "boolean", "description": "Fold androidx, kotlin, gms... hits into counts; default true with apks / dir."},
                 "sdk_prefixes": {"type": "array", "items": {"type": "string"}, "description": "Instead of the built-in SDK list."},

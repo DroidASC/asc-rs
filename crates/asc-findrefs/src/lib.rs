@@ -38,7 +38,7 @@ pub use insn_locator::{InsnLocator, MethodRef};
 pub use locators::{FieldLocator, MethodLocator, StringLocator, TypeLocator};
 pub use persist::FORMAT_VERSION as PERSIST_FORMAT_VERSION;
 pub use query::{CompiledQuery, Compound};
-pub use scanner::{CodeScanner, IdxSet, RefKind};
+pub use scanner::{CodeScanner, FieldAccess, IdxSet, RefKind};
 pub use table::Backing;
 
 use asc_dex::Dex;
@@ -176,6 +176,12 @@ pub enum Query {
         fan_out: Option<usize>,
     },
     Field(MemberQuery),
+    /// Field references restricted to reads (`iget*` / `sget*`) or writes
+    /// (`iput*` / `sput*`). [`Query::Field`] keeps both.
+    FieldAccess {
+        field: MemberQuery,
+        access: FieldAccess,
+    },
     /// The calls of a method query (`Method`, `MethodSet` or `Nested`) that
     /// every constraint keeps (`method:X[arg1="id", ret=unused]`); see
     /// [`CallConstraint`]. Its hits carry a note of the values judged.
@@ -211,7 +217,7 @@ impl Query {
             Query::Method(_) | Query::MethodSet(_) | Query::Nested(_) | Query::Virtual { .. } | Query::Call { .. } | Query::Defined(_) => {
                 RefKind::Method
             }
-            Query::Field(_) => RefKind::Field,
+            Query::Field(_) | Query::FieldAccess { .. } => RefKind::Field,
             // Rows of a compound query list constants of several kinds.
             Query::All { all, .. } => all.first().map_or(RefKind::String, Query::kind),
         }
@@ -222,6 +228,14 @@ impl Query {
         match self {
             Query::Extends(_) => Some(ClassRelation::Extends),
             Query::Implements(_) => Some(ClassRelation::Implements),
+            _ => None,
+        }
+    }
+
+    /// The read/write restriction of a field query, if any.
+    pub fn field_access(&self) -> Option<FieldAccess> {
+        match self {
+            Query::FieldAccess { access, .. } => Some(*access),
             _ => None,
         }
     }
@@ -294,6 +308,9 @@ pub struct Hit {
     pub matched_idx: u32,
     /// Owning method(s); `None` when the offset failed instruction verification.
     pub methods: Option<MethodRef>,
+    /// Whether a field instruction reads or writes the field. `None` for
+    /// string, type and method references.
+    pub field_access: Option<FieldAccess>,
     /// What the constraints of a [`Query::Call`] judged at this call site
     /// (`[arg1="id", ret=unused]`, `?` first when one is undetermined),
     /// and for a [`Query::Virtual`] alias, the methods it may dispatch to
@@ -530,7 +547,10 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         if idxs.is_empty() {
             return Ok(Vec::new());
         }
-        let hits = self.scan_idxs(query.kind(), &idxs)?;
+        let mut hits = self.scan_idxs(query.kind(), &idxs)?;
+        if let Some(access) = query.query().field_access() {
+            hits.retain(|hit| hit.field_access == Some(access));
+        }
         self.refine(query, hits)
     }
 
@@ -602,7 +622,10 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
             for hit in self.scan_idxs(kind, &union)? {
                 for &i in &mine {
                     if located[i].as_ref().is_some_and(|s| s.contains(&hit.matched_idx)) {
-                        out[i].push(hit.clone());
+                        let access = queries[i].query().field_access();
+                        if access.is_none() || access == hit.field_access {
+                            out[i].push(hit.clone());
+                        }
                     }
                 }
             }
@@ -644,7 +667,13 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         Ok(matches
             .into_iter()
             .zip(methods)
-            .map(|((offset, matched_idx), methods)| Hit { offset, matched_idx, methods, note: None })
+            .map(|((offset, matched_idx), methods)| Hit {
+                offset,
+                matched_idx,
+                methods,
+                field_access: (kind == RefKind::Field).then(|| FieldAccess::from_opcode(buf[offset as usize])).flatten(),
+                note: None,
+            })
             .collect())
     }
 }

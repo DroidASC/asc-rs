@@ -42,7 +42,7 @@ pub(crate) const L3_MAX_RESULT: usize = 4 << 20;
 /// inflated DEX files every query needs.
 const L3_MAX_TEXT: usize = 32 << 20;
 /// Layout version of the encoded `find_refs` results.
-const RESULT_FORMAT: u32 = 5;
+const RESULT_FORMAT: u32 = 6;
 /// Ends the encoded batches (where an entry name's length would be), so a
 /// truncated file is told from a complete one; the run's notes follow it.
 const RESULT_END: u32 = u32::MAX;
@@ -243,8 +243,15 @@ impl ResultRecorder {
                 self.out.push(match m {
                     Matched::String(_) => 0,
                     Matched::Symbol(_) => 1,
+                    Matched::Field { .. } => 2,
                 });
                 put_str(&mut self.out, m.as_str());
+                if let Matched::Field { access, .. } = m {
+                    self.out.push(match access {
+                        asc_findrefs::FieldAccess::Read => 1,
+                        asc_findrefs::FieldAccess::Write => 2,
+                    });
+                }
             }
             self.out.push(match r.relation {
                 None => 0,
@@ -255,6 +262,11 @@ impl ResultRecorder {
             for site in &r.sites {
                 put_u32(&mut self.out, site.offset);
                 put_u32(&mut self.out, site.matched as u32);
+                self.out.push(match site.field_access {
+                    None => 0,
+                    Some(asc_findrefs::FieldAccess::Read) => 1,
+                    Some(asc_findrefs::FieldAccess::Write) => 2,
+                });
                 put_opt(&mut self.out, site.pc);
                 put_opt(&mut self.out, site.line);
             }
@@ -350,6 +362,15 @@ pub(crate) fn decode_batches(payload: impl AsRef<[u8]> + Send + Sync + 'static) 
                 .map(|_| match r.u8()? {
                     0 => Some(Matched::String(r.str()?)),
                     1 => Some(Matched::Symbol(r.str()?)),
+                    2 => {
+                        let symbol = r.str()?;
+                        let access = match r.u8()? {
+                            1 => asc_findrefs::FieldAccess::Read,
+                            2 => asc_findrefs::FieldAccess::Write,
+                            _ => return None,
+                        };
+                        Some(Matched::Field { symbol, access })
+                    }
                     _ => None,
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -360,7 +381,17 @@ pub(crate) fn decode_batches(payload: impl AsRef<[u8]> + Send + Sync + 'static) 
                 _ => return None,
             };
             let sites = (0..r.u32()?)
-                .map(|_| Some(RefSite { offset: r.u32()?, matched: r.u32()? as usize, pc: r.opt()?, line: r.opt()? }))
+                .map(|_| {
+                    let offset = r.u32()?;
+                    let matched = r.u32()? as usize;
+                    let field_access = match r.u8()? {
+                        0 => None,
+                        1 => Some(asc_findrefs::FieldAccess::Read),
+                        2 => Some(asc_findrefs::FieldAccess::Write),
+                        _ => return None,
+                    };
+                    Some(RefSite { offset, matched, field_access, pc: r.opt()?, line: r.opt()? })
+                })
                 .collect::<Option<Vec<_>>>()?;
             let context = match r.u8()? {
                 0 => None,
@@ -623,9 +654,16 @@ mod tests {
             method_idx: 7,
             method: "La;->b".into(),
             signature: "La;->b()V".into(),
-            matched: vec![Matched::String("x\ny".into()), Matched::Symbol("La;->c:I".into())],
+            matched: vec![
+                Matched::String("x\ny".into()),
+                Matched::Symbol("La;->c:I".into()),
+                Matched::Field { symbol: "La;->f:I".into(), access: asc_findrefs::FieldAccess::Read },
+            ],
             relation: rel,
-            sites: vec![RefSite { offset: 9, matched: 1, pc: Some(3), line: None }],
+            sites: vec![
+                RefSite { offset: 9, matched: 1, field_access: None, pc: Some(3), line: None },
+                RefSite { offset: 11, matched: 2, field_access: Some(asc_findrefs::FieldAccess::Read), pc: Some(4), line: Some(8) },
+            ],
             context: rel.map(|_| "    const-string v0, \"x\"".to_string()),
         };
         let batch = |name: &str, results, error: Option<String>| RefBatch {
