@@ -128,8 +128,10 @@ much is known:
   the function, `this@F` / `argN@F` the `this` / parameter of the enclosing function F captured by a closure,
   `x().member` a member of a call result, `lex(level,slot)` a captured variable with several writers, `?`
   unknown.
-- `callgraph` rows: no mark is a proved call; `[new]` a construction; `[this-class]` is `this.m()` matched by
-  name in the class of the caller, not guaranteed; `[defines]` creates a closure, it is not a call
+- `callgraph` rows: no mark is a proved call; `[new]` a construction; `[super]` links `super()` / `super.m()` to
+  the parent; `[this-class]` / `[inherited]` / `[instance]` are methods matched by name (in the class of the
+  caller, in an ancestor, in the class an exported `new C()` was made of), not guaranteed; `[reassigned]`
+  went through a class a decorator assigned again and holds if the decorator kept the class; `[defines]` creates a closure, it is not a call
   (`--no-defines` drops them); `[external]` is a leaf rooted at an import / global for which the program has
   no function (system APIs, but also members of call results and imports that did not resolve);
   `[unresolved]` is a leaf of unknown origin (`--callees --unresolved` lists them, otherwise a row ends in
@@ -142,12 +144,19 @@ much is known:
   parent of unknown origin, `[reassigned]` a class a decorator assigned again after its definition (the
   subclass extends it or what the decorator put there, not guaranteed), `[function]` a plain function used
   as a base class.
-- A resource id is unique within one package only; `resources` rows of a program of several packages start
-  with the package, and the hits of `findrefs number ID` are to be matched on the entry column.
+- A resource id is unique within one package only; with several packages, `findrefs number ID --entry
+  PACKAGE` keeps the search to one package (`listclass` and the others take `--entry` too).
+- `manifest-summary` also has `page` / `route` rows (each item of the page list and the route table, with
+  `record=`, ready for `getclass`) and `abc` rows (each abc entry, and the decrypted file standing in for an
+  encrypted one); a `pack.info` that is the same in several packages is listed once.
+- A string over 2048 bytes is written `"…"… (+N bytes)`; a match behind the cut adds `match at byte N` and
+  the text around it.
+- Where a debug build names its local variables, a function header of `getclass` has a line
+  `; locals [from, to): v3 name, …`.
 
 Limits: a HarmonyOS program is served by the same daemon as APKs (the analyses stay resident), but has no
-disk cache (it opens in milliseconds); the call graph does not use the class hierarchy (`super()` and
-inherited methods are `[unresolved]`); `findrefs all` takes no excluded conditions; static ArkTS
+disk cache (it opens in milliseconds); `super()` / inherited methods whose parent is outside the
+program, and calls on what a singleton getter returns, stay leaves; `findrefs all` takes no excluded conditions; static ArkTS
 (`modules_static.abc`) is not supported; abc versions above 24.x have not been checked
 against real samples; a directory mixing DEX and HarmonyOS files is an Android program, so pass the HarmonyOS
 files by their own path.

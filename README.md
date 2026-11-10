@@ -124,8 +124,9 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
 - 被调用者路径（`findrefs call`、`callgraph --to` 匹配的就是它）：`import:请求#名字.成员`、`global:名字.成员`、
   `this.成员`、`local:函数` 是可确定的来源；`argN` 是本函数的第 N 个参数，`this@F` / `argN@F` 是闭包捕获的外层函数 F
   的 `this` / 参数，`x().成员` 是调用返回值的成员，`lex(层,槽)` 是有多个写入者的捕获变量，`?` 是未知。
-- `callgraph` 的行：无标记是可证明的调用；`[new]` 构造；`[this-class]` 是 `this.m()` 按名字在调用者所在的类里匹配，
-  不保证；`[defines]` 是创建闭包而不是调用（`--no-defines` 去掉）；`[external]` 是以导入 / 全局为根、程序里找不到
+- `callgraph` 的行：无标记是可证明的调用；`[new]` 构造；`[super]` 是 `super()` / `super.m()` 接到父类；
+  `[this-class]` / `[inherited]` / `[instance]` 是按名字匹配的方法（在调用者所在的类、在祖先类、在导出的 `new C()`
+  所属的类里），不保证；`[reassigned]` 表示途中经过被装饰器重新赋值的类，装饰器没换掉类时成立；`[defines]` 是创建闭包而不是调用（`--no-defines` 去掉）；`[external]` 是以导入 / 全局为根、程序里找不到
   对应函数的叶子（系统 API，也包括调用返回值的成员和没解析出来的导入）；`[unresolved]` 是来源未知的叶子
   （`--callees --unresolved` 列出，否则只在行尾计数 `unresolved=N`）；`(repeated)` 表示该节点已在别处展开。
 - 系统回调（生命周期 `onXxx`、事件处理函数）没有调用者；路径断在 `[unresolved]` 时按名字接着查：
@@ -133,10 +134,15 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
 
 - `hierarchy` 的行：`[external]` 是程序外的父类（系统类、全局），`[unresolved]` 是追不到来源的父类，`[reassigned]` 是
   定义后又被装饰器重新赋值的类（子类继承的是它或装饰器换上的东西，不保证），`[function]` 是当作基类用的普通函数。
-- 资源 id 只在一个包内唯一；多包程序的 `resources` 行首是包名，`findrefs number ID` 的结果要对上 entry 列。
+- 资源 id 只在一个包内唯一；多包程序的 `resources` 行首是包名，多包时用 `findrefs number ID --entry 包名` 把搜索限定在
+  一个包里（`listclass` 等也有 `--entry`）。
+- `manifest-summary` 另有 `page` / `route` 行（页面清单和路由表的每一项，带 `record=`，可直接给 `getclass`）、
+  `abc` 行（每个 abc 条目，加密的条目由哪个解密文件顶替）；多个包里相同的 `pack.info` 只列一次。
+- 超过 2048 字节的字符串写成 `"…"… (+N bytes)`，匹配点在截断之后时带 `match at byte N` 和命中处的片段。
+- 调试构建带局部变量名时，`getclass` 的函数头多一行 `; locals [起, 止): v3 name, …`。
 
 限制：HarmonyOS 程序和 APK 共用同一个 daemon（调用图等分析结果驻留复用），但没有磁盘 cache（打开是毫秒级）；
-调用图不使用继承关系（`super()`、继承来的方法是 `[unresolved]`）；`findrefs all` 不支持排除条件；
+父类在程序外的 `super()` / 继承方法、单例 getter 返回的对象上的调用仍是叶子；`findrefs all` 不支持排除条件；
 不支持静态 ArkTS（`modules_static.abc`）；24.x 以上版本的 abc 没有真实样本验证过；
 目录里 DEX 与 HarmonyOS 文件混放时按 Android 程序处理，HarmonyOS 文件要单独给路径。
 

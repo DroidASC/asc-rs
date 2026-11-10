@@ -201,7 +201,7 @@ functions) -> `asc getclass entry.hap entryability/EntryAbility --method EntryAb
 | conditions in one function | `asc findrefs entry.hap all 'call:^import:@ohos:net\.http' 'string:^https?://'` (one scan instead of a query per hit; `prop:=name` is exact; no `!`) |
 | callees / callers | `asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3` (callers without `--callees`) |
 | who extends X / overrides m | `asc hierarchy entry.hap UIAbility --method onCreate` (a class name, `RECORD->CLASS`, or a parent outside the program: `'import:@ohos:app\.'`, `'^global:ViewPU$'`); `--supers` walks up |
-| pages and routes | `asc manifest-summary entry.hap \| grep '^module'` shows `pages=$profile:main_pages(...)` and `routerMap=...`; then `asc xml entry.hap '$profile:main_pages'` (a route's `pageSourceFile` path suffix goes to `getclass`) |
+| pages and routes | `asc manifest-summary entry.hap \| grep -E '^(page\|route) '`: each row has `record=` (and a route its `buildFunction=`) for `getclass RECORD --method F`; `asc xml entry.hap '$profile:NAME'` prints the file itself (`customData`) |
 | resources | `asc resources entry.hap string/app_name` (or `0x...`, `$string:x`, `app.string.x`), `--search REGEX --in value`, `--resolve` |
 | where a text / resource is used | `asc resources entry.hap --search TEXT --in value` gives the id, then `asc findrefs entry.hap number ID`; by-name uses: `findrefs string 'app\.string\.NAME'`; while reading code: `getclass ... --res-names` |
 | who reaches a system API | `asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6`; only the paths from entry points: add `--from 'method:^EntryAbility\.on'` |
@@ -213,8 +213,10 @@ far that got:
   origins. `argN`: a parameter; `this@F` / `argN@F`: those of the enclosing function F, captured
   by a closure; `x().m`: member of a call result; `lex(L,S)`: a captured variable with several
   writers; `?`: unknown.
-- callgraph rows: no mark = proved call. `[new]`. `[this-class]`: `this.m()` matched by name in
-  the caller's class, not guaranteed. `[defines]`: a closure is created there, not called
+- callgraph rows: no mark = proved call. `[new]`. `[super]`: the parent's constructor /
+  method. `[this-class]` / `[inherited]` / `[instance]`: a method matched by name (caller's
+  class, an ancestor, the class of an exported `new C()`), not guaranteed. `[reassigned]`: through
+  a class a decorator assigned again. `[defines]`: a closure is created there, not called
   (`--no-defines` drops them). `[external]`: a leaf rooted at an import / global with no function
   of the program behind it - a system API, but also a member of a call result or an import that
   did not resolve; when its path names a record of the program, continue there by hand.
@@ -228,10 +230,15 @@ far that got:
 
 - hierarchy rows: `[external]` = a parent outside the program (system class, global);
   `[unresolved]` = parent of unknown origin; `[reassigned]` = a class a decorator assigned again
-  (not guaranteed); an `override ...` row can be pasted into `getclass` / `callgraph`. The call
-  graph does not use the hierarchy: `super()` and inherited methods stay `[unresolved]`.
+  (not guaranteed); an `override ...` row can be pasted into `getclass` / `callgraph`. `super()` and
+  inherited methods stay leaves where the parent is outside the program.
 - A resource id is unique within one package only: with several packages, `resources` rows start
-  with the package; match it against the entry column of `findrefs number ID`.
+  with the package: `findrefs number ID --entry PACKAGE` (every command takes `--entry`: an entry
+  name, a `/` suffix of it, or a package).
+- A paired decrypted abc is one `# note:` (the `abc` rows of manifest-summary say which file);
+  only an unpaired encrypted entry is a `# warning:` with exit code 2.
+- A string over 2048 bytes is cut, `"..."... (+N bytes)`; a match behind the cut adds `match at
+  byte N` and the text around it. Debug builds name locals: `; locals [from, to): v3 name`.
 - A directory is one program; its files are recognized by content, whatever they are called, and
   a decrypted abc pairs with its encrypted package entry by header and checksum.
 
