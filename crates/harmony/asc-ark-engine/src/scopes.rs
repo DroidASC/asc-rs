@@ -52,6 +52,7 @@
 
 mod classes;
 mod env;
+mod exports;
 mod reader;
 
 use std::collections::{HashMap, HashSet};
@@ -60,9 +61,10 @@ use asc_abc::{Abc, Class, FunctionName, Method};
 use asc_arkisa::OperandKind;
 
 use classes::{class_literal, literal_methods};
-pub(crate) use classes::{find_member, ClassInfo, Membership};
+pub(crate) use classes::{member_named, ClassInfo, Membership, Named};
 pub(crate) use env::ScopeTables;
 use env::{Found, Sites};
+pub(crate) use exports::{export_group, Exported, ExportedDefinitions};
 pub(crate) use reader::{Reader, RecordScopes};
 
 use crate::path::{Link, Origin, Path, PathBuilder};
@@ -816,6 +818,19 @@ impl Scopes {
         }
     }
 
+    /// The module-level bindings whose one writer stores a freshly made
+    /// object (`new C(...)`), each by one of its local export entries with
+    /// the value that is constructed.
+    pub(crate) fn instance_bindings(&self) -> impl Iterator<Item = (u32, &Path)> {
+        const NEW: Link = Link::Call { construct: true };
+        // With unread code no binding is known: `module_binding` says so too.
+        let known = (!self.unread_code).then_some(&self.module_vars);
+        known.into_iter().flatten().filter_map(|(&index, state)| {
+            let written = state.as_ref().ok()?;
+            (!written.path.cut && written.path.links.last() == Some(&NEW)).then_some((index, &written.path))
+        })
+    }
+
     /// The members of the class whose constructor is at method offset `class`.
     pub(crate) fn class(&self, class: u32) -> Option<&ClassInfo> {
         self.classes.get(&class)?.as_ref()
@@ -860,7 +875,7 @@ impl Scopes {
             _ => return,
         };
         let Ok(name) = names.string(name) else { return };
-        if let Some(member) = find_member(abc, members, name.bytes) {
+        if let Named::One(member) = member_named(abc, members, name.bytes) {
             path.origin = Origin::Definition(Some(member.method));
             path.links.drain(..used);
         }

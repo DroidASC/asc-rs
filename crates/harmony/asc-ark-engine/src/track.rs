@@ -228,11 +228,24 @@ enum CalleeAt {
     FirstRegister,
     /// The first register of the range (`newobjrange`).
     RangeStart,
-    /// The parent constructor (`supercall*`).
-    Super,
+    /// The parent constructor (`supercall*`), of the function `SuperOf` says.
+    Super(SuperOf),
     /// The property the instruction names, of its `this` register
     /// (`callthisNwithname`).
     Named,
+}
+
+/// Whose parent constructor a `supercall*` instruction runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuperOf {
+    /// The running function's (`supercallthisrange`: `acc: out` in isa.yaml).
+    Frame,
+    /// The function in the accumulator (`supercallspread`,
+    /// `supercallarrowrange`: `acc: inout`): the constructor itself puts its
+    /// own function object there, an arrow function inside it a captured one.
+    Acc,
+    /// The function in the register operand (`supercallforwardallargs`).
+    Register,
 }
 
 /// The operand layout of a call opcode.
@@ -267,8 +280,10 @@ impl CallShape {
             "apply" => CallShape { spread: true, ..with_this(CalleeAt::Acc) },
             "newobjrange" => CallShape { construct: true, ..CallShape::new(CalleeAt::RangeStart) },
             "newobjapply" => CallShape { construct: true, spread: true, ..CallShape::new(CalleeAt::FirstRegister) },
-            "supercallthisrange" | "supercallarrowrange" => CallShape::new(CalleeAt::Super),
-            "supercallspread" | "supercallforwardallargs" => CallShape { spread: true, ..CallShape::new(CalleeAt::Super) },
+            "supercallthisrange" => CallShape::new(CalleeAt::Super(SuperOf::Frame)),
+            "supercallarrowrange" => CallShape::new(CalleeAt::Super(SuperOf::Acc)),
+            "supercallspread" => CallShape { spread: true, ..CallShape::new(CalleeAt::Super(SuperOf::Acc)) },
+            "supercallforwardallargs" => CallShape { spread: true, ..CallShape::new(CalleeAt::Super(SuperOf::Register)) },
             "deprecated.callspread" => CallShape { spread: true, ..with_this(CalleeAt::FirstRegister) },
             "deprecated.callthisrange" => with_this(CalleeAt::RangeStart),
             "deprecated.callrange" => CallShape::new(CalleeAt::RangeStart),
@@ -357,6 +372,11 @@ pub(crate) struct CallSite<'t> {
     pub spread: bool,
     /// `new callee(...)`.
     pub construct: bool,
+    /// For `super(...)`: the parent constructor that runs is the one of the
+    /// running function. Always so for the form that names no function;
+    /// for the forms that take one, when it is tracked to be the running
+    /// function itself.
+    pub own_super: bool,
 }
 
 /// The tracked state at one instruction.
@@ -639,7 +659,8 @@ impl Tracker {
                 let head = self.call_site(shape, &insn);
                 if watch.calls() {
                     let args = self.args.get(head.skip..).unwrap_or_default();
-                    let site = CallSite { callee: head.callee, args, spread: shape.spread, construct: shape.construct };
+                    let site =
+                        CallSite { callee: head.callee, args, spread: shape.spread, construct: shape.construct, own_super: head.own_super };
                     visit(&self.frame, &insn, Event::Call(site));
                 }
                 if insn.opcode.writes_acc() {
@@ -774,17 +795,25 @@ impl Tracker {
         let callee = match shape.callee {
             CalleeAt::Acc => frame.acc,
             CalleeAt::FirstRegister | CalleeAt::RangeStart => callee_register.unwrap_or(ValueId::UNKNOWN),
-            CalleeAt::Super => frame.make(Source::Super, pc),
+            CalleeAt::Super(_) => frame.make(Source::Super, pc),
             CalleeAt::Named => match StringRef::of(insn) {
                 Some(name) => frame.make(Source::Property { base: this.unwrap_or(ValueId::UNKNOWN), name }, pc),
                 None => ValueId::UNKNOWN,
             },
         };
+        let own_super = match shape.callee {
+            CalleeAt::Super(SuperOf::Frame) => true,
+            CalleeAt::Super(SuperOf::Acc) => frame.value(frame.acc).source == Source::Function,
+            CalleeAt::Super(SuperOf::Register) => {
+                self.args.first().is_some_and(|&function| frame.value(function).source == Source::Function)
+            }
+            CalleeAt::Acc | CalleeAt::FirstRegister | CalleeAt::RangeStart | CalleeAt::Named => false,
+        };
         // The array of a spread call is its last register, when it has one left.
         if shape.spread && self.args.len() > skip {
             self.args.pop();
         }
-        CallHead { callee, skip }
+        CallHead { callee, skip, own_super }
     }
 }
 
@@ -827,6 +856,8 @@ struct CallHead {
     callee: ValueId,
     /// Leading entries of `Tracker::args` that are the callee or `this`.
     skip: usize,
+    /// See [`CallSite::own_super`].
+    own_super: bool,
 }
 
 #[cfg(test)]
@@ -846,8 +877,13 @@ mod tests {
         }
         // … except the constructors and the parent constructor.
         assert_eq!((shape("newobjrange").callee, shape("newobjrange").construct), (CalleeAt::RangeStart, true));
-        assert_eq!(shape("wide.supercallthisrange").callee, CalleeAt::Super);
-        assert_eq!(shape("callruntime.supercallforwardallargs").callee, CalleeAt::Super);
+        assert_eq!(shape("wide.supercallthisrange").callee, CalleeAt::Super(SuperOf::Frame));
+        assert_eq!(shape("callruntime.supercallforwardallargs").callee, CalleeAt::Super(SuperOf::Register));
+        // The forms that read the accumulator take the constructor from it.
+        for opcode in asc_arkisa::opcodes().filter(|op| op.name.contains("supercall")) {
+            let from_acc = matches!(shape(opcode.name).callee, CalleeAt::Super(SuperOf::Acc));
+            assert_eq!(from_acc, opcode.reads_acc(), "{}", opcode.name);
+        }
         assert_eq!(shape("wide.callthisrangewithname"), CallShape { has_this: true, ..CallShape::new(CalleeAt::Named) });
         assert!(shape("callruntime.callinit").has_this && shape("deprecated.callarg1").callee == CalleeAt::FirstRegister);
     }

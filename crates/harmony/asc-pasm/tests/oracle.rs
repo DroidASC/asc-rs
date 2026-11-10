@@ -1383,7 +1383,9 @@ impl<'a> Comparer<'a> {
             Err(_) => "acc".to_owned(),
             Ok(reg) => reg.checked_sub(code.num_vregs).map_or_else(|| format!("v{reg}"), |arg| format!("a{arg}")),
         };
-        let locals = info.locals().unwrap();
+        // Without the compiler's own variables, whose names start with a digit.
+        let own = |off: u32| self.subject.abc.string(off).is_ok_and(|text| text.bytes.first().is_some_and(u8::is_ascii_digit));
+        let locals: Vec<_> = info.locals().unwrap().into_iter().filter(|local| !own(local.name_off)).collect();
         let mut ranges: Vec<((usize, usize), Vec<String>)> = Vec::new();
         for local in locals.iter().take(SHOWN) {
             let range = (local.start_pc as usize, local.end_pc.map_or(code.instructions().len(), |end| end as usize));

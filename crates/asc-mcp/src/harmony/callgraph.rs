@@ -15,7 +15,7 @@ pub(super) const USAGE: &str =
      direction, depth, max_nodes; or to=\"call:REGEX\" for the callers of every callee path matching (the paths of kind=call, e.g. \
      call:^import:@ohos:net\\.http); from=\"method:NAME\" keeps only the paths from the callers matching (`[from]`); defines=false \
      leaves out `[defines]` (a closure is created, not called); unresolved=true lists the unresolved call sites of callees; `entry`. \
-     Rows: `[this-class]` matched by name, not guaranteed; `[external]` / `[unresolved]` are leaves, no function of the program\n";
+     Rows: `[super]` proved; `[this-class]` / `[inherited]` / `[instance]` matched by name, `[reassigned]` through a decorated class: not guaranteed; `[external]` / `[unresolved]` are leaves, no function of the program\n";
 
 /// The arguments of the tool on a HarmonyOS program, for its errors.
 const TAKES: &str = "class + method or to=call:REGEX, from=method:NAME, direction, depth, max_nodes, defines, unresolved, entry";

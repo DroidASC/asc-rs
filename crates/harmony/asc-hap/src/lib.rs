@@ -7,6 +7,8 @@
 //! - [`PackInfo`]: `pack.info`, the packing tool's digest of the bundle.
 //! - [`PkgContextInfo`]: `pkgContextInfo.json`, the package table that
 //!   `.abc` record names and import requests refer to.
+//! - [`PageList`] and [`RouterMap`]: the page list and the navigation route
+//!   table `module.json` names (`$profile:main_pages`, `$profile:router_map`).
 //! - [`ResourceIndex`]: `resources.index`, the compiled resource table:
 //!   what the ids in compiled `$r(...)` calls and the `$string:name`
 //!   references of `module.json` stand for.
@@ -41,16 +43,18 @@
 mod module;
 mod pack;
 mod pkg_context;
+mod profile;
 mod record;
 mod resource;
 mod value;
 
 pub use module::{
-    Ability, AbilityKind, ApiVersion, App, AtomicService, DefinePermission, Dependency, Metadata, Module, ModuleJson, NameValue, ProxyData,
-    RequestPermission, Skill, SkillUri, TestRunner,
+    Ability, AbilityKind, ApiVersion, App, AtomicService, DefinePermission, Dependency, Metadata, Module, ModuleJson, MultiAppMode,
+    NameValue, ProxyData, RequestPermission, Skill, SkillUri, TestRunner,
 };
 pub use pack::{PackAbility, PackApp, PackExtension, PackForm, PackInfo, PackModule, PackPackage};
 pub use pkg_context::{PkgContext, PkgContextInfo, RecordOwner};
+pub use profile::{PageList, Route, RouterMap};
 pub use record::RecordNames;
 pub use resource::{
     Attr, IndexFormat, Qualifier, QualifierKey, Qualifiers, Resource, ResourceIndex, ResourceIndexError, ResourceRef, ResourceType,

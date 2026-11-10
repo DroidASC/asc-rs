@@ -731,3 +731,135 @@ fn hints_point_at_the_kind_that_has_it() {
     assert_eq!(hints(&condition("call:nothing-like-this")).len(), 1);
     assert!(hints(&condition("number:0x7654321")).is_empty() && hints(&Query::string_literal("nowhere at all")).is_empty());
 }
+
+/// The rows of `query` over the program at `path`, in `entry` only when given.
+fn lines_in(engine: &Engine, query: &Query, entry: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    engine
+        .find_refs_in(query, entry, &AtomicBool::new(false), &mut |batch| {
+            lines.extend(batch.rows.iter().map(|row| row.line(&batch.entry_name)));
+        })
+        .unwrap();
+    lines
+}
+
+#[test]
+fn long_strings_are_cut_and_show_where_they_match() {
+    use asc_fixture::hap::{routed_program, LONG_FILLER_BYTES, LONG_MARKER, LONG_PAGE};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &routed_program().build().bytes);
+    let limit = asc_ark_engine::text::ROW_STRING_BYTES;
+    assert!(LONG_FILLER_BYTES > limit);
+    let mut matched = Vec::new();
+    let mut lines = Vec::new();
+    engine
+        .find_refs(&Query::string_literal("example.com/far"), &AtomicBool::new(false), &mut |batch| {
+            for row in &batch.rows {
+                matched.extend(row.matched.iter().map(String::len));
+                lines.push(row.line(&batch.entry_name));
+            }
+        })
+        .unwrap();
+    // The record's field, the operand and the item of the literal array, each on one bounded line.
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines.iter().all(|line| line.len() < limit + 600), "{:?}", lines.iter().map(String::len).collect::<Vec<_>>());
+    // The search ran on the whole strings, which the rows still carry.
+    assert!(matched.iter().all(|&len| len > LONG_FILLER_BYTES), "{matched:?}");
+    let at = LONG_FILLER_BYTES + "https://".len();
+    let tail = |kind: &str, filler: &str| format!("match at byte {at}: …\"{}{LONG_MARKER}/{kind}", filler.repeat(88));
+    assert!(
+        lines[0].starts_with(&format!("modules.abc | {LONG_PAGE} field jsonFileContent | - | \"{{\\\"text\\\":\\\"ccc")),
+        "{}",
+        lines[0]
+    );
+    let field_at = at + "{\"text\":\"".len();
+    assert!(
+        lines[0].ends_with(&format!(
+            "c\"… (+{} bytes) match at byte {field_at}: …\"{}{LONG_MARKER}/field\\\"}}\"",
+            LONG_FILLER_BYTES + "{\"text\":\"".len() + LONG_MARKER.len() + "/field\"}".len() - limit,
+            "c".repeat(88)
+        )),
+        "{}",
+        &lines[0][lines[0].len() - 300..]
+    );
+    assert!(lines[1].starts_with(&format!("modules.abc | {LONG_PAGE}->#*#long+0x0 | long | lda.str \"aaa")), "{}", &lines[1][..120]);
+    assert!(
+        lines[1].ends_with(&format!(
+            "a\"… (+{} bytes) ; {}\"",
+            LONG_FILLER_BYTES + LONG_MARKER.len() + "/operand".len() - limit,
+            tail("operand", "a")
+        )),
+        "{}",
+        &lines[1][lines[1].len() - 300..]
+    );
+    assert!(lines[2].contains(" | createarraywithbuffer literal@0x") && lines[2].contains(" [1]=\"bbb"), "{}", &lines[2][..160]);
+    assert!(lines[2].ends_with(&format!(
+        "b\"… (+{} bytes) {}\"",
+        LONG_FILLER_BYTES + LONG_MARKER.len() + "/item".len() - limit,
+        tail("item", "b")
+    )));
+    // A regex is located the same way; a match in the part shown needs no excerpt.
+    let by_regex = lines_in(&engine, &Query::string_regex("https://example\\.com/far/op").unwrap(), None);
+    assert!(
+        by_regex[0].ends_with(&format!("match at byte {LONG_FILLER_BYTES}: …\"{}{LONG_MARKER}/operand\"", "a".repeat(96))),
+        "{by_regex:?}"
+    );
+    let at_start = lines_in(&engine, &Query::string_regex("^aaaa").unwrap(), None);
+    assert!(at_start.len() == 1 && at_start[0].ends_with(" bytes)") && !at_start[0].contains("match at byte"), "{at_start:?}");
+    // A conjunction row is made of the same texts.
+    let both = lines_in(&engine, &condition_pair("string:far/operand", "string:far/item"), None);
+    assert!(both.len() == 1 && both[0].len() < 2 * limit + 1200 && both[0].matches("match at byte").count() == 2, "{both:?}");
+}
+
+fn condition_pair(first: &str, second: &str) -> Query {
+    Query::All(vec![condition(first), condition(second)])
+}
+
+#[test]
+fn a_search_can_be_kept_to_an_entry_or_a_package() {
+    use asc_ark_engine::ListOptions;
+    use asc_fixture::hap::{make_hap, Hap};
+    let dir = tempfile::tempdir().unwrap();
+    let abc = asc_fixture::abc::make_abc();
+    std::fs::write(dir.path().join("a.hap"), make_hap(&abc)).unwrap();
+    std::fs::write(dir.path().join("b.hsp"), Hap::new().modules_abc(&abc).abc("widgets", &abc).module_json("{}").build()).unwrap();
+    std::fs::write(dir.path().join("c.abc"), &abc).unwrap();
+    let engine = Engine::open(dir.path()).unwrap();
+    let query = Query::string_literal("Hello World");
+    let entries = |entry: Option<&str>| -> Vec<String> {
+        lines_in(&engine, &query, entry).iter().map(|line| line.split(" | ").next().unwrap().to_owned()).collect()
+    };
+    assert_eq!(entries(None), ["a.hap/ets/modules.abc", "b.hsp/ets/modules.abc", "b.hsp/ets/widgets.abc", "c.abc"]);
+    // A package names all of its entries; an entry is named whole or by a suffix that starts at a `/`.
+    assert_eq!(entries(Some("b.hsp")), ["b.hsp/ets/modules.abc", "b.hsp/ets/widgets.abc"]);
+    assert_eq!(entries(Some("a.hap")), ["a.hap/ets/modules.abc"]);
+    assert_eq!(entries(Some("b.hsp/ets/widgets.abc")), ["b.hsp/ets/widgets.abc"]);
+    assert_eq!(entries(Some("ets/widgets.abc")), ["b.hsp/ets/widgets.abc"]);
+    assert_eq!(entries(Some("ets/modules.abc")), ["a.hap/ets/modules.abc", "b.hsp/ets/modules.abc"]);
+    assert_eq!(entries(Some("c.abc")), ["c.abc"]);
+    let none = engine.find_refs_in(&query, Some("b"), &AtomicBool::new(false), &mut |_| panic!("no entry is searched"));
+    assert!(matches!(none, Err(EngineError::NoEntry(name)) if name == "b"));
+
+    let listed = |entry: &str| {
+        let options = ListOptions { entry: Some(entry.to_owned()), ..ListOptions::default() };
+        let mut entries: Vec<String> = engine.list_classes(&options).unwrap().into_iter().map(|record| record.entry).collect();
+        entries.dedup();
+        entries
+    };
+    assert_eq!(listed("b.hsp"), ["b.hsp/ets/modules.abc", "b.hsp/ets/widgets.abc"]);
+    assert_eq!(listed("c.abc"), ["c.abc"]);
+    assert!(matches!(
+        engine.list_classes(&ListOptions { entry: Some("nope".into()), ..ListOptions::default() }),
+        Err(EngineError::NoEntry(_))
+    ));
+    assert_eq!(
+        engine.module_requests_in(None, Some("a.hap")).unwrap().iter().filter(|request| request.entry != "a.hap/ets/modules.abc").count(),
+        0
+    );
+    assert_eq!(engine.entries_in(Some("b.hsp")).unwrap().len(), 2);
+
+    // A lone package, whose entries carry no prefix, is named by its file name.
+    let lone = Engine::open(dir.path().join("b.hsp")).unwrap();
+    assert_eq!(lines_in(&lone, &query, Some("b.hsp")).len(), 2);
+    assert_eq!(lines_in(&lone, &query, Some("ets/widgets.abc")).len(), 1);
+}

@@ -66,6 +66,8 @@ pub struct App {
     pub target_api_version: Option<ApiVersion>,
     pub target_minor_api_version: Option<i64>,
     pub target_patch_api_version: Option<i64>,
+    pub min_minor_api_version: Option<i64>,
+    pub min_patch_api_version: Option<i64>,
     pub api_release_type: Option<String>,
     pub compile_sdk_type: Option<String>,
     pub compile_sdk_version: Option<String>,
@@ -74,6 +76,18 @@ pub struct App {
     pub label: Option<String>,
     pub description: Option<String>,
     pub environments: Vec<NameValue>,
+    /// `multiAppMode`: whether the bundle may be installed several times.
+    pub multi_app_mode: Option<MultiAppMode>,
+    /// `GWPAsanEnabled`: sampled heap checking in release builds.
+    pub gwp_asan_enabled: Option<bool>,
+}
+
+/// `multiAppMode` of the `app` object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MultiAppMode {
+    /// `multiAppModeType`: `appClone` or `multiInstance`.
+    pub kind: Option<String>,
+    pub max_count: Option<i64>,
 }
 
 /// A `name` / `value` pair (`appEnvironments`).
@@ -197,6 +211,7 @@ pub struct Ability {
     pub write_permission: Option<String>,
     pub extension_process_mode: Option<String>,
     pub data_group_ids: Vec<String>,
+    pub remove_mission_after_terminate: Option<bool>,
     /// The entry as written, for fields not modelled here.
     pub raw: Value,
 }
@@ -246,6 +261,7 @@ impl Ability {
             .flag_present("continuable", self.continuable)
             .list_present("backgroundModes", &self.background_modes)
             .list_present("dataGroupIds", &self.data_group_ids)
+            .flag_present("removeMissionAfterTerminate", self.remove_mission_after_terminate)
             .end()
     }
 }
@@ -369,6 +385,7 @@ pub struct AtomicService {
 /// Keys that only affect how a component looks.
 const PRESENTATION_KEYS: &[&str] = &[
     "icon",
+    "startWindow",
     "startWindowIcon",
     "startWindowBackground",
     "orientation",
@@ -428,7 +445,7 @@ impl ModuleJson {
     pub fn summary_lines(&self) -> Vec<String> {
         let app = &self.app;
         let module = &self.module;
-        let mut out = vec![Line::new("bundle")
+        let mut bundle = Line::new("bundle")
             .word(app.bundle_name.as_deref().unwrap_or("-"))
             .opt("bundleType", app.bundle_type.as_deref())
             .num("versionCode", app.version_code)
@@ -440,8 +457,11 @@ impl ModuleJson {
             .opt("apiReleaseType", app.api_release_type.as_deref())
             .opt("compileSdkType", app.compile_sdk_type.as_deref())
             .opt("compileSdkVersion", app.compile_sdk_version.as_deref())
-            .opt("buildMode", app.build_mode.as_deref())
-            .end()];
+            .opt("buildMode", app.build_mode.as_deref());
+        if let Some(mode) = &app.multi_app_mode {
+            bundle = bundle.opt("multiAppMode", mode.kind.as_deref()).num("multiAppMaxCount", mode.max_count);
+        }
+        let mut out = vec![bundle.flag_present("GWPAsanEnabled", app.gwp_asan_enabled).end()];
         out.extend(
             app.environments.iter().map(|e| Line::new("app-env").opt("name", e.name.as_deref()).opt("value", e.value.as_deref()).end()),
         );
@@ -559,6 +579,8 @@ fn read_app(o: &mut Obj<'_, '_>) -> App {
         target_api_version: o.int("targetAPIVersion").map(ApiVersion),
         target_minor_api_version: o.int("targetMinorAPIVersion"),
         target_patch_api_version: o.int("targetPatchAPIVersion"),
+        min_minor_api_version: o.int("minMinorAPIVersion"),
+        min_patch_api_version: o.int("minPatchAPIVersion"),
         api_release_type: o.str("apiReleaseType"),
         compile_sdk_type: o.str("compileSdkType"),
         compile_sdk_version: o.text("compileSdkVersion"),
@@ -566,6 +588,8 @@ fn read_app(o: &mut Obj<'_, '_>) -> App {
         label: o.str("label"),
         description: o.str("description"),
         environments: o.objects("appEnvironments", |e| NameValue { name: e.str("name"), value: e.text("value") }),
+        multi_app_mode: o.object("multiAppMode", |m| MultiAppMode { kind: m.str("multiAppModeType"), max_count: m.int("maxCount") }),
+        gwp_asan_enabled: o.bool("GWPAsanEnabled"),
     }
 }
 
@@ -652,6 +676,7 @@ fn read_ability(o: &mut Obj<'_, '_>, kind: AbilityKind) -> Ability {
         write_permission: o.str("writePermission"),
         extension_process_mode: o.str("extensionProcessMode"),
         data_group_ids: o.strings("dataGroupIds"),
+        remove_mission_after_terminate: o.bool("removeMissionAfterTerminate"),
         raw: o.to_value(),
     }
 }

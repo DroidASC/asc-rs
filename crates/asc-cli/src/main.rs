@@ -66,6 +66,7 @@ examples:
   asc manifest-summary app.apk --json
   asc manifest-summary entry.hap | grep exported=true
   asc manifest-summary entry.hap --file pkgContextInfo.json
+  asc manifest-summary entry.hap | grep -E '^(page|route) '
   asc resources app.apk string/app_name
   asc resources app.apk 0x7f0d0001 --resolve
   asc resources app.apk --search 'https?://' --in value
@@ -105,6 +106,7 @@ examples:
   asc findrefs entry.hap import '@ohos:' --requests
   asc findrefs entry.hap method Index.build --exact
   asc findrefs entry.hap number 0x9e3779b9
+  asc findrefs app-dir number 0x01000003 --entry entry.hap
   asc findrefs entry.hap call 'import:@ohos:net\\.http.*\\.request$'
   asc findrefs entry.hap all 'string:^https?://' 'call:import:@ohos:net\\.http'
   asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
@@ -382,6 +384,10 @@ enum Command {
         /// system module placeholders).
         #[arg(long)]
         all: bool,
+        /// HarmonyOS: only the records of this ABC entry (ets/widgets.abc)
+        /// or package (entry.hap), as the last column names it.
+        #[arg(long, value_name = "NAME")]
+        entry: Option<String>,
         /// Write class names to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -400,7 +406,8 @@ enum Command {
         #[arg(short, long)]
         resolve: bool,
         /// HarmonyOS: print this document instead of module.json: pack.info
-        /// or pkgContextInfo.json.
+        /// (once for the packages that carry the same bytes) or
+        /// pkgContextInfo.json.
         #[arg(long, value_name = "NAME")]
         file: Option<String>,
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app); a directory, or paths joined with `,`, read as one program.
@@ -420,6 +427,12 @@ enum Command {
     /// `$type:name` reference is followed by what it stands for in
     /// resources.index: `label=$string:app_name("Shop")`,
     /// `pages=$profile:main_pages(resources/base/profile/main_pages.json)`.
+    /// The page list and the route table the module names are lines too:
+    /// `page pages/Index record=NAME`, `route NAME buildFunction=F
+    /// source=FILE record=NAME` (grep '^route ', or `| grep -v` them). An
+    /// `abc` line names each code entry (as --entry takes it), its status
+    /// and the decrypted file it is served from. A pack.info that several
+    /// packages carry byte for byte is listed once (`pack-info` lines).
     #[command(alias = "manifest_summary")]
     ManifestSummary {
         /// Print JSON instead of lines.
@@ -515,6 +528,11 @@ enum Command {
         /// definitions) and call (the property is called).
         #[arg(long, global = true, value_enum, value_name = "read|write")]
         access: Option<FieldAccessArg>,
+        /// HarmonyOS: search only this ABC entry (ets/widgets.abc) or
+        /// package (entry.hap), as the first column names it. A resource
+        /// id is unique within one package only.
+        #[arg(long, global = true, value_name = "NAME")]
+        entry: Option<String>,
         #[command(subcommand)]
         find: Find,
     },
@@ -538,8 +556,12 @@ enum Command {
     /// method:NAME` keeps only the paths from the callers the name
     /// matches (marked `[from]`); --unless is not supported. A call names
     /// no callee there, so rows say how each link was made: no mark for a
-    /// proved call, `[new]`, `[this-class]` (this.NAME() matched by name in
-    /// the class of the caller: not guaranteed), `[defines]` (a closure is
+    /// proved call, `[new]`, `[super]` (the parent's constructor or method),
+    /// `[this-class]` / `[inherited]` / `[instance]` (a method matched by
+    /// name in the class of the caller, in an ancestor, or in the class an
+    /// exported `new C()` was made of: not guaranteed), `[reassigned]` (a
+    /// class a decorator assigned again: holds if it kept the class),
+    /// `[defines]` (a closure is
     /// created, not called); callees that are no function of the program
     /// are leaves: `[external]` (the path starts at an import or a global
     /// and no function of the program was found for it: system APIs, also
@@ -1238,9 +1260,12 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             let args = ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class };
             getclass(io, common, args, t_start)?;
         }
-        Command::Listclass { prefix, all, output, apk_path } => {
+        Command::Listclass { prefix, all, entry, output, apk_path } => {
             if all {
                 return Err(HARMONY_ONLY_ALL.into());
+            }
+            if entry.is_some() {
+                return Err(HARMONY_ONLY_ENTRY.into());
             }
             let classes = io.engine(common, &apk_path).list_classes(prefix.as_deref()).map_err(|e| e.to_string())?;
             let mut text = String::with_capacity(classes.iter().map(|c| c.descriptor.len() + 1).sum());
@@ -1325,7 +1350,10 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             io.write_output(output.as_ref(), &xml)?;
             io.emit_records(&xml, output.as_ref())?;
         }
-        Command::Findrefs { apk_path, context, context_method, access, find } => {
+        Command::Findrefs { apk_path, context, context_method, access, entry, find } => {
+            if entry.is_some() {
+                return Err(HARMONY_ONLY_ENTRY.into());
+            }
             let context = match (context, context_method) {
                 (Some(c), _) => c,
                 (None, true) => RefContext::Method,

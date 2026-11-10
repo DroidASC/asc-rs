@@ -962,13 +962,16 @@ fn the_introduction_says_what_the_tools_take_once() {
          regex over the module request (@ohos:net.http), decl=true for the declarations only, requests=true for the distinct requests; method: \
          [RECORD->]FUNCTION, where it is defined (or `class` + `name`; exact); number: 1919810, 0x1d4b42, 1.5 or A..B; call: regex over \
          the resolved callee (import:@ohos:net.http#default.createHttp, global:console.log, this.x); all=[conditions]: functions \
-         matching every one"
+         matching every one; entry=NAME (also listclass): only that abc entry or package (entry.hap), as rows name it: a resource id is \
+         unique within one package only"
     );
     assert_eq!(
         head[3],
         "# manifest_summary: module.json, each ability / extension with record=NAME (what getclass takes) and its onXxx callbacks, a \
          `$type:name` reference followed by what it stands for (`label=$string:x(\"value\")`, `pages=$profile:main_pages(PATH)`); \
-         file=pack.info|pkgContextInfo.json for the other documents (also getmanifest)"
+         kind=\"page\" / kind=\"route\": the page list and the route table, each with its record (`route NAME buildFunction=F \
+         source=FILE record=NAME`); kind=\"abc\": the code entries; file=pack.info|pkgContextInfo.json for the other documents (also \
+         getmanifest)"
     );
     assert_eq!(
         head[4],
@@ -984,7 +987,8 @@ fn the_introduction_says_what_the_tools_take_once() {
          max_nodes; or to=\"call:REGEX\" for the callers of every callee path matching (the paths of kind=call, e.g. \
          call:^import:@ohos:net\\.http); from=\"method:NAME\" keeps only the paths from the callers matching (`[from]`); defines=false \
          leaves out `[defines]` (a closure is created, not called); unresolved=true lists the unresolved call sites of callees; `entry`. \
-         Rows: `[this-class]` matched by name, not guaranteed; `[external]` / `[unresolved]` are leaves, no function of the program"
+         Rows: `[super]` proved; `[this-class]` / `[inherited]` / `[instance]` matched by name, `[reassigned]` through a \
+         decorated class: not guaranteed; `[external]` / `[unresolved]` are leaves, no function of the program"
     );
     assert_eq!(
         head[6],
@@ -1023,7 +1027,7 @@ fn manifest_summary_joins_components_to_records() {
         call(3, "manifest_summary", json!({"apk": hap, "filter": "all"})),
         call(4, "manifest_summary", json!({"apk": hap, "kind": "ability,deeplink"})),
         call(5, "manifest_summary", json!({"apk": hap, "name": "internet"})),
-        call(6, "manifest_summary", json!({"apk": hap, "filter": "all", "offset": 12})),
+        call(6, "manifest_summary", json!({"apk": hap, "filter": "all", "offset": 13})),
         call(7, "manifest_summary", json!({"apk": hap, "file": "pkgContextInfo.json"})),
         call(8, "manifest_summary", json!({"apk": hap, "file": "pack"})),
         call(9, "getmanifest", json!({"apk": hap})),
@@ -1061,13 +1065,14 @@ fn manifest_summary_joins_components_to_records() {
 
     // Everything: the CLI's lines.
     let all = lines(&replies[2]);
-    assert_eq!(all.len(), 13, "{all:?}");
+    assert_eq!(all.len(), 14, "{all:?}");
+    assert_eq!(all[2], format!("abc ets/modules.abc version=12.0.6.0 bytes={} status=readable", make_abc().len()));
     assert!(all.contains(&"request-permission ohos.permission.INTERNET reason=- when=- abilities=-"), "{all:?}");
-    assert_eq!(all[12], "package-table packages=2 native=0 with-records=1 records=2 unlocated=0 file=pkgContextInfo.json");
+    assert_eq!(all[13], "package-table packages=2 native=0 with-records=1 records=2 unlocated=0 file=pkgContextInfo.json");
     // Narrowed by kind or name: every line of that kind, and how many there are.
     assert_eq!(lines(&replies[3]), [ability.as_str(), "deeplink EntryAbility sample://open", "# records 0..2 of 2"]);
     assert_eq!(lines(&replies[4]), ["request-permission ohos.permission.INTERNET reason=- when=- abilities=-", "# records 0..1 of 1"]);
-    assert_eq!(lines(&replies[5]), [all[12], "# records 12..13 of 13"]);
+    assert_eq!(lines(&replies[5]), [all[13], "# records 13..14 of 14"]);
     // The other documents.
     assert_eq!(
         lines(&replies[6]),
@@ -1109,19 +1114,23 @@ fn manifests_of_an_app_a_directory_and_what_has_none() {
         call(7, "manifest_summary", json!({"apk": missing, "kind": "ability"})),
         call(8, "manifest_summary", json!({"apk": inputs.path("dir"), "apks": [app]})),
     ]);
-    // An .app: its own pack.info, then a section per package, each line naming its package.
+    // An .app: its pack.info, which its packages carry byte for byte, is there once; then a section per
+    // package, each line naming its package.
     let found = rows(&replies[0]);
-    assert_eq!(found.len(), 5, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
     assert_eq!(found[0], "shop.app | pack-app com.example.sample bundleType=- versionCode=1000000 versionName=1.0.0");
     assert!(found[1].starts_with("entry.hap | ability EntryAbility exported=true (explicit) "), "{found:?}");
     assert!(found[1].ends_with(&format!(" record={ENTRY_ABILITY} abc=entry.hap/ets/modules.abc")), "{found:?}");
     assert!(
-        found[3].starts_with("feature.hap | ability EntryAbility ") && found[3].ends_with(" abc=feature.hap/ets/modules.abc"),
+        found[2].starts_with("feature.hap | ability EntryAbility ") && found[2].ends_with(" abc=feature.hap/ets/modules.abc"),
         "{found:?}"
     );
-    let headers: Vec<&str> = text(&replies[1]).lines().filter(|line| line.ends_with("/pack.info")).collect();
-    assert_eq!(headers, ["# shop.app/pack.info", "# entry.hap/pack.info", "# feature.hap/pack.info"]);
-    assert_eq!(ok(&replies[1])["documents"].as_array().unwrap().len(), 3);
+    let headers: Vec<&str> = text(&replies[1]).lines().filter(|line| line.starts_with("# ") && line.contains("/pack.info")).collect();
+    assert_eq!(headers, ["# shop.app/pack.info (the same in entry.hap, feature.hap)"]);
+    assert_eq!(
+        ok(&replies[1])["documents"].as_array().unwrap().iter().map(|document| &document["also_in"]).collect::<Vec<_>>(),
+        [&json!(["entry.hap", "feature.hap"])]
+    );
     // A directory: packages in path order.
     let found = rows(&replies[2]);
     assert!(found[0].starts_with("a/entry.hap | ability ") && found[1].starts_with("b/feature.hap | ability "), "{found:?}");
@@ -1431,4 +1440,121 @@ fn a_call_graph_goes_through_the_output_budget_and_names_entries_that_differ() {
             format!("0 {INDEX_PAGE}->#~@0>#build | Index.build [ets/widgets.abc]")
         ]
     );
+}
+
+#[test]
+fn pages_routes_long_strings_and_one_package_of_several() {
+    use asc_fixture::hap::{library_program, make_library_hsp, make_routed_hap, DETAIL_PAGE, LONG_FILLER_BYTES, SHARED_PAGE};
+    let inputs = Inputs::new();
+    inputs.file("app/entry.hap", &make_routed_hap());
+    inputs.file("app/lib.hsp", &make_library_hsp());
+    let app = inputs.path("app");
+    // Two app-store packages next to their decrypted code.
+    let encrypted = sample_program().encrypted().build().bytes;
+    inputs.file("stores/a.hap", &Hap::new().modules_abc(&encrypted).module_json(SAMPLE_MODULE_JSON).build());
+    inputs.file("stores/a.hap.abc", &make_abc());
+    inputs.file("stores/b.hsp", &Hap::new().modules_abc(&library_program().encrypted().build().bytes).module_json("{}").build());
+    inputs.file("stores/b.hsp.abc", &library_program().build().bytes);
+    let stores = inputs.path("stores");
+    let replies = session(&[
+        call(1, "manifest_summary", json!({"apk": app})),
+        call(2, "manifest_summary", json!({"apk": app, "kind": "route"})),
+        call(3, "manifest_summary", json!({"apk": app, "kind": "page,pack-info", "filter": "all"})),
+        call(4, "findrefs", json!({"apk": app, "kind": "literal", "value": "example.com/far"})),
+        call(5, "findrefs", json!({"apk": app, "kind": "string", "value": "shared|detail", "entry": "lib.hsp"})),
+        call(6, "findrefs", json!({"apk": app, "kind": "string", "value": "shared", "entry": "nope.hsp"})),
+        call(7, "listclass", json!({"apk": app, "entry": "lib.hsp"})),
+        call(8, "findrefs", json!({"apk": app, "kind": "string", "value": "nothing-like-this", "entry": "entry.hap"})),
+        call(9, "listclass", json!({"apk": stores})),
+        call(10, "findrefs", json!({"apk": stores, "kind": "string", "value": "shared"})),
+        call(11, "manifest_summary", json!({"apk": stores, "kind": "abc"})),
+    ]);
+    // By default pages and routes are left out, of the lines and of the structured reply.
+    assert!(lines(&replies[0]).iter().all(|line| !line.contains(" | route ") && !line.contains(" | page ")), "{}", text(&replies[0]));
+    assert!(ok(&replies[0])["packages"][0].get("routes").is_none());
+    let routes = lines(&replies[1]);
+    assert_eq!(routes.len(), 5, "{routes:?}");
+    assert_eq!(
+        routes[..2],
+        [
+            format!(
+                "entry.hap | route detail buildFunction=DetailBuilder source=src/main/ets/pages/Detail.ets record={DETAIL_PAGE} \
+                 abc=entry.hap/ets/modules.abc"
+            ),
+            format!(
+                "entry.hap | route lib/shared buildFunction=SharedBuilder source=src/main/ets/pages/Shared.ets package=@sample/lib \
+                 record={SHARED_PAGE} abc=lib.hsp/ets/modules.abc"
+            ),
+        ]
+    );
+    assert!(routes[3].ends_with(" record=- (no record com.example.sample/entry/ets/pages/Gone or &entry/src/main/ets/pages/Gone&)"));
+    assert_eq!(routes[4], "# records 0..4 of 4");
+    assert_eq!(ok(&replies[1])["packages"][0]["routes"][1]["abc"], "lib.hsp/ets/modules.abc");
+    assert_eq!(
+        lines(&replies[2]),
+        [
+            format!("entry.hap | page pages/Index record={INDEX_PAGE} abc=entry.hap/ets/modules.abc"),
+            "entry.hap | pack-info packages=2 (pack.info is byte for byte the same in lib.hsp: listed once, here)".to_owned(),
+            "lib.hsp | pack-info same-as=entry.hap (pack.info is byte for byte the one listed there)".to_owned(),
+            "# records 0..3 of 3".to_owned(),
+        ]
+    );
+
+    // Long strings are cut in the rows and in the structured reply; the match is shown where it is.
+    let limit = asc_ark_engine::text::ROW_STRING_BYTES;
+    let found = rows(&replies[3]);
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(found.iter().all(|row| row.len() < limit + 600 && row.contains(" match at byte ")), "{found:?}");
+    let matched: Vec<&str> = ok(&replies[3])["results"].as_array().unwrap().iter().map(|row| row["matched"][0].as_str().unwrap()).collect();
+    assert!(matched.iter().all(|text| text.len() < limit + 40 && text.contains("… (+")), "{matched:?}");
+    assert!(
+        matched[1].ends_with(&format!("a… (+{} bytes)", LONG_FILLER_BYTES + "https://example.com/far/operand".len() - limit)),
+        "{}",
+        matched[1]
+    );
+
+    // `entry` keeps a search or a listing to one package; one that is not there says what is.
+    assert_eq!(
+        rows(&replies[4]),
+        [format!("lib.hsp/ets/modules.abc | {SHARED_PAGE}->#*#SharedBuilder+0x0 | SharedBuilder | lda.str \"shared\"")]
+    );
+    assert_eq!(
+        error(&replies[5]),
+        "no entry named nope.hsp (entries: entry.hap/ets/modules.abc, lib.hsp/ets/modules.abc; a package names all of its entries)"
+    );
+    assert_eq!(rows(&replies[6]), [format!("{SHARED_PAGE} | functions=1 | lib.hsp/ets/modules.abc")]);
+    assert_eq!(ok(&replies[7])["hints"].as_array().unwrap().last().unwrap(), "entry=entry.hap kept the search to 1 of the 2 abc entries");
+
+    // Decrypted files next to several packages: one note, once, and nothing is a warning.
+    let note = "2 encrypted abc entries are served from the decrypted files next to them (manifest-summary names each: its `abc` lines)";
+    let first = text(&replies[8]);
+    assert_eq!(first.lines().filter(|line| line.starts_with("# note: ")).collect::<Vec<_>>(), [format!("# note: {note}")]);
+    assert!(!first.contains("# warning"), "{first}");
+    assert!(first.contains(" bytes | readable (encrypted in the package; served from the decrypted a.hap.abc)\n"), "{first}");
+    assert_eq!(ok(&replies[8])["notes"], json!([note]));
+    let later = text(&replies[9]);
+    assert!(!later.contains("# note") && !later.contains("# warning") && ok(&replies[9]).get("notes").is_none(), "{later}");
+    assert_eq!(ok(&replies[9])["unsearched_entries"], 0);
+    let entries = lines(&replies[10]);
+    assert!(
+        entries[0].starts_with("a.hap | abc a.hap/ets/modules.abc ")
+            && entries[0].ends_with(" served-from=a.hap.abc (encrypted in the package)")
+    );
+    assert!(
+        entries[1].starts_with("b.hsp | abc b.hsp/ets/modules.abc ")
+            && entries[1].ends_with(" served-from=b.hsp.abc (encrypted in the package)")
+    );
+}
+
+#[test]
+fn entry_is_refused_on_a_dex_program() {
+    let inputs = Inputs::new();
+    let apk = inputs.file("app.apk", &asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_dex())], true));
+    let replies = session(&[
+        call(1, "findrefs", json!({"apk": apk, "kind": "string", "value": "x", "entry": "classes.dex"})),
+        call(2, "listclass", json!({"apk": apk, "entry": "classes.dex"})),
+    ]);
+    for reply in &replies {
+        assert_eq!(error(reply), "`entry` applies to HarmonyOS programs only");
+    }
 }

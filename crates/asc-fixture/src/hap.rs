@@ -8,7 +8,10 @@ use asc_abc::FunctionKind;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::abc::{sample_program, AbcAnnotation, AbcBuilder, AbcCode, AbcFunction, AbcLiteral, AbcModule, AbcRecord, Asm};
+use crate::abc::{
+    sample_program, AbcAnnotation, AbcBuilder, AbcCode, AbcField, AbcFieldValue, AbcFunction, AbcLiteral, AbcModule, AbcRecord, AbcType,
+    Asm, Op,
+};
 
 /// How a zip entry is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +280,114 @@ pub fn resource_program() -> AbcBuilder {
     builder
 }
 
+/// Record of [`routed_program`] that a route of [`SAMPLE_ROUTER_MAP`] names.
+pub const DETAIL_PAGE: &str = "&entry/src/main/ets/pages/Detail&";
+/// Record of [`routed_program`] that holds the long strings.
+pub const LONG_PAGE: &str = "&entry/src/main/ets/pages/Long&";
+/// Record of [`library_program`]: the page of a route in another package.
+pub const SHARED_PAGE: &str = "&@sample/lib/src/main/ets/pages/Shared&1.0.0";
+/// What the long strings of [`routed_program`] hold far behind their start.
+pub const LONG_MARKER: &str = "https://example.com/far";
+/// Bytes of filler ahead of [`LONG_MARKER`] in each long string.
+pub const LONG_FILLER_BYTES: usize = 3000;
+
+/// `module.json` of the routed module: [`SAMPLE_MODULE_JSON`] with a route
+/// table (`routerMap`), which no resource index lists.
+pub fn routed_module_json() -> String {
+    SAMPLE_MODULE_JSON
+        .replace("\"pages\": \"$profile:main_pages\",", "\"pages\": \"$profile:main_pages\",\n    \"routerMap\": \"$profile:router_map\",")
+}
+
+/// `resources/base/profile/router_map.json` of the routed module, on one
+/// line as the build writes it: a route whose page is a record of the
+/// module ([`DETAIL_PAGE`]), one in another package ([`SHARED_PAGE`], named
+/// by its `ohmurl`), one spelled by its source file alone (the sample's
+/// index page) and one whose page no code has.
+pub const SAMPLE_ROUTER_MAP: &str = concat!(
+    r#"{"routerMap":[{"buildFunction":"DetailBuilder","name":"detail","pageSourceFile":"src/main/ets/pages/Detail.ets","#,
+    r#""ohmurl":"@normalized:N&&&entry/src/main/ets/pages/Detail&","customData":{"title":"Detail"}},"#,
+    r#"{"buildFunction":"SharedBuilder","name":"lib/shared","pageSourceFile":"src/main/ets/pages/Shared.ets","#,
+    r#""packageName":"@sample/lib","ohmurl":"@normalized:N&lib&&@sample/lib/src/main/ets/pages/Shared&1.0.0"},"#,
+    r#"{"buildFunction":"IndexBuilder","name":"index","pageSourceFile":"src/main/ets/pages/Index.ets"},"#,
+    r#"{"buildFunction":"GoneBuilder","name":"gone","pageSourceFile":"src/main/ets/pages/Gone.ets"}]}"#
+);
+
+/// A string of [`LONG_FILLER_BYTES`] of `filler`, then [`LONG_MARKER`] and `tail`.
+fn long_text(filler: &str, tail: &str) -> String {
+    format!("{}{LONG_MARKER}{tail}", filler.repeat(LONG_FILLER_BYTES / filler.len()))
+}
+
+/// [`sample_program`] plus two records: [`DETAIL_PAGE`], with the builder
+/// function `#*#DetailBuilder`, and [`LONG_PAGE`], whose strings are longer
+/// than a row shows, each with [`LONG_MARKER`] behind [`LONG_FILLER_BYTES`]
+/// of filler: the operand of an `lda.str` in `#*#long`, an item of the
+/// literal array that function creates, and the record's `jsonFileContent`.
+pub fn routed_program() -> AbcBuilder {
+    let function = |name: &str, asm: Asm| {
+        AbcFunction::new(name, AbcCode::new(1, 3, asm)).kind(FunctionKind::FUNCTION).annotation(AbcAnnotation::slot_number(1))
+    };
+    let mut builder = sample_program();
+    let mut detail = Asm::new();
+    detail.op("lda.str", [Op::str("detail")]).op("return", []);
+    builder.record(AbcRecord::ets_module(DETAIL_PAGE, "entry", &[], AbcModule::new()).function(function("#*#DetailBuilder", detail)));
+
+    let items = builder.literal_array([AbcLiteral::str("short"), AbcLiteral::str(&long_text("b", "/item"))]);
+    let mut long = Asm::new();
+    long.op("lda.str", [Op::str(&long_text("a", "/operand"))]).op("sta", [0.into()]);
+    long.op("createarraywithbuffer", [0.into(), items.into()]).op("return", []);
+    let content = AbcFieldValue::String(format!("{{\"text\":\"{}\"}}", long_text("c", "/field")));
+    builder.record(
+        AbcRecord::ets_module(LONG_PAGE, "entry", &[], AbcModule::new())
+            .field(AbcField::new("jsonFileContent", AbcType::U32, content))
+            .function(function("#*#long", long)),
+    );
+    builder
+}
+
+/// The code of a second package: the record [`SHARED_PAGE`] with the
+/// builder function `#*#SharedBuilder`.
+pub fn library_program() -> AbcBuilder {
+    let mut shared = Asm::new();
+    shared.op("lda.str", [Op::str("shared")]).op("return", []);
+    let function = AbcFunction::new("#*#SharedBuilder", AbcCode::new(1, 3, shared))
+        .kind(FunctionKind::FUNCTION)
+        .annotation(AbcAnnotation::slot_number(1));
+    let mut builder = AbcBuilder::new();
+    builder.record(AbcRecord::annotation_interface("_ESSlotNumberAnnotation"));
+    builder.record(AbcRecord::ets_module(SHARED_PAGE, "@sample/lib", &[], AbcModule::new()).function(function));
+    builder
+}
+
+/// `module.json` of the library package: a shared module `lib` of the
+/// sample bundle, without components.
+pub const LIBRARY_MODULE_JSON: &str = r#"{
+  "app": { "bundleName": "com.example.sample", "versionCode": 1000000, "versionName": "1.0.0" },
+  "module": { "name": "lib", "type": "shared", "packageName": "@sample/lib", "deviceTypes": ["phone"] }
+}
+"#;
+
+/// The routed module as a `.hap`: [`routed_program`], [`routed_module_json`],
+/// the resources of the sample and its page list, [`SAMPLE_ROUTER_MAP`]
+/// where the build puts a route table, and [`SAMPLE_PACK_INFO`].
+pub fn make_routed_hap() -> Vec<u8> {
+    Hap::new()
+        .modules_abc(&routed_program().build().bytes)
+        .module_json(&routed_module_json())
+        .resource_index(&sample_resources())
+        .entry("resources/base/profile/main_pages.json", SAMPLE_MAIN_PAGES.as_bytes(), Compression::Deflated)
+        .entry("resources/base/profile/router_map.json", SAMPLE_ROUTER_MAP.as_bytes(), Compression::Deflated)
+        .pack_info(SAMPLE_PACK_INFO)
+        .build()
+}
+
+/// The library package as an `.hsp`: [`library_program`],
+/// [`LIBRARY_MODULE_JSON`] and [`SAMPLE_PACK_INFO`], the same bytes the
+/// routed module carries (one build writes one `pack.info` into all of its
+/// packages).
+pub fn make_library_hsp() -> Vec<u8> {
+    Hap::new().modules_abc(&library_program().build().bytes).module_json(LIBRARY_MODULE_JSON).pack_info(SAMPLE_PACK_INFO).build()
+}
+
 /// A `.hap` under construction. Entries are written in the order they are
 /// added.
 ///
@@ -469,6 +580,20 @@ mod tests {
         assert_eq!(&index[record + 12..record + 12 + 7], b"\x05\0Shop\0");
         assert_eq!(&index[record + 19..record + 19 + 11], b"\x09\0app_name\0");
         assert_eq!(resource_program().build().bytes[..8], asc_abc::MAGIC);
+    }
+
+    #[test]
+    fn the_routed_module_names_its_route_table_and_long_strings() {
+        let manifest = routed_module_json();
+        assert!(manifest.contains("\"routerMap\": \"$profile:router_map\"") && manifest.len() > SAMPLE_MODULE_JSON.len());
+        assert_eq!(SAMPLE_ROUTER_MAP.lines().count(), 1);
+        assert_eq!(SAMPLE_ROUTER_MAP.matches("\"buildFunction\"").count(), 4);
+        let long = long_text("a", "/operand");
+        assert_eq!(long.find(LONG_MARKER), Some(LONG_FILLER_BYTES));
+        let names: Vec<String> = entries(&make_routed_hap()).into_iter().map(|(name, ..)| name).collect();
+        assert!(names.contains(&"resources/base/profile/router_map.json".to_owned()), "{names:?}");
+        assert_eq!(routed_program().build().bytes[..8], asc_abc::MAGIC);
+        assert_eq!(entries(&make_library_hsp()).len(), 3);
     }
 
     #[test]

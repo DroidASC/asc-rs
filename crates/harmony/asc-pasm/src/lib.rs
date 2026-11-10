@@ -70,7 +70,8 @@ pub struct Options {
     /// Add header lines naming the registers the debug info names, grouped
     /// by the code range in which a register holds its variable: `; locals
     /// [0004, 0020): v0 count, v1 name`, and `; params: a3 url`. Release
-    /// builds carry no such names and get no line.
+    /// builds carry no such names and get no line. On by default: the names
+    /// cost nothing where there are none, and make `v3` readable where there are.
     pub locals: bool,
 }
 
@@ -86,7 +87,7 @@ impl Default for Options {
             string_limit: Self::DEFAULT_STRING_LIMIT,
             ic_slots: false,
             lines: false,
-            locals: false,
+            locals: true,
         }
     }
 }

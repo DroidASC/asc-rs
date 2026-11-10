@@ -154,7 +154,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             engine.entries().count()
         }
         ("listclass", []) => {
-            let records = engine.list_classes(&ListOptions { filter, all })?;
+            let records = engine.list_classes(&ListOptions { filter, all, entry: None })?;
             for record in &records {
                 writeln!(out, "{}", record.line(several))?;
             }

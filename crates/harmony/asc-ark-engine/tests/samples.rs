@@ -130,8 +130,9 @@ fn contacts_records_resolve_by_every_spelling() {
     assert_eq!(get("pages/setIP", Some("setIP.rerender")).unwrap().function.as_deref(), Some("#~@2>#rerender"));
     assert!(matches!(get("pages/Index", Some("build")), Err(EngineError::NotFound { what: "function", .. })));
 
-    let pages =
-        engine.list_classes(&ListOptions { filter: Some(NameFilter::Prefix("entry/src/main/ets/pages".into())), all: false }).unwrap();
+    let pages = engine
+        .list_classes(&ListOptions { filter: Some(NameFilter::Prefix("entry/src/main/ets/pages".into())), ..ListOptions::default() })
+        .unwrap();
     assert_eq!(
         pages.iter().map(|record| (record.name.as_str(), record.functions)).collect::<Vec<_>>(),
         [("&entry/src/main/ets/pages/Index&", 18), ("&entry/src/main/ets/pages/setIP&", 36)]
@@ -232,7 +233,11 @@ fn large_sample_directory_pairs_the_decrypted_file_with_the_encrypted_entry() {
     let entries: Vec<_> = engine.entries().map(|info| (info.name.as_str(), &info.status)).collect();
     assert_eq!(entries, [("entry.hap/ets/modules.abc", &EntryStatus::Readable), ("entry.hap/ets/widgets.abc", &EntryStatus::Readable)]);
     assert_eq!(engine.entries().next().unwrap().size, decrypted);
-    assert_eq!(engine.notes(), ["entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted modules.abc"]);
+    assert!(engine.notes().is_empty(), "{:?}", engine.notes());
+    assert_eq!(
+        engine.stand_in_note().as_deref(),
+        Some("entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted modules.abc")
+    );
     let listed = counts(&engine);
     assert_eq!(listed.len(), 2, "{listed:?}");
 

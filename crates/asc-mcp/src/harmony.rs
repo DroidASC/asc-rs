@@ -28,8 +28,8 @@ use crate::{
     LISTCLASS_LIMIT,
 };
 use asc_ark_engine::{
-    Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, Manifest, ManifestLine, NameFilter, Pattern,
-    Query, RefRow, RefSite,
+    text, Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, Manifest, ManifestLine, NameFilter,
+    Pattern, Query, RefRow, RefSite,
 };
 use asc_engine::{names, Threads, MAPPED_CHARGE_DIVISOR};
 use serde_json::{json, Value};
@@ -108,7 +108,32 @@ fn dex_only(arg: &str) -> ToolError {
 /// The manifest tools, for the program's introduction.
 const MANIFEST_USAGE: &str = "# manifest_summary: module.json, each ability / extension with record=NAME (what getclass takes) and its \
      onXxx callbacks, a `$type:name` reference followed by what it stands for (`label=$string:x(\"value\")`, \
-     `pages=$profile:main_pages(PATH)`); file=pack.info|pkgContextInfo.json for the other documents (also getmanifest)\n";
+     `pages=$profile:main_pages(PATH)`); kind=\"page\" / kind=\"route\": the page list and the route table, each with its record \
+     (`route NAME buildFunction=F source=FILE record=NAME`); kind=\"abc\": the code entries; file=pack.info|pkgContextInfo.json \
+     for the other documents (also getmanifest)\n";
+/// What keeps `findrefs` and `listclass` to part of a program, for the program's introduction.
+const ENTRY_USAGE: &str = "entry=NAME (also listclass): only that abc entry or package (entry.hap), as rows name it: a resource id is \
+     unique within one package only";
+
+/// `entries: a, b, ... (N more)`: the ABC entries of the program, for the
+/// error of an `entry` that names none of them.
+pub fn entries_hint(engine: &Engine) -> String {
+    let names: Vec<&str> = engine.entries().map(|entry| entry.name.as_str()).collect();
+    let mut hint = format!("entries: {}", names.iter().take(MAX_ENTRIES_LISTED).copied().collect::<Vec<_>>().join(", "));
+    if names.len() > MAX_ENTRIES_LISTED {
+        hint.push_str(&format!(", ... {} more", names.len() - MAX_ENTRIES_LISTED));
+    }
+    hint.push_str("; a package names all of its entries");
+    hint
+}
+
+/// An engine error of a call that `entry` keeps to part of the program.
+fn entry_error(engine: &Engine, error: EngineError) -> ToolError {
+    match &error {
+        EngineError::NoEntry(_) => ToolError(format!("{error} ({})", entries_hint(engine))),
+        _ => error.into(),
+    }
+}
 
 /// A HarmonyOS program of the session.
 pub struct Session {
@@ -150,15 +175,20 @@ impl Session {
             EntryStatus::Unreadable(reason) => Cow::Owned(format!("unreadable: {reason}")),
         };
         let version = |entry: &asc_ark_engine::EntryInfo| entry.version.map(|v| v.to_string());
+        let stand_ins = self.engine.stand_ins();
         for entry in entries.iter().take(MAX_ENTRIES_LISTED) {
             let version = version(entry).unwrap_or_else(|| "?".into());
-            text.push_str(&format!("# abc | {} | {version} | {} bytes | {}\n", entry.name, entry.size, status(&entry.status)));
+            text.push_str(&format!("# abc | {} | {version} | {} bytes | {}", entry.name, entry.size, status(&entry.status)));
+            if let Some(stand_in) = stand_ins.iter().find(|stand_in| stand_in.entry == entry.name) {
+                text.push_str(&format!(" (encrypted in the package; served from the decrypted {})", stand_in.file));
+            }
+            text.push('\n');
         }
         if entries.len() > MAX_ENTRIES_LISTED {
             text.push_str(&format!("# abc | ... {} more (see `program`)\n", entries.len() - MAX_ENTRIES_LISTED));
         }
         // Said here, once per program, instead of in the tool schemas every turn pays for.
-        text.push_str(&format!("# findrefs `value` by kind: {}\n", RefKind::usages()));
+        text.push_str(&format!("# findrefs `value` by kind: {}; {ENTRY_USAGE}\n", RefKind::usages()));
         text.push_str(MANIFEST_USAGE);
         text.push_str(resources::USAGE);
         text.push_str(callgraph::USAGE);
@@ -173,7 +203,8 @@ impl Session {
     /// A tool's reply with what is said of the program ahead of it: on the
     /// first reply what it is and its notes; on every reply the notes of a
     /// program that has entries no query reads (an empty answer must not
-    /// read as "nothing there").
+    /// read as "nothing there"). That encrypted entries are read from
+    /// decrypted files is said once, in one line: nothing is left out.
     fn framed(&self, text: String, mut structured: Value) -> (String, Value) {
         let mut head = String::new();
         let first = !self.introduced.swap(true, Ordering::Relaxed);
@@ -184,9 +215,16 @@ impl Session {
         }
         let notes = self.engine.notes();
         let left_out = self.engine.entries().any(|entry| entry.status != EntryStatus::Readable);
+        let stand_in = self.engine.stand_in_note().filter(|_| first);
         if !notes.is_empty() && (first || left_out) {
             head.extend(notes.iter().map(|note| format!("# warning: {note}\n")));
-            prepend_notes(&mut structured, notes.to_vec());
+        }
+        if let Some(note) = &stand_in {
+            head.push_str(&format!("# note: {note}\n"));
+        }
+        let said: Vec<String> = notes.iter().filter(|_| first || left_out).cloned().chain(stand_in).collect();
+        if !said.is_empty() {
+            prepend_notes(&mut structured, said);
         }
         (head + &text, structured)
     }
@@ -294,9 +332,13 @@ pub(crate) fn run(session: &Session, tool: &str, args: &Value, call: &Call) -> T
 fn listclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     let (offset, limit) = page_args(args, LISTCLASS_LIMIT)?;
     let prefix = str_arg(args, "prefix")?;
-    let options = ListOptions { filter: prefix.map(|p| NameFilter::Prefix(p.to_owned())), all: bool_arg(args, "all")?.unwrap_or(false) };
+    let options = ListOptions {
+        filter: prefix.map(|p| NameFilter::Prefix(p.to_owned())),
+        all: bool_arg(args, "all")?.unwrap_or(false),
+        entry: str_arg(args, "entry")?.map(str::to_owned),
+    };
     let engine = &session.engine;
-    let records = engine.list_classes(&options)?;
+    let records = engine.list_classes(&options).map_err(|e| entry_error(engine, e))?;
     let total = records.len();
     let page: Vec<_> = records.iter().skip(offset).take(limit).collect();
     let with_entry = engine.has_several_entries();
@@ -306,7 +348,7 @@ fn listclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     // A prefix spelled as on the DEX side (`com.a`) finds nothing: show what names look like.
     let hint = match prefix {
         Some(prefix) if total == 0 => {
-            let every = engine.list_classes(&ListOptions { filter: None, all: options.all })?;
+            let every = engine.list_classes(&ListOptions { filter: None, ..options.clone() })?;
             every
                 .first()
                 .map(|first| format!("no record name starts with {prefix:?}; the program has {} records, e.g. {}", every.len(), first.name))
@@ -696,9 +738,11 @@ fn no_results_hints(engine: &Engine, query: &Query, cancel: &AtomicBool) -> Vec<
     own.into_iter().chain(found).collect()
 }
 
-/// A findrefs row as JSON: where the reference is and what it names.
+/// A findrefs row as JSON: where the reference is and what it names. A
+/// matched string is cut as the row's text cuts it.
 fn row_json(entry: &str, row: &RefRow) -> Value {
-    let mut v = json!({"entry": entry, "record": row.record, "matched": row.matched, "text": row.text});
+    let matched: Vec<Cow<'_, str>> = row.matched.iter().map(|matched| text::cut(matched, text::ROW_STRING_BYTES)).collect();
+    let mut v = json!({"entry": entry, "record": row.record, "matched": matched, "text": row.text});
     if let RefSite::Code { function, restored, pc } = &row.site {
         v["function"] = json!(function);
         v["name"] = json!(restored);
@@ -719,10 +763,15 @@ fn findrefs(session: &Session, args: &Value, call: &Call) -> ToolResult {
         Search::Requests(pattern) => return module_requests(session, args, &pattern),
     };
     let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
+    let entry = str_arg(args, "entry")?;
+    let engine = &session.engine;
+    // Entries left out whole (encrypted, damaged) are named in the program's notes.
+    let unreadable = engine.entries_in(entry).map_err(|e| entry_error(engine, e))?;
+    let unreadable = unreadable.into_iter().filter(|entry| entry.status != EntryStatus::Readable).count();
     let mut rows = Vec::new();
     let mut errors = Vec::new();
     let mut total = 0;
-    session.engine.find_refs(&query, &call.cancel, &mut |batch| {
+    let summary = engine.find_refs_in(&query, entry, &call.cancel, &mut |batch| {
         // Only the page is rendered.
         let skip = offset.saturating_sub(total);
         total += batch.rows.len();
@@ -738,12 +787,14 @@ fn findrefs(session: &Session, args: &Value, call: &Call) -> ToolResult {
     for error in &errors {
         text.push_str(&format!("# Warning: {error}\n"));
     }
-    let hints = if total == 0 && errors.is_empty() { no_results_hints(&session.engine, &query, &call.cancel) } else { Vec::new() };
+    let mut hints = if total == 0 && errors.is_empty() { no_results_hints(engine, &query, &call.cancel) } else { Vec::new() };
+    if let (Some(entry), true) = (entry, total == 0 && errors.is_empty()) {
+        hints.push(format!("entry={entry} kept the search to {} of the {} abc entries", summary.entries, engine.entries().count()));
+    }
     for hint in &hints {
         text.push_str(&format!("# hint: {hint}\n"));
     }
-    // Entries left out whole (encrypted, damaged) are named in the program's notes.
-    let unsearched = session.engine.entries().filter(|entry| entry.status != EntryStatus::Readable).count() + errors.len();
+    let unsearched = unreadable + errors.len();
     let structured = json!({
         "apk_id": session.id,
         "total": total,
@@ -762,7 +813,7 @@ fn findrefs(session: &Session, args: &Value, call: &Call) -> ToolResult {
 fn module_requests(session: &Session, args: &Value, pattern: &Pattern) -> ToolResult {
     let (offset, limit) = page_args(args, FINDREFS_LIMIT)?;
     let engine = &session.engine;
-    let requests = engine.module_requests(Some(pattern))?;
+    let requests = engine.module_requests_in(Some(pattern), str_arg(args, "entry")?).map_err(|e| entry_error(engine, e))?;
     let total = requests.len();
     let with_entry = engine.has_several_entries();
     let page: Vec<_> = requests.iter().skip(offset).take(limit).collect();
@@ -814,12 +865,13 @@ fn getmanifest(session: &Session, args: &Value, _: &Call) -> ToolResult {
     let mut text = String::new();
     for found in &documents {
         if several {
-            text.push_str(&format!("# {}/{}\n", found.package, found.document));
+            text.push_str(&format!("# {}\n", found.heading()));
         }
         text.push_str(found.text.trim_end());
         text.push('\n');
     }
-    let listed: Vec<Value> = documents.iter().map(|found| json!({"package": found.package, "text": found.text})).collect();
+    let listed: Vec<Value> =
+        documents.iter().map(|found| json!({"package": found.package, "text": found.text, "also_in": found.also_in})).collect();
     Ok((text, json!({"apk_id": session.id, "file": document.file_name(), "documents": listed})))
 }
 
@@ -874,8 +926,8 @@ fn manifest_summary(session: &Session, args: &Value, _: &Call) -> ToolResult {
     if filter == Filter::Exported && str_arg(args, "filter")?.is_none() {
         text.push_str(
             "# filter=exported (the default without kind / name / file): exported abilities and extensions with their record; \
-             filter=\"all\" for every line (permissions, pack.info), kind / name to narrow, file=\"pkgContextInfo.json\" for \
-             the package table\n",
+             filter=\"all\" for every line (permissions, pages, routes, pack.info), kind / name to narrow (kind=\"route\"), \
+             file=\"pkgContextInfo.json\" for the package table\n",
         );
     }
     for record in records.iter().skip(offset) {
@@ -891,6 +943,11 @@ fn manifest_summary(session: &Session, args: &Value, _: &Call) -> ToolResult {
         for package in structured["packages"].as_array_mut().into_iter().flatten() {
             if let Some(components) = package["components"].as_array_mut() {
                 components.retain(|component| component["exported"] == true);
+            }
+            // The lines left these out too; a route table has hundreds of entries.
+            if let Some(package) = package.as_object_mut() {
+                package.remove("pages");
+                package.remove("routes");
             }
         }
     }

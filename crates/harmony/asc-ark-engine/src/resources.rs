@@ -35,7 +35,7 @@ const MAX_CHAIN: usize = 32;
 const MANIFEST_VALUE_BYTES: usize = 200;
 /// Most bytes of a text value shown behind a resource id in a listing: the
 /// limit of a string literal there (`asc_pasm::Options::DEFAULT_STRING_LIMIT`).
-const LISTING_VALUE_BYTES: usize = asc_pasm::Options::DEFAULT_STRING_LIMIT;
+const LISTING_VALUE_BYTES: usize = text::ROW_STRING_BYTES;
 
 /// One value of one resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +220,14 @@ impl<'e> Table<'e> {
         })
     }
 
+    /// The path in the package of the file `reference` (`$profile:main_pages`)
+    /// names by its `base` value; `None` when the index has no such
+    /// resource or it is no file.
+    pub(crate) fn file_path(&self, reference: &str) -> Option<String> {
+        let value = self.base_value(Target::Named(ResourceRef::parse(reference)?))?.value();
+        value.archive_path().map(str::to_owned)
+    }
+
     /// The values `target` names, the `base` one first, the others in file order.
     fn values(&self, target: Target<'_>) -> Vec<Resource<'_>> {
         let mut values: Vec<Resource<'_>> = match target {
@@ -281,25 +289,10 @@ fn value_matches(pattern: &Pattern, value: &ResourceValue<'_>) -> bool {
     }
 }
 
-/// `text` in quotes on one line, at most `limit` bytes of it (cut back to a
-/// character boundary), what was dropped counted after the closing quote:
-/// `"abc"… (+120 bytes)`, as a listing cuts a string literal.
-fn quoted_cut(text: &str, limit: usize) -> String {
-    let mut end = limit.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut out = text::quoted(&text[..end]);
-    if end < text.len() {
-        out.push_str(&format!("… (+{} bytes)", text.len() - end));
-    }
-    out
-}
-
 /// The value on one line, a text of at most `limit` bytes.
 fn shown_value(value: &ResourceValue<'_>, limit: usize) -> String {
     match value {
-        ResourceValue::Text(text) => quoted_cut(text, limit),
+        ResourceValue::Text(text) => text::quoted_cut(text, limit),
         other => other.to_string(),
     }
 }
@@ -623,6 +616,31 @@ pub(crate) fn generated_profile(program: &Program, package: usize, reference: &s
     (reference.kind == ResourceType::Profile && program.has_file(package, &path)).then_some(path)
 }
 
+/// A profile of a package, as it is in the zip.
+pub(crate) struct ProfileFile<'p> {
+    /// Its path in the package: `resources/base/profile/main_pages.json`.
+    pub(crate) path: String,
+    pub(crate) bytes: Cow<'p, [u8]>,
+}
+
+/// The file the profile `reference` (`$profile:main_pages`) names in
+/// package `package`: by the package's index (`table`, when it has one that
+/// reads), else where the build puts the profiles it generates. `None` when
+/// the package has no such file; the reason when the file does not read.
+pub(crate) fn profile<'p>(
+    program: &'p Program,
+    package: usize,
+    table: Option<&Table<'_>>,
+    reference: &str,
+) -> Option<std::result::Result<ProfileFile<'p>, String>> {
+    let path = table.and_then(|table| table.file_path(reference)).or_else(|| generated_profile(program, package, reference))?;
+    match program.file(package, &path) {
+        Ok(Some(bytes)) => Some(Ok(ProfileFile { path, bytes })),
+        Ok(None) => None,
+        Err(err) => Some(Err(format!("{path}: {err}"))),
+    }
+}
+
 /// The instructions of `method` that create a resource object, by offset,
 /// each with the text that names the resource.
 fn resource_objects(abc: &Abc<'_>, method: &Method<'_>, index: &ResourceIndex<'_>) -> Vec<(usize, String)> {
@@ -809,7 +827,5 @@ mod tests {
         let lines: Vec<&str> = annotated.lines().collect();
         assert_eq!(lines[1], "  0004  createobjectwithbuffer [ \"id\", 0x1000003 (16777219) ]  # string/app_name \"Shop\"");
         assert_eq!(annotated.replace("  # string/app_name \"Shop\"", ""), listing, "nothing else changes");
-        assert_eq!(quoted_cut("a中b", 2), "\"a\"… (+4 bytes)");
-        assert_eq!(quoted_cut("abc", 3), "\"abc\"");
     }
 }

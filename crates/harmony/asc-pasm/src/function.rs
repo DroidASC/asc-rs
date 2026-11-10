@@ -131,7 +131,15 @@ fn write_local_name<W: Write>(out: &mut W, abc: &Abc<'_>, name_off: u32) -> fmt:
 ///
 /// Variables are grouped by the code range in which their registers hold
 /// them, one line per range in the order the ranges first occur; a
-/// parameter holds its register throughout.
+/// parameter holds its register throughout. The compiler's own variables
+/// (`0this`, `4funcObj`: names no source identifier can have) are left out,
+/// the function's header says where those values are.
+/// Whether the variable named at `name_off` is one the compiler made: its
+/// name starts with a digit.
+fn is_compiler_name(abc: &Abc<'_>, name_off: u32) -> bool {
+    abc.string(name_off).is_ok_and(|name| name.bytes.first().is_some_and(u8::is_ascii_digit))
+}
+
 fn write_locals<W: Write>(out: &mut W, abc: &Abc<'_>, code: &Code<'_>, info: &DebugInfo<'_>) -> fmt::Result {
     let locals = match info.locals() {
         Ok(locals) => locals,
@@ -142,7 +150,8 @@ fn write_locals<W: Write>(out: &mut W, abc: &Abc<'_>, code: &Code<'_>, info: &De
         }
     };
     let code_size = u32::try_from(code.instructions().len()).unwrap_or(u32::MAX);
-    let range = |local: &LocalVar| (local.start_pc, local.end_pc.unwrap_or(code_size));
+    let range = |local: &&LocalVar| (local.start_pc, local.end_pc.unwrap_or(code_size));
+    let locals: Vec<&LocalVar> = locals.iter().filter(|local| !is_compiler_name(abc, local.name_off)).collect();
     let shown = &locals[..locals.len().min(MAX_LOCALS)];
     for (first, local) in shown.iter().enumerate() {
         let (start, end) = range(local);
@@ -150,7 +159,7 @@ fn write_locals<W: Write>(out: &mut W, abc: &Abc<'_>, code: &Code<'_>, info: &De
             continue;
         }
         write!(out, "; locals [{start:04x}, {end:04x}): ")?;
-        let group = shown[first..].iter().filter(|local| range(local) == (start, end));
+        let group = shown[first..].iter().filter(|&local| range(local) == (start, end));
         for (i, local) in group.enumerate() {
             out.write_str(if i == 0 { "" } else { ", " })?;
             write_local_reg(out, code, i64::from(local.reg))?;

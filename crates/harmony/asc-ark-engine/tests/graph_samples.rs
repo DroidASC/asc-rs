@@ -183,3 +183,63 @@ fn large_sample_captured_variables_and_graph() {
     assert!(!tree.truncated && tree.records_scanned < size.records, "{} of {}", tree.records_scanned, size.records);
     both_directions_agree(&|| Engine::open(&path).unwrap(), &engine, &graph, 20_011);
 }
+
+/// The edges that go through the class hierarchy, exported objects and
+/// decorated classes, and the requests the documents of a package resolve,
+/// on the large sample opened as its directory (the package and its
+/// decrypted code). What is asserted holds for any program.
+#[test]
+fn large_sample_class_edges_and_package_requests() {
+    let Some(dir) = large_sample_dir() else { return };
+    let cancel = AtomicBool::new(false);
+    let engine = Engine::open(&dir).unwrap();
+    let (graph, size) = edges(&engine);
+    let census = census(&graph);
+    let count = |kind, to| census.get(&(kind, to)).copied().unwrap_or(0);
+    // These kinds are edges to functions: a call site they do not resolve stays a plain leaf.
+    let class_kinds = [EdgeKind::Super, EdgeKind::Instance, EdgeKind::ThisClass, EdgeKind::Inherited, EdgeKind::Reassigned];
+    for kind in class_kinds {
+        assert_eq!((count(kind, "external"), count(kind, "unresolved")), (0, 0), "{kind:?}");
+        assert!(count(kind, "function") + count(kind, "import") > 0, "{kind:?}: {census:?}");
+    }
+    for edge in graph.iter().filter(|edge| class_kinds.contains(&edge.kind)) {
+        let (CallNode::Function { record: from, .. }, CallNode::Function { function, record, .. }) = (&edge.from, &edge.to) else {
+            panic!("{edge:?}")
+        };
+        assert!(record != "?" && function != "?", "{edge:?}");
+        match edge.kind {
+            // An inherited method is not the caller's own, and `super` never leads back to the caller.
+            EdgeKind::Inherited | EdgeKind::Super => assert_ne!(edge.from, edge.to, "{edge:?}"),
+            // The class of the calling method is in the caller's record.
+            EdgeKind::ThisClass => assert_eq!(from, record, "{edge:?}"),
+            _ => {}
+        }
+    }
+    // The package says where its requests lead; the bare code file alone does not. Nothing that
+    // resolved without the documents is lost with them.
+    // (The package may hold more code files than the one that was decrypted.)
+    let bare = Engine::open(dir.join("modules.abc")).unwrap();
+    let bare_size = bare.build_call_graph(&cancel).unwrap();
+    assert!(bare_size.functions <= size.functions && bare_size.edges <= size.edges, "{bare_size:?} {size:?}");
+    let (forms, bare_forms) = (engine.request_forms(&cancel).unwrap(), bare.request_forms(&cancel).unwrap());
+    for (form, without) in &bare_forms {
+        let count = forms.get(form).copied().unwrap_or_default();
+        assert!(without.requests <= count.requests && without.resolved <= count.resolved && count.resolved <= count.requests, "{form:?}");
+    }
+    let to_functions = |engine: &Engine| {
+        let mut functions = 0;
+        engine.call_edges(&cancel, &mut |edge| functions += usize::from(matches!(edge.to, CallNode::Function { .. }))).unwrap();
+        functions
+    };
+    assert!(to_functions(&bare) <= graph.iter().filter(|edge| matches!(edge.to, CallNode::Function { .. })).count());
+
+    // Both ends of the edges of each kind agree, the callers side on an engine that has loaded
+    // nothing: the records a callers walk picks reach through subclasses and exported objects.
+    for kind in class_kinds {
+        let of_kind: Vec<CallEdge> = graph.iter().filter(|edge| edge.kind == kind).cloned().collect();
+        both_directions_agree(&|| Engine::open(&dir).unwrap(), &engine, &of_kind, of_kind.len() / 8 + 1);
+    }
+    // The memory the analyses take is accounted for, and given back.
+    let held = engine.memory_use().analyses;
+    assert!(held > 0 && engine.release_analyses() == held && engine.memory_use().analyses == 0);
+}

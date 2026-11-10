@@ -36,12 +36,26 @@ pub(crate) struct Membership {
     pub is_static: bool,
 }
 
-/// The callable member of `members` (of a class of `abc`) called `name`.
-pub(crate) fn find_member<'m>(abc: &Abc<'_>, members: &'m [Member], name: &[u8]) -> Option<&'m Member> {
+/// What the members of one side of a class say about a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Named<'m> {
+    /// No member has the name: a lookup goes on to the parent class.
+    Absent,
+    /// One callable member has it.
+    One(&'m Member),
+    /// The name is listed twice (a getter and a setter, a redefinition) or
+    /// names an accessor: what calling it runs is not decided here.
+    Undecided,
+}
+
+/// What `members` (of a class of `abc`) list under `name`.
+pub(crate) fn member_named<'m>(abc: &Abc<'_>, members: &'m [Member], name: &[u8]) -> Named<'m> {
     let mut named = members.iter().filter(|member| abc.string(member.name).is_ok_and(|other| other.bytes == name));
-    // A name listed twice (a getter and a setter, a redefinition) is not decided here.
-    let first = named.next()?;
-    (first.callable && named.next().is_none()).then_some(first)
+    match (named.next(), named.next()) {
+        (None, _) => Named::Absent,
+        (Some(only), None) if only.callable => Named::One(only),
+        (Some(_), _) => Named::Undecided,
+    }
 }
 
 /// Every method item of the literal array at `off`, nested arrays included.

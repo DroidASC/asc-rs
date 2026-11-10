@@ -61,6 +61,17 @@ impl<'q> Matcher<'q> {
         }
     }
 
+    /// Where `text`, a decoded string that [`Matcher::matches`], matches
+    /// first: a byte range of it.
+    pub(crate) fn find(&self, text: &str) -> Option<std::ops::Range<usize>> {
+        match self {
+            Matcher::Regex(regex) => regex.find(text).map(|found| found.range()),
+            Matcher::Bytes(finder) => finder.find(text.as_bytes()).map(|at| at..at + finder.needle().len()),
+            Matcher::Decoded(needle) => text.find(needle).map(|at| at..at + needle.len()),
+            Matcher::Exact(_) => Some(0..text.len()),
+        }
+    }
+
     /// Whether no string of `file` can match: the needle's bytes are nowhere
     /// in it.
     pub(crate) fn rules_out(&self, file: &[u8]) -> bool {
@@ -214,8 +225,9 @@ impl<'a> NamesWorker<'_, '_, 'a> {
         }
     }
 
-    /// `literal@0x1a2b [0]="a", [3]="b"`.
-    fn literal_text(off: u32, hits: &[LiteralHit]) -> String {
+    /// `literal@0x1a2b [0]="a", [3]="b"`; a string longer than a row shows
+    /// is cut, and says where it matches.
+    fn literal_text(&self, off: u32, hits: &[LiteralHit]) -> String {
         let mut out = format!("literal@{off:#x} ");
         for (i, hit) in hits.iter().enumerate() {
             if i > 0 {
@@ -223,7 +235,7 @@ impl<'a> NamesWorker<'_, '_, 'a> {
             }
             out.push_str(&hit.position);
             out.push('=');
-            text::quote_into(&mut out, &hit.value);
+            out.push_str(&text::quoted_match(&hit.value, self.names.matcher.find(&hit.value)));
         }
         out
     }
@@ -270,13 +282,13 @@ impl<'a> Worker<'a> for NamesWorker<'_, '_, 'a> {
                     if found.is_empty() {
                         continue;
                     }
-                    let text = Self::literal_text(value, &found);
+                    let text = self.literal_text(value, &found);
                     (found.into_iter().map(|hit| hit.value).collect(), text)
                 }
                 record_field::JSON_FILE_CONTENT => {
                     let Some(string) = self.offset_matches(value) else { continue };
                     let value = string.to_str().into_owned();
-                    let text = text::quoted(&value);
+                    let text = text::quoted_match(&value, self.names.matcher.find(&value));
                     (vec![value], text)
                 }
                 _ => continue,
@@ -316,8 +328,14 @@ impl<'a> Worker<'a> for NamesWorker<'_, '_, 'a> {
                     self.offset_matches(id)
                 };
                 if let Some(string) = string {
-                    matched.push(string.to_str().into_owned());
+                    let string = string.to_str().into_owned();
+                    // The listing cuts a long operand; the match may lie beyond the cut.
                     text = function.text(&insn);
+                    if let Some(excerpt) = text::excerpt_beyond(&string, names.matcher.find(&string)) {
+                        text.push_str(" ; ");
+                        text.push_str(&excerpt);
+                    }
+                    matched.push(string);
                 }
             }
             if flags & (LITERAL_ID | LITERAL_OFFSET) != 0 {
@@ -334,7 +352,7 @@ impl<'a> Worker<'a> for NamesWorker<'_, '_, 'a> {
                         text.push_str(insn.opcode.name);
                         text.push(' ');
                     }
-                    text.push_str(&Self::literal_text(off, &found));
+                    text.push_str(&self.literal_text(off, &found));
                     matched.extend(found.into_iter().map(|hit| hit.value));
                 }
             }

@@ -108,7 +108,7 @@ fn listing_filters_and_pseudo_records() {
     assert_eq!(all[1].line(true), "_ESTypeAnnotation | functions=0 kind=service foreign | modules.abc");
 
     let names = |filter: NameFilter| {
-        let options = ListOptions { filter: Some(filter), all: false };
+        let options = ListOptions { filter: Some(filter), ..ListOptions::default() };
         engine.list_classes(&options).unwrap().into_iter().map(|record| record.name).collect::<Vec<_>>()
     };
     assert_eq!(names(NameFilter::Prefix("entry/src".into())), [RECORD_A]);
@@ -290,7 +290,11 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     write(&root, "entry.hap.abc", &abc);
     let engine = Engine::open(&root).unwrap();
     assert_eq!(entry_names(&engine), ["entry.hap/ets/modules.abc", "entry.hap/ets/widgets.abc"]);
-    assert_eq!(engine.notes(), ["entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted entry.hap.abc"]);
+    assert!(engine.notes().is_empty(), "{:?}", engine.notes());
+    assert_eq!(
+        engine.stand_in_note().as_deref(),
+        Some("entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted entry.hap.abc")
+    );
     fs::remove_file(root.join("entry.hap.abc")).unwrap();
 
     // Neither file needs a telling name: both are found by their content.
@@ -301,7 +305,11 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     write(&odd, "listing.pa", b"# source binary: decrypted.bin\n");
     let engine = Engine::open(&odd).unwrap();
     assert_eq!(entry_names(&engine), ["package_1/ets/modules.abc", "package_1/ets/widgets.abc"]);
-    assert_eq!(engine.notes(), ["package_1/ets/modules.abc is encrypted in its package; served from the decrypted decrypted.bin"]);
+    assert!(engine.notes().is_empty(), "{:?}", engine.notes());
+    assert_eq!(
+        engine.stand_in_note().as_deref(),
+        Some("package_1/ets/modules.abc is encrypted in its package; served from the decrypted decrypted.bin")
+    );
 
     // A bare file of other content and another name is just one more entry.
     write(&root, "dump.abc", &widgets);
@@ -331,7 +339,11 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     let engine = Engine::open(&root).unwrap();
     assert_eq!(entry_names(&engine), ["entry.hap/ets/modules.abc", "entry.hap/ets/widgets.abc"]);
     assert!(engine.entries().all(|info| info.status == EntryStatus::Readable));
-    assert_eq!(engine.notes(), ["entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted modules.abc"]);
+    assert!(engine.notes().is_empty(), "{:?}", engine.notes());
+    assert_eq!(
+        engine.stand_in_note().as_deref(),
+        Some("entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted modules.abc")
+    );
     assert_eq!(
         find(&engine, &Query::string_literal("hello")),
         [format!("entry.hap/ets/modules.abc | {RECORD_A}->func_main_0+0x0 | func_main_0 | lda.str \"hello\"")]

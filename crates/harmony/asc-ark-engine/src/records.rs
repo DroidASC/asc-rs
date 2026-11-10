@@ -46,6 +46,9 @@ pub struct ListOptions {
     /// and system module placeholders such as `@ohos.app`) and records the
     /// file only declares.
     pub all: bool,
+    /// Only the records of the ABC entries this names: an entry or a
+    /// package, as [`crate::Engine::find_refs_in`] takes it.
+    pub entry: Option<String>,
 }
 
 /// One record of a program.
@@ -115,7 +118,8 @@ fn local_records<'a>(abc: Abc<'a>, entry: &'a str) -> Result<impl Iterator<Item 
 
 pub(crate) fn list(program: &Program, options: &ListOptions) -> Result<Vec<RecordListing>> {
     let mut out = Vec::new();
-    for (index, abc) in program.readable() {
+    let selected = selected_entries(program, options.entry.as_deref())?;
+    for (index, abc) in program.readable().filter(|(index, _)| selected.contains(index)) {
         let entry = program.info(index).map_or("", |info| info.name.as_str());
         let wrap = |source| EngineError::Abc { entry: entry.to_owned(), source };
         for class in abc.classes().map_err(wrap)? {
@@ -155,10 +159,34 @@ impl Located<'_> {
     }
 }
 
-/// Whether entry `name` is the one `wanted` names: exactly, or by a suffix
-/// that starts at a `/` (`ets/widgets.abc` for `entry.hap/ets/widgets.abc`).
+/// Whether entry `name` is one `wanted` names: exactly, by a suffix that
+/// starts at a `/` (`ets/widgets.abc` for `entry.hap/ets/widgets.abc`), or by
+/// a prefix that ends at one, its package (`entry.hap`, `shop.app/entry.hap`).
 fn entry_matches(name: &str, wanted: &str) -> bool {
-    name == wanted || name.strip_suffix(wanted).is_some_and(|rest| rest.ends_with('/'))
+    name == wanted
+        || name.strip_suffix(wanted).is_some_and(|rest| rest.ends_with('/'))
+        || name.strip_prefix(wanted).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The ABC entries `wanted` names, by index, readable or not: every entry
+/// when it is `None`; else the entries [`entry_matches`] accepts, and those
+/// of the package called `wanted` (a lone package, whose entries carry no
+/// prefix, is named by its file name).
+///
+/// # Errors
+/// [`EngineError::NoEntry`] when `wanted` names no entry of the program.
+pub(crate) fn selected_entries(program: &Program, wanted: Option<&str>) -> Result<Vec<usize>> {
+    let Some(wanted) = wanted else { return Ok((0..program.len()).collect()) };
+    let in_package = |index: usize| {
+        program.package_of(index).and_then(|package| program.packages().get(package)).is_some_and(|package| package.name == wanted)
+    };
+    let selected: Vec<usize> = (0..program.len())
+        .filter(|&index| program.info(index).is_some_and(|info| entry_matches(&info.name, wanted)) || in_package(index))
+        .collect();
+    if selected.is_empty() {
+        return Err(EngineError::NoEntry(wanted.to_owned()));
+    }
+    Ok(selected)
 }
 
 /// Find the record `query` names: by its canonical name, or else by a path
@@ -166,16 +194,13 @@ fn entry_matches(name: &str, wanted: &str) -> bool {
 pub(crate) fn resolve_record<'a>(program: &'a Program, query: &str, entry: Option<&str>) -> Result<Located<'a>> {
     let query = query.trim();
     let canonical = query.strip_prefix('L').and_then(|rest| rest.strip_suffix(';')).filter(|_| query.len() > 2).unwrap_or(query);
-    let mut searched = Vec::new();
-    for (index, abc) in program.readable() {
-        let name = program.info(index).map_or("", |info| info.name.as_str());
-        if entry.is_none_or(|wanted| entry_matches(name, wanted)) {
-            searched.push((name, abc));
-        }
-    }
-    if let (Some(wanted), true) = (entry, searched.is_empty()) {
-        return Err(EngineError::NoEntry(wanted.to_owned()));
-    }
+    // An entry that is named but cannot be read holds no record to find.
+    let selected = selected_entries(program, entry)?;
+    let searched: Vec<(&str, Abc<'_>)> = program
+        .readable()
+        .filter(|(index, _)| selected.contains(index))
+        .map(|(index, abc)| (program.info(index).map_or("", |info| info.name.as_str()), abc))
+        .collect();
     let wrap = |entry: &str, source| EngineError::Abc { entry: entry.to_owned(), source };
 
     let mut found = Vec::new();
@@ -287,6 +312,10 @@ mod tests {
         assert!(NameFilter::Regex(Regex::new("pages/[A-Z]\\w+&$").unwrap()).matches(name));
         assert!(entry_matches("entry.hap/ets/widgets.abc", "ets/widgets.abc") && entry_matches("a.abc", "a.abc"));
         assert!(!entry_matches("entry.hap/ets/widgets.abc", "widgets.abc/") && !entry_matches("xets/a.abc", "ets/a.abc"));
+        // A package names its entries; part of a name does not.
+        assert!(entry_matches("entry.hap/ets/widgets.abc", "entry.hap") && entry_matches("shop.app/entry.hap/ets/modules.abc", "shop.app"));
+        assert!(entry_matches("shop.app/entry.hap/ets/modules.abc", "shop.app/entry.hap"));
+        assert!(!entry_matches("entry.hap/ets/widgets.abc", "entry") && !entry_matches("entry.hap/ets/widgets.abc", "entry.hap/"));
     }
 
     #[test]

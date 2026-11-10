@@ -824,6 +824,7 @@ impl Server {
     }
 
     fn findrefs(&self, args: &Value, call: &Call) -> ToolResult {
+        harmony::refuse_on_dex(args, "entry", "")?;
         if args.get("rules").is_some() {
             return self.findrefs_rules(args, call);
         }
@@ -1054,6 +1055,7 @@ impl Server {
 
     fn listclass(&self, args: &Value, call: &Call) -> ToolResult {
         harmony::refuse_on_dex(args, "all", " (a DEX program has no pseudo records)")?;
+        harmony::refuse_on_dex(args, "entry", "")?;
         if let Some(paths) = multi::targets(args)? {
             return self.listclass_many(args, call, &paths);
         }

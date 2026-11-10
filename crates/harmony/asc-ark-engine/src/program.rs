@@ -122,6 +122,15 @@ pub struct EntryInfo {
     pub status: EntryStatus,
 }
 
+/// An encrypted package entry and the decrypted file that is read in its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandIn {
+    /// The entry, as rows name it: `entry.hap/ets/modules.abc`.
+    pub entry: String,
+    /// The bare `.abc` file next to the package, as the program labels it.
+    pub file: String,
+}
+
 /// Where the bytes of an entry are.
 enum Source {
     /// A stored zip entry, read in place.
@@ -168,6 +177,8 @@ pub(crate) struct Package {
     resources: Option<LazyEntry>,
     /// Whether it holds other packages (an `.app`) instead of a module.
     pub(crate) is_bundle: bool,
+    /// The `.app` it is inside of, by index, for an inner package.
+    pub(crate) parent: Option<usize>,
 }
 
 /// One file of a program and the name its entries are prefixed with (empty
@@ -221,6 +232,8 @@ pub(crate) struct Program {
     /// In the order they were opened: an `.app` ahead of its inner packages.
     packages: Vec<Package>,
     notes: Vec<String>,
+    /// The encrypted entries a decrypted file stands in for, in program order.
+    stand_ins: Vec<StandIn>,
     /// The files as they were listed, before any of them was mapped: a file
     /// replaced while the program opened makes the stamp stale, not wrong.
     stamp: Stamp,
@@ -235,6 +248,7 @@ impl Program {
             entries: Vec::new(),
             packages: Vec::new(),
             notes: Vec::new(),
+            stand_ins: Vec::new(),
             stamp: Stamp::of_sources(&files),
         };
         let lone = files.len() == 1;
@@ -268,6 +282,12 @@ impl Program {
 
     pub(crate) fn notes(&self) -> &[String] {
         &self.notes
+    }
+
+    /// The encrypted entries served from a decrypted file: not a note, the
+    /// program reads as if the package were not encrypted.
+    pub(crate) fn stand_ins(&self) -> &[StandIn] {
+        &self.stand_ins
     }
 
     pub(crate) fn stamp(&self) -> &Stamp {
@@ -429,7 +449,14 @@ impl Program {
                 || (nesting == Nesting::Allowed && is_package(name))
         })?;
         let container = self.push_container(zip);
-        self.packages.push(Package { name: shown.to_owned(), documents: Vec::new(), container, resources: None, is_bundle: false });
+        self.packages.push(Package {
+            name: shown.to_owned(),
+            documents: Vec::new(),
+            container,
+            resources: None,
+            is_bundle: false,
+            parent: None,
+        });
         let package = self.packages.len() - 1;
         let mut found = 0;
         for member in members {
@@ -443,10 +470,15 @@ impl Program {
                 self.packages[package].is_bundle = true;
                 // A broken inner package does not take the others with it.
                 let inner = self.containers[container].open_nested(&member).map_err(EngineError::from);
+                let position = self.packages.len();
                 match inner.and_then(|inner| self.add_package(inner, &name, &name, Nesting::Inner)) {
                     Ok(0) => self.notes.push(format!("{name}: no ets/*.abc")),
                     Ok(n) => found += n,
                     Err(err) => self.notes.push(format!("{name}: skipped: {err}")),
+                }
+                // Not there when the inner package did not open.
+                if let Some(inner) = self.packages.get_mut(position) {
+                    inner.parent = Some(package);
                 }
                 continue;
             }
@@ -557,7 +589,7 @@ impl Program {
             } else if self.abc(bare).is_some_and(|abc| abc.compute_checksum() != header.checksum) {
                 self.notes.push(format!("{bare_name} does not pair with the encrypted {name}: its body does not have the checksum"));
             } else {
-                self.notes.push(format!("{name} is encrypted in its package; served from the decrypted {bare_name}"));
+                self.stand_ins.push(StandIn { entry: name, file: bare_name.clone() });
                 return Some(bare);
             }
         }

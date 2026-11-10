@@ -3,10 +3,12 @@
 //! An ArkTS call names no callee, so the graph is made of what can be
 //! proved about each call site ([`edges`]): edges to functions of the
 //! program — local, through imports and exports ([`modules`]), by name
-//! inside a class — and leaves for everything else, external (system APIs,
-//! globals) or unresolved. A leaf keeps the callee path `findrefs call:`
-//! prints, so "which functions reach `import:@ohos:net.http`" is a callers
-//! query whose root is a pattern over leaves.
+//! inside a class and up its parent classes ([`crate::hierarchy`]) — and
+//! leaves for everything else, external (system APIs, globals) or
+//! unresolved. An edge that is not proved says so by its kind
+//! ([`EdgeKind`]). A leaf keeps the callee path `findrefs call:` prints, so
+//! "which functions reach `import:@ohos:net.http`" is a callers query whose
+//! root is a pattern over leaves.
 //!
 //! Nothing is indexed up front. The edges of a record are computed when a
 //! walk first needs them and kept in memory for the life of the [`Engine`]:
@@ -15,10 +17,23 @@
 //!   variables and module-level bindings of the records it imports from;
 //! - callers of a function need the edges of the records that can name it:
 //!   its own record and the records whose requests lead to it, directly or
-//!   through `export … from` chains ([`modules::Modules::importers_of`]).
-//!   That set comes from the module records alone, and is complete because
-//!   an edge into another record is only ever made through an import of
-//!   the calling record;
+//!   through `export … from` chains ([`modules::Importers::importers_of`]).
+//!   That set comes from the module records alone. An edge into another
+//!   record is made through an import of the calling record, with two
+//!   exceptions a method of a class has to pay for:
+//!   - a method is inherited: `this.m()`, `super.m()`, `D.m()` and
+//!     `new D().m()` lead to the method of an ancestor of `D`, whose record
+//!     the caller need not import. So the callers of a method are also
+//!     looked for in the records of the subclasses of its class and in the
+//!     records that import those. Subclasses are found level by level, each
+//!     level among the records that import the class above (a class names
+//!     its parent through an import): the class definitions of those
+//!     records are worked out ([`crate::hierarchy`]), nothing else;
+//!   - an object is exported: `api.m()`, where another record exports
+//!     `api = new C()`, leads to the method of `C`, which the caller need
+//!     not import either. So the callers of an instance method are also
+//!     looked for in the records that import a record with such a binding
+//!     of the class or of a subclass of it.
 //! - callers of a leaf pattern need the edges of every record.
 
 mod edges;
@@ -33,14 +48,15 @@ use asc_abc::{Abc, ClassEntry};
 
 pub use edges::EdgeKind;
 use edges::{Edge, FnRef, RecordEdges, Target};
-use modules::Importers;
 pub(crate) use modules::RecordId;
 pub use modules::{FormCount, RequestForm};
+use modules::{Importers, Layout, Packages};
 
+use crate::hierarchy::{self, ClassRef};
 use crate::refs::method::name_matches;
 use crate::refs::CallPaths;
 use crate::refs::{chunks, run_units, Regions, RECORD_CHUNK};
-use crate::scopes::{ScopeTables, Scopes};
+use crate::scopes::{ExportedDefinitions, ScopeTables, Scopes};
 use crate::track::Tracker;
 use crate::{records, Engine, EngineError, Pattern, Result};
 
@@ -158,8 +174,9 @@ pub struct CallRow {
     pub parent: Option<usize>,
     pub node: CallNode,
     /// How the parent row and this one are linked; `None` for a root. When
-    /// several call sites link them, the strongest kind (a proved call
-    /// before a by-name one before a definition).
+    /// several call sites link them, the strongest kind, in the order
+    /// [`EdgeKind`] lists them (a proved call before a by-name one before a
+    /// definition).
     pub kind: Option<EdgeKind>,
     /// Call sites (or definitions) that link the parent row and this one.
     pub sites: usize,
@@ -191,8 +208,9 @@ pub struct CallTree {
 impl CallTree {
     /// One line per row: indentation and the depth number, an arrow
     /// (`<-` caller, `->` callee), `RECORD->FUNCTION | restored name` or a
-    /// leaf's callee path, and flags: `[defines]`, `[this-class]`, `[new]`
-    /// for the kind of link, `[external]` / `[unresolved]` for a leaf,
+    /// leaf's callee path, and flags: `[new]`, `[super]`, `[instance]`,
+    /// `[this-class]`, `[inherited]`, `[reassigned]`, `[defines]` for the
+    /// kind of link ([`EdgeKind`]), `[external]` / `[unresolved]` for a leaf,
     /// `x3` for several call sites, `unresolved=N` for the call sites of a
     /// function that lead nowhere, `[ENTRY]` when `with_entry`, and
     /// `(repeated)`.
@@ -283,6 +301,10 @@ pub struct GraphSize {
 #[derive(Default)]
 pub(crate) struct Slot {
     scopes: OnceLock<Scopes>,
+    /// What the module-level bindings of the record hold: asked by the
+    /// hierarchy for every record it reads, by the call graph for a record
+    /// with a binding that is written more than once.
+    exported: OnceLock<ExportedDefinitions>,
     edges: OnceLock<RecordEdges>,
     /// Left by the first `call:` search that went through the whole record.
     call_paths: OnceLock<CallPaths>,
@@ -295,6 +317,7 @@ pub(crate) struct Slot {
 #[derive(Default)]
 pub(crate) struct GraphCache {
     importers: OnceLock<Importers>,
+    packages: Packages,
     slots: Mutex<HashMap<RecordId, Arc<Slot>>>,
     /// Heap bytes of what was computed so far, roughly: added once per part,
     /// by the thread whose result is kept.
@@ -304,7 +327,22 @@ pub(crate) struct GraphCache {
 impl GraphCache {
     /// Bytes the analyses computed so far take on the heap, roughly.
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.bytes.load(Ordering::Relaxed)
+        self.bytes.load(Ordering::Relaxed) + self.packages.heap_bytes()
+    }
+
+    /// Where the documents of the packages say records are.
+    pub(crate) fn packages(&self) -> &Packages {
+        &self.packages
+    }
+
+    /// What the module-level bindings of the record whose slot is `slot`
+    /// hold: `build` runs when no query asked yet, and what it returns is kept.
+    pub(crate) fn exported<'s>(&self, slot: &'s Slot, build: impl FnOnce() -> ExportedDefinitions) -> &'s ExportedDefinitions {
+        slot.exported.get_or_init(|| {
+            let exported = build();
+            self.charge(exported.heap_bytes());
+            exported
+        })
     }
 
     fn charge(&self, bytes: usize) {
@@ -387,6 +425,9 @@ pub(crate) struct Session<'e> {
     regions: Vec<Option<Regions<'e>>>,
     tables: ScopeTables,
     cache: Arc<GraphCache>,
+    /// The class hierarchy, for the walks and call sites that go up or down
+    /// a parent link: made when the first one does.
+    classes: OnceLock<hierarchy::Session<'e>>,
 }
 
 /// A node of a walk.
@@ -444,7 +485,16 @@ impl<'e> Session<'e> {
         let program = &engine.program;
         let abcs: Vec<Option<Abc<'e>>> = (0..program.len()).map(|index| program.abc(index)).collect();
         let regions = abcs.iter().map(|abc| abc.as_ref().map(Regions::of)).collect();
-        Session { engine, abcs, regions, tables: ScopeTables::new(), cache: engine.graph_cache() }
+        Session { engine, abcs, regions, tables: ScopeTables::new(), cache: engine.graph_cache(), classes: OnceLock::new() }
+    }
+
+    fn layout(&self) -> Layout<'_, 'e> {
+        Layout { abcs: &self.abcs, program: &self.engine.program, packages: self.cache.packages() }
+    }
+
+    /// The class hierarchy of the program, over the same cache.
+    fn classes(&self) -> &hierarchy::Session<'e> {
+        self.classes.get_or_init(|| hierarchy::Session::with_graph(self.engine, Arc::clone(&self.cache)))
     }
 
     /// Who imports each record: read from every module record the first
@@ -455,7 +505,7 @@ impl<'e> Session<'e> {
             return Ok(importers);
         }
         // Two walks may both build it; the first to finish is kept.
-        let built = Importers::build(&self.abcs, self.engine.threads, cancel)?;
+        let built = Importers::build(self.layout(), self.engine.threads, cancel)?;
         Ok(cache.importers.get_or_init(|| {
             cache.charge(built.heap_bytes());
             built
@@ -484,6 +534,17 @@ impl<'e> Session<'e> {
         Some(self.cache.scopes(slot, || Scopes::build(abc, regions, &class, &self.tables, &mut Tracker::default())))
     }
 
+    /// What the module-level bindings of record `id` hold; `slot` is its
+    /// slot and `scopes` its scopes.
+    fn exported<'s>(&self, slot: &'s Slot, id: RecordId, scopes: &Scopes) -> Option<&'s ExportedDefinitions> {
+        if let Some(exported) = slot.exported.get() {
+            return Some(exported);
+        }
+        let (abc, regions) = self.abc(id.entry).zip(self.regions(id.entry))?;
+        let class = abc.class(id.class).ok()?;
+        Some(self.cache.exported(slot, || ExportedDefinitions::build(abc, regions, &class, scopes, &self.tables)))
+    }
+
     /// The edges of record `id`, whose slot is `slot`.
     fn edges<'s>(&self, slot: &'s Slot, id: RecordId) -> Option<&'s RecordEdges> {
         if let Some(edges) = slot.edges.get() {
@@ -491,7 +552,7 @@ impl<'e> Session<'e> {
         }
         let scopes = self.scopes(slot, id)?;
         Some(slot.edges.get_or_init(|| {
-            let edges = self.build_edges(id, scopes);
+            let edges = self.build_edges(id, slot, scopes);
             self.cache.charge(edges.heap_bytes());
             edges
         }))
@@ -640,22 +701,13 @@ impl<'e> Session<'e> {
         cancel: &AtomicBool,
         scanned: &mut HashSet<RecordId>,
     ) -> Result<HashMap<Node, Neighbors>> {
-        let records: Vec<RecordId> = if frontier.iter().any(|node| matches!(node, Node::Leaf { .. })) {
-            self.all_records()
+        let (records, slots) = if frontier.iter().any(|node| matches!(node, Node::Leaf { .. })) {
+            let records = self.all_records();
+            let slots = self.load(&records, cancel)?;
+            (records, slots)
         } else {
-            let importers = self.importers(cancel)?;
-            let mut records = HashSet::new();
-            for node in frontier {
-                let Node::Function(function) = node else { continue };
-                let Some(home) = self.record_of(*function) else { continue };
-                records.insert(home);
-                records.extend(importers.importers_of(home));
-            }
-            let mut records: Vec<RecordId> = records.into_iter().collect();
-            records.sort_unstable();
-            records
+            self.records_that_reach(frontier, cancel)?
         };
-        let slots = self.load(&records, cancel)?;
         scanned.extend(records.iter().copied());
         // Looked up per edge: by reference, without building a node for each.
         let wanted_functions: HashSet<FnRef> =
@@ -683,6 +735,65 @@ impl<'e> Session<'e> {
             }
         }
         Ok(out)
+    }
+
+    /// The records whose code can have an edge to a function of `frontier`,
+    /// in order, with their edges computed: see the module documentation.
+    fn records_that_reach(&self, frontier: &[Node], cancel: &AtomicBool) -> Result<(Vec<RecordId>, Vec<Arc<Slot>>)> {
+        let importers = self.importers(cancel)?;
+        // The records of `homes` and the records that import them.
+        let with_importers = |homes: HashSet<RecordId>| -> HashSet<RecordId> {
+            let mut records: HashSet<RecordId> = homes.iter().flat_map(|&home| importers.importers_of(home)).collect();
+            records.extend(homes);
+            records
+        };
+        // The classes with a method in the frontier, and whether one of those methods is an instance method.
+        let mut family: HashSet<ClassRef> = HashSet::new();
+        let mut instance_methods = false;
+        let mut homes: HashSet<RecordId> = HashSet::new();
+        for node in frontier {
+            let Node::Function(function) = node else { continue };
+            let Some(home) = self.record_of(*function) else { continue };
+            homes.insert(home);
+            let slot = self.slot(home);
+            let membership = self.scopes(&slot, home).and_then(|scopes| scopes.membership(function.method));
+            // A constructor is only reached by name: `new`, or `super(...)` of a direct subclass.
+            if let Some(membership) = membership.filter(|membership| membership.class != function.method) {
+                instance_methods |= !membership.is_static;
+                family.insert(ClassRef { entry: function.entry, ctor: membership.class });
+            }
+        }
+        let mut records = with_importers(homes);
+        // Their subclasses, level by level: a class names its parent through an import, so the
+        // subclasses of a level are in the records that import the records of that level.
+        let mut level: HashSet<ClassRef> = family.clone();
+        while !level.is_empty() {
+            let candidates = with_importers(level.iter().filter_map(|class| self.classes().record_of(*class)).collect());
+            records.extend(candidates.iter().copied());
+            let mut candidates: Vec<RecordId> = candidates.into_iter().collect();
+            candidates.sort_unstable();
+            let subclasses = self.classes().subclasses_among(&level, &candidates, cancel)?;
+            level = subclasses.into_iter().filter(|class| family.insert(*class)).collect();
+        }
+        let mut records: Vec<RecordId> = records.into_iter().collect();
+        records.sort_unstable();
+        let mut slots = self.load(&records, cancel)?;
+        if instance_methods {
+            // The records that export an object of one of the classes: whoever imports them can call its methods.
+            let mut readers: HashSet<RecordId> = HashSet::new();
+            for (&id, slot) in records.iter().zip(&slots) {
+                if self.holds_instance_of(id, slot, &family) {
+                    readers.extend(importers.importers_of(id));
+                }
+            }
+            let mut more: Vec<RecordId> = readers.into_iter().filter(|id| records.binary_search(id).is_err()).collect();
+            if !more.is_empty() {
+                more.sort_unstable();
+                slots.extend(self.load(&more, cancel)?);
+                records.extend(more);
+            }
+        }
+        Ok((records, slots))
     }
 
     /// The leaves whose path `pattern` matches, in program order.

@@ -72,6 +72,8 @@ pub struct PackForm {
     pub kind: Option<String>,
     pub update_enabled: Option<bool>,
     pub update_duration: Option<i64>,
+    /// `scheduledUpdateTime`: the time of day of the daily update, `10:30`.
+    pub scheduled_update_time: Option<String>,
     pub default_dimension: Option<String>,
     pub support_dimensions: Vec<String>,
 }
@@ -156,6 +158,7 @@ impl PackInfo {
                         .opt("type", f.kind.as_deref())
                         .flag("updateEnabled", f.update_enabled)
                         .num("updateDuration", f.update_duration)
+                        .opt_present("scheduledUpdateTime", f.scheduled_update_time.as_deref())
                         .opt("defaultDimension", f.default_dimension.as_deref())
                         .list("supportDimensions", &f.support_dimensions)
                         .end()
@@ -211,6 +214,7 @@ fn read_module(o: &mut Obj<'_, '_>) -> PackModule {
                 kind: f.str("type"),
                 update_enabled: f.bool("updateEnabled"),
                 update_duration: f.int("updateDuration"),
+                scheduled_update_time: f.str("scheduledUpdateTime"),
                 default_dimension: f.str("defaultDimension"),
                 support_dimensions: f.strings("supportDimensions"),
             }),

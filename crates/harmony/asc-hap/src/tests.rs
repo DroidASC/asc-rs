@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::{AbilityKind, ApiVersion, HapError, ModuleJson, PackInfo, PkgContextInfo, SkillUri};
+use crate::{AbilityKind, ApiVersion, HapError, ModuleJson, PackInfo, PageList, PkgContextInfo, RouterMap, SkillUri};
 
 fn module(json: serde_json::Value) -> ModuleJson {
     ModuleJson::parse(json.to_string().as_bytes()).unwrap()
@@ -495,6 +495,12 @@ fn record_names() {
     // The table's source root and version are used, whatever they are.
     let table = PkgContextInfo::parse(br#"{"entry": {"entryPath": "lib/", "version": "1.2.3"}}"#).unwrap();
     assert_eq!(m.record_names("ets/a/B.ts", Some(&table)).normalized.as_deref(), Some("&entry/lib/ets/a/B&1.2.3"));
+    // A shared package lists its entry file there, or nothing: its sources are where they always are.
+    for entry_path in ["", "Index.ets"] {
+        let table =
+            PkgContextInfo::parse(format!(r#"{{"entry": {{"entryPath": "{entry_path}", "version": "2.0.0"}}}}"#).as_bytes()).unwrap();
+        assert_eq!(m.record_names("ets/a/B.ts", Some(&table)).normalized.as_deref(), Some("&entry/src/main/ets/a/B&2.0.0"));
+    }
 
     for (source, path) in [
         ("./ets/a/B.ts", "ets/a/B"),
@@ -514,4 +520,77 @@ fn record_names_with_missing_manifest_fields() {
     assert_eq!((names.normalized.as_deref(), names.bundled.as_deref()), (Some("&feature/src/main/ets/A&"), None));
     assert_eq!(names.candidates(), ["&feature/src/main/ets/A&"]);
     assert!(module(json!({})).record_names("./ets/A.ets", None).candidates().is_empty());
+}
+
+#[test]
+fn fields_of_newer_packages_are_modelled() {
+    let m = module(json!({
+        "app": {
+            "bundleName": "com.x.y", "minMinorAPIVersion": 0, "minPatchAPIVersion": 0, "GWPAsanEnabled": true,
+            "multiAppMode": { "multiAppModeType": "appClone", "maxCount": 2 }
+        },
+        "module": { "abilities": [{
+            "name": "Side", "removeMissionAfterTerminate": true, "startWindow": "$profile:start_window", "startWindowId": 7
+        }] }
+    }));
+    assert!(m.unmodelled.is_empty() && m.notes.is_empty(), "{:?} {:?}", m.unmodelled, m.notes);
+    let lines = m.summary_lines();
+    assert!(lines[0].ends_with(" buildMode=- multiAppMode=appClone multiAppMaxCount=2 GWPAsanEnabled=true"), "{}", lines[0]);
+    assert!(lines[2].ends_with(" srcEntry=- removeMissionAfterTerminate=true"), "{}", lines[2]);
+    assert_eq!((m.app.min_minor_api_version, m.app.min_patch_api_version), (Some(0), Some(0)));
+
+    let pack = PackInfo::parse(
+        br#"{"summary": {"modules": [{"distro": {"moduleName": "entry"}, "extensionAbilities": [
+            {"name": "Form", "forms": [{"name": "Card", "scheduledUpdateTime": "10:30", "updateEnabled": true}]}]}]}}"#,
+    )
+    .unwrap();
+    assert!(pack.unmodelled.is_empty(), "{:?}", pack.unmodelled);
+    assert!(pack.summary().contains("pack-form entry Form Card type=- updateEnabled=true updateDuration=- scheduledUpdateTime=10:30 "));
+}
+
+#[test]
+fn page_lists_and_route_tables() {
+    let pages = PageList::parse(br#"{"src": ["pages/Index", "pages/sub/Detail", 3], "window": {"designWidth": 720}}"#).unwrap();
+    assert_eq!(pages.pages, ["pages/Index", "pages/sub/Detail"]);
+    assert_eq!(pages.notes.len(), 1);
+    assert_eq!(PageList::src_entry("pages/Index"), "./ets/pages/Index");
+    assert!(PageList::parse(b"{}").unwrap().pages.is_empty());
+    assert!(PageList::parse(b"[]").is_err());
+
+    let table = RouterMap::parse(
+        br#"{"routerMap": [
+            {"name": "detail", "pageSourceFile": "src/main/ets/pages/Detail.ets", "buildFunction": "DetailBuilder",
+             "ohmurl": "@normalized:N&&&entry/src/main/ets/pages/Detail&", "data": {"k": "v"}, "customData": [1]},
+            {"name": "lib/pay", "pageSourceFile": "src/main/ets/Pay.ts", "buildFunction": "PayBuilder", "packageName": "@lib/pay",
+             "ohmurl": "@normalized:N&shared&com.other&@lib/pay/src/main/ets/Pay&1.2.0"},
+            {"name": "old", "pageSourceFile": "./src/main/ets/pages/Old.ets", "buildFunction": "OldBuilder"},
+            {"name": "native", "ohmurl": "@normalized:Y&&&libpay.so&"},
+            7
+        ]}"#,
+    )
+    .unwrap();
+    assert_eq!(table.routes.len(), 4);
+    assert_eq!(table.notes.len(), 1);
+    let records: Vec<Option<&str>> = table.routes.iter().map(|route| route.ohmurl_record()).collect();
+    assert_eq!(records, [Some("&entry/src/main/ets/pages/Detail&"), Some("com.other&@lib/pay/src/main/ets/Pay&1.2.0"), None, None]);
+    assert_eq!(table.routes[0].ohmurl_module(), Some(""));
+    assert_eq!(table.routes[1].ohmurl_module(), Some("shared"));
+    assert_eq!(table.routes[1].record_path(Some("entry")).as_deref(), Some("@lib/pay/src/main/ets/Pay"));
+    assert_eq!(table.routes[2].record_path(Some("entry")).as_deref(), Some("entry/src/main/ets/pages/Old"));
+    assert_eq!(table.routes[3].record_path(Some("entry")), None);
+
+    let m = module(json!({ "app": { "bundleName": "com.x.y" }, "module": { "name": "entry", "packageName": "entry" } }));
+    let packages =
+        PkgContextInfo::parse(br#"{"entry": {"entryPath": "src/main/", "version": ""}, "@lib/pay": {"version": "1.2.0"}}"#).unwrap();
+    let names = |index: usize, table_given: bool| m.route_record_names(&table.routes[index], table_given.then_some(&packages));
+    // The ohmurl is the record; a page of the module itself may also be spelled by bundle and module.
+    assert_eq!(names(0, false).candidates(), ["&entry/src/main/ets/pages/Detail&", "com.x.y/entry/ets/pages/Detail"]);
+    assert_eq!(names(1, true).candidates(), ["com.other&@lib/pay/src/main/ets/Pay&1.2.0"]);
+    // Without one, the name comes from the source file and the package table.
+    assert_eq!(names(2, false).candidates(), ["com.x.y/entry/ets/pages/Old", "&entry/src/main/ets/pages/Old&"]);
+    assert_eq!(names(2, true).candidates(), ["&entry/src/main/ets/pages/Old&", "com.x.y/entry/ets/pages/Old"]);
+    let mut by_source = table.routes[1].clone();
+    by_source.ohmurl = None;
+    assert_eq!(m.route_record_names(&by_source, Some(&packages)).candidates(), ["&@lib/pay/src/main/ets/Pay&1.2.0"]);
+    assert!(names(3, true).candidates().is_empty());
 }

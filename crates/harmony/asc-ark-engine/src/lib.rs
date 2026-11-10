@@ -55,7 +55,7 @@ pub use hierarchy::{ClassDefinition, ClassNode, ClassRow, DefinedMethod, Hierarc
 pub use manifest::{CodeLink, Document, DocumentText, EntryCode, Manifest, ManifestLine, PackageManifest, PackageRecords};
 pub use measure::{CallResolution, CalleeRoot, ResolutionOptions, ResolvedCapture};
 pub use ops::Access;
-pub use program::{EntryInfo, EntryStatus, Format, Stamp};
+pub use program::{EntryInfo, EntryStatus, Format, Stamp, StandIn};
 pub use records::{ListOptions, NameFilter, RecordListing};
 pub use refs::{NumberQuery, Pattern, Query, RefBatch, RefRow, RefSite, RefSummary, RequestListing};
 pub use resources::{ChainEnd, PackageFile, ResolvedResource, ResourceField, ResourceRow, ResourceTables};
@@ -227,8 +227,8 @@ impl Engine {
         self.program.infos()
     }
 
-    /// What the program leaves out or substitutes, one line each: encrypted
-    /// entries, packages without code, files that did not open.
+    /// What the program leaves out, one line each: encrypted entries
+    /// nothing stands in for, packages without code, files that did not open.
     pub fn notes(&self) -> &[String] {
         self.program.notes()
     }
@@ -277,11 +277,32 @@ impl Engine {
     /// [`EngineError::Cancelled`] once `cancel` is raised (checked between
     /// units of work; batches already delivered stay delivered).
     pub fn find_refs(&self, query: &Query, cancel: &AtomicBool, sink: &mut dyn FnMut(RefBatch)) -> Result<RefSummary> {
+        self.find_refs_in(query, None, cancel, sink)
+    }
+
+    /// As [`Engine::find_refs`], in the ABC entries `entry` names only
+    /// (`None`: all): an entry by its name or a suffix of it that starts at
+    /// a `/` (`ets/widgets.abc`), or every entry of a package by the
+    /// package's name (`entry.hap`, `shop.app/entry.hap`). A resource id is
+    /// unique within one package only: this is how a search for one stays in
+    /// its package.
+    ///
+    /// # Errors
+    /// As [`Engine::find_refs`]; [`EngineError::NoEntry`] when `entry` names
+    /// no entry of the program.
+    pub fn find_refs_in(
+        &self,
+        query: &Query,
+        entry: Option<&str>,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(RefBatch),
+    ) -> Result<RefSummary> {
         let started = Instant::now();
+        let selected = records::selected_entries(&self.program, entry)?;
         let mut summary = RefSummary { notes: self.notes().to_vec(), ..RefSummary::default() };
         // One cache for the whole search, whatever is released meanwhile.
         let cache = self.graph_cache();
-        for (index, abc) in self.program.readable() {
+        for (index, abc) in self.program.readable().filter(|(index, _)| selected.contains(index)) {
             let name = self.program.info(index).map_or("", |info| info.name.as_str());
             let entry = refs::Entry { name, index: u32::try_from(index).unwrap_or(u32::MAX), abc };
             let batch = refs::search_entry(&entry, query, &cache, self.threads, cancel)?;
@@ -302,7 +323,56 @@ impl Engine {
     /// # Errors
     /// [`EngineError::Abc`] for an entry whose class index cannot be read.
     pub fn module_requests(&self, pattern: Option<&Pattern>) -> Result<Vec<RequestListing>> {
-        refs::module_requests(&self.program, pattern)
+        self.module_requests_in(pattern, None)
+    }
+
+    /// As [`Engine::module_requests`], of the ABC entries `entry` names only
+    /// (as [`Engine::find_refs_in`] takes it).
+    ///
+    /// # Errors
+    /// As [`Engine::module_requests`]; [`EngineError::NoEntry`] when `entry`
+    /// names no entry of the program.
+    pub fn module_requests_in(&self, pattern: Option<&Pattern>, entry: Option<&str>) -> Result<Vec<RequestListing>> {
+        let selected = records::selected_entries(&self.program, entry)?;
+        let mut requests = refs::module_requests(&self.program, pattern)?;
+        if entry.is_some() {
+            let names: Vec<&str> = selected.iter().filter_map(|&index| Some(self.program.info(index)?.name.as_str())).collect();
+            requests.retain(|request| names.contains(&request.entry.as_str()));
+        }
+        Ok(requests)
+    }
+
+    /// The ABC entries `entry` names (as [`Engine::find_refs_in`] takes
+    /// it; `None`: all), readable or not, in program order.
+    ///
+    /// # Errors
+    /// [`EngineError::NoEntry`] when `entry` names no entry of the program.
+    pub fn entries_in(&self, entry: Option<&str>) -> Result<Vec<&EntryInfo>> {
+        let selected = records::selected_entries(&self.program, entry)?;
+        Ok(selected.into_iter().filter_map(|index| self.program.info(index)).collect())
+    }
+
+    /// The encrypted package entries that are read from a decrypted file
+    /// found next to the package, in program order. Such a program answers
+    /// as if it were not encrypted, so these are no part of
+    /// [`Engine::notes`]; `manifest-summary` names the file on the `abc`
+    /// line of each entry.
+    pub fn stand_ins(&self) -> &[StandIn] {
+        self.program.stand_ins()
+    }
+
+    /// One line that says the program reads decrypted files in place of
+    /// encrypted entries, for a front end to show; `None` when it reads
+    /// none. One stand-in is named; several are counted.
+    pub fn stand_in_note(&self) -> Option<String> {
+        match self.stand_ins() {
+            [] => None,
+            [one] => Some(format!("{} is encrypted in its package; served from the decrypted {}", one.entry, one.file)),
+            many => Some(format!(
+                "{} encrypted abc entries are served from the decrypted files next to them (manifest-summary names each: its `abc` lines)",
+                many.len()
+            )),
+        }
     }
 
     /// Whether the program has more than one ABC entry, i.e. whether rows

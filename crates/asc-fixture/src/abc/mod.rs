@@ -35,6 +35,8 @@ mod asm;
 mod calls;
 mod classes;
 mod layout;
+mod lineage;
+mod packages;
 mod plan;
 mod sample;
 mod spec;
@@ -44,6 +46,11 @@ pub use asm::{Asm, Assembled, Catch, Op};
 pub use calls::{call_graph_program, CALLS_APP, CALLS_BOX, CALLS_INDEX, CALLS_UTIL};
 pub use classes::{class_hierarchy_program, CLASSES_APP, CLASSES_BASE, CLASSES_INDEX};
 pub use layout::{AbcFile, AbcLayout, AbcRegionLayout};
+pub use lineage::{class_calls_program, LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE, LINEAGE_SERVICE};
+pub use packages::{
+    packaged_entry_program, packaged_library_program, PACKAGED_ENTRY_MODULE_JSON, PACKAGED_ENTRY_PKG_CONTEXT, PACKAGED_INDEX, PACKAGED_KIT,
+    PACKAGED_LIBRARY_MODULE_JSON, PACKAGED_OWN, PACKAGED_TOOL,
+};
 pub use sample::{make_abc, make_multi_region_abc, sample_program, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL, SAMPLE_MAGIC};
 pub use spec::{
     AbcAnnotation, AbcAnnotationElement, AbcCatch, AbcCode, AbcDebugInfo, AbcField, AbcFieldValue, AbcFunction, AbcIndirectExport,

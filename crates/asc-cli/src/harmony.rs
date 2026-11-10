@@ -46,9 +46,10 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
     io.window = common.window();
     io.spill = common.spill();
     let code = match command {
-        Command::Listclass { prefix, all, output, apk_path } => {
+        Command::Listclass { prefix, all, entry, output, apk_path } => {
             let engine = open(io, common, &apk_path)?;
-            listclass(io, &engine, prefix, all, output.as_ref())?;
+            let options = ListOptions { filter: prefix.map(NameFilter::Prefix), all, entry };
+            listclass(io, &engine, &options, output.as_ref())?;
             EXIT_OK
         }
         Command::Getclass { output, no_debug_info: _, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class } => {
@@ -73,18 +74,18 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             getclass(io, common, &args)?;
             EXIT_OK
         }
-        Command::Findrefs { apk_path, context, context_method, access, find } => {
+        Command::Findrefs { apk_path, context, context_method, access, entry, find } => {
             if context.is_some() || context_method {
                 return Err(unsupported_search("--context"));
             }
             match search(io, find, access)? {
                 Search::Refs { query, output } => {
                     let engine = open(io, common, &apk_path)?;
-                    findrefs(io, &engine, &query, output.as_ref())?
+                    findrefs(io, &engine, &query, entry.as_deref(), output.as_ref())?
                 }
                 Search::Requests { pattern, output } => {
                     let engine = open(io, common, &apk_path)?;
-                    module_requests(io, &engine, &pattern, output.as_ref())?;
+                    module_requests(io, &engine, &pattern, entry.as_deref(), output.as_ref())?;
                     EXIT_OK
                 }
             }
@@ -183,19 +184,32 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
 }
 
 /// Open the program and report what it leaves out (encrypted entries,
-/// packages without code), as the DEX side reports its program notes.
+/// packages without code), as the DEX side reports its program notes. That
+/// encrypted entries are read from decrypted files is one `# note:` line,
+/// however many there are: nothing is left out.
 fn open(io: &mut Io<'_>, common: &Common, path: &Path) -> Result<Arc<Engine>, String> {
     let engine = io.harmony(common, path).map_err(|e| e.to_string())?;
     for note in engine.notes() {
         io.note(format_args!("# warning: {note}"));
     }
+    if let Some(note) = engine.stand_in_note() {
+        io.note(format_args!("# note: {note}"));
+    }
     Ok(engine)
 }
 
+/// What a search or listing that `--entry` keeps to part of the program
+/// says when it fails: an entry that is not there is told what is.
+fn entry_error(engine: &Engine, error: &EngineError) -> String {
+    match error {
+        EngineError::NoEntry(_) => format!("{error} ({})", asc_mcp::harmony::entries_hint(engine)),
+        other => other.to_string(),
+    }
+}
+
 /// One record per line; a program of several ABC entries also names the entry.
-fn listclass(io: &mut Io<'_>, engine: &Engine, prefix: Option<String>, all: bool, output: Option<&PathBuf>) -> Result<(), String> {
-    let options = ListOptions { filter: prefix.map(NameFilter::Prefix), all };
-    let records = engine.list_classes(&options).map_err(|e| e.to_string())?;
+fn listclass(io: &mut Io<'_>, engine: &Engine, options: &ListOptions, output: Option<&PathBuf>) -> Result<(), String> {
+    let records = engine.list_classes(options).map_err(|e| entry_error(engine, &e))?;
     let with_entry = engine.has_several_entries();
     let text: String = records.iter().map(|record| record.line(with_entry) + "\n").collect();
     match output {
@@ -233,7 +247,7 @@ fn getmanifest(io: &mut Io<'_>, engine: &Engine, given: &Path, document: Documen
     let mut text = String::new();
     for found in manifest.documents(document) {
         if several {
-            text.push_str(&format!("# {}/{}\n", found.package, found.document));
+            text.push_str(&format!("# {}\n", found.heading()));
         }
         text.push_str(found.text.trim_end());
         text.push('\n');
@@ -542,8 +556,14 @@ fn search(io: &Io<'_>, find: Find, access: Option<FieldAccessArg>) -> Result<Sea
 }
 
 /// `findrefs import --requests`: one line per distinct module request.
-fn module_requests(io: &mut Io<'_>, engine: &Engine, pattern: &Pattern, output: Option<&PathBuf>) -> Result<(), String> {
-    let requests = engine.module_requests(Some(pattern)).map_err(|e| e.to_string())?;
+fn module_requests(
+    io: &mut Io<'_>,
+    engine: &Engine,
+    pattern: &Pattern,
+    entry: Option<&str>,
+    output: Option<&PathBuf>,
+) -> Result<(), String> {
+    let requests = engine.module_requests_in(Some(pattern), entry).map_err(|e| entry_error(engine, &e))?;
     let with_entry = engine.has_several_entries();
     let text: String = requests.iter().map(|request| request.line(with_entry) + "\n").collect();
     io.write_output(output, &text)?;
@@ -588,6 +608,12 @@ impl CallTarget {
 /// ABC entries no query reads (encrypted, damaged): named when the program opened.
 fn unreadable_entries(engine: &Engine) -> usize {
     engine.entries().filter(|entry| entry.status != EntryStatus::Readable).count()
+}
+
+/// As [`unreadable_entries`], among the entries `--entry` keeps the search to.
+fn unreadable_entries_in(engine: &Engine, entry: Option<&str>) -> Result<usize, String> {
+    let entries = engine.entries_in(entry).map_err(|e| entry_error(engine, &e))?;
+    Ok(entries.into_iter().filter(|entry| entry.status != EntryStatus::Readable).count())
 }
 
 /// The tree of `query`, with `from` the caller paths it keeps: the exit
@@ -647,14 +673,17 @@ fn hierarchy(io: &mut Io<'_>, engine: &Engine, query: &HierarchyQuery, output: O
     Ok(EXIT_PARTIAL)
 }
 
-/// One row per reference, entry by entry in program order: the exit status,
-/// [`EXIT_PARTIAL`] when part of the program could not be searched.
-fn findrefs(io: &mut Io<'_>, engine: &Engine, query: &Query, output: Option<&PathBuf>) -> Result<u8, String> {
+/// One row per reference, entry by entry in program order (of the entries
+/// `entry` names, when given): the exit status, [`EXIT_PARTIAL`] when part of
+/// what was to be searched could not be.
+fn findrefs(io: &mut Io<'_>, engine: &Engine, query: &Query, entry: Option<&str>, output: Option<&PathBuf>) -> Result<u8, String> {
+    // Before the output file is made: an entry that is not there is the whole answer.
+    let unreadable = unreadable_entries_in(engine, entry)?;
     let cancel = io.cancel;
     let mut sink = io.sink(output, true)?;
     let mut errors = Vec::new();
     let summary = engine
-        .find_refs(query, cancel, &mut |batch| {
+        .find_refs_in(query, entry, cancel, &mut |batch| {
             for row in &batch.rows {
                 sink.line(&row.line(&batch.entry_name));
             }
@@ -673,10 +702,14 @@ fn findrefs(io: &mut Io<'_>, engine: &Engine, query: &Query, output: Option<&Pat
         for hint in engine.no_results_hints(query, cancel) {
             io.note(format_args!("hint: {hint}"));
         }
+        if let Some(entry) = entry {
+            let all = engine.entries().count();
+            io.note(format_args!("hint: --entry {entry} kept the search to {} of the {all} abc entries", summary.entries));
+        }
     }
     io_result?;
     // Entries left out whole (encrypted, damaged) were named when the program opened.
-    let unsearched = unreadable_entries(engine) + errors.len();
+    let unsearched = unreadable + errors.len();
     if unsearched == 0 {
         return Ok(EXIT_OK);
     }

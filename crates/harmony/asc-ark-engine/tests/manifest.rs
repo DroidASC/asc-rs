@@ -11,8 +11,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use asc_ark_engine::{CodeLink, Document, Engine, EngineError, Manifest};
-use asc_fixture::abc::{make_abc, make_multi_region_abc, sample_program, ENTRY_ABILITY};
-use asc_fixture::hap::{make_app, make_hap, Compression, Hap, SAMPLE_MODULE_JSON};
+use asc_fixture::abc::{make_abc, make_multi_region_abc, sample_program, ENTRY_ABILITY, INDEX_PAGE};
+use asc_fixture::hap::{
+    make_app, make_hap, make_library_hsp, make_routed_hap, routed_module_json, Compression, Hap, DETAIL_PAGE, SAMPLE_MODULE_JSON,
+    SHARED_PAGE,
+};
 
 /// The package table of the sample module, plus a library and a native one.
 const PKG_CONTEXT: &str = r#"{
@@ -75,6 +78,15 @@ fn a_hap_joins_its_components_to_records() {
     assert_eq!(starting(&all, "pack-app"), ["pack-app com.example.sample bundleType=- versionCode=1000000 versionName=1.0.0"]);
     assert!(starting(&all, "module")[0].starts_with("module entry type=entry ") && !starting(&all, "module")[0].contains("record="));
     assert!(starting(&all, "package-table").is_empty());
+    // The code of the package, and the pages of its page list with their records.
+    let at = all.iter().position(|line| line.starts_with("module ")).unwrap();
+    assert!(all[at + 1].starts_with("abc ets/modules.abc version=12.0.6.0 bytes=") && all[at + 1].ends_with(" status=readable"), "{all:?}");
+    assert_eq!(starting(&all, "page"), [format!("page pages/Index record={INDEX_PAGE}")]);
+    assert_eq!(
+        package.pages[0].link,
+        CodeLink::Record { record: INDEX_PAGE.into(), entry: "ets/modules.abc".into(), callbacks: Vec::new() }
+    );
+    assert!(starting(&all, "route").is_empty() && starting(&all, "pack-info").is_empty());
 
     // One document only; the documents themselves, re-indented.
     assert!(lines(&manifest, Some(Document::Pack)).iter().all(|line| line.starts_with("pack-")));
@@ -92,6 +104,66 @@ fn a_hap_joins_its_components_to_records() {
     assert_eq!(component["callbacks"][0], "EntryAbility.onCreate");
     assert_eq!((component["exported"].as_bool(), component["deep_links"][0].as_str()), (Some(true), Some("sample://open")));
     assert_eq!(json["packages"][0]["request_permissions"][0], "ohos.permission.INTERNET");
+    assert_eq!(
+        json["packages"][0]["pages"],
+        serde_json::json!([{"page": "pages/Index", "record": INDEX_PAGE, "abc": "ets/modules.abc", "callbacks": []}])
+    );
+    assert_eq!(json["packages"][0]["abc"][0]["status"], "readable");
+}
+
+#[test]
+fn routes_are_joined_to_the_records_of_their_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    // Alone: the route into another package finds no record, and says which name it tried.
+    let alone = manifest(&write(dir.path(), "alone/entry.hap", &make_routed_hap()));
+    let all = lines(&alone, None);
+    assert_eq!(
+        starting(&all, "route"),
+        [
+            format!("route detail buildFunction=DetailBuilder source=src/main/ets/pages/Detail.ets record={DETAIL_PAGE}"),
+            format!(
+                "route lib/shared buildFunction=SharedBuilder source=src/main/ets/pages/Shared.ets package=@sample/lib record=- (no \
+                 record {SHARED_PAGE})"
+            ),
+            format!("route index buildFunction=IndexBuilder source=src/main/ets/pages/Index.ets record={INDEX_PAGE}"),
+            "route gone buildFunction=GoneBuilder source=src/main/ets/pages/Gone.ets record=- (no record \
+             com.example.sample/entry/ets/pages/Gone or &entry/src/main/ets/pages/Gone&)"
+                .to_owned(),
+        ]
+    );
+    let module = starting(&all, "module")[0];
+    assert!(module.contains(" routerMap=$profile:router_map(resources/base/profile/router_map.json)"), "{module}");
+    // Pages and routes come after the components, the routes last.
+    let at = |word: &str| all.iter().position(|line| line.split(' ').next() == Some(word)).unwrap();
+    assert!(at("deeplink") < at("page") && at("page") < at("route") && at("route") < at("pack-app"), "{all:?}");
+    assert_eq!(alone.packages[0].routes.len(), 4);
+    assert_eq!(alone.json()["packages"][0]["routes"][0]["record"], DETAIL_PAGE);
+    assert_eq!(alone.json()["packages"][0]["routes"][3]["record"], serde_json::Value::Null);
+
+    // Next to the package that has the page, the route is joined across packages.
+    write(dir.path(), "both/entry.hap", &make_routed_hap());
+    write(dir.path(), "both/lib.hsp", &make_library_hsp());
+    let both = manifest(&dir.path().join("both"));
+    let all = lines(&both, None);
+    let shared: Vec<&str> = all.iter().filter(|line| line.contains(" route lib/shared ")).map(String::as_str).collect();
+    assert_eq!(
+        shared,
+        [format!(
+            "entry.hap | route lib/shared buildFunction=SharedBuilder source=src/main/ets/pages/Shared.ets package=@sample/lib \
+             record={SHARED_PAGE} abc=lib.hsp/ets/modules.abc"
+        )]
+    );
+    assert!(all.contains(&"lib.hsp | pack-info same-as=entry.hap (pack.info is byte for byte the one listed there)".to_owned()), "{all:?}");
+
+    // A route table that is not JSON is a note; the rest of the summary stands.
+    let broken = Hap::new().modules_abc(&make_abc()).module_json(&routed_module_json()).entry(
+        "resources/base/profile/router_map.json",
+        b"{\"routerMap\": [",
+        Compression::Stored,
+    );
+    let all = lines(&manifest(&write(dir.path(), "broken/entry.hap", &broken.build())), None);
+    assert!(starting(&all, "route").is_empty());
+    assert!(all.last().unwrap().starts_with("note resources/base/profile/router_map.json: invalid JSON: "), "{all:?}");
 }
 
 #[test]
@@ -108,7 +180,29 @@ fn an_app_has_its_own_pack_info_and_one_section_per_package() {
         let outer = &manifest.packages[0];
         assert!(outer.module.is_none() && outer.pack.is_some() && outer.component_code.is_empty());
         let all = lines(&manifest, None);
-        assert_eq!(all[0], "shop.app | pack-app com.example.sample bundleType=- versionCode=1000000 versionName=1.0.0");
+        // The three have the bytes of one pack.info: listed once, by the first.
+        assert_eq!(
+            all[..2],
+            [
+                "shop.app | pack-info packages=3 (pack.info is byte for byte the same in entry.hap, feature.hap: listed once, here)",
+                "shop.app | pack-app com.example.sample bundleType=- versionCode=1000000 versionName=1.0.0"
+            ]
+        );
+        assert_eq!(all.iter().filter(|line| line.contains(" | pack-app ")).count(), 1);
+        let same: Vec<&str> = all.iter().filter(|line| line.contains(" same-as=")).map(String::as_str).collect();
+        assert_eq!(
+            same,
+            [
+                "entry.hap | pack-info same-as=shop.app (pack.info is byte for byte the one listed there)",
+                "feature.hap | pack-info same-as=shop.app (pack.info is byte for byte the one listed there)"
+            ]
+        );
+        // A line about a module names its references by the index of that module's package: the app has none.
+        assert!(
+            all.contains(&"shop.app | pack-ability entry EntryAbility label=$string:EntryAbility_label(\"Sample\")".to_owned()),
+            "{all:?}"
+        );
+        assert_eq!(lines(&manifest, Some(Document::Pack)).len(), 7);
         // Each package resolves in its own code, and a program of several entries names the entry.
         let abilities: Vec<&str> = all.iter().filter(|line| line.contains(" | ability ")).map(String::as_str).collect();
         assert_eq!(abilities.len(), 2);
@@ -121,7 +215,10 @@ fn an_app_has_its_own_pack_info_and_one_section_per_package() {
         let mut sections = packages.clone();
         sections.dedup();
         assert_eq!(sections, ["shop.app", "entry.hap", "feature.hap"]);
-        assert_eq!(manifest.documents(Document::Pack).len(), 3);
+        let packs = manifest.documents(Document::Pack);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].heading(), "shop.app/pack.info (the same in entry.hap, feature.hap)");
+        assert_eq!(manifest.json()["packages"][1]["pack_info_same_as"], "shop.app");
         assert_eq!(
             manifest.documents(Document::Module).iter().map(|d| d.package.as_str()).collect::<Vec<_>>(),
             ["entry.hap", "feature.hap"]
@@ -139,7 +236,18 @@ fn a_directory_names_packages_by_their_path() {
     let first = lines(&manifest(dir.path()), None);
     let mut sections: Vec<&str> = first.iter().map(|line| line.split(" | ").next().unwrap()).collect();
     sections.dedup();
-    assert_eq!(sections, ["a/entry.hap", "b/feature.hap"]);
+    // A bare file that stands in for no package entry has no manifest: one line says so.
+    assert_eq!(sections, ["a/entry.hap", "b/feature.hap", "c/lib.abc"]);
+    let bare = first.last().unwrap();
+    assert!(
+        bare.starts_with("c/lib.abc | abc c/lib.abc version=12.0.6.0 bytes=")
+            && bare.ends_with(" status=readable bare (part of no package: no manifest, no resources)"),
+        "{bare}"
+    );
+    assert!(first.iter().any(|line| line.starts_with("a/entry.hap | abc a/entry.hap/ets/modules.abc version=12.0.6.0 bytes=")));
+    // The two packages carry the bytes of one pack.info.
+    assert_eq!(first.iter().filter(|line| line.contains(" | pack-app ")).count(), 1);
+    assert!(first.contains(&"b/feature.hap | pack-info same-as=a/entry.hap (pack.info is byte for byte the one listed there)".to_owned()));
     assert!(first.iter().any(|line| line.starts_with("b/feature.hap | ability ") && line.ends_with(" abc=b/feature.hap/ets/modules.abc")));
     // The same program gives the same lines.
     assert_eq!(lines(&manifest(dir.path()), None), first);
@@ -191,10 +299,24 @@ fn an_encrypted_entry_leaves_the_component_unresolved_until_the_decrypted_file_i
     );
     assert_eq!(alone.json()["packages"][0]["components"][0]["unresolved"], "ets/modules.abc is encrypted");
 
+    let entry = starting(&all, "abc")[0];
+    assert!(
+        entry.starts_with("abc ets/modules.abc version=12.0.6.0 bytes=")
+            && entry.ends_with(" status=encrypted (not searched: put the decrypted .abc next to the package)"),
+        "{entry}"
+    );
+
     // The decrypted file stands in for the entry, and the join goes through it.
     write(dir.path(), "store/modules.abc", &make_abc());
     let paired = manifest(&store);
     let all = lines(&paired, None);
+    let entry = starting(&all, "abc")[0];
+    assert!(
+        entry.starts_with("abc entry.hap/ets/modules.abc version=12.0.6.0 bytes=")
+            && entry.ends_with(" status=readable served-from=modules.abc (encrypted in the package)"),
+        "{entry}"
+    );
+    assert!(paired.bare.is_empty(), "the file that stands in is the package's entry, not a bare one");
     assert!(starting(&all, "ability")[0].ends_with(&format!(" record={ENTRY_ABILITY}")), "{all:?}");
     assert_eq!(
         starting(&all, "package-table"),
@@ -273,7 +395,7 @@ fn a_document_that_is_not_json_is_a_note() {
     let manifest = manifest(&path);
     assert!(!manifest.has(Document::Module) && manifest.has(Document::Pack));
     let all = lines(&manifest, None);
-    assert!(all[0].starts_with("pack-app "), "{all:?}");
+    assert!(all[0].starts_with("abc ets/modules.abc ") && all[1].starts_with("pack-app "), "{all:?}");
     assert!(all.last().unwrap().starts_with("note module.json: invalid JSON: "), "{all:?}");
 }
 

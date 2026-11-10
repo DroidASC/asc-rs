@@ -19,7 +19,9 @@
 //!   write stores a class or function and every other write stores a value
 //!   computed at run time: what a class decorator compiles to
 //!   (`C = decorator(C) || C`). The link is marked *reassigned*: the
-//!   binding holds the class or what the decorator returned for it;
+//!   binding holds the class or what the decorator returned for it (the
+//!   rule is [`crate::scopes::ExportedDefinitions`], which the call graph
+//!   follows too);
 //! - anything else is a leaf that keeps the value's path as `findrefs call:`
 //!   prints paths: *external* when the path starts at an import whose
 //!   request names no record of the program (`import:@ohos:app.ability.UIAbility#default`)
@@ -44,12 +46,12 @@ use std::sync::{Arc, Mutex};
 use asc_abc::{Abc, ClassEntry, ModuleRecord};
 use asc_arkisa::Prefix;
 
-use crate::callgraph::modules::{self, Binding};
+use crate::callgraph::modules::{Binding, Layout};
 use crate::callgraph::{GraphCache, RecordId};
 use crate::path::{Link, Names, NoLexicals, Origin, Path, PathBuilder, MAX_PATH_LINKS};
 use crate::refs::{chunks, pc_of, run_units, Regions};
-use crate::scopes::{Reader, ScopeTables, Scopes, Unresolved};
-use crate::track::{Event, StoreTarget, Tracker, Watch};
+use crate::scopes::{export_group, Exported, ExportedDefinitions, Reader, ScopeTables, Scopes};
+use crate::track::{Event, Tracker, Watch};
 use crate::{records, table_bytes, Engine, EngineError, Pattern, Result};
 
 /// Module-level bindings followed from one to the next before a parent is
@@ -402,9 +404,9 @@ pub struct ClassDefinition {
 
 /// A class of a program: the ABC entry and the offset of its constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct ClassRef {
-    entry: u32,
-    ctor: u32,
+pub(crate) struct ClassRef {
+    pub entry: u32,
+    pub ctor: u32,
 }
 
 /// The parent of a class definition, as far as its own record tells.
@@ -424,27 +426,6 @@ enum Parent {
         text: u32,
         external: bool,
     },
-}
-
-/// The class or function a module-level binding holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Exported {
-    /// Offset of its method (of a class: its constructor).
-    method: u32,
-    /// The binding is written again after it, with values computed at run time.
-    reassigned: bool,
-}
-
-/// What a store into a module-level binding writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Wrote {
-    /// A class or function of the record, by its method offset.
-    Definition(u32),
-    /// A value computed at run time: the result of a call, a member, or
-    /// something the tracker lost.
-    Computed,
-    /// Another binding or a constant.
-    Other,
 }
 
 /// A method of a class literal.
@@ -476,9 +457,6 @@ pub(crate) struct RecordClasses {
     defs: Vec<ClassDef>,
     /// Per constructor: its first definition in `defs`.
     by_ctor: HashMap<u32, u32>,
-    /// Per local export entry: the class or function of this record its
-    /// binding holds, when that is known.
-    exports: HashMap<u32, Exported>,
     texts: Vec<String>,
 }
 
@@ -504,7 +482,6 @@ impl RecordClasses {
         self.defs.capacity() * size_of::<ClassDef>()
             + self.defs.iter().map(|def| members(def) + bound(def)).sum::<usize>()
             + table_bytes(&self.by_ctor)
-            + table_bytes(&self.exports)
             + self.texts.capacity() * size_of::<String>()
             + self.texts.iter().map(String::capacity).sum::<usize>()
     }
@@ -539,7 +516,7 @@ enum Node {
 }
 
 /// One query's view of the program and the caches.
-struct Session<'e> {
+pub(crate) struct Session<'e> {
     engine: &'e Engine,
     /// The entries by index; `None` for the unreadable ones.
     abcs: Vec<Option<Abc<'e>>>,
@@ -561,69 +538,7 @@ struct Home<'s, 'a> {
 impl Home<'_, '_> {
     /// The local export entries that share the local name of entry `index`.
     fn export_group(&self, index: u32) -> Option<Vec<u32>> {
-        let module = self.module.as_ref()?;
-        let local = module.local_exports.get(index as usize)?.local_name_off;
-        let name = self.abc.string(local).ok()?.bytes;
-        let same = |off: u32| off == local || self.abc.string(off).is_ok_and(|other| other.bytes == name);
-        Some(
-            module
-                .local_exports
-                .iter()
-                .enumerate()
-                .filter(|(_, export)| same(export.local_name_off))
-                .filter_map(|(index, _)| u32::try_from(index).ok())
-                .collect(),
-        )
-    }
-
-    /// The class or function of the record the binding of local export
-    /// `index` holds: its one writer stores a definition and nothing else,
-    /// or (`reassigned`, the stores into each local export of the record)
-    /// one of its writers does and the others store computed values.
-    fn exported_definition(&self, index: u32, reassigned: &HashMap<u32, Vec<Wrote>>) -> Option<Exported> {
-        let group = self.export_group(index)?;
-        match self.scopes.module_binding(&group) {
-            Ok(written) => match written.path.origin {
-                Origin::Definition(Some(method)) if written.path.links.is_empty() && !written.path.cut => {
-                    Some(Exported { method, reassigned: false })
-                }
-                _ => None,
-            },
-            Err(Unresolved::MultipleWriters) => {
-                let mut writes = group.iter().filter_map(|index| reassigned.get(index)).flatten();
-                let mut found = None;
-                let mut computed = false;
-                for wrote in writes.by_ref() {
-                    match *wrote {
-                        Wrote::Definition(method) if found.is_none_or(|known| known == method) => found = Some(method),
-                        Wrote::Definition(_) | Wrote::Other => return None,
-                        Wrote::Computed => computed = true,
-                    }
-                }
-                found.filter(|_| computed).map(|method| Exported { method, reassigned: true })
-            }
-            Err(_) => None,
-        }
-    }
-
-    /// Whether some module-level binding of the record has several writers.
-    fn has_reassigned_bindings(&self) -> bool {
-        let exports = self.module.as_ref().map_or(0, |module| module.local_exports.len());
-        (0..exports)
-            .filter_map(|index| u32::try_from(index).ok())
-            .any(|index| matches!(self.scopes.module_binding(&[index]), Err(Unresolved::MultipleWriters)))
-    }
-}
-
-/// What kind of value `path` is, for a store into a module-level binding.
-fn wrote(path: &Path) -> Wrote {
-    match path.origin {
-        Origin::Definition(Some(method)) if path.links.is_empty() && !path.cut => Wrote::Definition(method),
-        Origin::Unknown | Origin::Computed => Wrote::Computed,
-        // A captured variable that did not resolve may hold another class.
-        Origin::Lexical { .. } | Origin::Slot { .. } => Wrote::Other,
-        _ if path.cut || !path.links.is_empty() => Wrote::Computed,
-        _ => Wrote::Other,
+        export_group(&self.abc, self.module.as_ref()?, index)
     }
 }
 
@@ -667,10 +582,31 @@ fn names_class(wanted: &str, raw: &str, name: &str) -> bool {
 
 impl<'e> Session<'e> {
     fn new(engine: &'e Engine) -> Session<'e> {
+        Session::with_graph(engine, engine.graph_cache())
+    }
+
+    /// A view for a query that holds `graph` already: the scopes of a
+    /// record are then shared with it whatever is released meanwhile.
+    pub(crate) fn with_graph(engine: &'e Engine, graph: Arc<GraphCache>) -> Session<'e> {
         let program = &engine.program;
         let abcs: Vec<Option<Abc<'e>>> = (0..program.len()).map(|index| program.abc(index)).collect();
         let regions = abcs.iter().map(|abc| abc.as_ref().map(Regions::of)).collect();
-        Session { engine, abcs, regions, tables: ScopeTables::new(), graph: engine.graph_cache(), cache: engine.class_cache() }
+        Session { engine, abcs, regions, tables: ScopeTables::new(), graph, cache: engine.class_cache() }
+    }
+
+    fn layout(&self) -> Layout<'_, 'e> {
+        Layout { abcs: &self.abcs, program: &self.engine.program, packages: self.graph.packages() }
+    }
+
+    /// The class or function the binding of local export `index` of record
+    /// `id` holds, when that is known.
+    fn exported(&self, id: RecordId, index: u32) -> Option<Exported> {
+        let abc = self.abc(id.entry)?;
+        let regions = self.regions.get(id.entry as usize)?.as_ref()?;
+        let class = abc.class(id.class).ok()?;
+        let slot = self.graph.slot(id);
+        let scopes = self.graph.scopes(&slot, || Scopes::build(abc, regions, &class, &self.tables, &mut Tracker::default()));
+        self.graph.exported(&slot, || ExportedDefinitions::build(abc, regions, &class, scopes, &self.tables)).get(index)
     }
 
     fn abc(&self, entry: u32) -> Option<Abc<'e>> {
@@ -734,31 +670,7 @@ impl<'e> Session<'e> {
         let (mut path, mut text) = (Path::default(), String::new());
         // A malformed member list ends the record's functions.
         let methods: Vec<_> = class.methods().into_iter().flatten().map_while(|method| method.ok()).collect();
-        // The stores into the bindings that have several: only a record with such a binding is walked for them.
-        let mut stores: HashMap<u32, Vec<Wrote>> = HashMap::new();
-        if home.has_reassigned_bindings() {
-            for method in &methods {
-                let Some(function) = regions.function(abc, method) else { continue };
-                let offset = method.offset();
-                let reader = Reader::new(scopes, offset);
-                let entity = |entity_id: u32| function.entity(entity_id);
-                // Code that does not decode: `Scopes::module_binding` gives up on the record's bindings then.
-                let _ = tracker.run_events(self.tables.effects(), &function.code, Watch::Stores, |frame, _, event| {
-                    let Event::Store { target: StoreTarget::Module(index), value } = event else { return };
-                    match &reader {
-                        Some(reader) => PathBuilder { frame, function: offset, entity: &entity, lexicals: reader }.build(value, &mut path),
-                        None => PathBuilder { frame, function: offset, entity: &entity, lexicals: &NoLexicals }.build(value, &mut path),
-                    }
-                    stores.entry(index).or_default().push(wrote(&path));
-                });
-            }
-        }
-        let exports = home.module.as_ref().map_or(0, |module| module.local_exports.len());
-        for index in (0..exports).filter_map(|index| u32::try_from(index).ok()) {
-            if let Some(exported) = home.exported_definition(index, &stores) {
-                out.exports.insert(index, exported);
-            }
-        }
+        let exported = self.graph.exported(&slot, || ExportedDefinitions::build(abc, regions, &class, scopes, &self.tables));
         for method in &methods {
             let Some(function) = regions.function(abc, method) else { continue };
             let offset = method.offset();
@@ -774,7 +686,7 @@ impl<'e> Session<'e> {
                 }
                 text.clear();
                 names.write(&mut text, &path);
-                let parent = self.parent(&home, &out.exports, &path, &mut |external| Parent::Leaf { text: texts.id(&text), external });
+                let parent = self.parent(&home, exported, &path, &mut |external| Parent::Leaf { text: texts.id(&text), external });
                 let members = scopes.class(ctor).map(|info| {
                     let instance =
                         info.instance.iter().map(|member| MemberDef { name: member.name, method: member.method, is_static: false });
@@ -789,7 +701,6 @@ impl<'e> Session<'e> {
             out.by_ctor.entry(def.ctor).or_insert(u32::try_from(index).unwrap_or(u32::MAX));
         }
         out.defs.shrink_to_fit();
-        out.exports.shrink_to_fit();
         out.texts = texts.list;
         out
     }
@@ -797,7 +708,7 @@ impl<'e> Session<'e> {
     /// What `path`, the value of a parent register in record `home`, is.
     /// `leaf` makes the leaf that keeps the path (`true`: external).
     /// `exports`: the definitions the bindings of `home` hold.
-    fn parent(&self, home: &Home<'_, 'e>, exports: &HashMap<u32, Exported>, path: &Path, leaf: &mut dyn FnMut(bool) -> Parent) -> Parent {
+    fn parent(&self, home: &Home<'_, 'e>, exports: &ExportedDefinitions, path: &Path, leaf: &mut dyn FnMut(bool) -> Parent) -> Parent {
         let mut current = path.clone();
         for _ in 0..MAX_HOPS {
             if current.cut {
@@ -807,8 +718,8 @@ impl<'e> Session<'e> {
                 (Origin::Constant("hole"), []) => return Parent::None,
                 (Origin::Definition(Some(method)), []) => return Parent::Local(Exported { method, reassigned: false }),
                 (Origin::ModuleLocal(index), links) => {
-                    if let (Some(exported), []) = (exports.get(&index), links) {
-                        return Parent::Local(*exported);
+                    if let (Some(exported), []) = (exports.get(index), links) {
+                        return Parent::Local(exported);
                     }
                     let Some(written) = home.export_group(index).and_then(|group| home.scopes.module_binding(&group).ok()) else { break };
                     if written.path.cut || written.path.links.len() + links.len() > MAX_PATH_LINKS {
@@ -820,14 +731,14 @@ impl<'e> Session<'e> {
                 }
                 (Origin::Import(index), links) => {
                     let Some(import) = home.module.as_ref().and_then(|module| module.regular_imports.get(index as usize)) else { break };
-                    let Some(target) = modules::request(&self.abcs, home.id, import.module_request_idx) else {
+                    let Some(target) = self.layout().request(home.id, import.module_request_idx) else {
                         return leaf(current.is_known());
                     };
                     let name = home.abc.string(import.import_name_off).ok().map(|name| name.bytes);
                     return self.imported(target, name.filter(|_| links.is_empty()), leaf);
                 }
                 (Origin::Namespace(index), links) => {
-                    let target = u16::try_from(index).ok().and_then(|index| modules::request(&self.abcs, home.id, index));
+                    let target = u16::try_from(index).ok().and_then(|index| self.layout().request(home.id, index));
                     let Some(target) = target else { return leaf(current.is_known()) };
                     let name = match links {
                         [Link::Property(Some(name))] => home.abc.string(*name).ok().map(|name| name.bytes),
@@ -846,7 +757,7 @@ impl<'e> Session<'e> {
     /// name (the parent is a member of the import, not the import) or when
     /// the export chain does not end in the program.
     fn imported(&self, target: RecordId, name: Option<&[u8]>, leaf: &mut dyn FnMut(bool) -> Parent) -> Parent {
-        match name.and_then(|name| modules::export(&self.abcs, target, name)) {
+        match name.and_then(|name| self.layout().export(target, name)) {
             Some(binding) => match leaf(false) {
                 Parent::Leaf { text, .. } => Parent::Import { binding, text },
                 other => other,
@@ -864,9 +775,8 @@ impl<'e> Session<'e> {
             Parent::Local(local) => Some((Node::Class(ClassRef { entry: home.entry, ctor: local.method }), local.reassigned)),
             Parent::Leaf { text, external } => Some((Node::Leaf { path: classes.text(*text).to_owned(), external: *external }, false)),
             Parent::Import { binding, text } => {
-                let exporter = self.record(binding.record);
                 // The entries of a binding share one variable: any of them names it.
-                let exported = binding.exports.first().and_then(|index| exporter.exports.get(index));
+                let exported = binding.exports.first().and_then(|&index| self.exported(binding.record, index));
                 Some(match exported {
                     Some(exported) => (Node::Class(ClassRef { entry: binding.record.entry, ctor: exported.method }), exported.reassigned),
                     None => (Node::Leaf { path: classes.text(*text).to_owned(), external: false }, false),
@@ -875,8 +785,45 @@ impl<'e> Session<'e> {
         }
     }
 
+    /// The one parent class (or function) of `class`, with whether the
+    /// link goes through a reassigned binding: `None` for a class without
+    /// parent, with a parent outside the program or one that was not
+    /// resolved, and for a constructor two definitions give different
+    /// parents.
+    pub(crate) fn superclass(&self, class: ClassRef) -> Option<(ClassRef, bool)> {
+        match &self.parents(class)[..] {
+            [(Node::Class(parent), reassigned)] => Some((*parent, *reassigned)),
+            _ => None,
+        }
+    }
+
+    /// The classes `records` define with one of `parents` as their parent;
+    /// the definitions of those records are worked out, and their parents
+    /// resolved, on the engine's threads.
+    ///
+    /// # Errors
+    /// [`EngineError::Cancelled`].
+    pub(crate) fn subclasses_among(&self, parents: &HashSet<ClassRef>, records: &[RecordId], cancel: &AtomicBool) -> Result<Vec<ClassRef>> {
+        let units: Vec<Range<usize>> = chunks(records.len(), RECORDS_PER_UNIT).collect();
+        let found = run_units(units.len(), self.engine.threads, cancel, |unit| {
+            let mut found = Vec::new();
+            for &id in &records[units[unit].clone()] {
+                let classes = self.record(id);
+                for def in &classes.defs {
+                    if let Some((Node::Class(parent), _)) = self.parent_node(id, &classes, &def.parent) {
+                        if parents.contains(&parent) {
+                            found.push(ClassRef { entry: id.entry, ctor: def.ctor });
+                        }
+                    }
+                }
+            }
+            found
+        })?;
+        Ok(found.into_iter().flatten().collect())
+    }
+
     /// The record that holds the constructor of `class`.
-    fn record_of(&self, class: ClassRef) -> Option<RecordId> {
+    pub(crate) fn record_of(&self, class: ClassRef) -> Option<RecordId> {
         let method = self.abc(class.entry)?.method(class.ctor).ok()?;
         Some(RecordId { entry: class.entry, class: method.class_off().ok()? })
     }

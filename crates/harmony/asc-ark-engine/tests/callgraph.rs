@@ -442,3 +442,380 @@ fn damaged_files_do_not_panic() {
     let cancelled = engine.call_graph(&query(CallRoots::function("star"), Direction::Callers, 1), &AtomicBool::new(true));
     assert!(matches!(cancelled, Err(EngineError::Cancelled)), "{cancelled:?}");
 }
+
+/// The tree of `query` on the class program, record names shortened.
+fn class_lines(engine: &Engine, query: &CallQuery) -> Vec<String> {
+    use asc_fixture::abc::{LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE, LINEAGE_SERVICE};
+    let tree = engine.call_graph(query, &AtomicBool::new(false)).unwrap();
+    let names =
+        [(LINEAGE_APP, "App"), (LINEAGE_BASE, "Base"), (LINEAGE_MIDDLE, "Middle"), (LINEAGE_LEAF, "Leaf"), (LINEAGE_SERVICE, "Service")];
+    tree.lines(false)
+        .into_iter()
+        .map(|mut line| {
+            for (record, name) in names {
+                line = line.replace(&format!("{record}->"), &format!("{name}->"));
+            }
+            line.replace("@normalized:N&&&entry/src/main/ets/", "N:")
+        })
+        .collect()
+}
+
+#[test]
+fn calls_go_up_the_parent_classes() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &asc_fixture::abc::class_calls_program());
+    let callees =
+        |root: &str| class_lines(&engine, &CallQuery { unresolved: true, ..query(CallRoots::function(root), Direction::Callees, 1) });
+    // `this.run()` is found two classes up, `this.stop()` one up; `super.run()` is the same
+    // function as `this.run()` here, and the proved call is the one the row shows.
+    assert_eq!(
+        callees("leaf/Leaf->Leaf.go"),
+        [
+            "0 Leaf->#~@0>#go | Leaf.go unresolved=1",
+            "  1 -> Base->#~@0>#run | Base.run [super] x2",
+            "  1 -> Middle->#~@0>#stop | Middle.stop [inherited]",
+            // No class of the chain lists it.
+            "  1 -> this.none [unresolved]",
+            "  1 -> Leaf->#~@0>#go | Leaf.go [this-class] unresolved=1 (repeated)",
+        ]
+    );
+    assert_eq!(
+        callees("mid/Middle->Middle.relay"),
+        ["0 Middle->#~@0>#relay | Middle.relay", "  1 -> Base->#~@0>#run | Base.run [inherited]"]
+    );
+    // `super.stop()` skips the method of the class itself; a static method looks at the static side.
+    assert_eq!(callees("mid/Middle->Middle.stop"), ["0 Middle->#~@0>#stop | Middle.stop", "  1 -> Base->#~@0>#stop | Base.stop [super]"]);
+    assert_eq!(
+        callees("mid/Middle->Middle.build"),
+        ["0 Middle->#~@0<#build | Middle.build", "  1 -> Base->#~@0<#make | Base.make [super] x2"]
+    );
+    // `super(...)` is the parent's constructor.
+    assert_eq!(
+        callees("leaf/Leaf->Leaf.constructor"),
+        ["0 Leaf->#~@0=#Leaf | Leaf.constructor", "  1 -> Middle->#~@0=#Middle | Middle.constructor [super]"]
+    );
+    assert_eq!(
+        callees("mid/Middle->Middle.constructor"),
+        ["0 Middle->#~@0=#Middle | Middle.constructor", "  1 -> Base->#~@0=#Base | Base.constructor [super]"]
+    );
+    // A parent outside the program: the call sites stay as they were.
+    assert_eq!(callees("leaf/Leaf->Ext.constructor"), ["0 Leaf->#~@1=#Ext | Ext.constructor unresolved=1", "  1 -> super [unresolved]"]);
+    assert_eq!(
+        callees("leaf/Leaf->Ext.onCreate"),
+        ["0 Leaf->#~@1>#onCreate | Ext.onCreate unresolved=2", "  1 -> this.missing [unresolved]", "  1 -> super.onCreate [unresolved]"]
+    );
+    // A parent read from a reassigned binding marks whatever goes through it.
+    assert_eq!(
+        callees("svc/Service->Card.constructor"),
+        ["0 Service->#~@1=#Card | Card.constructor", "  1 -> Base->#~@1=#Tagged | Tagged.constructor [reassigned]"]
+    );
+    assert_eq!(callees("svc/Service->Card.show"), ["0 Service->#~@1>#show | Card.show", "  1 -> Base->#~@1>#go | Tagged.go [reassigned]"]);
+}
+
+#[test]
+fn exported_objects_and_decorated_classes_are_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &asc_fixture::abc::class_calls_program());
+    assert_eq!(
+        class_lines(&engine, &query(CallRoots::function("pages/App->run"), Direction::Callees, 1)),
+        [
+            "0 App->#*#run | run",
+            // `api = new Middle()` in another record, which imports `Middle`: the method of the class …
+            "  1 -> Middle->#~@0>#stop | Middle.stop [instance]",
+            // … or of its parent; `new Middle().run()` leads there too, as an inherited method.
+            "  1 -> Base->#~@0>#run | Base.run [instance] x2",
+            // `tag = new Tagged()`, and `Tagged` is reassigned by a decorator.
+            "  1 -> Base->#~@1>#go | Tagged.go [reassigned]",
+            // An object of a class of the exporting record.
+            "  1 -> Service->#~@0>#ping | Local.ping [instance]",
+            // `one = Middle.build()`: what a call returned is not known.
+            "  1 -> import:N:svc/Service&#one.run [external]",
+            // No class of the chain lists it.
+            "  1 -> import:N:svc/Service&#api.absent [external]",
+            "  1 -> Base->#~@1=#Tagged | Tagged.constructor [reassigned]",
+            "  1 -> Base->#~@1<#create | Tagged.create [reassigned]",
+            // `Middle.make()`: a static method of the parent.
+            "  1 -> Base->#~@0<#make | Base.make [inherited]",
+            "  1 -> Middle->#~@0=#Middle | Middle.constructor [new]",
+        ]
+    );
+    let all = edges(&engine);
+    let count = |kind| all.iter().filter(|edge| edge.kind == kind).count();
+    assert_eq!(
+        EdgeKind::ALL.map(count),
+        // Call, New, Super, Instance, ThisClass, Inherited, Reassigned, Defines.
+        [9, 3, 5, 5, 1, 6, 6, 9]
+    );
+    // What goes through an import says how the call site spells it.
+    let via: Vec<String> = all
+        .iter()
+        .filter(|edge| matches!(edge.kind, EdgeKind::Instance | EdgeKind::Reassigned) && edge.via.is_some())
+        .map(|edge| edge.via.as_deref().unwrap_or_default().replace("@normalized:N&&&entry/src/main/ets/", "N:"))
+        .collect();
+    assert_eq!(
+        via,
+        [
+            "import:N:svc/Service&#api.stop",
+            "import:N:svc/Service&#api.run",
+            "import:N:svc/Service&#tag.go",
+            "import:N:svc/Service&#local.ping",
+            "import:N:base/Base&#Tagged",
+            "import:N:base/Base&#Tagged.create",
+            "import:N:base/Base&#Tagged",
+            // A binding of the record itself, which holds an object of an imported class.
+            "module:api.relay",
+        ]
+    );
+    // The object of a class of the record, read back in the record: nothing is imported.
+    assert_eq!(
+        class_lines(&engine, &query(CallRoots::function("svc/Service->probe"), Direction::Callees, 1)),
+        [
+            "0 Service->#*#probe | probe",
+            "  1 -> Service->#~@0>#ping | Local.ping [instance]",
+            "  1 -> Middle->#~@0>#relay | Middle.relay [instance]"
+        ]
+    );
+}
+
+#[test]
+fn callers_of_a_method_come_through_subclasses_and_exported_objects() {
+    let dir = tempfile::tempdir().unwrap();
+    // Each walk on an engine that has loaded nothing: the records it picks have to be enough.
+    let callers = |root: &str| {
+        let cold = open(dir.path(), &asc_fixture::abc::class_calls_program());
+        class_lines(&cold, &query(CallRoots::function(root), Direction::Callers, 1))
+    };
+    // `pages/App` and `leaf/Leaf` do not import the record of `Base`.
+    assert_eq!(
+        callers("base/Base->Base.run"),
+        [
+            "0 Base->#~@0>#run | Base.run",
+            "  1 <- App->#*#run | run [instance] x2",
+            "  1 <- Middle->#~@0>#relay | Middle.relay [inherited]",
+            "  1 <- Leaf->#~@0>#go | Leaf.go [super] x2 unresolved=1",
+        ]
+    );
+    assert_eq!(
+        callers("base/Base->Base.make"),
+        ["0 Base->#~@0<#make | Base.make", "  1 <- App->#*#run | run [inherited]", "  1 <- Middle->#~@0<#build | Middle.build [super] x2"]
+    );
+    assert_eq!(
+        callers("mid/Middle->Middle.stop"),
+        [
+            "0 Middle->#~@0>#stop | Middle.stop",
+            "  1 <- App->#*#run | run [instance]",
+            "  1 <- Leaf->#~@0>#go | Leaf.go [inherited] unresolved=1"
+        ]
+    );
+    assert_eq!(
+        callers("svc/Service->Local.ping"),
+        ["0 Service->#~@0>#ping | Local.ping", "  1 <- App->#*#run | run [instance]", "  1 <- Service->#*#probe | probe [instance]"]
+    );
+    assert_eq!(
+        callers("base/Base->Tagged.go"),
+        ["0 Base->#~@1>#go | Tagged.go", "  1 <- App->#*#run | run [reassigned]", "  1 <- Service->#~@1>#show | Card.show [reassigned]"]
+    );
+    assert_eq!(
+        callers("base/Base->Tagged.constructor"),
+        [
+            "0 Base->#~@1=#Tagged | Tagged.constructor",
+            "  1 <- App->#*#run | run [reassigned]",
+            "  1 <- Base->func_main_0 | func_main_0 [defines]",
+            "  1 <- Service->func_main_0 | func_main_0 [reassigned]",
+            "  1 <- Service->#~@1=#Card | Card.constructor [reassigned]",
+        ]
+    );
+    // Every edge of the program is seen from both ends.
+    let engine = open(dir.path(), &asc_fixture::abc::class_calls_program());
+    let level_one = |engine: &Engine, node: &CallNode, direction| -> HashSet<CallNode> {
+        let CallNode::Function { record, function, .. } = node else { return HashSet::new() };
+        let roots = CallRoots::Function { record: Some(record.clone()), function: function.clone(), entry: None };
+        let tree = engine.call_graph(&CallQuery { max_nodes: usize::MAX, ..query(roots, direction, 1) }, &AtomicBool::new(false)).unwrap();
+        tree.rows.into_iter().filter(|row| row.depth == 1).map(|row| row.node).collect()
+    };
+    for edge in edges(&engine).iter().filter(|edge| matches!(edge.to, CallNode::Function { .. })) {
+        let cold = open(dir.path(), &asc_fixture::abc::class_calls_program());
+        assert!(level_one(&cold, &edge.to, Direction::Callers).contains(&edge.from), "{edge:?}");
+        assert!(level_one(&engine, &edge.from, Direction::Callees).contains(&edge.to), "{edge:?}");
+    }
+}
+
+#[test]
+fn a_lookup_stops_where_the_classes_do_not_decide() {
+    const RECORD: &str = "&entry/src/main/ets/Odd&";
+    let literal = |builder: &mut AbcBuilder, methods: &[(&str, &str)]| {
+        let mut items = Vec::new();
+        for (name, method) in methods {
+            items.extend([AbcLiteral::str(name), AbcLiteral::method(RECORD, method), AbcLiteral::MethodAffiliate(0)]);
+        }
+        items.push(AbcLiteral::Integer(i32::try_from(methods.len()).unwrap()));
+        builder.literal_array(items)
+    };
+    let mut builder = AbcBuilder::new();
+    // `Top` lists `twice` two times (a redefinition) and `once` one time; `Low extends Top`;
+    // `Free` extends a parameter.
+    let top = literal(&mut builder, &[("twice", "#~@0>#twice"), ("twice", "#~@0>#twice^1"), ("once", "#~@0>#once")]);
+    let low = literal(&mut builder, &[("use", "#~@1>#use")]);
+    let free = literal(&mut builder, &[("use", "#~@2>#use")]);
+    let mut main = Asm::new();
+    main.op("ldhole", []).op("sta", [0.into()]);
+    main.op("defineclasswithbuffer", [0.into(), Op::method("#~@0=#Top"), top.into(), 0.into(), 0.into()]).op("sta", [0.into()]);
+    main.op("defineclasswithbuffer", [0.into(), Op::method("#~@1=#Low"), low.into(), 0.into(), 0.into()]);
+    main.op("definefunc", [0.into(), Op::method("#*#mix"), 1.into()]).op("returnundefined", []);
+    // `mix(base)`: no locals, so `base` is register 3.
+    let mut mix = Asm::new();
+    mix.op("defineclasswithbuffer", [0.into(), Op::method("#*@3~@2=#Free"), free.into(), 0.into(), 3.into()]).op("return", []);
+    let mut uses = Asm::new();
+    for name in ["twice", "once"] {
+        uses.op("ldthisbyname", [0.into(), Op::str(name)]).op("callarg0", [0.into()]);
+        uses.op("ldsuperbyname", [0.into(), Op::str(name)]).op("callarg0", [0.into()]);
+    }
+    uses.op("returnundefined", []);
+    let mut leaf = Asm::new();
+    leaf.op("returnundefined", []);
+    // `super(...args)`: the constructor passes its own function object (register 1: one local),
+    // then something else.
+    let mut spread = Asm::new();
+    spread.op("lda", [1.into()]).op("supercallspread", [0.into(), 0.into()]);
+    spread.op("ldundefined", []).op("supercallspread", [0.into(), 0.into()]).op("returnundefined", []);
+    let mut record = AbcRecord::ets_module(RECORD, "entry", &["Top", "Low", "Free", "mix"], AbcModule::new())
+        .function(function("func_main_0", 1, 0, main))
+        .function(function("#*#mix", 0, 1, mix))
+        .function(function("#~@1=#Low", 1, 0, spread))
+        .function(function("#~@1>#use", 0, 0, uses.clone()))
+        .function(function("#~@2>#use", 0, 0, uses));
+    for name in ["#~@0=#Top", "#~@0>#twice", "#~@0>#twice^1", "#~@0>#once", "#*@3~@2=#Free"] {
+        record = record.function(function(name, 0, 0, leaf.clone()));
+    }
+    builder.record(record);
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &builder);
+    let callees = |root: &str| {
+        let query = CallQuery { unresolved: true, ..query(CallRoots::function(root), Direction::Callees, 1) };
+        let tree = engine.call_graph(&query, &AtomicBool::new(false)).unwrap();
+        tree.lines(false).into_iter().skip(1).map(|line| line.replace(&format!("{RECORD}->"), "")).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        callees("Low.use"),
+        [
+            // Listed twice by the parent: which one runs is not decided, and the lookup does not go on.
+            "  1 -> this.twice [unresolved]",
+            "  1 -> super.twice [unresolved]",
+            "  1 -> #~@0>#once | Top.once [super] x2",
+        ]
+    );
+    // `super(...)` is the parent's constructor when the function it is called for is the running one.
+    assert_eq!(callees("Low.constructor"), ["  1 -> #~@0=#Top | Top.constructor [super]", "  1 -> super [unresolved]"]);
+    // A parent that is not known.
+    assert_eq!(
+        callees("#~@2>#use"),
+        [
+            "  1 -> this.twice [unresolved]",
+            "  1 -> super.twice [unresolved]",
+            "  1 -> this.once [unresolved]",
+            "  1 -> super.once [unresolved]",
+        ]
+    );
+}
+
+#[test]
+fn a_binding_written_twice_is_followed_only_as_a_decorated_class() {
+    use asc_fixture::abc::{class_hierarchy_program, CLASSES_BASE};
+    // A second ABC file that imports the bindings of the hierarchy program: `Watched` is a class
+    // reassigned by a decorator, `Either` is assigned two classes.
+    let module = AbcModule::new().import("Watched", "Watched", &request(CLASSES_BASE)).import("Either", "Either", &request(CLASSES_BASE));
+    let mut main = Asm::new();
+    for index in 0..2u8 {
+        main.op("ldexternalmodulevar", [index.into()]).op("sta", [0.into()]).op("newobjrange", [0.into(), 1.into(), 0.into()]);
+    }
+    main.op("returnundefined", []);
+    let mut second = AbcBuilder::new();
+    second.record(AbcRecord::ets_module(OTHER, "feature", &[], module).function(function("func_main_0", 1, 0, main)));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.abc"), class_hierarchy_program().build().bytes).unwrap();
+    std::fs::write(dir.path().join("b.abc"), second.build().bytes).unwrap();
+    let engine = Engine::open(dir.path()).unwrap();
+    let root = CallRoots::function(&format!("{OTHER}->func_main_0"));
+    let tree = engine.call_graph(&query(root, Direction::Callees, 1), &AtomicBool::new(false)).unwrap();
+    let rows: Vec<String> = tree.lines(true).iter().map(|line| line.replace(&format!("{CLASSES_BASE}->"), "Base->")).collect();
+    assert_eq!(
+        rows[1..],
+        [
+            "  1 -> Base->#~@1=#Watched | Watched.constructor [reassigned] [a.abc]",
+            // Assigned two classes: neither is taken.
+            "  1 -> import:@normalized:N&&&entry/src/main/ets/base/Base&#Either [external] [new]",
+        ]
+    );
+    let callers =
+        engine.call_graph(&query(CallRoots::function("Watched.constructor"), Direction::Callers, 1), &AtomicBool::new(false)).unwrap();
+    assert!(
+        callers.lines(false).contains(&format!("  1 <- {OTHER}->func_main_0 | func_main_0 [reassigned]")),
+        "{:?}",
+        callers.lines(false)
+    );
+}
+
+/// The two packages of the fixture in a directory: `entry.hap` and `lib.hsp`.
+fn packaged(dir: &Path, library_module_json: &str) -> Engine {
+    use asc_fixture::abc::{packaged_entry_program, packaged_library_program, PACKAGED_ENTRY_MODULE_JSON, PACKAGED_ENTRY_PKG_CONTEXT};
+    use asc_fixture::hap::{Compression, Hap};
+    let entry = Hap::new().modules_abc(&packaged_entry_program().build().bytes).module_json(PACKAGED_ENTRY_MODULE_JSON).entry(
+        "pkgContextInfo.json",
+        PACKAGED_ENTRY_PKG_CONTEXT.as_bytes(),
+        Compression::Deflated,
+    );
+    let library = Hap::new().modules_abc(&packaged_library_program().build().bytes).module_json(library_module_json);
+    std::fs::write(dir.join("entry.hap"), entry.build()).unwrap();
+    std::fs::write(dir.join("lib.hsp"), library.build()).unwrap();
+    Engine::open(dir).unwrap()
+}
+
+#[test]
+fn requests_are_led_by_their_module_and_by_the_package_table() {
+    use asc_fixture::abc::{PACKAGED_INDEX, PACKAGED_KIT, PACKAGED_LIBRARY_MODULE_JSON, PACKAGED_OWN, PACKAGED_TOOL};
+    let callees = |engine: &Engine| {
+        let root = CallRoots::Function { record: Some(PACKAGED_INDEX.into()), function: "func_main_0".into(), entry: None };
+        let tree = engine.call_graph(&query(root, Direction::Callees, 1), &AtomicBool::new(false)).unwrap();
+        tree.lines(true).into_iter().skip(1).collect::<Vec<_>>()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let engine = packaged(dir.path(), PACKAGED_LIBRARY_MODULE_JSON);
+    assert_eq!(
+        callees(&engine),
+        [
+            // Both packages have the record: the request names module `lib`.
+            format!("  1 -> {PACKAGED_TOOL}->#*#tool | tool [lib.hsp/ets/modules.abc]"),
+            // A package name: its entry file, in the module the table of the requesting package gives …
+            format!("  1 -> {PACKAGED_KIT}->#*#kit | kit [lib.hsp/ets/modules.abc]"),
+            // … or in the package itself.
+            format!("  1 -> {PACKAGED_OWN}->#*#own | own [entry.hap/ets/modules.abc]"),
+            // A package the table does not list.
+            "  1 -> import:absent#gone [external]".to_owned(),
+            // A module the program does not have: the record of the requesting package.
+            format!("  1 -> {PACKAGED_TOOL}->#*#spare | spare [entry.hap/ets/modules.abc]"),
+        ]
+    );
+    let forms = engine.request_forms(&AtomicBool::new(false)).unwrap();
+    let form = |form| forms.get(&form).map(|count| (count.requests, count.resolved));
+    assert_eq!(
+        (form(RequestForm::Normalized), form(RequestForm::Plain), form(RequestForm::System)),
+        (Some((2, 2)), Some((2, 1)), Some((1, 1)))
+    );
+    // The callers of each copy are the ones whose request leads to it.
+    let callers = |entry: &str, function: &str| {
+        let roots = CallRoots::Function { record: Some(PACKAGED_TOOL.into()), function: function.into(), entry: Some(entry.into()) };
+        let tree =
+            packaged(dir.path(), PACKAGED_LIBRARY_MODULE_JSON).call_graph(&query(roots, Direction::Callers, 1), &AtomicBool::new(false));
+        tree.unwrap().rows.iter().filter(|row| row.depth == 1 && row.kind == Some(EdgeKind::Call)).count()
+    };
+    assert_eq!((callers("lib.hsp/ets/modules.abc", "tool"), callers("entry.hap/ets/modules.abc", "tool")), (1, 0));
+    assert_eq!((callers("lib.hsp/ets/modules.abc", "spare"), callers("entry.hap/ets/modules.abc", "spare")), (0, 1));
+
+    // Without a package of that module name, the requesting package comes first, as before; a
+    // package name whose module is not there is looked up the same way, and is not found.
+    let other = tempfile::tempdir().unwrap();
+    let renamed = PACKAGED_LIBRARY_MODULE_JSON.replace("\"lib\"", "\"renamed\"");
+    let rows = callees(&packaged(other.path(), &renamed));
+    assert_eq!(rows[0], format!("  1 -> {PACKAGED_TOOL}->#*#tool | tool [entry.hap/ets/modules.abc]"));
+    assert_eq!(rows[1], format!("  1 -> {PACKAGED_KIT}->#*#kit | kit [lib.hsp/ets/modules.abc]"));
+}

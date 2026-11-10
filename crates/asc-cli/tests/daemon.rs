@@ -2,7 +2,9 @@
 #![cfg(unix)]
 
 use asc_fixture::abc::{call_graph_program, class_hierarchy_program, make_abc, sample_program};
-use asc_fixture::hap::{make_app, make_hap, resource_program, Compression, Hap, SAMPLE_MODULE_JSON};
+use asc_fixture::hap::{
+    library_program, make_app, make_hap, make_library_hsp, make_routed_hap, resource_program, Compression, Hap, SAMPLE_MODULE_JSON,
+};
 use asc_fixture::{make_apk, make_dex};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -60,6 +62,15 @@ impl Env {
         if !daemon {
             cmd.env("ASC_DAEMON", "off");
         }
+        // A copy of the binary this test just wrote can still be open for
+        // writing in a child another test thread forked in the meantime
+        // (ETXTBSY) until that child execs: wait for it.
+        for _ in 0..200 {
+            match cmd.output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(Duration::from_millis(10)),
+                other => return other.expect("run asc"),
+            }
+        }
         cmd.output().expect("run asc")
     }
 
@@ -100,6 +111,22 @@ impl Env {
         // Other spellings of a program: its entry is named after the file as given.
         std::os::unix::fs::symlink("calls.abc", self.work.path().join("link.abc")).unwrap();
         std::os::unix::fs::symlink("store", self.work.path().join("store-link")).unwrap();
+        // A module with a route table and long strings, next to the package a
+        // route leads into; both carry the bytes of one pack.info.
+        self.write("routed/entry.hap", &make_routed_hap());
+        self.write("routed/lib.hsp", &make_library_hsp());
+        // Two app-store packages, each next to its decrypted code, and one without.
+        let library = library_program().build().bytes;
+        let library_store = Hap::new().modules_abc(&library_program().encrypted().build().bytes).module_json("{}").build();
+        self.write("stores/a.hap", &store);
+        self.write("stores/a.hap.abc", &sample);
+        self.write("stores/b.hsp", &library_store);
+        self.write("stores/b.hsp.abc", &library);
+        self.write("stores-partial/a.hap", &store);
+        self.write("stores-partial/a.hap.abc", &sample);
+        self.write("stores-partial/b.hsp", &library_store);
+        self.write("stores-partial/b.hsp.abc", &library);
+        self.write("stores-partial/c.hap", &store);
         // DEX code next to HarmonyOS files stays a DEX program.
         self.write("mixed/app.apk", &make_apk(&[("classes.dex", &make_dex())], true));
         self.write("mixed/entry.hap", &hap);
@@ -305,6 +332,34 @@ fn daemon_output_is_byte_identical_for_harmony_programs() {
         &["listclass", "store"],
         &["findrefs", "store", "string", "testTag"],
         &["manifest-summary", "store"],
+        // Decrypted files next to several packages are one note; a package
+        // without one is still a warning and exit status 2.
+        &["findrefs", "stores", "string", "shared|testTag"],
+        &["manifest-summary", "stores"],
+        &["findrefs", "stores-partial", "string", "shared|testTag"],
+        &["findrefs", "stores-partial", "string", "testTag", "--entry", "a.hap"],
+        &["findrefs", "stores-partial", "string", "testTag", "--entry", "c.hap"],
+        &["listclass", "stores-partial", "--entry", "b.hsp"],
+        // Pages and routes joined to records, across packages; one pack.info
+        // for the packages that share its bytes; long strings cut.
+        &["manifest-summary", "routed"],
+        &["manifest-summary", "routed", "--json"],
+        &["manifest-summary", "routed", "--file", "pack.info"],
+        &["manifest-summary", "routed", "--limit", "3", "--offset", "10"],
+        &["getmanifest", "routed", "--file", "pack.info"],
+        &["getmanifest", "shop.app", "--file", "pack.info"],
+        &["manifest-summary", "pkgs"],
+        &["findrefs", "routed", "string", "example\\.com/far"],
+        &["findrefs", "routed", "string", "example.com/far", "--literal", "--entry", "entry.hap"],
+        &["findrefs", "routed", "all", "string:far/operand", "literal:far/item"],
+        // Kept to one entry or package; an entry that is not there.
+        &["findrefs", "two.hap", "string", "testTag", "--entry", "ets/widgets.abc"],
+        &["findrefs", "two.hap", "--entry", "two.hap", "import", ".", "--requests"],
+        &["findrefs", "pkgs", "number", "0x1d4b42", "--entry", "a.hap"],
+        &["findrefs", "pkgs", "string", "nothing-like-this", "--entry", "a.hap"],
+        &["findrefs", "pkgs", "string", "testTag", "--entry", "nope.hap"],
+        &["listclass", "two.hap", "--entry", "ets/widgets.abc"],
+        &["listclass", "pkgs", "--entry", "nope.hap"],
         // Programs of several files: a directory with a package that does
         // not open, relative paths joined with commas.
         &["listclass", "pkgs"],
@@ -335,7 +390,21 @@ fn daemon_output_is_byte_identical_for_harmony_programs() {
     assert!(String::from_utf8_lossy(&partial.stderr).contains("is encrypted"), "{partial:?}");
     assert_eq!(env.run(true, &["getclass", "entry.hap", "pages/Missing"]).status.code(), Some(1));
     let paired = env.run(true, &["listclass", "store"]);
-    assert!(String::from_utf8_lossy(&paired.stderr).contains("served from the decrypted modules.abc"), "{paired:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&paired.stderr),
+        "# note: entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted modules.abc\n",
+        "{paired:?}"
+    );
+    let several = env.run(true, &["listclass", "stores"]);
+    assert_eq!(
+        String::from_utf8_lossy(&several.stderr),
+        "# note: 2 encrypted abc entries are served from the decrypted files next to them (manifest-summary names each: its `abc` lines)\n",
+        "{several:?}"
+    );
+    let partial = env.run(true, &["findrefs", "stores-partial", "string", "testTag"]);
+    assert_eq!(partial.status.code(), Some(2), "{partial:?}");
+    assert_eq!(String::from_utf8_lossy(&partial.stderr).lines().filter(|line| line.starts_with("# ")).count(), 2, "{partial:?}");
+    assert_eq!(env.run(true, &["findrefs", "stores-partial", "string", "testTag", "--entry", "a.hap"]).status.code(), Some(0));
 }
 
 /// The resident engine of a HarmonyOS program is not served once a file of

@@ -3,10 +3,12 @@
 //!
 //! ```text
 //! arkcg callers|callees <path> <ROOT> [--leaf] [--depth N] [--max-nodes N] [--no-defines] [--unresolved]
-//! arkcg edges  <path>              every edge, tab separated
+//! arkcg edges  <path>              every edge, tab separated: from, pc, kind, to, the callee
+//!                                  path of an edge through an import, the ABC entry of `to`
 //! arkcg build  <path>              build the whole graph: time and size
 //! arkcg forms  <path>              module request forms and how many resolve
-//! arkcg check  <path> [--sample N] [--seed S]
+//! arkcg census <path>              edges per kind and target, leaf shares, cold / warm time, memory
+//! arkcg check  <path> [--sample N] [--seed S] [--kind KIND]
 //! ```
 //!
 //! `ROOT` is `FUNCTION` or `RECORD->FUNCTION`; with `--leaf` a regex over
@@ -18,10 +20,13 @@
 //! `A` among its callees. The callers side of each test runs on a fresh
 //! engine without the whole graph loaded, so it also tests that the records
 //! a callers walk looks at are enough.
+//! With `--kind KIND` (`super`, `instance`, `inherited`, `reassigned` …,
+//! the flag rows carry) the functions are the ones with a call site of that
+//! kind.
 //!
 //! `--threads N` and `--time` work with every command.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::io::Write;
 use std::process::ExitCode;
@@ -80,7 +85,7 @@ fn next(state: &mut u64) -> u64 {
     state.wrapping_mul(0x2545_f491_4f6c_dd1d)
 }
 
-fn check(path: &str, threads: Option<usize>, sample: Option<usize>, seed: u64) -> Result<usize, Box<dyn Error>> {
+fn check(path: &str, threads: Option<usize>, sample: Option<usize>, seed: u64, kind: Option<&str>) -> Result<usize, Box<dyn Error>> {
     let open = || -> Result<Engine, Box<dyn Error>> {
         let engine = Engine::open(path)?;
         Ok(match threads {
@@ -92,7 +97,7 @@ fn check(path: &str, threads: Option<usize>, sample: Option<usize>, seed: u64) -
     let mut functions: Vec<CallNode> = Vec::new();
     let mut seen = HashSet::new();
     full.call_edges(&AtomicBool::new(false), &mut |edge| {
-        if seen.insert(edge.from.clone()) {
+        if kind.is_none_or(|kind| edge.kind.label() == Some(kind)) && seen.insert(edge.from.clone()) {
             functions.push(edge.from);
         }
     })?;
@@ -150,13 +155,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let max_nodes = take_value(&mut args, "--max-nodes").map(|n| n.parse::<usize>()).transpose()?;
     let sample = take_value(&mut args, "--sample").map(|n| n.parse::<usize>()).transpose()?;
     let seed = take_value(&mut args, "--seed").map(|n| n.parse::<u64>()).transpose()?.unwrap_or(1);
+    let kind = take_value(&mut args, "--kind");
     let (leaf, no_defines, unresolved) =
         (take_flag(&mut args, "--leaf"), take_flag(&mut args, "--no-defines"), take_flag(&mut args, "--unresolved"));
     let [command, path, rest @ ..] = &args[..] else {
-        return Err("usage: arkcg callers|callees|edges|build|forms|check <path> ...".into());
+        return Err("usage: arkcg callers|callees|edges|build|forms|census|check <path> ...".into());
     };
     if command == "check" {
-        return match check(path, threads, sample, seed)? {
+        return match check(path, threads, sample, seed, kind.as_deref())? {
             0 => Ok(()),
             failures => Err(format!("{failures} inconsistencies").into()),
         };
@@ -189,14 +195,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         ("edges", []) => {
             let mut failed = None;
             engine.call_edges(&cancel, &mut |edge| {
+                let entry = match &edge.to {
+                    CallNode::Function { entry, .. } => entry.as_str(),
+                    CallNode::Leaf { .. } => "",
+                };
                 let written = writeln!(
                     out,
-                    "{}\t{:#x}\t{:?}\t{}\t{}",
+                    "{}\t{:#x}\t{:?}\t{}\t{}\t{entry}",
                     location(&edge.from),
                     edge.pc,
                     edge.kind,
                     location(&edge.to),
-                    edge.via.unwrap_or_default()
+                    edge.via.as_deref().unwrap_or_default()
                 );
                 failed = failed.take().or(written.err());
             })?;
@@ -207,6 +217,34 @@ fn run() -> Result<(), Box<dyn Error>> {
         ("build", []) => {
             let size = engine.build_call_graph(&cancel)?;
             writeln!(out, "{size:?}")?;
+        }
+        ("census", []) => {
+            let cold = Instant::now();
+            let size = engine.build_call_graph(&cancel)?;
+            let cold = cold.elapsed();
+            let warm = Instant::now();
+            let mut census: BTreeMap<(String, &'static str), usize> = BTreeMap::new();
+            engine.call_edges(&cancel, &mut |edge| {
+                let to = match (&edge.to, &edge.via) {
+                    (CallNode::Function { .. }, Some(_)) => "function through an import",
+                    (CallNode::Function { .. }, None) => "function",
+                    (CallNode::Leaf { external: true, .. }, _) => "external",
+                    (CallNode::Leaf { external: false, .. }, _) => "unresolved",
+                };
+                *census.entry((format!("{:?}", edge.kind), to)).or_default() += 1;
+            })?;
+            let warm = warm.elapsed();
+            let total = size.edges.max(1);
+            let share = |to: &str| {
+                let count: usize = census.iter().filter(|((_, target), _)| *target == to).map(|(_, count)| count).sum();
+                format!("{count} ({:.2}%)", count as f64 * 100.0 / total as f64)
+            };
+            writeln!(out, "records {}, functions {}, edges {}", size.records, size.functions, size.edges)?;
+            writeln!(out, "external {}, unresolved {}", share("external"), share("unresolved"))?;
+            for ((kind, to), count) in &census {
+                writeln!(out, "{kind:<12} {to:<28} {count:>9}")?;
+            }
+            writeln!(out, "cold build {cold:?}, warm listing {warm:?}, analyses {} bytes", engine.memory_use().analyses)?;
         }
         ("forms", []) => {
             for (form, count) in engine.request_forms(&cancel)? {

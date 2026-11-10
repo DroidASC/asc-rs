@@ -2,6 +2,7 @@
 
 use crate::module::ModuleJson;
 use crate::pkg_context::PkgContextInfo;
+use crate::profile::Route;
 
 /// Source root of a module's own package when `pkgContextInfo.json` is
 /// not at hand; every sample that has the file says the same.
@@ -54,10 +55,40 @@ impl ModuleJson {
         let package_name = self.module.package_name.as_deref().or(module);
         let package = packages.zip(package_name).and_then(|(table, name)| table.get(name));
         let normalized = package_name.map(|name| match package {
-            Some(p) => format!("&{name}/{}{path}&{}", p.entry_path, p.version),
+            // A shared package lists its entry file, or nothing, where a hap lists its source root.
+            Some(p) if p.entry_path.ends_with('/') => format!("&{name}/{}{path}&{}", p.entry_path, p.version),
+            Some(p) => format!("&{name}/{DEFAULT_SOURCE_ROOT}{path}&{}", p.version),
             None => format!("&{name}/{DEFAULT_SOURCE_ROOT}{path}&"),
         });
         let bundled = self.app.bundle_name.as_deref().zip(module).map(|(bundle, module)| format!("{bundle}/{module}/{path}"));
         RecordNames { normalized, bundled, package_listed: package.is_some() }
+    }
+
+    /// Record names for the page of a route of this module's route table.
+    ///
+    /// The route's `ohmurl` spells the record outright; without one the
+    /// name is put together from `pageSourceFile` and the package that has
+    /// it (`packageName`, else the module's own), with the version
+    /// `packages` lists for that package. A page of the module itself has
+    /// the `<bundle>/<module>/ets/…` spelling besides.
+    pub fn route_record_names(&self, route: &Route, packages: Option<&PkgContextInfo>) -> RecordNames {
+        let module = self.module.name.as_deref();
+        let own_package = self.module.package_name.as_deref().or(module);
+        let path = route.record_path(own_package);
+        let listed = packages.zip(route.package_name.as_deref().or(own_package)).and_then(|(table, name)| table.get(name));
+        let from_source = path.as_ref().map(|path| format!("&{path}&{}", listed.map_or("", |package| package.version.as_str())));
+        let normalized = route.ohmurl_record().map(str::to_owned).or(from_source);
+        let is_own = route.package_name.as_deref().is_none_or(|package| Some(package) == own_package);
+        let source = route.page_source_file.as_deref().map(|source| source.trim_start_matches("./").trim_start_matches('/'));
+        let below_root = source.and_then(|source| source.strip_prefix(DEFAULT_SOURCE_ROOT)).filter(|_| is_own);
+        let bundled = self
+            .app
+            .bundle_name
+            .as_deref()
+            .zip(module)
+            .zip(below_root)
+            .map(|((bundle, module), path)| format!("{bundle}/{module}/{}", strip_source_extension(path)));
+        // A route with an `ohmurl` comes from a build with normalized names.
+        RecordNames { normalized, bundled, package_listed: listed.is_some() || route.ohmurl.is_some() }
     }
 }
