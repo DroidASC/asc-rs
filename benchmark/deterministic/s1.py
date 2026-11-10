@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Douyin agent-audit replay (47 steps, class_inventory dropped), one process per step (CLI) or one MCP session.
 
-usage: s1.py FLAVOR BIN APK TRIALS OUT.json [global droidasc args...]
+usage: s1.py FLAVOR BIN APK TRIALS OUT.json [global asc args...]
   FLAVOR: asc-cli | asc-mcp | asc-mcp-hot | rust-cli | rust-mcp
   asc-mcp      a fresh server per trial (its disk cache as the global args leave it)
   asc-mcp-hot  one server: an untimed pass first, then TRIALS timed passes in the same process

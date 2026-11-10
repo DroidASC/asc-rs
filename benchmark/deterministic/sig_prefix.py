@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Signature-filtered findrefs on the prefix-skip path: same rows, and time.
 
-usage: sig_prefix.py DROIDASC TRIALS APK...
+usage: sig_prefix.py ASC TRIALS APK...
 
 For each APK and each query below, runs a one-shot cold CLI search
 (`--no-cache`, so Deflate entries go through the prefix probe) and the same
@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import Mcp, text
 
 BIN, TRIALS, APKS = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
-ENV = dict(os.environ, DROIDASC_DAEMON="off")
+ENV = dict(os.environ, ASC_DAEMON="off")
 
 # (bare name, [(spelling, target prefix its rows must have)])
 QUERIES = [

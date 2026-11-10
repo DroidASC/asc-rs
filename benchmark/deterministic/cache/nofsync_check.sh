@@ -3,8 +3,8 @@
 # predates this boot (verified once), and when an L1 file is damaged (dropped, rewritten).
 # usage: nofsync_check.sh BASE NEW APK CACHE_DIR   (Linux and macOS)
 B=$1 N=$2 A=$3 D=$4
-export DROIDASC_DAEMON=off
-rm -rf $D; mkdir -p $D; export DROIDASC_CACHE_TIERS=dex,derived
+export ASC_DAEMON=off
+rm -rf $D; mkdir -p $D; export ASC_CACHE_TIERS=dex,derived
 h() { "$@" | sort | cksum; }
 # mtime two days back: "written before this boot"
 age() { python3 -c 'import os, sys, time; t = time.time() - 172800; [os.utime(p, (t, t)) for p in sys.argv[1:]]' "$@"; }

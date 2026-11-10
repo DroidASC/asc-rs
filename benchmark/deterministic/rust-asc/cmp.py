@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Semantic findrefs diff: rust_ASC CLI text vs droidasc MCP JSON.
-usage: cmp.py RUST DROIDASC APK  (queries built in)"""
+"""Semantic findrefs diff: rust_ASC CLI text vs asc MCP JSON.
+usage: cmp.py RUST ASC APK  (queries built in)"""
 import collections, json, os, re, subprocess, sys
-# droidasc forwards one-shot commands to its daemon by default; measure without it unless asked.
-os.environ.setdefault("DROIDASC_DAEMON", "off")
+# asc forwards one-shot commands to its daemon by default; measure without it unless asked.
+os.environ.setdefault("ASC_DAEMON", "off")
 RUST, ASC, APK = sys.argv[1:4]
 QUERIES = [
     ["string", "http"], ["string", "password"], ["string", "https?://"],

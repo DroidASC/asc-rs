@@ -3,7 +3,7 @@
 APK 和逐 APK 清单都不入库（其中两份是个人手机上的全部应用），这里只记来源、数量和版本。清单用 [`corpus/manifest.py`](corpus/manifest.py) 生成，复现时按 sha256 核对：
 
 ```
-python3 benchmark/corpus/manifest.py DROIDASC DIR... > corpus.tsv
+python3 benchmark/corpus/manifest.py ASC DIR... > corpus.tsv
 ```
 
 | 语料 | 数量 | 来源与版本 | 用于 |

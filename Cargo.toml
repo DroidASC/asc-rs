@@ -20,7 +20,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/DroidASC/asc-rs"
+repository = "https://github.com/Ylarod/asc-rs"
 rust-version = "1.85"
 
 [workspace.dependencies]
@@ -53,7 +53,7 @@ sha2 = "0.10"
 [profile.release]
 lto = "fat"
 codegen-units = 1
-# Unwind so `droidasc mcp` can turn a panic in one tool call into an error result.
+# Unwind so `asc mcp` can turn a panic in one tool call into an error result.
 panic = "unwind"
 debug = false
 opt-level = 3

@@ -4,8 +4,8 @@
 usage: nofsync_bench.py BASE NEW DOUYIN_APK CORPUS_DIR CACHE_ROOT TRIALS
 """
 import concurrent.futures as cf, os, shutil, statistics as st, subprocess, sys, time
-# droidasc forwards one-shot commands to its daemon by default; measure without it unless asked.
-os.environ.setdefault("DROIDASC_DAEMON", "off")
+# asc forwards one-shot commands to its daemon by default; measure without it unless asked.
+os.environ.setdefault("ASC_DAEMON", "off")
 BASE, NEW, APK, CORPUS, ROOT, N = sys.argv[1:6] + [int(sys.argv[6])]
 Q = ["findrefs", APK, "method", "exec", "--class", "java.lang.Runtime"]
 RULES = ["string:http://", "string:password", "type:Ldalvik/system/DexClassLoader;", "method:java.lang.Runtime->exec",
@@ -19,7 +19,7 @@ def fresh(tag):
     subprocess.run(["sync"])
     return d
 
-NO_L3 = dict(os.environ, DROIDASC_CACHE_TIERS="dex,derived")
+NO_L3 = dict(os.environ, ASC_CACHE_TIERS="dex,derived")
 
 def run(b, d, args, env=None):
     t = time.time()

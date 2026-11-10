@@ -741,7 +741,7 @@ impl EngineCache {
                 let (rx, disk, memory) = (Arc::clone(&rx), Arc::clone(disk), self.memory.clone());
                 let (derived_pending, pending_bytes) = (Arc::clone(&self.derived_pending), Arc::clone(&self.pending_bytes));
                 std::thread::Builder::new()
-                    .name("droidasc-cache-writer".into())
+                    .name("asc-cache-writer".into())
                     .spawn(move || {
                         // Writes (and re-inflating deferred entries) must not take CPU from queries.
                         prebuild::lower_priority();

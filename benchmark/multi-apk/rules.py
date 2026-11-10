@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """One `rules` findrefs call vs one findrefs call per rule, over a directory.
 
-usage: rules.py DROIDASC APK_DIR [MODE ...] [-- extra droidasc args]
+usage: rules.py ASC APK_DIR [MODE ...] [-- extra asc args]
 
-Modes (default all), each in a fresh `droidasc mcp` process:
+Modes (default all), each in a fresh `asc mcp` process:
   per-rule-seq   one `dir` findrefs per rule, each after the previous reply
   per-rule-par   the same calls sent at once
   rules          a single findrefs with `rules`

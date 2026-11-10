@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""usage: reference.py DROIDASC APK_DIR OUT.json — per goal, the APK stems with a hit."""
+"""usage: reference.py ASC APK_DIR OUT.json — per goal, the APK stems with a hit."""
 import concurrent.futures as cf, json, os, runpy, subprocess, sys
 B, D, OUT = sys.argv[1:4]
 GOALS = runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "goals.py"))["GOALS"]

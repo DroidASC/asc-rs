@@ -1,7 +1,7 @@
 """Shared bits of the macOS benchmarks: MCP client, peak RSS of a process (tree)."""
 import json, os, subprocess, sys, threading, time
-# droidasc forwards one-shot commands to its daemon by default; measure without it unless asked.
-os.environ.setdefault("DROIDASC_DAEMON", "off")
+# asc forwards one-shot commands to its daemon by default; measure without it unless asked.
+os.environ.setdefault("ASC_DAEMON", "off")
 
 DARWIN = sys.platform == "darwin"
 

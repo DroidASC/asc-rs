@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Environment variable overriding [`ProcessRegistry::default_dir`].
-pub const RUNTIME_DIR_ENV: &str = "DROIDASC_RUNTIME_DIR";
+pub const RUNTIME_DIR_ENV: &str = "ASC_RUNTIME_DIR";
 
 /// Another registered process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,16 +38,16 @@ pub struct ProcessRegistry {
 }
 
 impl ProcessRegistry {
-    /// `$DROIDASC_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/droidasc`, else
-    /// `<temp dir>/droidasc-<uid>/procs`.
+    /// `$ASC_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/asc`, else
+    /// `<temp dir>/asc-<uid>/procs`.
     pub fn default_dir() -> Option<PathBuf> {
         if let Some(d) = std::env::var_os(RUNTIME_DIR_ENV) {
             return Some(PathBuf::from(d));
         }
         if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
-            return Some(PathBuf::from(d).join("droidasc"));
+            return Some(PathBuf::from(d).join("asc"));
         }
-        Some(std::env::temp_dir().join(format!("droidasc-{}", uid()?)).join("procs"))
+        Some(std::env::temp_dir().join(format!("asc-{}", uid()?)).join("procs"))
     }
 
     /// Register this process in `dir` (created private to the user). `None`

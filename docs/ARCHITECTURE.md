@@ -33,8 +33,8 @@ lazily and cached. The crates follow the data: *format* â†’ *search / rebuild* â
 | `asc-axml`, `asc-arsc` | Binary XML and `resources.arsc` |
 | `asc-cache` | Disk tiers, memory LRU, process registry |
 | `asc-engine` | Queries over an APK: class lookup, findrefs, rules, call graph, hierarchy, manifest summary, multi-APK sweeps |
-| `asc-cli` | `droidasc` binary and its daemon |
-| `asc-mcp` | `droidasc mcp`: resident stdio MCP session |
+| `asc-cli` | `asc` binary and its daemon |
+| `asc-mcp` | `asc mcp`: resident stdio MCP session |
 | `asc-fixture` | Synthetic DEX / APK fixtures for tests |
 
 ## Query syntax and output
@@ -119,9 +119,9 @@ Caches are filled by queries themselves, so the "no preprocessing" property hold
 
 `asc_engine::config` declares every knob once (one macro row: key, type, default,
 environment variable, help) and resolves it from, first wins, a flag (`--set KEY=VALUE` or
-the older `--threads` / `--memory-mb` / `--cache-*` flags), `$DROIDASC_<KEY>`, the TOML file
-(`~/.config/droidasc/config.toml` or `$DROIDASC_CONFIG`) and the default. Each value records
-its source; `droidasc config [--json]` prints them with what `auto` comes to now.
+the older `--threads` / `--memory-mb` / `--cache-*` flags), `$ASC_<KEY>`, the TOML file
+(`~/.config/asc/config.toml` or `$ASC_CONFIG`) and the default. Each value records
+its source; `asc config [--json]` prints them with what `auto` comes to now.
 
 The CLI resolves once before anything else, so a bad value fails every command with the
 layer, the key and what is expected. `DiskCache::open` and `CacheConfig` read no environment
@@ -131,7 +131,7 @@ cgroup v2 on Linux, `hw.memsize` and `host_statistics64` on macOS) feeds the aut
 
 ## Several processes
 
-A `ProcessRegistry` (one file per process in `$XDG_RUNTIME_DIR/droidasc`; Linux and macOS)
+A `ProcessRegistry` (one file per process in `$XDG_RUNTIME_DIR/asc`; Linux and macOS)
 records each process's cache bytes and whether it is serving a request.
 
 * **Memory.** With `memory.max` automatic (or a percentage), a resident process sizes its LRU
@@ -154,7 +154,7 @@ output is byte-identical with or without it (`crates/asc-cli/tests/daemon.rs`).
 * Every command writes through `output::Io`, locally or over the socket.
 * `--debug` and `--no-cache` runs stay local.
 * The socket name hashes the binary, the resolved settings (but `daemon.*`), the
-  `DROIDASC_*` variables and the umask, so a client only meets a daemon that would print the
+  `ASC_*` variables and the umask, so a client only meets a daemon that would print the
   same. A spawned daemon inherits the environment and gets the client's flag settings as
   `--set`.
 * The socket directory must be private, and both ends check the peer uid.
@@ -164,7 +164,7 @@ output is byte-identical with or without it (`crates/asc-cli/tests/daemon.rs`).
 * Open engines' class graphs and resource tables count against the memory budget
   (`SharedCache::fit_resident`, shared with the MCP session): beyond half of it the least
   recently used APKs close.
-* `DROIDASC_DAEMON=off` disables it.
+* `ASC_DAEMON=off` disables it.
 
 **MCP session.**
 * One `Engine` per opened APK, all on one shared cache. An APK opens when a call first names

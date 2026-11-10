@@ -1,4 +1,4 @@
-//! `droidasc` command line entry.
+//! `asc` command line entry.
 
 #[cfg(unix)]
 mod daemon;
@@ -18,7 +18,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 const EXAMPLES: &str = "global options (accepted by every command, after it too):
-  --set KEY=VALUE     any setting of `droidasc config` (repeatable), e.g. --set memory.max=4G
+  --set KEY=VALUE     any setting of `asc config` (repeatable), e.g. --set memory.max=4G
   --threads N         = --set threads=N
   --no-cache          = --set cache.enabled=off
   --cache-dir DIR     = --set cache.dir=DIR
@@ -27,9 +27,9 @@ const EXAMPLES: &str = "global options (accepted by every command, after it too)
   --debug             timing and cache statistics on stderr
 
 settings:
-  Threads, memory and disk cache budgets are settings: a flag beats $DROIDASC_<KEY>, which
-  beats ~/.config/droidasc/config.toml ($DROIDASC_CONFIG), which beats the default; the
-  automatic defaults follow this machine. `droidasc config` lists them with their values
+  Threads, memory and disk cache budgets are settings: a flag beats $ASC_<KEY>, which
+  beats ~/.config/asc/config.toml ($ASC_CONFIG), which beats the default; the
+  automatic defaults follow this machine. `asc config` lists them with their values
   and sources (--json for scripts).
 
 common:
@@ -44,51 +44,51 @@ common:
   output then goes to a file the last line names, and --offset shows the next records.
 
 examples:
-  droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
-  droidasc getclass app.apk com.poc.Main --threads 16
-  droidasc getclass app.apk com.poc.Main --dump-dex Main.dex
-  droidasc disassemble app.apk com.poc.Main --debuginfo
-  droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
-  droidasc getclass app.apk com.poc.Main --res-names
-  droidasc listclass app.apk -o classes.txt
-  droidasc listclass app.apk --prefix com.poc
-  droidasc getmanifest app.apk -o AndroidManifest.xml
-  droidasc getmanifest app.apk --resolve
-  droidasc manifest-summary app.apk | grep exported=true
-  droidasc manifest-summary app.apk --json
-  droidasc resources app.apk string/app_name
-  droidasc resources app.apk 0x7f0d0001 --resolve
-  droidasc resources app.apk --search 'https?://' --in value
-  droidasc resources app.apk -o resources.txt
-  droidasc xml app.apk res/xml/network_security_config.xml
-  droidasc findrefs app.apk string token -o string_refs.txt
-  droidasc findrefs app.apk string 'a.b(c)' --literal
-  droidasc findrefs app.apk type com.poc.Main
-  droidasc findrefs app.apk extends android.app.Activity -o subclasses.txt
-  droidasc findrefs app.apk impl android.os.IInterface
-  droidasc findrefs app.apk method onCreate --class com.poc.Main
-  droidasc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
-  droidasc findrefs app.apk method run --class com.poc.Main --exact
-  droidasc findrefs app.apk field apiKey -o field_refs.txt
-  droidasc findrefs app.apk field apiKey --access write
-  droidasc findrefs app.apk string token --no-cache
-  droidasc findrefs app.apk string token --context 3
-  droidasc findrefs app.apk method loadUrl --context-method
-  droidasc findrefs app.apk method 'android.provider.Settings$Secure->getString[arg1==\"android_id\"]'
-  droidasc findrefs app.apk method '{literal:device_id}'
-  droidasc findrefs app.apk rules 'method:{string:^https?://} & !type:Lcom/a/test/'
-  droidasc findrefs app.apk method @methods.txt
-  droidasc findrefs app.apk rules 'override:android.os.IInterface->asBinder'
-  droidasc findrefs app.apk rules 'flag:native & string:AES'
-  droidasc findrefs app.apk rules 'in:{extends:android.app.Service} & annotation:androidx.annotation.RequiresPermission'
-  droidasc callgraph app.apk com.poc.Main onCreate --depth 3
-  droidasc callgraph app.apk com.poc.Main 'run(I)V' --callees
-  droidasc findrefs system/framework impl com.android.internal.telephony.ITelephony
-  droidasc callgraph framework.jar,services.jar,TeleService.apk android.telephony.TelephonyManager getImei
-  droidasc callgraph app.apk --to 'method:java.lang.Runtime->exec' --from 'method:Intent.getStringExtra' --depth 5
-  droidasc mcp --memory-mb 4096
-  droidasc cache stats
-  droidasc daemon status
+  asc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
+  asc getclass app.apk com.poc.Main --threads 16
+  asc getclass app.apk com.poc.Main --dump-dex Main.dex
+  asc disassemble app.apk com.poc.Main --debuginfo
+  asc disassemble app.apk com.poc.Main --method 'run(I)V'
+  asc getclass app.apk com.poc.Main --res-names
+  asc listclass app.apk -o classes.txt
+  asc listclass app.apk --prefix com.poc
+  asc getmanifest app.apk -o AndroidManifest.xml
+  asc getmanifest app.apk --resolve
+  asc manifest-summary app.apk | grep exported=true
+  asc manifest-summary app.apk --json
+  asc resources app.apk string/app_name
+  asc resources app.apk 0x7f0d0001 --resolve
+  asc resources app.apk --search 'https?://' --in value
+  asc resources app.apk -o resources.txt
+  asc xml app.apk res/xml/network_security_config.xml
+  asc findrefs app.apk string token -o string_refs.txt
+  asc findrefs app.apk string 'a.b(c)' --literal
+  asc findrefs app.apk type com.poc.Main
+  asc findrefs app.apk extends android.app.Activity -o subclasses.txt
+  asc findrefs app.apk impl android.os.IInterface
+  asc findrefs app.apk method onCreate --class com.poc.Main
+  asc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
+  asc findrefs app.apk method run --class com.poc.Main --exact
+  asc findrefs app.apk field apiKey -o field_refs.txt
+  asc findrefs app.apk field apiKey --access write
+  asc findrefs app.apk string token --no-cache
+  asc findrefs app.apk string token --context 3
+  asc findrefs app.apk method loadUrl --context-method
+  asc findrefs app.apk method 'android.provider.Settings$Secure->getString[arg1==\"android_id\"]'
+  asc findrefs app.apk method '{literal:device_id}'
+  asc findrefs app.apk rules 'method:{string:^https?://} & !type:Lcom/a/test/'
+  asc findrefs app.apk method @methods.txt
+  asc findrefs app.apk rules 'override:android.os.IInterface->asBinder'
+  asc findrefs app.apk rules 'flag:native & string:AES'
+  asc findrefs app.apk rules 'in:{extends:android.app.Service} & annotation:androidx.annotation.RequiresPermission'
+  asc callgraph app.apk com.poc.Main onCreate --depth 3
+  asc callgraph app.apk com.poc.Main 'run(I)V' --callees
+  asc findrefs system/framework impl com.android.internal.telephony.ITelephony
+  asc callgraph framework.jar,services.jar,TeleService.apk android.telephony.TelephonyManager getImei
+  asc callgraph app.apk --to 'method:java.lang.Runtime->exec' --from 'method:Intent.getStringExtra' --depth 5
+  asc mcp --memory-mb 4096
+  asc cache stats
+  asc daemon status
 
 exit status:
   0  success
@@ -97,7 +97,7 @@ exit status:
 
 Debug output (--debug) goes to stderr so stdout can be redirected.
 On Unix, commands answer through a per-user daemon that keeps APKs resident (same output);
-DROIDASC_DAEMON=off runs each command in its own process.";
+ASC_DAEMON=off runs each command in its own process.";
 
 const EXIT_OK: u8 = 0;
 /// `resources --search` rows printed without --limit / --max-bytes.
@@ -106,7 +106,7 @@ const RESOURCE_SEARCH_ROWS: usize = 1000;
 const EXIT_PARTIAL: u8 = 2;
 
 #[derive(Parser)]
-#[command(name = "droidasc", about = "Search and disassemble APK code without preprocessing.", after_help = EXAMPLES, version, disable_version_flag = true)]
+#[command(name = "asc", about = "Search and disassemble APK code without preprocessing.", after_help = EXAMPLES, version, disable_version_flag = true)]
 struct Cli {
     /// Print version.
     #[arg(short = 'V', visible_short_alias = 'v', long, action = clap::ArgAction::Version)]
@@ -122,7 +122,7 @@ struct Common {
     /// Enable debug profiling output (written to stderr).
     #[arg(long, global = true, hide = true)]
     debug: bool,
-    /// Set any setting of `droidasc config` (repeatable).
+    /// Set any setting of `asc config` (repeatable).
     #[arg(long = "set", global = true, value_name = "KEY=VALUE", hide = true)]
     set: Vec<String>,
     /// Worker thread count (`--set threads=N`).
@@ -142,11 +142,11 @@ struct Common {
     memory_mb: Option<u64>,
     /// Show at most N records on stdout (results, rows, classes, smali
     /// lines); the whole output goes to a file named on the last line
-    /// (default: $DROIDASC_LIMIT, else no limit).
+    /// (default: $ASC_LIMIT, else no limit).
     #[arg(long, global = true, value_name = "N", help_heading = "Output")]
     limit: Option<usize>,
     /// Show at most N bytes of records on stdout, whole records only, the
-    /// rest as with --limit (default: $DROIDASC_MAX_BYTES, else no limit).
+    /// rest as with --limit (default: $ASC_MAX_BYTES, else no limit).
     #[arg(long, global = true, value_name = "N", help_heading = "Output")]
     max_bytes: Option<usize>,
     /// Skip the first N records (the next page after a cut output).
@@ -198,7 +198,7 @@ impl Common {
         }
         for pair in &self.set {
             let Some((key, value)) = pair.split_once('=') else {
-                return Err(format!("--set {pair:?}: expected KEY=VALUE, e.g. --set memory.max=4G (keys: droidasc config)"));
+                return Err(format!("--set {pair:?}: expected KEY=VALUE, e.g. --set memory.max=4G (keys: asc config)"));
             };
             let (key, value) = (key.trim(), value.trim());
             match key {
@@ -208,7 +208,7 @@ impl Common {
                 _ => flag(key, value.to_string()),
             }
         }
-        self.config = Some(Config::load(&flags).map_err(|e| format!("{e} (droidasc config lists the settings)"))?);
+        self.config = Some(Config::load(&flags).map_err(|e| format!("{e} (asc config lists the settings)"))?);
         Ok(())
     }
 
@@ -232,14 +232,14 @@ impl Common {
     }
 
     /// `--offset` / `--limit` / `--max-bytes`, the last two defaulting to
-    /// `$DROIDASC_LIMIT` / `$DROIDASC_MAX_BYTES` so an agent host can set them
+    /// `$ASC_LIMIT` / `$ASC_MAX_BYTES` so an agent host can set them
     /// once.
     fn window(&self) -> Window {
         let env = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse().ok());
         Window {
             offset: self.offset,
-            limit: self.limit.or_else(|| env("DROIDASC_LIMIT")),
-            max_bytes: self.max_bytes.or_else(|| env("DROIDASC_MAX_BYTES")),
+            limit: self.limit.or_else(|| env("ASC_LIMIT")),
+            max_bytes: self.max_bytes.or_else(|| env("ASC_MAX_BYTES")),
         }
     }
 
@@ -512,7 +512,7 @@ enum Command {
     ///
     /// Commands start it on first use and answer through it afterwards, with
     /// the same output as without it; it exits after 15 idle minutes.
-    /// `DROIDASC_DAEMON=off` runs every command in its own process.
+    /// `ASC_DAEMON=off` runs every command in its own process.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,

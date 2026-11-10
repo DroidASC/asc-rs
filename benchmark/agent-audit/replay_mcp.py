@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay the dexsql-release agent-audit goals against `droidasc mcp`.
+"""Replay the dexsql-release agent-audit goals against `asc mcp`.
 
 The 17 goals and their steps come from dexsql-release's
 benchmarks/agent-audit/harness/rasc_replay.py (SCENARIOS), imported at run
@@ -7,7 +7,7 @@ time from $HARNESS; nothing of theirs is copied here. Each rasc CLI step is
 translated to the matching MCP tool call, so both tools do the same lookups.
 
 Measured like dexsql_replay.py / whole_suite.py:
-  * whole session: a new `droidasc mcp` process per trial: initialize,
+  * whole session: a new `asc mcp` process per trial: initialize,
     listclass (opens the APK and inflates every DEX), every goal once, close; median of TRIALS;
   * hot per goal: one session, goals shuffled with seed 1937, TRIALS each,
     median per goal, geometric mean over goals;
@@ -15,8 +15,8 @@ Measured like dexsql_replay.py / whole_suite.py:
 The class inventory goal is excluded, as in the dexsql report.
 
 Environment: HARNESS (dexsql-release/benchmarks/agent-audit/harness),
-APK (douyin-40.7.0.apk), DROIDASC (default target/release/droidasc),
-DROIDASC_THREADS (default: droidasc's default), DROIDASC_ARGS (extra
+APK (douyin-40.7.0.apk), ASC (default target/release/asc),
+ASC_THREADS (default: asc's default), ASC_ARGS (extra
 global flags, e.g. "--no-cache"). Writes results/asc_mcp_benchmark.json.
 """
 
@@ -38,9 +38,9 @@ sys.path.insert(0, str(HARNESS))
 import rasc_replay as rr  # noqa: E402
 
 APK = str(Path(os.environ.get("APK", "douyin-40.7.0.apk")).resolve())
-BIN = os.environ.get("DROIDASC", str(REPO / "target/release/droidasc"))
-THREADS = os.environ.get("DROIDASC_THREADS")
-EXTRA = os.environ.get("DROIDASC_ARGS", "").split()
+BIN = os.environ.get("ASC", str(REPO / "target/release/asc"))
+THREADS = os.environ.get("ASC_THREADS")
+EXTRA = os.environ.get("ASC_ARGS", "").split()
 TRIALS = 7
 EXCLUDED = {"class_inventory"}
 

@@ -4,8 +4,8 @@
 usage: ps_bench.py APK N BIN... -- QUERY ARGS ; QUERY ARGS ; ...
 """
 import os, statistics, subprocess, sys, time
-# droidasc forwards one-shot commands to its daemon by default; measure without it unless asked.
-os.environ.setdefault("DROIDASC_DAEMON", "off")
+# asc forwards one-shot commands to its daemon by default; measure without it unless asked.
+os.environ.setdefault("ASC_DAEMON", "off")
 
 apk, n = sys.argv[1], int(sys.argv[2])
 rest = sys.argv[3:]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """S2 multi-APK audit: every APK of the corpus dirs x 8 rules.
 
-usage: s2.py MODE BIN OUT.json ARGS... [-- global droidasc args...]
+usage: s2.py MODE BIN OUT.json ARGS... [-- global asc args...]
   cli P T        pool of P one-shot `findrefs` processes (one per APK x rule), each --threads T
   mcp N          N concurrent `mcp` servers, APKs split between them by size; each runs one
                  multi-APK `findrefs dir=<its slice>` per rule (all cursor pages)

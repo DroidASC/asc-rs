@@ -1,11 +1,11 @@
 ---
-name: droidasc
-description: Search and read Android APK bytecode from the shell with the droidasc CLI - the manifest's attack surface (exported components, providers, deep links), code references to strings / types / methods / fields, smali of a class or method, call graphs and class hierarchies, resources. Use when auditing or reverse engineering an APK, or answering "which code calls / uses X" in one or many APKs.
+name: asc
+description: Search and read Android APK bytecode from the shell with the asc CLI - the manifest's attack surface (exported components, providers, deep links), code references to strings / types / methods / fields, smali of a class or method, call graphs and class hierarchies, resources. Use when auditing or reverse engineering an APK, or answering "which code calls / uses X" in one or many APKs.
 ---
 
-# droidasc
+# asc
 
-`droidasc` answers questions about an APK directly from the file, in milliseconds, without
+`asc` answers questions about an APK directly from the file, in milliseconds, without
 decompiling it first. Every command takes the APK path first; class names may be written
 `com.a.B` or `Lcom/a/B;`.
 
@@ -19,8 +19,8 @@ decompiling it first. Every command takes the APK path first; class names may be
   names a file with the whole output: grep that file, or rerun with the `--offset` it gives.
 
 ```sh
-droidasc findrefs app.apk string 'https?://' --limit 50
-# records 1-50 of 523 shown; full output in /home/u/.cache/droidasc/out/3f2a….txt (grep it, or rerun with --offset 50)
+asc findrefs app.apk string 'https?://' --limit 50
+# records 1-50 of 523 shown; full output in /home/u/.cache/asc/out/3f2a….txt (grep it, or rerun with --offset 50)
 ```
 
 - A query with no results prints `hint:` lines on stderr (DEX entries searched, case
@@ -31,22 +31,22 @@ droidasc findrefs app.apk string 'https?://' --limit 50
 
 | question | command |
 |---|---|
-| attack surface | `droidasc manifest-summary app.apk` (`| grep exported=true`, `--json`) |
-| who uses a string | `droidasc findrefs app.apk string 'regex'` (`(?i)` ignores case, `--literal` for plain text) |
-| who calls a method | `droidasc findrefs app.apk method 'android.webkit.WebView->loadUrl'` |
-| who reads / writes a field | `droidasc findrefs app.apk field 'android.os.Build->SERIAL'` (`--access read` or `--access write` to filter) |
-| who uses a type | `droidasc findrefs app.apk type android.content.ClipboardManager` |
-| subclasses / implementers | `droidasc findrefs app.apk extends android.webkit.WebViewClient` (`impl` for interfaces); all levels: `droidasc hierarchy app.apk android.app.Service` |
-| several queries at once | `droidasc findrefs app.apk rules 'method:java.lang.Runtime->exec' 'string:(?i)password'` (rows prefixed `r1 |`, `r2 |`; `--file` for many) |
-| conditions in one method | `droidasc findrefs app.apk all 'string:https?://' 'method:android.webkit.WebView->loadUrl' '!string:localhost'` |
-| callers of the methods that use X | `droidasc findrefs app.apk method '{literal:device_id}'` (one call, any depth of `{}`) |
-| calls of a list of methods | `droidasc findrefs app.apk method @methods.txt` |
+| attack surface | `asc manifest-summary app.apk` (`| grep exported=true`, `--json`) |
+| who uses a string | `asc findrefs app.apk string 'regex'` (`(?i)` ignores case, `--literal` for plain text) |
+| who calls a method | `asc findrefs app.apk method 'android.webkit.WebView->loadUrl'` |
+| who reads / writes a field | `asc findrefs app.apk field 'android.os.Build->SERIAL'` (`--access read` or `--access write` to filter) |
+| who uses a type | `asc findrefs app.apk type android.content.ClipboardManager` |
+| subclasses / implementers | `asc findrefs app.apk extends android.webkit.WebViewClient` (`impl` for interfaces); all levels: `asc hierarchy app.apk android.app.Service` |
+| several queries at once | `asc findrefs app.apk rules 'method:java.lang.Runtime->exec' 'string:(?i)password'` (rows prefixed `r1 |`, `r2 |`; `--file` for many) |
+| conditions in one method | `asc findrefs app.apk all 'string:https?://' 'method:android.webkit.WebView->loadUrl' '!string:localhost'` |
+| callers of the methods that use X | `asc findrefs app.apk method '{literal:device_id}'` (one call, any depth of `{}`) |
+| calls of a list of methods | `asc findrefs app.apk method @methods.txt` |
 | code around each hit | add `--context 3`, or `--context method` for the whole method |
-| read code | `droidasc getclass app.apk com.a.B` (smali); one method: `--method onReceive` |
-| callers / callees | `droidasc callgraph app.apk com.a.B onReceive --depth 3` (`--callees`, `--virtual`) |
-| paths from a source to a sink | `droidasc callgraph app.apk --to 'method:Runtime.exec' --from 'method:Intent.getStringExtra' --unless 'method:Validator.check' --depth 4` |
-| classes | `droidasc listclass app.apk --prefix com.a` |
-| resources | `droidasc resources app.apk string/app_name`, `--search 'https?://' --in value`; `droidasc xml app.apk res/xml/file_paths.xml` |
+| read code | `asc getclass app.apk com.a.B` (smali); one method: `--method onReceive` |
+| callers / callees | `asc callgraph app.apk com.a.B onReceive --depth 3` (`--callees`, `--virtual`) |
+| paths from a source to a sink | `asc callgraph app.apk --to 'method:Runtime.exec' --from 'method:Intent.getStringExtra' --unless 'method:Validator.check' --depth 4` |
+| classes | `asc listclass app.apk --prefix com.a` |
+| resources | `asc resources app.apk string/app_name`, `--search 'https?://' --in value`; `asc xml app.apk res/xml/file_paths.xml` |
 
 Member targets accept `Lcom/a/B;->name(sig)`, `com.a.B->name`, `com.a.B#name`, `com.a.B.name`,
 or `B.name` (any package). A name alone is a substring / regex (`=name` or a signature: exact). A signature picks that
@@ -60,8 +60,8 @@ Pass a directory (every `*.apk`, `*.jar`, `*.zip`, `*.dex` below it) or paths jo
 wherever an APK goes: findrefs, callgraph, hierarchy and getclass then span every archive.
 
 ```sh
-droidasc findrefs system/framework impl com.android.internal.telephony.ITelephony
-droidasc callgraph framework.jar,telephony-common.jar,TeleService.apk android.telephony.TelephonyManager getImei --depth 3
+asc findrefs system/framework impl com.android.internal.telephony.ITelephony
+asc callgraph framework.jar,telephony-common.jar,TeleService.apk android.telephony.TelephonyManager getImei --depth 3
 ```
 
 DEX names start with their archive (`services.jar/classes2.dex | ...`), callgraph rows end with
@@ -113,23 +113,23 @@ archive of the program:
 
 ```sh
 # every AIDL stub's declared methods (the $Stub classes themselves)
-droidasc findrefs system/framework rules 'in:{type:.*\$Stub;}'
+asc findrefs system/framework rules 'in:{type:.*\$Stub;}'
 # binder-exposed implementations of one interface that reach an identifier getter,
 # skipping any path through a permission check
-droidasc callgraph system/framework \
+asc callgraph system/framework \
   --from 'override:com.android.internal.telephony.ITelephony->getDeviceId' \
   --to 'method:android.telephony.TelephonyManager->getImei' \
   --unless 'method:~enforce.*Permission' --depth 6
 # native methods that also load a crypto string
-droidasc findrefs app.apk rules 'flag:native & string:AES'
+asc findrefs app.apk rules 'flag:native & string:AES'
 ```
 
 ```sh
 # who calls the methods that build a device id, minus test code
-droidasc findrefs app.apk rules 'method:{literal:device_id} & !type:Lcom/a/test/'
+asc findrefs app.apk rules 'method:{literal:device_id} & !type:Lcom/a/test/'
 # paths from methods that read an Intent extra to Runtime.exec, none through a method
 # that calls the app's validator
-droidasc callgraph app.apk --to 'method:java.lang.Runtime->exec' \
+asc callgraph app.apk --to 'method:java.lang.Runtime->exec' \
   --from 'method:android.content.Intent->getStringExtra' \
   --unless 'method:com.a.Validator->check' --depth 5
 ```
@@ -155,38 +155,38 @@ match, all of them: `[arg1="android_id", ret=unused]` or `[arg1="android_id"][re
 - `findrefs APK method 'X[...]'` takes them directly; they work in rules, `{}` and callgraph.
 
 ```sh
-droidasc findrefs fw/ method 'android.provider.Settings$Secure->getString[arg1=="android_id"]'
-droidasc findrefs fw/ method 'android.os.SystemProperties->get[arg0==~^ro\.serial]'
+asc findrefs fw/ method 'android.provider.Settings$Secure->getString[arg1=="android_id"]'
+asc findrefs fw/ method 'android.os.SystemProperties->get[arg0==~^ro\.serial]'
 # permission checks whose answer is ignored
-droidasc findrefs fw/ method 'android.content.Context->checkCallingOrSelfPermission[ret==unused]'
+asc findrefs fw/ method 'android.content.Context->checkCallingOrSelfPermission[ret==unused]'
 # what is passed: show the values of every call
-droidasc findrefs app.apk method 'android.content.Intent->putExtra[arg0=*, arg1=*]'
+asc findrefs app.apk method 'android.content.Intent->putExtra[arg0=*, arg1=*]'
 ```
 
 ## Audit workflow
 
-1. `droidasc manifest-summary app.apk | grep exported=true`: exported components, providers
+1. `asc manifest-summary app.apk | grep exported=true`: exported components, providers
    (authorities, grantUriPermissions), deep links, FileProvider paths, network security config.
-2. For each entry point, find what it reaches: `droidasc findrefs app.apk method 'Lcom/a/Entry;->onReceive' --context method`,
-   or the sensitive sinks directly: `droidasc findrefs app.apk rules 'method:android.webkit.WebView->addJavascriptInterface' 'method:java.lang.Runtime->exec' 'method:android.content.Context->openFileOutput'`.
-3. Read the relevant method: `droidasc getclass app.apk com.a.Entry --method onReceive`.
-4. Walk the path: `droidasc callgraph app.apk com.a.Helper writeFile --depth 3` (callers) or `--callees`.
+2. For each entry point, find what it reaches: `asc findrefs app.apk method 'Lcom/a/Entry;->onReceive' --context method`,
+   or the sensitive sinks directly: `asc findrefs app.apk rules 'method:android.webkit.WebView->addJavascriptInterface' 'method:java.lang.Runtime->exec' 'method:android.content.Context->openFileOutput'`.
+3. Read the relevant method: `asc getclass app.apk com.a.Entry --method onReceive`.
+4. Walk the path: `asc callgraph app.apk com.a.Helper writeFile --depth 3` (callers) or `--callees`.
 
 ## Tuning
 
-`droidasc config --json` shows every setting (threads, memory, disk cache), its source and
+`asc config --json` shows every setting (threads, memory, disk cache), its source and
 what `auto` comes to on this machine; change one with `--set KEY=VALUE` on a command, its
-`env` variable for a session, or `~/.config/droidasc/config.toml` for good.
+`env` variable for a session, or `~/.config/asc/config.toml` for good.
 
 - Small machine, or memory pressure: `memory.max=1G` (or `10%`), `threads=4`.
 - Several agents at once: keep `auto` (processes split memory and threads); if they still
   crowd the machine, lower `memory.max` to a percentage.
 - Little disk: `cache.max=2G`, or `cache.tiers=derived,rendered` to skip inflated DEX.
-- One-off sweep you will not repeat: `--no-cache`, or `DROIDASC_CACHE=off` for the session.
+- One-off sweep you will not repeat: `--no-cache`, or `ASC_CACHE=off` for the session.
 
 ## Notes
 
 - Repeated commands are fast: a per-user daemon keeps APKs resident and gives the same
-  output; `DROIDASC_DAEMON=off` runs each command in its own process.
-- `droidasc --help` lists every command and the global options; `droidasc <command> --help`
+  output; `ASC_DAEMON=off` runs each command in its own process.
+- `asc --help` lists every command and the global options; `asc <command> --help`
   lists that command's options.

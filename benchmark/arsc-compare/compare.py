@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Compare `droidasc resources APK` with `aapt2 dump resources APK`.
+"""Compare `asc resources APK` with `aapt2 dump resources APK`.
 
-usage: compare.py [--aapt2 PATH] [--droidasc PATH] [--jobs N] [--examples FILE] APK_OR_DIR...
+usage: compare.py [--aapt2 PATH] [--asc PATH] [--jobs N] [--examples FILE] APK_OR_DIR...
 
 For every APK, both tools dump the whole resource table and the dumps are
 compared per resource id: name, the set of configurations, and each
 configuration's value after normalizing the two notations (aapt2 prints
-`16.000000dp`, droidasc `16dp`; aapt2 prints bags as `(style) size=3
-parent=...`, droidasc as `{parent=@... k=v ...}`, and so on).
+`16.000000dp`, asc `16dp`; aapt2 prints bags as `(style) size=3
+parent=...`, asc as `{parent=@... k=v ...}`, and so on).
 
 Prints one line per APK and a total; `--examples` writes up to 20 examples
 of every difference kind per APK.
@@ -194,7 +194,7 @@ def same(a, b):
         # aapt2 prints the 24-bit mantissa unsigned: -3dp shows as 16777213dp.
         signed = [a[1]] + ([a[1] - (1 << 24) * m for m in (1, 2**-7, 2**-15, 2**-23)] if a[2] else [])
         if a[2] in ("%", "%p"):
-            # aapt2 prints the raw fraction (0.8%); droidasc as written (80%).
+            # aapt2 prints the raw fraction (0.8%); asc as written (80%).
             return any(close(x * 100, b[1]) or close(x, b[1]) for x in signed)
         return any(close(x, b[1]) for x in signed)
     # aapt2 shows a 6-digit color for RGB8 but keeps the alpha for ARGB8.
@@ -209,17 +209,17 @@ def same(a, b):
     return False
 
 
-def compare(apk, aapt2, droidasc):
+def compare(apk, aapt2, asc):
     a = subprocess.run([aapt2, "dump", "resources", apk], capture_output=True)
-    o = subprocess.run([droidasc, "--no-cache", "resources", apk], capture_output=True)
+    o = subprocess.run([asc, "--no-cache", "resources", apk], capture_output=True)
     stats = Counter()
     ex = defaultdict(list)
     if a.returncode != 0:
         stats["aapt2_failed"] += 1
         ex["aapt2_failed"].append(a.stderr.decode(errors="replace").strip()[:200])
     if o.returncode != 0:
-        stats["droidasc_failed"] += 1
-        ex["droidasc_failed"].append(o.stderr.decode(errors="replace").strip()[:200])
+        stats["asc_failed"] += 1
+        ex["asc_failed"].append(o.stderr.decode(errors="replace").strip()[:200])
     # Bytes, not text mode: universal newlines would turn a "\r" inside a string into "\n".
     (A, staged), O = parse_aapt2(a.stdout.decode(errors="replace")), parse_ours(o.stdout.decode(errors="replace"))
     stats["ids"] = len(A)
@@ -232,7 +232,7 @@ def compare(apk, aapt2, droidasc):
 
     for rid in sorted(set(A) | set(O)):
         # aapt2 folds a staged id's values into the finalized resource and lists
-        # it only partially; droidasc shows the staged chunk as stored.
+        # it only partially; asc shows the staged chunk as stored.
         if rid in staged:
             stats["staged_skipped"] += 1
             continue
@@ -261,7 +261,7 @@ def compare(apk, aapt2, droidasc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--aapt2", default=os.path.expanduser("~/Android/Sdk/build-tools/37.0.0/aapt2"))
-    ap.add_argument("--droidasc", default="target/release/droidasc")
+    ap.add_argument("--asc", default="target/release/asc")
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     ap.add_argument("--examples")
     ap.add_argument("paths", nargs="+")
@@ -275,7 +275,7 @@ def main():
     total = Counter()
     ex_out = open(args.examples, "w") if args.examples else None
     with cf.ThreadPoolExecutor(args.jobs) as pool:
-        for apk, stats, ex in pool.map(lambda a: compare(a, args.aapt2, args.droidasc), apks):
+        for apk, stats, ex in pool.map(lambda a: compare(a, args.aapt2, args.asc), apks):
             total += stats
             diffs = {k: v for k, v in stats.items() if k not in ("ids", "values", "staged_skipped")}
             print(f"{os.path.basename(apk)}: ids={stats['ids']} values={stats['values']} " + (" ".join(f"{k}={v}" for k, v in sorted(diffs.items())) or "OK"), flush=True)

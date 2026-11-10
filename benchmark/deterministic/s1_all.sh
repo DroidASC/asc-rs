@@ -10,7 +10,7 @@ A=$PWD/apks/k80/com.ss.android.ugc.aweme.apk
 R=results/round2; C=$T0; T=${TRIALS:-5}
 S1() { python3 $H/s1.py "$@"; }
 for v in new old; do
-  B=$([ $v = new ] && echo src/target/release/droidasc || echo bin/droidasc-r1)
+  B=$([ $v = new ] && echo src/target/release/asc || echo bin/asc-r1)
   S1 asc-cli $B $A $T $R/s1-$v-cli-nocache.json --no-cache
   rm -rf $C/s1-$v; S1 asc-cli $B $A 1 $C/warmup.json --cache-dir $C/s1-$v
   S1 asc-cli $B $A $T $R/s1-$v-cli-disk.json --cache-dir $C/s1-$v

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""usage: failed.py RUN_DIR... > failed.jsonl — droidasc MCP calls that failed, with their error text."""
+"""usage: failed.py RUN_DIR... > failed.jsonl — asc MCP calls that failed, with their error text."""
 import glob, json, os, sys
 out = []
 for d in sys.argv[1:]:
     for p in sorted(glob.glob(os.path.join(d, "*.ndjson"))):
         tool = os.path.basename(p).split(".")[0]
-        if tool not in ("droidasc", "dnewA", "dnewB", "dr1"):
+        if tool not in ("asc", "dnewA", "dnewB", "dr1"):
             continue
         calls = {}
         for l in open(p):

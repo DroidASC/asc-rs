@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run CMD (an s2.py run); while it runs, sample the droidasc processes under it:
+"""Run CMD (an s2.py run); while it runs, sample the asc processes under it:
 summed RSS every 0.5 s, and `footprint` (per-category dirty/clean, summed over the
 processes) every PERIOD s. Prints the time course and the category breakdown at the
 sample with the largest total footprint; writes OUT.json.
@@ -12,7 +12,7 @@ root = subprocess.Popen(cmd)
 t0 = time.time()
 
 
-def droidascs():
+def ascs():
     ps = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,comm="], capture_output=True, text=True).stdout
     rows = []
     for l in ps.splitlines():
@@ -29,7 +29,7 @@ def droidascs():
             continue
         seen.add(p)
         stack.extend(kids.get(p, []))
-    return {pid: rss for pid, _, rss, comm in rows if pid in seen and comm.endswith("droidasc")}
+    return {pid: rss for pid, _, rss, comm in rows if pid in seen and comm.endswith("asc")}
 
 
 rss_course, fp_samples, pid_peak = [], [], {}
@@ -38,14 +38,14 @@ stop = threading.Event()
 
 def rss_loop():
     while not stop.is_set():
-        d = droidascs()
+        d = ascs()
         rss_course.append((round(time.time() - t0, 1), len(d), sum(d.values()) // 1024))
         time.sleep(0.5)
 
 
 threading.Thread(target=rss_loop, daemon=True).start()
 while root.poll() is None:
-    pids = list(droidascs())
+    pids = list(ascs())
     if pids:
         j = os.path.join(os.environ.get("BENCH_TMP", "/private/tmp/asc-bench"), "fp.json")
         ts = time.time() - t0

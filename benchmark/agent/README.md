@@ -21,15 +21,15 @@ grok -p PROMPT --trust --disallowed-tools LIST --no-subagents --no-plan --disabl
 
 | 组 | MCP 配置 | 读文件 |
 |---|---|---|
-| dnewA | `droidasc mcp --spill-mb 0`（超长分页） | 否 |
-| dnewB | `droidasc mcp`（超长写文件） | 是 |
+| dnewA | `asc mcp --spill-mb 0`（超长分页） | 否 |
+| dnewB | `asc mcp`（超长写文件） | 是 |
 | dexsql | `dexsql mcp` | 是 |
-| dr1 | r1 `8b7a09e` 的 `droidasc mcp` | 否 |
+| dr1 | r1 `8b7a09e` 的 `asc mcp` | 否 |
 
 ```
 export HARNESS=…/dexsql-release/benchmarks/agent-audit/harness GROK=~/.grok/bin/grok
 R=/private/tmp/asc-grok        # ws-<组>/、apks/douyin.apk、runs/
-cd $R/ws-dnewB && grok mcp add -s project droidasc -e DROIDASC_CACHE_DIR=$R/ws-dnewB/cache -- $R/ws-dnewB/droidasc mcp
+cd $R/ws-dnewB && grok mcp add -s project asc -e ASC_CACHE_DIR=$R/ws-dnewB/cache -- $R/ws-dnewB/asc mcp
 python3 s1/run.py $R r2s1 3 2 dnewA dr1 &           # ROOT TAG REPS CONC 组...
 python3 s1/run.py $R r2s1 3 2 dnewB dexsql --files &
 python3 s1/summary.py $R r2s1 -v
@@ -43,7 +43,7 @@ python3 s1/summary.py $R r2s1 -v
 
 ```
 R=/private/tmp/asc-grok/s2
-python3 s2/run.py $R r2s2 1 4 droidasc dexsql
+python3 s2/run.py $R r2s2 1 4 asc dexsql
 python3 s2/score.py $R r2s2 s2/ref-k80.json -v
 ```
 

@@ -1,11 +1,11 @@
-"""rust_ASC vs droidasc (round 1): APK-level hit sets of the 8 S2 rules over a corpus dir
-(rust_ASC CLI per APK x rule vs one droidasc MCP), and the rows that differ.
+"""rust_ASC vs asc (round 1): APK-level hit sets of the 8 S2 rules over a corpus dir
+(rust_ASC CLI per APK x rule vs one asc MCP), and the rows that differ.
 
-usage: s2diff.py RUST_ASC DROIDASC CORPUS_DIR
+usage: s2diff.py RUST_ASC ASC CORPUS_DIR
 """
 import concurrent.futures as cf, json, os, re, subprocess, sys
-# droidasc forwards one-shot commands to its daemon by default; measure without it unless asked.
-os.environ.setdefault("DROIDASC_DAEMON", "off")
+# asc forwards one-shot commands to its daemon by default; measure without it unless asked.
+os.environ.setdefault("ASC_DAEMON", "off")
 R, B, D = sys.argv[1:4]
 RULES = [["string","http://"],["string","password"],["type","Ldalvik/system/DexClassLoader;"],["method","exec","--class","java.lang.Runtime"],
  ["method","addJavascriptInterface"],["method","setJavaScriptEnabled"],["method","getDeviceId"],["method","loadLibrary","--class","java.lang.System"]]

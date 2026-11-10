@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Compare droidasc findrefs with the Python reference by what they find, not how
+"""Compare asc findrefs with the Python reference by what they find, not how
 they print it.
 
-usage: semantic.py [--upstream ../ASC] [--droidasc target/release/droidasc]
+usage: semantic.py [--upstream ../ASC] [--asc target/release/asc]
                    [--queries FILE] APK
 
 Both outputs are parsed into a set of (dex, Lcls;->name, matched) rows, `matched` the
-matched values in order; the line formats differ on purpose (droidasc adds signatures
+matched values in order; the line formats differ on purpose (asc adds signatures
 and field types, quotes strings, uses `, ` and `|` columns). A query is a line of
 findrefs arguments (`string http`, `method exec --class java.lang.Runtime`); without
 --queries a default audit-style set runs. Exits 1 on any difference.
@@ -104,7 +104,7 @@ def run(cmd, cwd=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--upstream", default="../ASC")
-    ap.add_argument("--droidasc", default="target/release/droidasc")
+    ap.add_argument("--asc", default="target/release/asc")
     ap.add_argument("--queries")
     ap.add_argument("apk")
     args = ap.parse_args()
@@ -114,12 +114,12 @@ def main():
     bad = 0
     for q in queries:
         argv = shlex.split(q)
-        theirs = parse_upstream(run([sys.executable, "-m", "droidasc", "findrefs", args.apk, *argv], cwd=args.upstream))
-        ours = parse_ours(run([args.droidasc, "--no-cache", "findrefs", args.apk, *argv]), argv[0])
+        theirs = parse_upstream(run([sys.executable, "-m", "asc", "findrefs", args.apk, *argv], cwd=args.upstream))
+        ours = parse_ours(run([args.asc, "--no-cache", "findrefs", args.apk, *argv]), argv[0])
         only_theirs, only_ours = theirs - ours, ours - theirs
         status = "ok" if not (only_theirs or only_ours) else "DIFF"
         print(f"{status:4} {q}: {len(ours)} rows (upstream {len(theirs)})")
-        for tag, rows in (("upstream only", only_theirs), ("droidasc only", only_ours)):
+        for tag, rows in (("upstream only", only_theirs), ("asc only", only_ours)):
             for row in sorted(rows)[:5]:
                 print(f"     {tag}: {row}")
         bad += status != "ok"

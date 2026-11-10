@@ -1,4 +1,4 @@
-//! `droidasc config`: every setting with its value, where the value came
+//! `asc config`: every setting with its value, where the value came
 //! from, and what an `auto` value comes to on this machine right now.
 
 use asc_engine::asc_cache::{disk_space, DiskCache, DiskCapacity, ProcessRegistry, ProcessUsage};
@@ -18,7 +18,7 @@ struct Machine {
     device: Device,
     /// `(free, total)` of the cache directory's file system.
     disk: Option<(u64, u64)>,
-    /// The user's other registered droidasc processes.
+    /// The user's other registered asc processes.
     others: Vec<ProcessUsage>,
 }
 
@@ -85,7 +85,7 @@ fn now(config: &Config, m: &Machine, key: &str) -> Option<String> {
 pub(crate) fn print(config: &Config, action: Option<&ConfigAction>, json: bool) -> Result<u8, String> {
     let env = |name: &str| std::env::var(name).ok();
     if let Some(ConfigAction::Path) = action {
-        let path = Config::file_path(env).ok_or("no config file: $DROIDASC_CONFIG is empty and $HOME unset")?;
+        let path = Config::file_path(env).ok_or("no config file: $ASC_CONFIG is empty and $HOME unset")?;
         println!("{}", path.display());
         return Ok(0);
     }
@@ -118,7 +118,7 @@ pub(crate) fn print(config: &Config, action: Option<&ConfigAction>, json: bool) 
         file.as_ref().map_or("none".into(), |p| format!("{} ({})", p.display(), if config.file.is_some() { "read" } else { "not found" }));
     println!("# config file: {shown}");
     println!(
-        "# machine: {} memory, {} available, {} CPUs, {} other droidasc processes",
+        "# machine: {} memory, {} available, {} CPUs, {} other asc processes",
         d.total_memory.map_or("unknown".into(), gib),
         d.available_memory.map_or("unknown".into(), gib),
         d.cpus,

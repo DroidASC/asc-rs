@@ -13,7 +13,7 @@
 //!
 //! One daemon serves one binary and one cache configuration: the socket name
 //! hashes the executable (path, size, mtime, version), the cache settings
-//! (`--cache-dir`, `--cache-max-mb`, `DROIDASC_*`, `XDG_CACHE_HOME`, `HOME`)
+//! (`--cache-dir`, `--cache-max-mb`, `ASC_*`, `XDG_CACHE_HOME`, `HOME`)
 //! and the umask (files it writes for `-o` get the client's mode). So a
 //! client never meets a daemon of another build; an upgraded binary starts
 //! its own daemon, which tells the one of the old build at the same path to
@@ -50,10 +50,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// `off` disables the daemon: every command runs in its own process.
-pub(crate) const SWITCH_ENV: &str = "DROIDASC_DAEMON";
+pub(crate) const SWITCH_ENV: &str = "ASC_DAEMON";
 /// Directory of the sockets (and of the process registry); as for
 /// [`asc_engine::asc_cache::ProcessRegistry::default_dir`].
-const RUNTIME_DIR_ENV: &str = "DROIDASC_RUNTIME_DIR";
+const RUNTIME_DIR_ENV: &str = "ASC_RUNTIME_DIR";
 /// How often the daemon checks for idleness.
 const IDLE_POLL: Duration = Duration::from_secs(10);
 /// APKs kept open; the least recently used beyond this is closed. Their
@@ -131,7 +131,7 @@ fn wait_for(sock: &Path, mut child: std::process::Child, wait: Duration) -> Opti
     }
 }
 
-/// `droidasc daemon <action>`.
+/// `asc daemon <action>`.
 pub(crate) fn command(common: &Common, action: &crate::DaemonAction) -> Result<u8, String> {
     use crate::DaemonAction;
     let dir = socket_dir().ok_or("no private runtime directory for the daemon socket")?;
@@ -206,7 +206,7 @@ impl Identity {
         build.write(&mtime.to_le_bytes());
         // Every setting but the daemon's own timings, from whichever layer
         // (flags, environment, config file), and the variables a command
-        // reads besides (`$DROIDASC_LIMIT`, ...): the daemon runs commands with
+        // reads besides (`$ASC_LIMIT`, ...): the daemon runs commands with
         // the environment it was started with.
         let mut config = Fnv::default();
         for (key, value, _, _) in common.config().entries() {
@@ -220,7 +220,7 @@ impl Identity {
         let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
             .filter(|(k, _)| {
                 let k = k.as_bytes();
-                (k.starts_with(b"DROIDASC_") && !k.starts_with(SWITCH_ENV.as_bytes()))
+                (k.starts_with(b"ASC_") && !k.starts_with(SWITCH_ENV.as_bytes()))
                     || k == b"XDG_CACHE_HOME"
                     || k == b"XDG_CONFIG_HOME"
                     || k == b"HOME"
@@ -307,14 +307,14 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
     }
 }
 
-/// `$DROIDASC_RUNTIME_DIR/daemon`, `$XDG_RUNTIME_DIR/droidasc/daemon` or
-/// `<temp dir>/droidasc-<uid>/daemon`, created private; `None` if it (or its
+/// `$ASC_RUNTIME_DIR/daemon`, `$XDG_RUNTIME_DIR/asc/daemon` or
+/// `<temp dir>/asc-<uid>/daemon`, created private; `None` if it (or its
 /// parent) belongs to someone else or others may enter it.
 fn socket_dir() -> Option<PathBuf> {
     let base = match (std::env::var_os(RUNTIME_DIR_ENV), std::env::var_os("XDG_RUNTIME_DIR")) {
         (Some(d), _) => PathBuf::from(d),
-        (None, Some(d)) => PathBuf::from(d).join("droidasc"),
-        (None, None) => std::env::temp_dir().join(format!("droidasc-{}", uid())),
+        (None, Some(d)) => PathBuf::from(d).join("asc"),
+        (None, None) => std::env::temp_dir().join(format!("asc-{}", uid())),
     };
     let dir = base.join("daemon");
     // `<tag>.sock` must fit `sockaddr_un` (104 bytes on macOS, 108 on Linux).
@@ -351,7 +351,7 @@ fn status_of(sock: &Path) -> Option<String> {
     (tag == STATUS).then(|| String::from_utf8_lossy(&body).into_owned())
 }
 
-/// Start `droidasc daemon serve` for `common`'s configuration, detached
+/// Start `asc daemon serve` for `common`'s configuration, detached
 /// from this process and its terminal. It inherits the environment (and
 /// reads the same config file); the settings given as flags are handed on.
 fn spawn(common: &Common) -> io::Result<std::process::Child> {
@@ -439,7 +439,7 @@ fn relay(mut stream: UnixStream, req: &[u8]) -> Option<u8> {
             Ok(Some((DECLINE, _))) if !started => return None,
             Ok(_) | Err(_) if !started => return None,
             Ok(_) | Err(_) => {
-                let _ = writeln!(err, "Error: the droidasc daemon went away mid-command");
+                let _ = writeln!(err, "Error: the asc daemon went away mid-command");
                 return Some(1);
             }
         }
@@ -496,7 +496,7 @@ impl Engines for Daemon {
     }
 }
 
-/// `droidasc daemon serve`: bind the socket and answer until idle.
+/// `asc daemon serve`: bind the socket and answer until idle.
 fn serve(common: &Common, dir: &Path) -> Result<u8, String> {
     let id = Identity::of(common).ok_or("cannot identify this executable")?;
     // One daemon per identity: the lock is held for the daemon's lifetime.

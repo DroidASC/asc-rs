@@ -19,7 +19,7 @@
 //! keeps running. `notifications/cancelled` stops the named call: work not
 //! yet started is skipped and, as the protocol asks, the call gets no reply.
 //!
-//! Tool results carry the CLI's text (same line formats as `droidasc`) as
+//! Tool results carry the CLI's text (same line formats as `asc`) as
 //! `content`, and the same data as `structuredContent`.
 //!
 //! `findrefs` and `listclass` also take many APKs at once
@@ -362,7 +362,7 @@ impl Server {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
-                    "serverInfo": {"name": "droidasc", "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": "asc", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": "asc-rs: Android APK code search and smali. Pass `apk` (a path) to any tool; replies \
                         name it by apk_id, which later calls may pass instead. Usual flow: findrefs with context=\"method\" (finds the code \
                         and shows it, often no getclass needed) -> getclass with method=\"name\" for more of a class \
@@ -469,7 +469,7 @@ impl Server {
         // Build the search tables of what the caches already hold, in the
         // background (queries go first); a cold APK has nothing to build.
         let warm = Arc::clone(&apk);
-        let _ = thread::Builder::new().name("droidasc-prebuild".into()).spawn(move || {
+        let _ = thread::Builder::new().name("asc-prebuild".into()).spawn(move || {
             let _ = warm.engine.prebuild();
         });
         Ok(apk)

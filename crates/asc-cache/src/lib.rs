@@ -216,7 +216,7 @@ impl AsRef<[u8]> for DexData {
 pub enum CacheError {
     #[error("cache io error at {path}: {source}")]
     Io { path: PathBuf, source: std::io::Error },
-    #[error("{path} is not a droidasc cache directory (no {tag} marker); refusing to touch it")]
+    #[error("{path} is not a asc cache directory (no {tag} marker); refusing to touch it")]
     NotACacheDir { path: PathBuf, tag: &'static str },
     #[error("{path}: too little free disk space left to cache {bytes} bytes")]
     LowDiskSpace { path: PathBuf, bytes: u64 },
@@ -491,7 +491,7 @@ const STALE_TMP: Duration = Duration::from_secs(10 * 60);
 /// backup tools skip it.
 pub const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 const CACHEDIR_TAG_CONTENT: &str = "Signature: 8a477f597d28d172789f06886806bc55\n\
-# This file is a cache directory tag created by droidasc.\n\
+# This file is a cache directory tag created by asc.\n\
 # For information about cache directory tags, see: https://bford.info/cachedir/\n";
 
 /// Whether `name` has the shape [`ApkKey::for_apk`] produces
@@ -507,13 +507,13 @@ fn is_cache_dir_name(name: &str) -> bool {
 }
 
 impl DiskCache {
-    /// The default cache directory: `$XDG_CACHE_HOME/droidasc`, else
-    /// `~/.cache/droidasc`.
+    /// The default cache directory: `$XDG_CACHE_HOME/asc`, else
+    /// `~/.cache/asc`.
     pub fn default_dir() -> Option<PathBuf> {
         if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
-            return Some(PathBuf::from(d).join("droidasc"));
+            return Some(PathBuf::from(d).join("asc"));
         }
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("droidasc"))
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("asc"))
     }
 
     /// A cache in `dir` with the default policy: automatic capacity, every

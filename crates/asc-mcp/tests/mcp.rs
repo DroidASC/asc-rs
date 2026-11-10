@@ -80,7 +80,7 @@ fn full_session() {
     assert_eq!(replies.len(), 11);
     assert_eq!(replies[0]["id"], 1);
     assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "droidasc");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "asc");
 
     let tools: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(tools, ["getclass", "findrefs", "callgraph", "hierarchy", "listclass", "getmanifest", "manifest_summary", "resources"]);

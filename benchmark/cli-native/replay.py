@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Failed-call replay (round 2, cli-native): every droidasc MCP call that failed in the grok runs,
+"""Failed-call replay (round 2, cli-native): every asc MCP call that failed in the grok runs,
 replayed on one build.
 
-usage: replay.py BIN APK failed-calls.jsonl — replay each failed droidasc call in one MCP session.
+usage: replay.py BIN APK failed-calls.jsonl — replay each failed asc call in one MCP session.
 
 APK paths are rewritten to APK (opened first as apk1). Prints one JSON line per call:
 group, tool, ok, actionable, first 300 chars of the reply text."""
@@ -23,10 +23,10 @@ n = 0
 for i, l in enumerate(open(SRC)):
     r = json.loads(l)
     name = r["input"].get("tool_name", "")
-    if not name.startswith("droidasc__"):
+    if not name.startswith("asc__"):
         continue
     args = fix(r["input"].get("tool_input") or {})
-    rep = rpc({"jsonrpc": "2.0", "id": 100 + i, "method": "tools/call", "params": {"name": name[len("droidasc__"):], "arguments": args}})
+    rep = rpc({"jsonrpc": "2.0", "id": 100 + i, "method": "tools/call", "params": {"name": name[len("asc__"):], "arguments": args}})
     res = rep.get("result") or {}
     txt = (res.get("content") or [{}])[0].get("text", "") if res else json.dumps(rep.get("error"))
     ok = res.get("isError") is False

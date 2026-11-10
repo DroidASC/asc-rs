@@ -7,8 +7,8 @@ cd ${ASC_EVAL:-$HOME/asc-eval}
 T0=${BENCH_TMP:-/private/tmp/asc-bench}
 R=results/round2-bm; C=$T0/cache; N=${TRIALS:-3}
 mkdir -p $R $T0
-export DROIDASC_DAEMON=off
-OLD=src-r2/target/release/droidasc; NEW=src-bm/target/release/droidasc
+export ASC_DAEMON=off
+OLD=src-r2/target/release/asc; NEW=src-bm/target/release/asc
 S2() { zsh $H/guard.sh 40000 python3 $H/s2.py "$@" 2>&1 | grep -v "^guard peak" | sed "s/^/  /"; }
 L() { echo "  load $(sysctl -n vm.loadavg)"; }
 # 1. AUTO threads, mcprules N=1/4/8/16 cold + warm

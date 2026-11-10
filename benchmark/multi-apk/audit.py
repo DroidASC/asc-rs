@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Exposure-surface audit over a directory of APKs through one `droidasc mcp`.
+"""Exposure-surface audit over a directory of APKs through one `asc mcp`.
 
 Compares an agent that calls findrefs once per APK per rule with one that
 calls it once per rule over the whole directory (`dir`), following cursors.
 
-usage: audit.py DROIDASC APK_DIR [per-apk|multi|multi-first|all] [extra droidasc args...]
+usage: audit.py ASC APK_DIR [per-apk|multi|multi-first|all] [extra asc args...]
 
   per-apk      RULES x APKs findrefs calls, all pipelined at once (no agent can go faster)
   per-apk-rule the same calls one rule at a time: a rule's APKs pipelined, then wait

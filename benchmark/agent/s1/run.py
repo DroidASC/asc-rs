@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Real-agent eval: grok headless with only one MCP server (droidasc or dexsql).
+"""Real-agent eval: grok headless with only one MCP server (asc or dexsql).
 
 usage: run.py ROOT TAG REPS CONC [tool ...]   (ROOT has ws-<tool>/, apks/douyin.apk, runs/)
 """
 import concurrent.futures as cf, json, os, runpy, subprocess, sys, time
 ROOT, TAG, REPS, CONC = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 FILES = "--files" in sys.argv
-TOOLS = [a for a in sys.argv[5:] if not a.startswith("--")] or ["droidasc", "dexsql"]
+TOOLS = [a for a in sys.argv[5:] if not a.startswith("--")] or ["asc", "dexsql"]
 # dexsql-release benchmarks/agent-audit/harness (its SCENARIOS are imported, not copied).
 H = os.environ.get("HARNESS") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dexsql-release/benchmarks/agent-audit/harness")
 sys.path.insert(0, H)

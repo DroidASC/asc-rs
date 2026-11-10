@@ -32,15 +32,15 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name=droidasc-${GITHUB_REF_NAME}-${{ matrix.target }}
+          name=asc-${GITHUB_REF_NAME}-${{ matrix.target }}
           mkdir "$name"
-          cp target/${{ matrix.target }}/release/droidasc LICENSE README.md README.en.md "$name"/
+          cp target/${{ matrix.target }}/release/asc LICENSE README.md README.en.md "$name"/
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
-          path: droidasc-*.tar.gz*
+          path: asc-*.tar.gz*
   release:
     needs: build
     runs-on: ubuntu-latest

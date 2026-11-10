@@ -22,7 +22,7 @@ fn short_tempdir() -> tempfile::TempDir {
 
 impl Env {
     fn new() -> Env {
-        Env::with_exe(PathBuf::from(env!("CARGO_BIN_EXE_droidasc")))
+        Env::with_exe(PathBuf::from(env!("CARGO_BIN_EXE_asc")))
     }
 
     fn with_exe(exe: PathBuf) -> Env {
@@ -48,17 +48,17 @@ impl Env {
     fn run(&self, daemon: bool, args: &[&str]) -> Output {
         let mut cmd = Command::new(&self.exe);
         cmd.current_dir(self.work.path())
-            .env("DROIDASC_CONFIG", "")
-            .env("DROIDASC_RUNTIME_DIR", self.runtime.path())
-            .env("DROIDASC_CACHE_MAX_MB", "256")
-            .env_remove("DROIDASC_DAEMON")
+            .env("ASC_CONFIG", "")
+            .env("ASC_RUNTIME_DIR", self.runtime.path())
+            .env("ASC_CACHE_MAX_MB", "256")
+            .env_remove("ASC_DAEMON")
             .arg("--cache-dir")
             .arg(self.cache.path())
             .args(args);
         if !daemon {
-            cmd.env("DROIDASC_DAEMON", "off");
+            cmd.env("ASC_DAEMON", "off");
         }
-        cmd.output().expect("run droidasc")
+        cmd.output().expect("run asc")
     }
 
     fn start(&self) -> u32 {
@@ -183,15 +183,15 @@ fn a_relative_cache_dir_is_the_clients() {
     let run = |daemon: bool, cache: &str| {
         let mut cmd = Command::new(&env.exe);
         cmd.current_dir(env.work.path())
-            .env("DROIDASC_CONFIG", "")
-            .env("DROIDASC_RUNTIME_DIR", env.runtime.path())
-            .env_remove("DROIDASC_DAEMON")
+            .env("ASC_CONFIG", "")
+            .env("ASC_RUNTIME_DIR", env.runtime.path())
+            .env_remove("ASC_DAEMON")
             .args(["findrefs", "app.apk", "string", "token", "--threads", "1", "--limit", "1"])
             .args(["--set", &format!("cache.dir={cache}")]);
         if !daemon {
-            cmd.env("DROIDASC_DAEMON", "off");
+            cmd.env("ASC_DAEMON", "off");
         }
-        cmd.output().expect("run droidasc")
+        cmd.output().expect("run asc")
     };
     for (daemon, cache) in [(false, "local-cache"), (true, "remote-cache")] {
         let out = run(daemon, cache);
@@ -208,7 +208,7 @@ fn a_relative_cache_dir_is_the_clients() {
 fn first_command_starts_the_daemon_and_off_bypasses_it() {
     let env = Env::new();
     let off = env.run(false, &["listclass", "app.apk"]);
-    assert!(env.status().starts_with("no daemon"), "DROIDASC_DAEMON=off starts nothing");
+    assert!(env.status().starts_with("no daemon"), "ASC_DAEMON=off starts nothing");
     let first = env.run(true, &["listclass", "app.apk"]);
     assert_eq!(first.stdout, off.stdout);
     let t0 = Instant::now();
@@ -228,14 +228,14 @@ fn first_command_starts_the_daemon_and_off_bypasses_it() {
 #[test]
 fn a_replaced_binary_retires_the_old_daemon() {
     let bin = short_tempdir();
-    let exe = bin.path().join("droidasc");
-    std::fs::copy(env!("CARGO_BIN_EXE_droidasc"), &exe).unwrap();
+    let exe = bin.path().join("asc");
+    std::fs::copy(env!("CARGO_BIN_EXE_asc"), &exe).unwrap();
     let env = Env::with_exe(exe.clone());
     let old = env.start();
     // A new build at the same path (one more byte changes its identity).
     let mut bytes = std::fs::read(&exe).unwrap();
     bytes.push(0);
-    let next = bin.path().join("droidasc.new");
+    let next = bin.path().join("asc.new");
     std::fs::write(&next, bytes).unwrap();
     std::fs::set_permissions(&next, std::fs::metadata(&exe).unwrap().permissions()).unwrap();
     std::fs::rename(&next, &exe).unwrap();
@@ -257,12 +257,12 @@ fn idle_and_wait_times_come_from_the_environment() {
     // No wait: the first command runs itself while the daemon starts.
     let mut cmd = Command::new(&env.exe);
     cmd.current_dir(env.work.path())
-        .env("DROIDASC_CONFIG", "")
-        .env("DROIDASC_RUNTIME_DIR", env.runtime.path())
-        .env("DROIDASC_CACHE_MAX_MB", "256")
-        .env("DROIDASC_DAEMON_WAIT_MS", "0")
-        .env("DROIDASC_DAEMON_IDLE", "1")
-        .env_remove("DROIDASC_DAEMON")
+        .env("ASC_CONFIG", "")
+        .env("ASC_RUNTIME_DIR", env.runtime.path())
+        .env("ASC_CACHE_MAX_MB", "256")
+        .env("ASC_DAEMON_WAIT_MS", "0")
+        .env("ASC_DAEMON_IDLE", "1")
+        .env_remove("ASC_DAEMON")
         .arg("--cache-dir")
         .arg(env.cache.path())
         .args(["listclass", "app.apk"]);
@@ -282,7 +282,7 @@ fn idle_and_wait_times_come_from_the_environment() {
     // `daemon status` is not a request: the daemon exits a second after it started.
     let t0 = Instant::now();
     while alive(pid) {
-        assert!(t0.elapsed() < Duration::from_secs(10), "daemon {pid} still up with DROIDASC_DAEMON_IDLE=1");
+        assert!(t0.elapsed() < Duration::from_secs(10), "daemon {pid} still up with ASC_DAEMON_IDLE=1");
         std::thread::sleep(Duration::from_millis(50));
     }
 }

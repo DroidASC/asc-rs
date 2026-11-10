@@ -80,17 +80,17 @@ impl SpillDir {
         SpillDir { dir, budget, lock: Mutex::new(()) }
     }
 
-    /// `out/` in the disk cache directory, else `$XDG_RUNTIME_DIR/droidasc/out`,
+    /// `out/` in the disk cache directory, else `$XDG_RUNTIME_DIR/asc/out`,
     /// else a per-user directory under the system temporary directory.
     pub fn default_dir(cache_dir: Option<&Path>) -> PathBuf {
         if let Some(d) = cache_dir {
             return d.join(asc_engine::asc_cache::SPILL_DIR);
         }
         if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-            return PathBuf::from(run).join("droidasc").join("out");
+            return PathBuf::from(run).join("asc").join("out");
         }
         let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-        std::env::temp_dir().join(format!("droidasc-{user}")).join("out")
+        std::env::temp_dir().join(format!("asc-{user}")).join("out")
     }
 
     pub fn dir(&self) -> &Path {

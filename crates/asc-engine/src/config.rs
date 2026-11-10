@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Environment variable naming the config file; empty: none.
-pub const CONFIG_ENV: &str = "DROIDASC_CONFIG";
+pub const CONFIG_ENV: &str = "ASC_CONFIG";
 
 /// Where a setting's value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -352,35 +352,35 @@ macro_rules! settings {
 }
 
 settings! {
-    threads: Count = Count::Auto, "threads", "DROIDASC_THREADS", None,
-        "worker threads per process; auto: the CPUs, 4 per CPU split between busy droidasc processes";
-    memory_max: Amount = Amount::Auto, "memory.max", "DROIDASC_MEMORY", None,
+    threads: Count = Count::Auto, "threads", "ASC_THREADS", None,
+        "worker threads per process; auto: the CPUs, 4 per CPU split between busy asc processes";
+    memory_max: Amount = Amount::Auto, "memory.max", "ASC_MEMORY", None,
         "memory cache of mcp and the daemon; auto = 25%: of available memory, split between resident processes";
-    memory_ceiling: Amount = Amount::Auto, "memory.ceiling", "DROIDASC_MEMORY_CEILING", None,
+    memory_ceiling: Amount = Amount::Auto, "memory.ceiling", "ASC_MEMORY_CEILING", None,
         "most one process's automatic memory cache takes (a % is of physical memory); auto: 1/16 of it, 2G..8G";
-    memory_split: bool = true, "memory.split", "DROIDASC_MEMORY_SPLIT", None,
+    memory_split: bool = true, "memory.split", "ASC_MEMORY_SPLIT", None,
         "split the automatic memory budget between the user's resident processes";
-    cache_enabled: bool = true, "cache.enabled", "DROIDASC_CACHE", None,
+    cache_enabled: bool = true, "cache.enabled", "ASC_CACHE", None,
         "read and write the disk cache";
-    cache_dir: CacheDir = CacheDir::Default, "cache.dir", "DROIDASC_CACHE_DIR", None,
-        "disk cache directory; default: $XDG_CACHE_HOME/droidasc or ~/.cache/droidasc";
-    cache_max: Amount = Amount::Auto, "cache.max", "DROIDASC_CACHE_MAX", Some("DROIDASC_CACHE_MAX_MB"),
+    cache_dir: CacheDir = CacheDir::Default, "cache.dir", "ASC_CACHE_DIR", None,
+        "disk cache directory; default: $XDG_CACHE_HOME/asc or ~/.cache/asc";
+    cache_max: Amount = Amount::Auto, "cache.max", "ASC_CACHE_MAX", Some("ASC_CACHE_MAX_MB"),
         "disk cache budget; auto = 20%: of free space plus the cache, at most cache.ceiling, never into a 1 GiB / 5% reserve";
-    cache_ceiling: Bytes = Bytes(AutoDisk::CEILING), "cache.ceiling", "DROIDASC_CACHE_CEILING", None,
+    cache_ceiling: Bytes = Bytes(AutoDisk::CEILING), "cache.ceiling", "ASC_CACHE_CEILING", None,
         "most the automatic disk budget takes";
-    cache_tiers: Tiers = Tiers([true; 3]), "cache.tiers", "DROIDASC_CACHE_TIERS", None,
+    cache_tiers: Tiers = Tiers([true; 3]), "cache.tiers", "ASC_CACHE_TIERS", None,
         "disk cache tiers in use: dex (L1), derived (L2), rendered (L3)";
-    cache_min_dex: Bytes = Bytes(DEFAULT_MIN_DEX_BYTES), "cache.min_dex", "DROIDASC_CACHE_MIN_DEX", Some("DROIDASC_CACHE_MIN_DEX_MB"),
+    cache_min_dex: Bytes = Bytes(DEFAULT_MIN_DEX_BYTES), "cache.min_dex", "ASC_CACHE_MIN_DEX", Some("ASC_CACHE_MIN_DEX_MB"),
         "smallest inflated DEX written to L1 (smaller ones are cheaper to inflate again)";
-    cache_write_queue: Bytes = Bytes(CacheConfig::WRITE_QUEUE as u64), "cache.write_queue", "DROIDASC_CACHE_WRITE_QUEUE", None,
+    cache_write_queue: Bytes = Bytes(CacheConfig::WRITE_QUEUE as u64), "cache.write_queue", "ASC_CACHE_WRITE_QUEUE", None,
         "heap queued disk writes may hold (at most the memory cache's budget); later ones inflate again when written";
-    cache_writers: Count = Count::Auto, "cache.writers", "DROIDASC_CACHE_WRITERS", None,
+    cache_writers: Count = Count::Auto, "cache.writers", "ASC_CACHE_WRITERS", None,
         "disk writer threads per process; auto: 1 per 8 CPUs, 1..4";
-    cache_spill: Bytes = Bytes(64 << 20), "cache.spill", "DROIDASC_CACHE_SPILL", None,
+    cache_spill: Bytes = Bytes(64 << 20), "cache.spill", "ASC_CACHE_SPILL", None,
         "budget of out/ in the cache directory, where cut outputs go; 0 writes none";
-    daemon_idle: Seconds = Seconds(Duration::from_secs(15 * 60)), "daemon.idle", "DROIDASC_DAEMON_IDLE", None,
+    daemon_idle: Seconds = Seconds(Duration::from_secs(15 * 60)), "daemon.idle", "ASC_DAEMON_IDLE", None,
         "the daemon exits after this long without a request";
-    daemon_wait: Millis = Millis(Duration::from_millis(300)), "daemon.wait", "DROIDASC_DAEMON_WAIT", Some("DROIDASC_DAEMON_WAIT_MS"),
+    daemon_wait: Millis = Millis(Duration::from_millis(300)), "daemon.wait", "ASC_DAEMON_WAIT", Some("ASC_DAEMON_WAIT_MS"),
         "how long the first command waits for the daemon it starts, then runs itself";
 }
 
@@ -404,9 +404,9 @@ impl Config {
         Config::KEYS.iter().map(|k| k.name).collect::<Vec<_>>().join(", ")
     }
 
-    /// The config file: `$DROIDASC_CONFIG` (empty: none), else
-    /// `$XDG_CONFIG_HOME/droidasc/config.toml`, else
-    /// `~/.config/droidasc/config.toml`.
+    /// The config file: `$ASC_CONFIG` (empty: none), else
+    /// `$XDG_CONFIG_HOME/asc/config.toml`, else
+    /// `~/.config/asc/config.toml`.
     pub fn file_path(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
         if let Some(p) = env(CONFIG_ENV) {
             return (!p.is_empty()).then(|| expand_home(&p));
@@ -415,7 +415,7 @@ impl Config {
             .filter(|d| !d.is_empty())
             .map(PathBuf::from)
             .or_else(|| env("HOME").map(|h| Path::new(&h).join(".config")))?;
-        Some(base.join("droidasc").join("config.toml"))
+        Some(base.join("asc").join("config.toml"))
     }
 
     /// Read the process's environment and config file, then apply `flags`
@@ -648,13 +648,10 @@ mod tests {
     #[test]
     fn flags_beat_env_beat_file_beat_defaults() {
         let file = "threads = 3\n[memory]\nmax = \"30%\"\nsplit = false\n[cache]\nmax = \"8G\"\ntiers = \"dex\"\n";
-        let path = Path::new("/etc/droidasc.toml");
-        let c = Config::resolve(
-            Some((path, file)),
-            env(&[("DROIDASC_THREADS", "6"), ("DROIDASC_CACHE_MAX_MB", "1024")]),
-            &flags(&[("threads", "9")]),
-        )
-        .unwrap();
+        let path = Path::new("/etc/asc.toml");
+        let c =
+            Config::resolve(Some((path, file)), env(&[("ASC_THREADS", "6"), ("ASC_CACHE_MAX_MB", "1024")]), &flags(&[("threads", "9")]))
+                .unwrap();
         assert_eq!(c.threads, Setting { value: Count::Fixed(9), source: Source::Flag });
         assert_eq!(c.cache_max, Setting { value: Amount::Bytes(GIB), source: Source::Env });
         assert_eq!(c.memory_max, Setting { value: Amount::Percent(30), source: Source::File });
@@ -664,16 +661,15 @@ mod tests {
         assert_eq!(c.file.as_deref(), Some(path));
         assert_eq!(c.flag_pairs(), flags(&[("threads", "9")]));
         // The current name wins over the legacy one; empty variables are unset.
-        let c = Config::resolve(None, env(&[("DROIDASC_CACHE_MAX", "20%"), ("DROIDASC_CACHE_MAX_MB", "1"), ("DROIDASC_THREADS", "")]), &[])
-            .unwrap();
+        let c = Config::resolve(None, env(&[("ASC_CACHE_MAX", "20%"), ("ASC_CACHE_MAX_MB", "1"), ("ASC_THREADS", "")]), &[]).unwrap();
         assert_eq!(c.cache_max.value, Amount::Percent(20));
         assert_eq!(c.threads.source, Source::Default);
     }
 
     #[test]
     fn errors_say_where_and_what_is_expected() {
-        let e = Config::resolve(None, env(&[("DROIDASC_MEMORY", "lots")]), &[]).unwrap_err().to_string();
-        assert!(e.contains("$DROIDASC_MEMORY: memory.max = \"lots\": expected auto, a size"), "{e}");
+        let e = Config::resolve(None, env(&[("ASC_MEMORY", "lots")]), &[]).unwrap_err().to_string();
+        assert!(e.contains("$ASC_MEMORY: memory.max = \"lots\": expected auto, a size"), "{e}");
         let e = Config::resolve(Some((Path::new("c.toml"), "[memory]\nmaxx = 1\n")), env(&[]), &[]).unwrap_err().to_string();
         assert!(e.starts_with("c.toml: unknown setting \"memory.maxx\"; known: threads, memory.max"), "{e}");
         let e = Config::resolve(Some((Path::new("c.toml"), "threads = [1]\n")), env(&[]), &[]).unwrap_err().to_string();
@@ -686,8 +682,8 @@ mod tests {
 
     #[test]
     fn the_file_is_found_like_other_xdg_configs() {
-        assert_eq!(Config::file_path(env(&[("HOME", "/h")])), Some(PathBuf::from("/h/.config/droidasc/config.toml")));
-        assert_eq!(Config::file_path(env(&[("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")])), Some(PathBuf::from("/x/droidasc/config.toml")));
+        assert_eq!(Config::file_path(env(&[("HOME", "/h")])), Some(PathBuf::from("/h/.config/asc/config.toml")));
+        assert_eq!(Config::file_path(env(&[("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")])), Some(PathBuf::from("/x/asc/config.toml")));
         assert_eq!(Config::file_path(env(&[("HOME", "/h"), (CONFIG_ENV, "/c.toml")])), Some(PathBuf::from("/c.toml")));
         assert_eq!(Config::file_path(env(&[("HOME", "/h"), (CONFIG_ENV, "")])), None);
     }
@@ -707,7 +703,7 @@ mod tests {
         assert_eq!((c.memory_bytes(&big), c.memory_policy(&big)), (GIB as usize, None));
         let c = Config::resolve(None, env(&[]), &flags(&[("cache.max", "10%"), ("cache.ceiling", "5G")])).unwrap();
         assert_eq!(c.disk_capacity(), DiskCapacity::Auto(AutoDisk { percent: 10, ceiling: 5 * GIB }));
-        let off = Config::resolve(None, env(&[("DROIDASC_CACHE", "off")]), &[]).unwrap();
+        let off = Config::resolve(None, env(&[("ASC_CACHE", "off")]), &[]).unwrap();
         assert!(off.disk_cache().is_none() && off.cache_dir().is_none());
         let fixed = Config::resolve(None, env(&[]), &flags(&[("threads", "4"), ("cache.writers", "2"), ("cache.dir", "/tmp/c")])).unwrap();
         assert_eq!((fixed.threads(), fixed.fixed_threads()), (Threads::Fixed(4), Some(4)));

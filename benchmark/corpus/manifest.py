@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Inventory of a corpus directory (the APKs themselves are not in the repository).
 
-usage: manifest.py DROIDASC DIR [DIR...] > corpus.tsv
+usage: manifest.py ASC DIR [DIR...] > corpus.tsv
 One row per APK: file, package, versionName, versionCode, bytes, sha256. Package and
-versions come from the first `droidasc manifest-summary` line; `-` when an APK has no
-manifest droidasc can read.
+versions come from the first `asc manifest-summary` line; `-` when an APK has no
+manifest asc can read.
 """
 import concurrent.futures as cf, hashlib, os, re, subprocess, sys
 
@@ -17,7 +17,7 @@ def row(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     out = subprocess.run([B, "--no-cache", "manifest-summary", path], capture_output=True, text=True,
-                         env=dict(os.environ, DROIDASC_DAEMON="off")).stdout
+                         env=dict(os.environ, ASC_DAEMON="off")).stdout
     first = out.splitlines()[0] if out else ""
     pkg = re.match(r"package (\S+)", first)
     vc = re.search(r"versionCode=(\S+)", first)

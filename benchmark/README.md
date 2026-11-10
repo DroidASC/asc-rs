@@ -59,7 +59,7 @@ dexsql-release 的 17 个目标共 47 步，5 次中位数，耗时 / 峰值 RSS
 | MCP，不开缓存 | 134 ms / 643 MB | 137 ms / 643 MB | 2691 ms / 354 MB | 约 722 ms，2.4 GB |
 | MCP，磁盘缓存 | 61 ms / 103 MB | 61 ms / 107 MB | — | — |
 
-回放写死了 40.7.0 的混淆名，各工具在 40.8.0 上都缺 13–14 个证据（droidasc 各配置缺得相同）；dexsql 写死的 method id 有 18 次报错，只作计时参考。
+回放写死了 40.7.0 的混淆名，各工具在 40.8.0 上都缺 13–14 个证据（asc 各配置缺得相同）；dexsql 写死的 method id 有 18 次报错，只作计时参考。
 
 **本地 Linux，Douyin 40.7.0**
 
@@ -181,11 +181,11 @@ r1 在 manifest_exported_components 上 0/3：单 APK 的 manifest 摘要被 gro
 | asc-rs，MCP + 读文件 | 1.00 | 1.00 | 6 | 104k | 0.039 | 74 s |
 | dexsql，MCP + 读文件 | 1.00 | 1.00 | 110 | 4815k | 1.225 | 716 s |
 
-参考答案由 droidasc 生成、dexsql 独立核对。dexsql 每个 dataset 最多 64 个输入，只能分批。
+参考答案由 asc 生成、dexsql 独立核对。dexsql 每个 dataset 最多 64 个输入，只能分批。
 
 ### 失败调用回放
 
-agent 评测中 92 次失败的 droidasc 调用在同一 MCP 会话重放（本地，Douyin 40.7.0）：
+agent 评测中 92 次失败的 asc 调用在同一 MCP 会话重放（本地，Douyin 40.7.0）：
 
 | 版本 | 成功 | 报错带提示 | 报错无提示 |
 |---|---:|---:|---:|

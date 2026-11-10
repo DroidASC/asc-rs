@@ -13,7 +13,7 @@ X, OUT, K, P, T = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), 
 BASE = os.path.expanduser(os.environ.get("CORPUS_BASE", "~/asc-eval/apks"))
 DIRS = [d if d.startswith("/") else os.path.join(BASE, d) for d in os.environ.get("CORPUS", "k80:mi17").split(":")]
 APKS = sorted(os.path.join(d, f) for d in DIRS for f in os.listdir(d) if f.endswith(".apk"))
-# Same order as s2.py RULES. droidasc string = regex search, method name = substring, class exact.
+# Same order as s2.py RULES. asc string = regex search, method name = substring, class exact.
 WHERE = [
     ("method_strings", "value LIKE '%http://%'"),
     ("method_strings", "value LIKE '%password%'"),

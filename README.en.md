@@ -5,24 +5,24 @@ English | [简体中文](README.md)
 Treats an APK as a read-only database: locate classes, search cross-references, disassemble, and decode
 the manifest and resources straight from the archive, in milliseconds, with no preprocessing or global
 index. Built for people and agents: CLI first (with a transparent warm daemon on Unix), plus an MCP
-server. The binary is `droidasc`.
+server. The binary is `asc`.
 
 ## Build
 
 ```sh
-cargo build --release        # -> target/release/droidasc (Rust 1.85+)
+cargo build --release        # -> target/release/asc (Rust 1.85+)
 cargo test --workspace
 ```
 
 ## Quick start
 
 ```sh
-droidasc manifest-summary app.apk | grep exported=true          # attack surface
-droidasc findrefs app.apk string 'https?://' --limit 50         # who uses this string
-droidasc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
-droidasc getclass app.apk com.poc.Main --method onCreate        # read smali
-droidasc callgraph app.apk com.poc.Main onCreate --depth 3      # caller tree
-droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
+asc manifest-summary app.apk | grep exported=true          # attack surface
+asc findrefs app.apk string 'https?://' --limit 50         # who uses this string
+asc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
+asc getclass app.apk com.poc.Main --method onCreate        # read smali
+asc callgraph app.apk com.poc.Main onCreate --depth 3      # caller tree
+asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 ```
 
 ## Commands
@@ -38,7 +38,7 @@ droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec
 | `resources` / `xml` | Query `resources.arsc`; decode any binary XML |
 | `mcp` / `daemon` / `cache` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`) |
 
-All options: `droidasc --help` and `droidasc <command> --help`. Exit status: 0 success, 1 error, 2 some
+All options: `asc --help` and `asc <command> --help`. Exit status: 0 success, 1 error, 2 some
 DEX entries could not be searched (the other results are valid).
 
 ## Output and query syntax
@@ -68,20 +68,20 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
 ## For agents
 
 - **Cut output, spilled to a file**: nothing is cut unless asked. `--limit N` / `--max-bytes N` (or
-  `$DROIDASC_LIMIT` / `$DROIDASC_MAX_BYTES`) keep stdout short; the whole output goes to `out/` in the cache
+  `$ASC_LIMIT` / `$ASC_MAX_BYTES`) keep stdout short; the whole output goes to `out/` in the cache
   directory and the last line says where and how to continue:
 
   ```
-  # records 1-50 of 523 shown; full output in /home/u/.cache/droidasc/out/3f2a….txt (grep it, or rerun with --offset 50)
+  # records 1-50 of 523 shown; full output in /home/u/.cache/asc/out/3f2a….txt (grep it, or rerun with --offset 50)
   ```
 
-- **Skill**: [`skills/droidasc/SKILL.md`](skills/droidasc/SKILL.md) is an
+- **Skill**: [`skills/asc/SKILL.md`](skills/asc/SKILL.md) is an
   [Agent Skill](https://agentskills.io/specification) for agents that work through a shell.
 - **Daemon** (Unix): one-shot commands are handed to a per-user daemon that keeps opened APKs resident; the
   output (stdout, stderr, exit status) is byte-identical to running without it. The first command starts
-  it and it exits when idle; Ctrl-C in the client cancels the query in the daemon. `droidasc daemon
-  status|stop|start` controls it, `DROIDASC_DAEMON=off` turns it off.
-- **MCP**: `droidasc mcp` is a resident session over stdio with the tools `getclass`, `findrefs`,
+  it and it exits when idle; Ctrl-C in the client cancels the query in the daemon. `asc daemon
+  status|stop|start` controls it, `ASC_DAEMON=off` turns it off.
+- **MCP**: `asc mcp` is a resident session over stdio with the tools `getclass`, `findrefs`,
   `callgraph`, `hierarchy`, `listclass`, `getmanifest`, `manifest_summary`, `resources`. Passing an
   `apk` path opens it; the `apk_id` in replies can stand in for the path. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
   APKs in one call. Replies stay within `max_bytes` (default 16384); the rest is spilled to a file or paged,
@@ -90,7 +90,7 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
   sites also carry `access`.
 
   ```json
-  { "mcpServers": { "droidasc": { "command": "/absolute/path/to/droidasc", "args": ["mcp"] } } }
+  { "mcpServers": { "asc": { "command": "/absolute/path/to/asc", "args": ["mcp"] } } }
   ```
 
 ## Caching and resources
@@ -99,10 +99,10 @@ Inflated DEX files, derived search tables and query results are cached on disk (
 on by default); resident processes (`mcp`, the daemon) also keep an in-memory LRU. The cache only speeds
 things up and can be deleted at any time; files carry a CRC, so damage is just a miss.
 
-Threads, memory and disk are one set of settings. `droidasc config` lists each with its value, its source
+Threads, memory and disk are one set of settings. `asc config` lists each with its value, its source
 and what it comes to on this machine (`--json` for scripts and agents). A flag (`--set KEY=VALUE`) beats
-the environment (`$DROIDASC_<KEY>`, named in `--json`), which beats the config file
-`~/.config/droidasc/config.toml` (under `$XDG_CONFIG_HOME`, or `$DROIDASC_CONFIG`; empty reads none), which
+the environment (`$ASC_<KEY>`, named in `--json`), which beats the config file
+`~/.config/asc/config.toml` (under `$XDG_CONFIG_HOME`, or `$ASC_CONFIG`; empty reads none), which
 beats the default. `auto` defaults are computed for this machine, and resident processes register so they
 split memory and threads.
 
@@ -112,15 +112,15 @@ split memory and threads.
 | `memory.max` (`--memory-mb`) | auto = 25%: (available memory + what resident processes hold) × 25% / resident processes; or `4G`, `40%` |
 | `memory.ceiling` | auto: 1/16 of physical memory within 2G..8G (2G on a 12 GB machine, 6G on 96 GB) |
 | `memory.split` | on: split between resident processes |
-| `cache.enabled` (`--no-cache`), `cache.dir` (`--cache-dir`) | on; `$XDG_CACHE_HOME/droidasc` or `~/.cache/droidasc` |
+| `cache.enabled` (`--no-cache`), `cache.dir` (`--cache-dir`) | on; `$XDG_CACHE_HOME/asc` or `~/.cache/asc` |
 | `cache.max` (`--cache-max-mb`) | auto = 20%: (free space + the cache) × 20%, at most `cache.ceiling` (32G), keeping 1 GiB / 5% free |
 | `cache.tiers`, `cache.min_dex` | `dex,derived,rendered`; DEX under 4M are not written to L1 |
 | `cache.write_queue`, `cache.writers` | 512M (and at most the memory budget); auto: one per 8 CPUs, 1..4 |
 | `cache.spill` (`--spill-mb`) | 64M: budget of `out/`, where cut outputs go |
-| `daemon.idle`, `daemon.wait` | 15m; 300ms. `DROIDASC_DAEMON=off` turns the daemon off |
+| `daemon.idle`, `daemon.wait` | 15m; 300ms. `ASC_DAEMON=off` turns the daemon off |
 
 ```toml
-# ~/.config/droidasc/config.toml
+# ~/.config/asc/config.toml
 threads = 8
 [memory]
 max = "4G"

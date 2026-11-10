@@ -8,7 +8,7 @@ rust-version.workspace = true
 description = "asc-rs command line: getclass / getmanifest / findrefs over an APK without preprocessing."
 
 [[bin]]
-name = "droidasc"
+name = "asc"
 path = "src/main.rs"
 
 [dependencies]
