@@ -67,6 +67,11 @@ pub struct Options {
     /// Put a `; line N` comment where the source line changes, instead of
     /// only the function's first line in its header.
     pub lines: bool,
+    /// Add header lines naming the registers the debug info names, grouped
+    /// by the code range in which a register holds its variable: `; locals
+    /// [0004, 0020): v0 count, v1 name`, and `; params: a3 url`. Release
+    /// builds carry no such names and get no line.
+    pub locals: bool,
 }
 
 impl Options {
@@ -76,7 +81,13 @@ impl Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { literal_limit: Self::DEFAULT_LITERAL_LIMIT, string_limit: Self::DEFAULT_STRING_LIMIT, ic_slots: false, lines: false }
+        Options {
+            literal_limit: Self::DEFAULT_LITERAL_LIMIT,
+            string_limit: Self::DEFAULT_STRING_LIMIT,
+            ic_slots: false,
+            lines: false,
+            locals: false,
+        }
     }
 }
 

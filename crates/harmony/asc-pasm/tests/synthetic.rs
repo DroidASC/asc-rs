@@ -6,6 +6,7 @@ mod common;
 use asc_abc::leb128::write_uleb128;
 use asc_abc::{Abc, ClassEntry};
 use asc_arkisa::{walk, Instruction};
+use asc_fixture::abc::{AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcRecord, Asm};
 use asc_pasm::{write_function, write_instruction, write_record, Options};
 
 const RECORD: &str = "&entry/src/main/ets/pages/Index&";
@@ -577,7 +578,7 @@ impl Rng {
 fn render_damaged(data: &[u8]) {
     let Ok(abc) = Abc::parse_lenient(data) else { return };
     let Ok(classes) = abc.classes() else { return };
-    let opts = Options { lines: true, ic_slots: true, ..Options::default() };
+    let opts = Options { lines: true, locals: true, ic_slots: true, ..Options::default() };
     let mut text = String::new();
     for entry in classes {
         let Ok(ClassEntry::Local(class)) = entry else { continue };
@@ -628,6 +629,79 @@ fn damaged_files_never_panic() {
     let data = build(&[function, Function::new("func_main_0", &[0x4d, 0x00, 0x65])]);
     render_damaged(&data);
     damage(&data, 5_000, 0x9e37_79b9_7f4a_7c15);
+}
+
+/// The listing of the one function of a file whose debug info is `debug`.
+fn listing_with_debug(debug: AbcDebugInfo, damage: impl FnOnce(&mut Vec<u8>, &Abc<'_>)) -> String {
+    let mut code = Asm::new();
+    code.op("ldundefined", []).op("sta", [0.into()]).op("lda", [0.into()]).op("return", []);
+    let mut builder = AbcBuilder::new();
+    builder.record(AbcRecord::new(RECORD).function(AbcFunction::new("#*#named", AbcCode::new(3, 5, code)).debug(debug)));
+    let mut data = builder.build().bytes;
+    let pristine = data.clone();
+    damage(&mut data, &Abc::parse(&pristine).unwrap());
+    let abc = Abc::parse(&data).unwrap();
+    let class = abc.find_record(RECORD.as_bytes()).unwrap().unwrap().local().unwrap();
+    let method = class.methods().unwrap().next().unwrap().unwrap();
+    let mut text = String::new();
+    write_function(&mut text, &abc, &class, &method, &Options { locals: true, ..Options::default() }).unwrap();
+    text
+}
+
+#[test]
+fn registers_are_named_from_the_debug_info() {
+    let local = |reg: i32, name: &str| AbcLineOp::StartLocal { reg, name: name.to_owned(), ty: "any".to_owned() };
+    let debug = AbcDebugInfo {
+        line_start: 4,
+        params: vec![Some("url".to_owned()), None],
+        program: vec![
+            local(0, "count"),
+            AbcLineOp::StartLocalExtended { reg: 1, name: "na\nme".to_owned(), ty: "any".to_owned(), signature: "Lstring;".to_owned() },
+            AbcLineOp::Special { pc_delta: 1, line_delta: 1 },
+            local(2, "item"),
+            local(-1, "result"),
+            local(4, "that"),
+            AbcLineOp::Special { pc_delta: 2, line_delta: 1 },
+            AbcLineOp::EndLocal(2),
+        ],
+    };
+    let text = listing_with_debug(debug.clone(), |_, _| {});
+    let header: Vec<&str> = text.lines().take_while(|line| !line.starts_with("  ")).collect();
+    assert_eq!(
+        header,
+        [
+            ".function #*#named  ; named",
+            "; vregs 3, args 5 (a0 func, a1 new.target, a2 this, 2 params), code 6 bytes, line 4",
+            // Variables that share a range share a line; one left open lives to the end of the code.
+            "; locals [0000, 0006): v0 count, v1 na\\nme: Lstring;",
+            "; locals [0001, 0003): v2 item",
+            "; locals [0001, 0006): acc result, a1 that",
+            // The nameless second parameter is left out.
+            "; params: a0 url",
+        ]
+    );
+    // Without names the header is the two lines it was.
+    let plain = listing_with_debug(AbcDebugInfo { program: Vec::new(), params: Vec::new(), ..debug.clone() }, |_, _| {});
+    assert_eq!(plain.lines().take_while(|line| !line.starts_with("  ")).count(), 2, "{plain}");
+
+    // More variables than a header shows.
+    let many = AbcDebugInfo { line_start: 1, params: Vec::new(), program: (0..300).map(|_| local(0, "count")).collect() };
+    let text = listing_with_debug(many, |_, _| {});
+    let lines: Vec<&str> = text.lines().filter(|line| line.starts_with("; locals")).collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert_eq!(lines[0].matches("v0 count").count(), 256);
+    assert_eq!(lines[1], "; locals: … (+44 more)");
+
+    // A program that runs out of constants is reported in place of the
+    // names: twelve operations taking one each, where the pool holds eleven.
+    let text = listing_with_debug(debug, |data, abc| {
+        let class = abc.find_record(RECORD.as_bytes()).unwrap().unwrap().local().unwrap();
+        let info = class.methods().unwrap().next().unwrap().unwrap().debug_info().unwrap().unwrap();
+        let program = info.line_program_off().unwrap() as usize;
+        data[program..program + 12].fill(0x0b);
+    });
+    assert!(text.contains("\n; locals: <error: "), "{text}");
+    assert!(text.ends_with(".end function\n"));
 }
 
 #[test]

@@ -4,7 +4,8 @@
 //! `ark_disasm` listings of them: the tool's output as it comes, one file
 //! per ABC file, with or without `--verbose`. A listing is paired with the
 //! ABC file whose strings it dumps, whatever the files are called; listings
-//! are read as a stream, they run to hundreds of megabytes.
+//! are read as a stream, they run to gigabytes. A part cut out of a listing
+//! (it starts like one and lacks the string dump) is skipped and counted.
 //! `$ASC_ABC_PA_ONLY` keeps the listings whose path contains it.
 //!
 //! `$ASC_ABC_PA_DIR` is the older input: a directory of `*.pa` parts that a
@@ -12,12 +13,18 @@
 //! `$ASC_ABC_LARGE_SAMPLE`) was split into by hand. Without the variables
 //! its test does nothing.
 //!
+//! `$ASC_ARK_DISASM` is the official tool itself: with it the files
+//! `asc-fixture` writes are disassembled on the spot and compared the same
+//! way, which checks the fixture writer too: the tool has to accept its
+//! files.
+//!
 //! The oracle is compared with what `asc-abc` and `asc-arkisa` decode
 //! (every function, instruction, operand, literal array, try block, field,
 //! module record and source language; with `--verbose` also file offsets,
-//! instruction bytes and line rows), and the structure of the `asc-pasm`
-//! listing (offsets, mnemonics, labels, try ranges, source lines) is
-//! compared with the oracle in turn. Divergences are counted per class;
+//! instruction bytes, line rows, column rows and the local variable table
+//! with its parameter rows), and the structure of the `asc-pasm` listing
+//! (offsets, mnemonics, labels, try ranges, source lines, variable names)
+//! is compared with the oracle in turn. Divergences are counted per class;
 //! the ones listed in [`KNOWN`] are not ours to fix.
 
 mod common;
@@ -29,6 +36,10 @@ use std::path::{Path, PathBuf};
 
 use asc_abc::{Abc, Class, ClassEntry, Code, FieldType, FieldValue, LineOp, Literal, Method, MethodTag, ModuleRecord};
 use asc_arkisa::{walk, Instruction, OperandKind, Value};
+use asc_fixture::abc::{
+    call_graph_program, class_calls_program, class_hierarchy_program, packaged_entry_program, packaged_library_program, sample_program,
+    AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcRecord, Asm, Op, INDEX_PAGE, VERSION_13_0_1_0,
+};
 use asc_pasm::{write_function, Options};
 
 /// Divergence classes that are not ours to fix, with the reason.
@@ -205,6 +216,8 @@ struct Subject<'a> {
     /// tool keeps the first of each and drops the rest.
     signatures: HashMap<Vec<u8>, Vec<u32>>,
     records: HashMap<Vec<u8>, Vec<u32>>,
+    /// Names of the classes the file only declares, as `.record` names.
+    foreign: HashSet<Vec<u8>>,
 }
 
 impl<'a> Subject<'a> {
@@ -217,9 +230,16 @@ impl<'a> Subject<'a> {
             phase_tables: HashSet::new(),
             signatures: HashMap::new(),
             records: HashMap::new(),
+            foreign: HashSet::new(),
         };
         for entry in abc.classes().unwrap() {
-            let ClassEntry::Local(class) = entry.unwrap() else { continue };
+            let class = match entry.unwrap() {
+                ClassEntry::Local(class) => class,
+                ClassEntry::Foreign(class) => {
+                    subject.foreign.insert(dotted(ClassEntry::Foreign(class).name()));
+                    continue;
+                }
+            };
             subject.classes.insert(class.offset(), class);
             subject.records.entry(dotted(class.name())).or_default().push(class.offset());
             if let Some(module) = class.module_record().unwrap() {
@@ -490,7 +510,16 @@ struct OracleFunction<'t> {
     catches: Vec<OracleCatch<'t>>,
     lines: Vec<(u64, u64)>,
     columns: Vec<(u64, u64)>,
+    /// The text under `LOCAL_VARIABLE_TABLE:`, heading and rows; a name is
+    /// written as it is, line feeds included.
+    locals: Option<&'t [u8]>,
 }
+
+/// Heads the last table of a `--verbose` function.
+const LOCALS_TITLE: &[u8] = b"#   LOCAL_VARIABLE_TABLE:";
+
+/// `File::EntityId::IsValid`: an offset inside the file header names nothing.
+const HEADER_SIZE: u32 = 60;
 
 fn is_label_name(name: &[u8]) -> bool {
     let known = [&b"jump_label_"[..], b"try_begin_label_", b"try_end_label_", b"handler_begin_label_", b"handler_end_label_"];
@@ -670,6 +699,13 @@ impl<'a> Comparer<'a> {
                     }
                 }
                 annotations.clear();
+            } else if let Some(name) = line.strip_prefix(b".record ").and_then(|rest| rest.strip_suffix(b" <external>")) {
+                // A class the file only declares: a header without a body.
+                self.report.count("external records in oracle");
+                let ours = self.subject.foreign.contains(name);
+                self.report.check(ours, "record: external in the oracle, not a foreign class of ours", || lossy(name));
+                language = None;
+                annotations.clear();
             } else if line.starts_with(b".record ") {
                 let header = line.to_vec();
                 let mut fields: Vec<Vec<u8>> = Vec::new();
@@ -730,7 +766,7 @@ impl<'a> Comparer<'a> {
                     break;
                 } else if line == b"#   CODE:" {
                     code = true;
-                } else if line == b"#   LINE_NUMBER_TABLE:" || line == b"#   COLUMN_NUMBER_TABLE:" {
+                } else if line == b"#   LINE_NUMBER_TABLE:" || line == b"#   COLUMN_NUMBER_TABLE:" || line == LOCALS_TITLE {
                     code = false;
                 } else if code && line.starts_with(b"\t") {
                     pending = parse_insn(line).is_none();
@@ -833,6 +869,7 @@ impl<'a> Comparer<'a> {
             catches: catches.iter().filter_map(|&(from, to)| catch_line(&text[from..to])).collect(),
             lines: Vec::new(),
             columns: Vec::new(),
+            locals: None,
         };
         self.function(&oracle, Some(method_off), language)
     }
@@ -885,6 +922,10 @@ impl<'a> Comparer<'a> {
                 mode = Mode::Lines;
             } else if line == b"#   COLUMN_NUMBER_TABLE:" {
                 mode = Mode::Columns;
+            } else if line == LOCALS_TITLE {
+                // The last table of a function, up to its closing brace.
+                current.locals = Some(body.get(offset..).unwrap_or_default());
+                break;
             } else if let Some(row) = line.strip_prefix(b"#\tline ").or_else(|| line.strip_prefix(b"#\tcolumn ")) {
                 let mut parts = row.split(|&b| b == b':');
                 match (parts.next().and_then(parse_dec), parts.next().and_then(|pc| parse_dec(pc.strip_prefix(b" ")?))) {
@@ -1329,6 +1370,44 @@ impl<'a> Comparer<'a> {
         ok & self.report.check(rest.is_empty(), "instruction: more operands in oracle", at)
     }
 
+    /// The header lines of the listing that name registers: the variables
+    /// the oracle's table was compared with, one `; locals [start, end): `
+    /// line per code range in the order the ranges first occur, each
+    /// variable with its register, name and type other than `any`; then the
+    /// named parameters.
+    fn listed_locals(&self, method: &Method<'a>, code: &Code<'a>) -> Vec<String> {
+        const SHOWN: usize = 256;
+        let Some(info) = method.debug_info().unwrap() else { return Vec::new() };
+        let name = |off: u32| self.subject.abc.string(off).map_or_else(|_| "<bad string>".to_owned(), |text| listed_name(&text.to_str()));
+        let reg = |reg: i64| match u32::try_from(reg) {
+            Err(_) => "acc".to_owned(),
+            Ok(reg) => reg.checked_sub(code.num_vregs).map_or_else(|| format!("v{reg}"), |arg| format!("a{arg}")),
+        };
+        let locals = info.locals().unwrap();
+        let mut ranges: Vec<((usize, usize), Vec<String>)> = Vec::new();
+        for local in locals.iter().take(SHOWN) {
+            let range = (local.start_pc as usize, local.end_pc.map_or(code.instructions().len(), |end| end as usize));
+            let kind = name(local.signature_off.unwrap_or(local.type_off));
+            let kind = if kind.is_empty() || kind == "any" { String::new() } else { format!(": {kind}") };
+            let item = format!("{} {}{kind}", reg(i64::from(local.reg)), name(local.name_off));
+            match ranges.iter_mut().find(|(known, _)| *known == range) {
+                Some((_, items)) => items.push(item),
+                None => ranges.push((range, vec![item])),
+            }
+        }
+        let mut lines: Vec<String> =
+            ranges.iter().map(|((start, end), items)| format!("; locals [{start:04x}, {end:04x}): {}", items.join(", "))).collect();
+        if locals.len() > SHOWN {
+            lines.push(format!("; locals: … (+{} more)", locals.len() - SHOWN));
+        }
+        let params = (i64::from(code.num_vregs)..).zip(info.params()).filter(|&(_, off)| off != 0).take(SHOWN);
+        let params: Vec<String> = params.map(|(at, off)| format!("{} {}", reg(at), name(off))).collect();
+        if !params.is_empty() {
+            lines.push(format!("; params: {}", params.join(", ")));
+        }
+        lines
+    }
+
     fn resolve(method: &Method<'a>, id: u32) -> u32 {
         u16::try_from(id).ok().and_then(|idx| method.resolve(idx).ok()).unwrap_or(u32::MAX)
     }
@@ -1388,9 +1467,15 @@ impl<'a> Comparer<'a> {
 
     fn line_table(&mut self, oracle: &OracleFunction<'_>, method: &Method<'a>, context: &dyn Fn() -> String) -> bool {
         let Some(info) = method.debug_info().unwrap() else {
-            return self.report.check(oracle.lines.is_empty(), "line table: oracle has one, we have no debug info", context);
+            return self.report.check(
+                oracle.lines.is_empty() && oracle.columns.is_empty() && oracle.locals.is_none(),
+                "line table: oracle has one, we have no debug info",
+                context,
+            );
         };
-        // The oracle prints the line register sign-extended to 64 bits.
+        // The line and column registers are 32 bits wide and hold -1 for
+        // "none"; the oracle keeps them in a `size_t` (`LineProgramState::
+        // SetColumn` casts the `int32_t`), so it prints -1 as 2^64 - 1.
         let widen = |line: u32| i64::from(i32::from_le_bytes(line.to_le_bytes())) as u64;
         let mut lines = vec![(widen(info.line_start), 0u64)];
         for row in info.line_rows().unwrap() {
@@ -1404,7 +1489,12 @@ impl<'a> Comparer<'a> {
             match op.unwrap() {
                 LineOp::AdvancePc(delta) => pc += u64::from(delta),
                 LineOp::Special { pc_delta, .. } => pc += u64::from(pc_delta),
-                LineOp::SetColumn(column) => columns.push((u64::from(column), pc)),
+                LineOp::SetColumn(column) => {
+                    if column == u32::MAX {
+                        self.report.count("column rows of -1 (printed as 2^64 - 1)");
+                    }
+                    columns.push((widen(column), pc));
+                }
                 _ => {}
             }
         }
@@ -1443,8 +1533,100 @@ impl<'a> Comparer<'a> {
                     &columns[..columns.len().min(12)]
                 )
             });
+            ok = false;
         }
-        ok
+        ok & self.local_table(oracle, method, &info, pc, context)
+    }
+
+    /// The local variable table as `Disassembler::SerializeLocalVariableTable`
+    /// writes it: the variables of the line number program in the order it
+    /// starts them, then one row per parameter of the debug info.
+    /// `end_address` is where the line number program stops.
+    fn local_table(
+        &mut self,
+        oracle: &OracleFunction<'_>,
+        method: &Method<'a>,
+        info: &asc_abc::DebugInfo<'a>,
+        end_address: u64,
+        context: &dyn Fn() -> String,
+    ) -> bool {
+        let Some(code) = method.code().unwrap() else { return true };
+        let string = |off: u32| self.subject.string(off);
+        let mut rows: Vec<Vec<u8>> = Vec::new();
+        let mut row = |start: u64, end: u64, reg: i64, name: &[u8], kind: &[u8], signature: Option<&[u8]>| {
+            let place = match u32::try_from(reg) {
+                Err(_) => "acc".to_owned(),
+                Ok(reg) => match reg.checked_sub(code.num_vregs) {
+                    Some(arg) => format!("a{arg}"),
+                    None => format!("v{reg}"),
+                },
+            };
+            let mut text = format!("#\t {start:>5}  {end:>4}  {:>8} ", format!("{reg}({place})")).into_bytes();
+            // `std::setw` counts bytes.
+            text.resize(text.len() + 14usize.saturating_sub(name.len()), b' ');
+            text.extend_from_slice(name);
+            text.extend_from_slice(b"   ");
+            text.extend_from_slice(kind);
+            if let Some(signature) = signature.filter(|signature| !signature.is_empty() && *signature != kind) {
+                text.extend_from_slice(b" (");
+                text.extend_from_slice(signature);
+                text.push(b')');
+            }
+            text.push(b'\n');
+            rows.push(text);
+        };
+        let locals = info.locals().unwrap();
+        for local in &locals {
+            // `ProcessVars` takes an end of 0 for "not ended" and puts the
+            // last address there, also when the variable was ended at 0.
+            let end = local.end_pc.filter(|&end| end != 0).map_or(end_address, u64::from);
+            row(
+                u64::from(local.start_pc),
+                end,
+                i64::from(local.reg),
+                string(local.name_off),
+                string(local.type_off),
+                local.signature_off.map(string),
+            );
+        }
+        let mut params = 0u64;
+        let mut modelled = true;
+        for (reg, name_off) in (i64::from(code.num_vregs)..).zip(info.params()) {
+            params += 1;
+            // `ExtractMethodParams`: a nameless parameter has no type either;
+            // a method without a proto has parameters of type `any`.
+            let (name, kind): (&[u8], &[u8]) = if name_off <= HEADER_SIZE {
+                (b"", b"")
+            } else {
+                modelled &= method.proto_idx == u16::MAX;
+                (string(name_off), b"A")
+            };
+            row(0, code.instructions().len() as u64, reg, name, kind, None);
+        }
+        if !modelled {
+            // Named parameters typed by a proto: not modelled here.
+            self.report.count("local variable tables with proto-typed parameters (not compared)");
+            return true;
+        }
+        self.report.add("local variable rows compared", locals.len() as u64);
+        self.report.add("parameter rows compared", params);
+        let expected = if rows.is_empty() {
+            None
+        } else {
+            let mut text = b"#\t Start   End  Register           Name   Signature\n".to_vec();
+            text.extend(rows.iter().flatten());
+            Some(text)
+        };
+        let same = oracle.locals == expected.as_deref();
+        if same {
+            self.report.add("local variable rows identical", locals.len() as u64);
+            self.report.add("parameter rows identical", params);
+        } else {
+            self.report.diverge("local variable table differs", || {
+                format!("{}: oracle {:?}, ours {:?}", context(), oracle.locals.map(lossy), expected.as_deref().map(lossy))
+            });
+        }
+        same
     }
 
     /// The `asc-pasm` listing of the function against the oracle: offsets,
@@ -1457,7 +1639,7 @@ impl<'a> Comparer<'a> {
         code: &Code<'a>,
         context: &dyn Fn() -> String,
     ) -> bool {
-        let opts = Options { lines: true, ic_slots: true, literal_limit: usize::MAX, string_limit: usize::MAX };
+        let opts = Options { lines: true, locals: true, ic_slots: true, literal_limit: usize::MAX, string_limit: usize::MAX };
         self.listing.clear();
         write_function(&mut self.listing, &self.subject.abc, class, method, &opts).unwrap();
         let listing = std::mem::take(&mut self.listing);
@@ -1497,8 +1679,11 @@ impl<'a> Comparer<'a> {
         let expected_lines = std::mem::take(&mut self.listed);
         let mut listed = expected_lines.iter();
         let mut lines_ok = true;
+        let mut locals_lines = Vec::new();
         for text in listing.lines().skip(2) {
-            if let Some(label) = text.strip_prefix("L_") {
+            if text.starts_with("; locals") || text.starts_with("; params: ") {
+                locals_lines.push(text);
+            } else if let Some(label) = text.strip_prefix("L_") {
                 labels.push(usize::from_str_radix(&label[..label.find(':').unwrap()], 16).unwrap());
             } else if let Some(range) = text.strip_prefix("  .try ") {
                 let hex = |text: &str| usize::from_str_radix(text, 16).unwrap();
@@ -1544,6 +1729,13 @@ impl<'a> Comparer<'a> {
             format!("{}: oracle {stated_tries:x?}, ours {tries:x?}", context())
         });
         ok &= self.report.check(lines_ok, "listing: source lines differ", context);
+        let expected = self.listed_locals(method, code);
+        if !expected.is_empty() {
+            self.report.count("listing: functions with locals lines");
+        }
+        ok &= self.report.check(locals_lines == expected, "listing: locals lines differ", || {
+            format!("{}: `{locals_lines:?}`, expected `{expected:?}`", context())
+        });
         self.listing = listing;
         self.listed = expected_lines;
         ok
@@ -1732,23 +1924,32 @@ fn fingerprint(path: &Path) -> Fingerprint {
     entries
 }
 
+/// Whether the listing has the string dump the official tool ends its
+/// output with. A file that starts like a listing and has none is a part
+/// somebody cut out of one.
+fn has_string_dump(path: &Path) -> bool {
+    let mut lines = Lines::new(BufReader::with_capacity(1 << 20, std::fs::File::open(path).unwrap()));
+    std::iter::from_fn(|| lines.next().map(|line| line == b"# STRING")).any(|found| found)
+}
+
 /// `$ASC_ABC_PA` names files and directories (separated like `$PATH`) with
 /// ABC files and the official tool's listings of them, `ark_disasm` output
 /// as it comes: one file each, with or without `--verbose`. Which listing
-/// belongs to which file is decided by content. Without the variable the
-/// test does nothing.
+/// belongs to which file is decided by content. A file that starts like a
+/// listing and lacks the string dump is a part of one: it cannot be paired,
+/// and is skipped and counted. Without the variable the test does nothing.
 #[test]
 fn official_listings_agree() {
     let Some(roots) = std::env::var_os("ASC_ABC_PA") else { return };
     let only = std::env::var("ASC_ABC_PA_ONLY").ok();
     let files = files_under(&std::env::split_paths(&roots).collect::<Vec<_>>());
-    let mut listings: Vec<(&PathBuf, Fingerprint, bool)> = files
+    let (mut listings, parts): (Vec<_>, Vec<_>) = files
         .iter()
         .filter(|path| starts_with(path, LISTING_HEAD))
         .filter(|path| only.as_ref().is_none_or(|only| path.to_string_lossy().contains(only.as_str())))
         .map(|path| (path, fingerprint(path), false))
-        .collect();
-    assert!(!listings.is_empty(), "no listing under $ASC_ABC_PA");
+        .partition(|(path, strings, _)| !strings.is_empty() || has_string_dump(path));
+    assert!(!listings.is_empty(), "no whole listing under $ASC_ABC_PA");
 
     let mut rows = Vec::new();
     let mut opcodes = Opcodes::new();
@@ -1771,14 +1972,23 @@ fn official_listings_agree() {
             }
             let unknown: u64 = outcome.divergences.iter().filter(|(_, _, known)| !known).map(|(_, count, _)| count).sum();
             let known: u64 = outcome.divergences.iter().filter(|(_, _, known)| *known).map(|(_, count, _)| count).sum();
+            // Compared and, when it is not all of them, identical.
+            let pair = |compared: &str, identical: &str| match (outcome.count(compared), outcome.count(identical)) {
+                (compared, identical) if compared == identical => compared.to_string(),
+                (compared, identical) => format!("{compared}/{identical}"),
+            };
             rows.push(format!(
-                "{:>3}.{:<3} {:>8} {:>8} {:>9} {:>9} {:>7} {:>7}  {}",
+                "{:>3}.{:<3} {:>8} {:>8} {:>9} {:>9} {:>8} {:>8} {:>7} {:>6} {:>7} {:>7}  {}",
                 abc.header().version.0[0],
                 abc.header().version.0[1..].iter().map(u8::to_string).collect::<Vec<_>>().join("."),
                 outcome.count("functions in oracle"),
                 outcome.count("functions identical"),
                 outcome.count("instructions compared"),
                 outcome.count("instructions identical"),
+                pair("line rows compared", "line rows identical"),
+                pair("column rows compared", "column rows identical"),
+                pair("local variable rows compared", "local variable rows identical"),
+                pair("parameter rows compared", "parameter rows identical"),
                 known,
                 unknown,
                 listing.display()
@@ -1789,17 +1999,130 @@ fn official_listings_agree() {
         }
     }
     println!("==== all listings");
-    println!("version  functions identical     insns identical   known unknown  listing");
+    println!("version  functions identical     insns identical    lines  columns  locals params   known unknown  listing");
     for row in &rows {
         println!("{row}");
     }
     let mut union = String::new();
     opcode_lines(&mut union, &opcodes);
     print!("{union}");
+    println!("==== {} listings compared; {} files skipped, parts of a listing (no string dump)", rows.len(), parts.len());
+    for (part, ..) in &parts {
+        println!("skipped: {}", part.display());
+    }
     for (listing, ..) in listings.iter().filter(|(_, _, taken)| !taken) {
         failed.push(format!("{}: no ABC file under $ASC_ABC_PA has its strings", listing.display()));
     }
     assert!(failed.is_empty(), "divergences from the official disassembler:\n{}", failed.join("\n"));
+}
+
+/// A function whose debug info has everything the official tool tabulates:
+/// variables started plainly and with a signature, ended, left open and
+/// ended at address 0, a register that changes hands, the accumulator,
+/// columns including -1, named and nameless parameters.
+fn debug_program() -> AbcBuilder {
+    const RECORD: &str = "&entry/src/main/ets/pages/Debug&";
+    let local = |reg: i32, name: &str| AbcLineOp::StartLocal { reg, name: name.to_owned(), ty: "any".to_owned() };
+    let mut code = Asm::new();
+    code.op("ldai", [7.into()]).op("sta", [0.into()]).op("lda.str", [Op::str("label")]).op("sta", [1.into()]);
+    code.op("lda", [0.into()]).op("sta", [2.into()]).op("lda", [1.into()]).op("return", []);
+    let debug = AbcDebugInfo {
+        line_start: 3,
+        params: vec![Some("request".to_owned()), None, Some("a much longer parameter name".to_owned())],
+        program: vec![
+            AbcLineOp::SetFile("entry/src/main/ets/pages/Debug.ets".to_owned()),
+            local(3, "early"),
+            AbcLineOp::EndLocal(3),
+            AbcLineOp::SetColumn(4),
+            AbcLineOp::Special { pc_delta: 5, line_delta: 1 },
+            local(0, "count"),
+            AbcLineOp::StartLocalExtended { reg: 1, name: "label".to_owned(), ty: "any".to_owned(), signature: "Lstring;".to_owned() },
+            AbcLineOp::SetColumn(u32::MAX),
+            AbcLineOp::Special { pc_delta: 4, line_delta: -4 },
+            AbcLineOp::EndLocal(0),
+            local(0, "other"),
+            local(-1, "result"),
+            AbcLineOp::AdvancePc(4),
+            AbcLineOp::AdvanceLine(40),
+            AbcLineOp::SetColumn(12),
+            AbcLineOp::Special { pc_delta: 0, line_delta: 0 },
+            AbcLineOp::EndLocal(1),
+            AbcLineOp::Special { pc_delta: 2, line_delta: 1 },
+        ],
+    };
+    let mut plain = Asm::new();
+    plain.op("ldundefined", []).op("return", []);
+    let mut builder = AbcBuilder::new();
+    builder.record(
+        AbcRecord::new(RECORD)
+            .function(AbcFunction::new("#*#debug", AbcCode::new(4, 6, code)).debug(debug))
+            .function(AbcFunction::new("#*#plain", AbcCode::new(0, 3, plain))),
+    );
+    builder
+}
+
+/// `$ASC_ARK_DISASM` is the official disassembler (`ark_disasm [--verbose]
+/// input.abc output.pa`). It is run on the files `asc-fixture` writes, and
+/// its listings are compared like any other. Without the variable the test
+/// does nothing.
+#[test]
+fn official_tool_agrees_on_fixtures() {
+    let Some(tool) = std::env::var_os("ASC_ARK_DISASM") else { return };
+    let mut programs: Vec<(&str, AbcBuilder)> = vec![
+        ("sample", sample_program()),
+        ("regions", sample_program()),
+        ("calls", call_graph_program()),
+        ("classes", class_hierarchy_program()),
+        ("lineage", class_calls_program()),
+        ("entry", packaged_entry_program()),
+        ("library", packaged_library_program()),
+        ("debug", debug_program()),
+        ("debug-13", debug_program()),
+    ];
+    programs[1].1.split_region_before(INDEX_PAGE);
+    programs[8].1.version(VERSION_13_0_1_0);
+
+    let dir = std::env::temp_dir().join(format!("asc-pasm-oracle-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
+    let mut failed = Vec::new();
+    for (name, builder) in &programs {
+        let data = builder.build().bytes;
+        let abc_path = dir.join(format!("{name}.abc"));
+        std::fs::write(&abc_path, &data).unwrap();
+        for verbose in [false, true] {
+            let listing = dir.join(format!("{name}{}.pa", if verbose { "-verbose" } else { "" }));
+            let mut command = std::process::Command::new(&tool);
+            if verbose {
+                command.arg("--verbose");
+            }
+            let run = command.arg(&abc_path).arg(&listing).output().unwrap_or_else(|err| panic!("{}: {err}", Path::new(&tool).display()));
+            if !run.status.success() || !starts_with(&listing, LISTING_HEAD) {
+                let said = String::from_utf8_lossy(&run.stderr);
+                failed.push(format!("{name}: the official tool rejects the file ({}): {}", run.status, said.trim()));
+                continue;
+            }
+            let outcome = compare(&data, std::slice::from_ref(&listing));
+            println!("==== {name}{}", if verbose { " --verbose" } else { "" });
+            print!("{}", outcome.report);
+            if !outcome.unknown().is_empty() {
+                failed.push(format!("{name}: {:?}", outcome.unknown()));
+            }
+            let functions = outcome.count("functions in oracle");
+            if functions == 0 || functions != outcome.count("functions identical") {
+                failed.push(format!("{name}: {functions} functions, {} identical", outcome.count("functions identical")));
+            }
+            if verbose && name.starts_with("debug") {
+                // Every table of the debug function was there to compare.
+                let compared = ["line rows", "column rows", "local variable rows", "parameter rows"]
+                    .map(|what| (outcome.count(&format!("{what} compared")), outcome.count(&format!("{what} identical"))));
+                if compared != [(5, 5), (3, 3), (5, 5), (3, 3)] {
+                    failed.push(format!("{name}: debug tables compared and identical: {compared:?}"));
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(failed.is_empty(), "the official disassembler on fixture files:\n{}", failed.join("\n"));
 }
 
 #[test]

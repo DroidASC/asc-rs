@@ -251,6 +251,7 @@ version = "0.1.0"
 dependencies = [
  "asc-abc",
  "asc-arkisa",
+ "asc-fixture",
  "thiserror",
  "zip",
 ]

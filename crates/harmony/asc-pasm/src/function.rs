@@ -4,12 +4,12 @@
 use std::fmt::{self, Write};
 use std::iter::Peekable;
 
-use asc_abc::{Abc, CatchBlock, Code, FunctionKind, LineRows, Method, TryBlock};
+use asc_abc::{Abc, CatchBlock, Code, DebugInfo, FunctionKind, LineRows, LocalVar, Method, TryBlock};
 use asc_arkisa::walk;
 
 use crate::insn::{write_label, InsnPrinter};
 use crate::record::RecordInfo;
-use crate::text::{write_count, write_error, write_name};
+use crate::text::{write_count, write_error, write_name, ELLIPSIS};
 use crate::Options;
 
 /// Closes every function, so a listing cut short by the caller is
@@ -94,6 +94,100 @@ fn write_header<W: Write>(
         out.write_str(", sendable")?;
     }
     out.write_char('\n')
+}
+
+/// Most variables named in one header. Line number programs are shared
+/// and their length is whatever the file says; real functions have dozens.
+const MAX_LOCALS: usize = 256;
+
+/// The type every ArkTS variable has; not worth a word.
+const ANY: &[u8] = b"any";
+
+/// `v3` below `num_vregs`, `a1` from there on, `acc` for the accumulator.
+fn write_local_reg<W: Write>(out: &mut W, code: &Code<'_>, reg: i64) -> fmt::Result {
+    match u32::try_from(reg) {
+        Err(_) => out.write_str("acc"),
+        Ok(reg) => match reg.checked_sub(code.num_vregs) {
+            Some(arg) => write!(out, "a{arg}"),
+            None => write!(out, "v{reg}"),
+        },
+    }
+}
+
+fn write_local_name<W: Write>(out: &mut W, abc: &Abc<'_>, name_off: u32) -> fmt::Result {
+    match abc.string(name_off) {
+        Ok(name) => write_name(out, &name.to_str()),
+        Err(error) => write_error(out, format_args!("name: {error}")),
+    }
+}
+
+/// The header lines naming the registers, when the debug info names any:
+///
+/// ```text
+/// ; locals [0004, 0020): v0 count, v1 name: string
+/// ; locals [0010, 0018): v2 item
+/// ; params: a3 url
+/// ```
+///
+/// Variables are grouped by the code range in which their registers hold
+/// them, one line per range in the order the ranges first occur; a
+/// parameter holds its register throughout.
+fn write_locals<W: Write>(out: &mut W, abc: &Abc<'_>, code: &Code<'_>, info: &DebugInfo<'_>) -> fmt::Result {
+    let locals = match info.locals() {
+        Ok(locals) => locals,
+        Err(error) => {
+            out.write_str("; locals: ")?;
+            write_error(out, error)?;
+            return out.write_char('\n');
+        }
+    };
+    let code_size = u32::try_from(code.instructions().len()).unwrap_or(u32::MAX);
+    let range = |local: &LocalVar| (local.start_pc, local.end_pc.unwrap_or(code_size));
+    let shown = &locals[..locals.len().min(MAX_LOCALS)];
+    for (first, local) in shown.iter().enumerate() {
+        let (start, end) = range(local);
+        if shown[..first].iter().any(|earlier| range(earlier) == (start, end)) {
+            continue;
+        }
+        write!(out, "; locals [{start:04x}, {end:04x}): ")?;
+        let group = shown[first..].iter().filter(|local| range(local) == (start, end));
+        for (i, local) in group.enumerate() {
+            out.write_str(if i == 0 { "" } else { ", " })?;
+            write_local_reg(out, code, i64::from(local.reg))?;
+            out.write_char(' ')?;
+            write_local_name(out, abc, local.name_off)?;
+            // The signature is the type again unless the variable was started with one.
+            match abc.string(local.signature_off.unwrap_or(local.type_off)) {
+                Ok(kind) if kind.bytes == ANY || kind.bytes.is_empty() => {}
+                Ok(kind) => {
+                    out.write_str(": ")?;
+                    write_name(out, &kind.to_str())?;
+                }
+                Err(error) => {
+                    out.write_str(": ")?;
+                    write_error(out, format_args!("type: {error}"))?;
+                }
+            }
+        }
+        out.write_char('\n')?;
+    }
+    if locals.len() > MAX_LOCALS {
+        writeln!(out, "; locals: {ELLIPSIS} (+{} more)", locals.len() - MAX_LOCALS)?;
+    }
+    // A nameless parameter is stored as offset 0.
+    let params = (i64::from(code.num_vregs)..).zip(info.params()).filter(|&(_, name_off)| name_off != 0);
+    let mut named = 0usize;
+    for (reg, name_off) in params.take(MAX_LOCALS) {
+        named += 1;
+        out.write_str(if named == 1 { "; params: " } else { ", " })?;
+        write_local_reg(out, code, reg)?;
+        out.write_char(' ')?;
+        write_local_name(out, abc, name_off)?;
+    }
+    if named > 0 {
+        out.write_char('\n')?;
+    }
+    Ok(())
 }
 
 /// A try block and how far the listing got with it.
@@ -309,6 +403,12 @@ pub(crate) fn write_function<W: Write>(
     };
     write_header(out, abc, record, method, code.as_ref(), opts)?;
     let Some(code) = code else { return out.write_str(END) };
+    if opts.locals {
+        // A debug info that cannot be read is reported where the line would stand.
+        if let Ok(Some(info)) = method.debug_info() {
+            write_locals(out, abc, &code, &info)?;
+        }
+    }
 
     let printer = InsnPrinter::new(abc, method, record, Some(code.num_vregs), opts);
     let mut markers = Markers::collect(out, &code)?;

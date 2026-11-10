@@ -7,7 +7,9 @@ use asc_abc::{
     Abc, AbcError, CatchBlock, ClassEntry, FieldType, FieldValue, FunctionKind, LineOp, LineRow, Literal, LocalExport, RecordName,
     RegularImport, SourceLang, Version,
 };
-use asc_fixture::abc::{adler32, seal, AbcLiteral, MethodRef, VERSION_13_0_1_0};
+use asc_fixture::abc::{
+    adler32, seal, AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcLiteral, AbcRecord, Asm, MethodRef, VERSION_13_0_1_0,
+};
 use common::{synthetic, synthetic_builder, walk, BIG, FOREIGN, RECORD_A, RECORD_B};
 
 #[test]
@@ -327,6 +329,71 @@ fn debug_info_and_line_program() {
     assert_eq!(ops.len(), 4);
     assert!(matches!(ops[3], Err(AbcError::Truncated { .. })));
     assert!(debug.line_rows().unwrap().any(|row| row.is_err()));
+}
+
+#[test]
+fn local_variables_of_the_line_program() {
+    let local = |reg: i32, name: &str| AbcLineOp::StartLocal { reg, name: name.to_owned(), ty: "any".to_owned() };
+    let mut code = Asm::new();
+    code.op("ldundefined", []).op("sta", [0.into()]).op("lda", [0.into()]).op("return", []);
+    let debug = AbcDebugInfo {
+        line_start: 1,
+        params: vec![Some("first".to_owned()), None],
+        program: vec![
+            // Ended where it starts, at 0.
+            local(2, "early"),
+            AbcLineOp::EndLocal(2),
+            AbcLineOp::Special { pc_delta: 1, line_delta: 1 },
+            local(0, "count"),
+            AbcLineOp::StartLocalExtended { reg: -1, name: "result".to_owned(), ty: "any".to_owned(), signature: "Lstring;".to_owned() },
+            AbcLineOp::AdvancePc(2),
+            AbcLineOp::EndLocal(0),
+            // No variable in the register: nothing to end or to restart.
+            AbcLineOp::EndLocal(7),
+            AbcLineOp::RestartLocal(7),
+            // The register changes hands, and the first holder comes back.
+            local(0, "other"),
+            AbcLineOp::Special { pc_delta: 2, line_delta: 0 },
+            AbcLineOp::EndLocal(0),
+            AbcLineOp::RestartLocal(0),
+        ],
+    };
+    let mut builder = AbcBuilder::new();
+    builder.record(
+        AbcRecord::new("&entry/src/main/ets/Locals&").function(AbcFunction::new("#*#locals", AbcCode::new(3, 5, code)).debug(debug)),
+    );
+    let file = builder.build();
+    let abc = Abc::parse(&file.bytes).unwrap();
+    let debug = abc.method(file.layout.method("&entry/src/main/ets/Locals&", "#*#locals")).unwrap().debug_info().unwrap().unwrap();
+
+    let text = |off: u32| abc.string(off).unwrap().to_str().into_owned();
+    let locals: Vec<_> = debug
+        .locals()
+        .unwrap()
+        .iter()
+        .map(|local| (local.reg, text(local.name_off), local.signature_off.map(text), local.start_pc, local.end_pc))
+        .collect();
+    assert_eq!(
+        locals,
+        [
+            (2, "early".to_owned(), None, 0, Some(0)),
+            (0, "count".to_owned(), None, 1, Some(3)),
+            (-1, "result".to_owned(), Some("Lstring;".to_owned()), 1, None),
+            (0, "other".to_owned(), None, 3, Some(5)),
+            (0, "other".to_owned(), None, 5, None),
+        ]
+    );
+    assert!(debug.locals().unwrap().iter().all(|local| text(local.type_off) == "any"));
+    assert_eq!(debug.params().collect::<Vec<_>>().len(), 2);
+
+    // A program that runs out of constants is an error, not a partial table:
+    // thirteen operations taking one each, where the pool holds ten.
+    let mut starved = file.bytes.clone();
+    let program = debug.line_program_off().unwrap() as usize;
+    starved[program..program + 13].fill(0x0b);
+    let abc = Abc::parse(&starved).unwrap();
+    let debug = abc.method(file.layout.method("&entry/src/main/ets/Locals&", "#*#locals")).unwrap().debug_info().unwrap().unwrap();
+    assert!(matches!(debug.locals(), Err(AbcError::Truncated { .. })));
 }
 
 #[test]

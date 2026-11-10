@@ -33,7 +33,7 @@ pub use class::{
     IndexList, Method, MethodTag, Methods, SourceLang,
 };
 pub use code::{CatchBlock, Code, TryBlock, TryBlocks};
-pub use debug::{DebugInfo, LineOp, LineOps, LineRow, LineRows};
+pub use debug::{DebugInfo, LineOp, LineOps, LineRow, LineRows, LocalVar};
 pub use error::{AbcError, Result};
 pub use header::{Header, RegionHeader, Version};
 pub use literal::{tag as literal_tag, Literal, LiteralArray, Literals};

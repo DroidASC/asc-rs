@@ -31,6 +31,7 @@ pub struct Stats {
     pub catch_blocks: u64,
     pub annotations: u64,
     pub debug_infos: u64,
+    pub locals: u64,
     pub line_rows: u64,
     pub module_records: u64,
     pub module_entries: u64,
@@ -257,6 +258,10 @@ pub fn walk(abc: &Abc<'_>, strict: bool) -> Result<Stats, AbcError> {
                     stats.line_rows += 1;
                 }
                 debug.first_line()?;
+                for local in debug.locals()? {
+                    abc.string(local.name_off)?;
+                    stats.locals += 1;
+                }
             }
         }
     }

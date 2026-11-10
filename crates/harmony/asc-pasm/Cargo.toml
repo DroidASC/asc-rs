@@ -13,5 +13,7 @@ asc-arkisa.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# Builds the files the official disassembler is run on.
+asc-fixture.workspace = true
 # Reads the real `.hap` / `.app` samples in the integration tests.
 zip.workspace = true

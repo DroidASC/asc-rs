@@ -112,6 +112,69 @@ impl<'a> DebugInfo<'a> {
     pub fn line_rows(&self) -> Result<LineRows<'a>> {
         Ok(LineRows { ops: self.line_ops()?, pc: 0, line: self.line_start, column: 0 })
     }
+
+    /// The local variables the line number program declares, in the order
+    /// it starts them. The parameters are not among them: their names are
+    /// [`DebugInfo::params`].
+    ///
+    /// An `END_LOCAL` closes the latest variable of its register, a
+    /// `RESTART_LOCAL` starts that variable anew; either is ignored when the
+    /// register never had a variable.
+    ///
+    /// # Errors
+    /// A malformed line number program.
+    pub fn locals(&self) -> Result<Vec<LocalVar>> {
+        let mut locals: Vec<LocalVar> = Vec::new();
+        let mut pc = 0u32;
+        for op in self.line_ops()? {
+            match op? {
+                LineOp::AdvancePc(delta) => pc = pc.wrapping_add(delta),
+                LineOp::Special { pc_delta, .. } => pc = pc.wrapping_add(pc_delta),
+                LineOp::StartLocal { reg, name_off, type_off } => {
+                    locals.push(LocalVar { reg, name_off, type_off, signature_off: None, start_pc: pc, end_pc: None });
+                }
+                LineOp::StartLocalExtended { reg, name_off, type_off, signature_off } => {
+                    locals.push(LocalVar { reg, name_off, type_off, signature_off: Some(signature_off), start_pc: pc, end_pc: None });
+                }
+                LineOp::EndLocal { reg } => {
+                    if let Some(local) = locals.iter_mut().rfind(|local| local.reg == reg) {
+                        local.end_pc = Some(pc);
+                    }
+                }
+                LineOp::RestartLocal { reg } => {
+                    if let Some(&local) = locals.iter().rfind(|local| local.reg == reg) {
+                        locals.push(LocalVar { start_pc: pc, end_pc: None, ..local });
+                    }
+                }
+                LineOp::AdvanceLine(_)
+                | LineOp::SetPrologueEnd
+                | LineOp::SetEpilogueBegin
+                | LineOp::SetFile(_)
+                | LineOp::SetSourceCode(_)
+                | LineOp::SetColumn(_) => {}
+            }
+        }
+        Ok(locals)
+    }
+}
+
+/// A local variable: the code range in which a register holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalVar {
+    /// The register; `-1` is the accumulator. Registers at or above the
+    /// code item's `num_vregs` are arguments.
+    pub reg: i32,
+    /// String offsets of the name and the type.
+    pub name_off: u32,
+    pub type_off: u32,
+    /// String offset of the type signature, when the variable was started
+    /// with one (`START_LOCAL_EXTENDED`).
+    pub signature_off: Option<u32>,
+    /// Code offset from which the register holds the variable.
+    pub start_pc: u32,
+    /// Code offset at which it stops doing so; `None` when the program never
+    /// ends the variable, which then lives to the end of the code.
+    pub end_pc: Option<u32>,
 }
 
 /// One operation of a line number program, with its constant pool
@@ -145,6 +208,8 @@ pub enum LineOp {
     SetFile(u32),
     /// String offset of the source code, or 0.
     SetSourceCode(u32),
+    /// The column register is 32 bits wide; `u32::MAX` is the compiler's
+    /// `-1`, "no column".
     SetColumn(u32),
     /// A special opcode: advance pc and line, then emit a row.
     Special {
