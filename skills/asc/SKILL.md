@@ -1,6 +1,6 @@
 ---
 name: asc
-description: Search and read Android APK bytecode from the shell with the asc CLI - the manifest's attack surface (exported components, providers, deep links), code references to strings / types / methods / fields, smali of a class or method, call graphs and class hierarchies, resources. Use when auditing or reverse engineering an APK, or answering "which code calls / uses X" in one or many APKs.
+description: Search and read Android APK bytecode (and HarmonyOS HAP / ABC) from the shell with the asc CLI - the manifest's attack surface (exported components, providers, deep links), code references to strings / types / methods / fields, smali of a class or method, call graphs and class hierarchies, resources. Use when auditing or reverse engineering an APK or a HarmonyOS .hap / .app / .abc, or answering "which code calls / uses X" in one or many APKs.
 ---
 
 # asc
@@ -172,6 +172,72 @@ asc findrefs app.apk method 'android.content.Intent->putExtra[arg0=*, arg1=*]'
 3. Read the relevant method: `asc getclass app.apk com.a.Entry --method onReceive`.
 4. Walk the path: `asc callgraph app.apk com.a.Helper writeFile --depth 3` (callers) or `--callees`.
 
+## HarmonyOS (.hap / .hsp / .app / .abc)
+
+The same commands read ArkTS bytecode; the format is detected from the file, and what does not
+apply fails with one line naming what does. A directory or `,` list is one program. An app-store
+hap has an encrypted `ets/modules.abc` (`# warning:` on stderr, exit 2, nothing found in it): put
+the decrypted `modules.abc` next to the hap and pass the directory.
+
+A class is a *record* (a module): `&entry/src/main/ets/pages/Index&`, libraries end in a version
+(`&@ohos/lib/Index&1.0.0`); quote the `&`, or give a path suffix (`pages/Index`). A method is a
+*function*: raw `#~@0>#build`, restored `Index.build`. Rows are
+`entry | RECORD->FUNCTION+0xPC | restored name | instruction ; resolved callee`: paste column 2
+as it is into `getclass` / `callgraph`.
+
+Reading order: `asc manifest-summary entry.hap` (abilities / extensions with `exported=`,
+deep-link `uri` lines; each has `record=NAME`, and a `callbacks` line lists its `onXxx`
+functions) -> `asc getclass entry.hap entryability/EntryAbility --method EntryAbility.onCreate`
+(or the whole record; `listclass --prefix entry/` lists them) -> `findrefs` / `callgraph`.
+
+| question | command |
+|---|---|
+| who uses a string | `asc findrefs entry.hap string 'https?://'` (`--literal`: plain text; in `all`, `literal:TEXT` is that plain-text string search too) |
+| who uses a number | `asc findrefs entry.hap number 0x67452301` (or `A..B`) |
+| system modules used | `asc findrefs entry.hap import '@ohos:' --requests`; uses of one: `import '@ohos:net\.http'` |
+| who calls X | `asc findrefs entry.hap call '^import:@ohos:net\.http'` (regex over the resolved callee path); by member name, any receiver: `asc findrefs entry.hap prop request --exact --access call` |
+| where a function is defined | `asc findrefs entry.hap method EntryAbility.onCreate --exact`: **definition sites, not calls**. Raw names are full of regex metacharacters: use `--exact` |
+| property / global access | `asc findrefs entry.hap prop token --access write`, `global console --exact` |
+| conditions in one function | `asc findrefs entry.hap all 'call:^import:@ohos:net\.http' 'string:^https?://'` (one scan instead of a query per hit; `prop:=name` is exact; no `!`) |
+| callees / callers | `asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3` (callers without `--callees`) |
+| who extends X / overrides m | `asc hierarchy entry.hap UIAbility --method onCreate` (a class name, `RECORD->CLASS`, or a parent outside the program: `'import:@ohos:app\.'`, `'^global:ViewPU$'`); `--supers` walks up |
+| pages and routes | `asc manifest-summary entry.hap \| grep '^module'` shows `pages=$profile:main_pages(...)` and `routerMap=...`; then `asc xml entry.hap '$profile:main_pages'` (a route's `pageSourceFile` path suffix goes to `getclass`) |
+| resources | `asc resources entry.hap string/app_name` (or `0x...`, `$string:x`, `app.string.x`), `--search REGEX --in value`, `--resolve` |
+| where a text / resource is used | `asc resources entry.hap --search TEXT --in value` gives the id, then `asc findrefs entry.hap number ID`; by-name uses: `findrefs string 'app\.string\.NAME'`; while reading code: `getclass ... --res-names` |
+| who reaches a system API | `asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6`; only the paths from entry points: add `--from 'method:^EntryAbility\.on'` |
+
+A call names no callee in ArkTS; its origin is tracked inside the function, and output says how
+far that got:
+
+- Callee paths: `import:REQUEST#NAME.m`, `global:NAME.m`, `this.m`, `local:FUNCTION` are known
+  origins. `argN`: a parameter; `this@F` / `argN@F`: those of the enclosing function F, captured
+  by a closure; `x().m`: member of a call result; `lex(L,S)`: a captured variable with several
+  writers; `?`: unknown.
+- callgraph rows: no mark = proved call. `[new]`. `[this-class]`: `this.m()` matched by name in
+  the caller's class, not guaranteed. `[defines]`: a closure is created there, not called
+  (`--no-defines` drops them). `[external]`: a leaf rooted at an import / global with no function
+  of the program behind it - a system API, but also a member of a call result or an import that
+  did not resolve; when its path names a record of the program, continue there by hand.
+  `[unresolved]`: a leaf of unknown origin; `unresolved=N` counts them on a row, `--callees
+  --unresolved` lists them.
+- Callbacks the system calls (lifecycle `onXxx`, event handlers) have no callers, and a path
+  stops at `[unresolved] x.NAME`. Continue by name: `findrefs method NAME --exact` (the functions
+  that could be meant; `--class RECORD` narrows), `findrefs prop NAME --exact --access call` (the
+  other call sites), then `callgraph` from the candidates. Pages and UI are wired by strings
+  (`loadContent`, router names): `findrefs string`.
+
+- hierarchy rows: `[external]` = a parent outside the program (system class, global);
+  `[unresolved]` = parent of unknown origin; `[reassigned]` = a class a decorator assigned again
+  (not guaranteed); an `override ...` row can be pasted into `getclass` / `callgraph`. The call
+  graph does not use the hierarchy: `super()` and inherited methods stay `[unresolved]`.
+- A resource id is unique within one package only: with several packages, `resources` rows start
+  with the package; match it against the entry column of `findrefs number ID`.
+- A directory is one program; its files are recognized by content, whatever they are called, and
+  a decrypted abc pairs with its encrypted package entry by header and checksum.
+
+Not on HarmonyOS: `rules`, `--context`, `--virtual`, `--unless`, `getmanifest --resolve`,
+findrefs `type` / `field` / `extends` / `impl`, static ArkTS (`modules_static.abc`).
+
 ## Tuning
 
 `asc config --json` shows every setting (threads, memory, disk cache), its source and
@@ -186,7 +252,7 @@ what `auto` comes to on this machine; change one with `--set KEY=VALUE` on a com
 
 ## Notes
 
-- Repeated commands are fast: a per-user daemon keeps APKs resident and gives the same
+- Repeated commands are fast: a per-user daemon keeps opened programs resident and gives the same
   output; `ASC_DAEMON=off` runs each command in its own process.
 - `asc --help` lists every command and the global options; `asc <command> --help`
   lists that command's options.

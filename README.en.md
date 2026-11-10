@@ -4,8 +4,9 @@ English | [简体中文](README.md)
 
 Treats an APK as a read-only database: locate classes, search cross-references, disassemble, and decode
 the manifest and resources straight from the archive, in milliseconds, with no preprocessing or global
-index. Built for people and agents: CLI first (with a transparent warm daemon on Unix), plus an MCP
-server. The binary is `asc`.
+index; HarmonyOS HAP / ABC files answer the same commands (see [HarmonyOS](#harmonyos-hap--abc)). Built for
+people and agents: CLI first (with a transparent warm daemon on Unix), plus an MCP server. The binary is
+`asc`.
 
 ## Build
 
@@ -39,7 +40,7 @@ asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 | `mcp` / `daemon` / `cache` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`) |
 
 All options: `asc --help` and `asc <command> --help`. Exit status: 0 success, 1 error, 2 some
-DEX entries could not be searched (the other results are valid).
+DEX (or ABC) entries could not be searched (the other results are valid).
 
 ## Output and query syntax
 
@@ -65,6 +66,92 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
 - An empty result prints `hint:` lines on stderr: DEX entries searched, case sensitivity, a framework class
   the APK does not define, the closest class or the methods it has, and so on.
 
+## HarmonyOS (HAP / ABC)
+
+The same `asc` and the same commands read ArkCompiler bytecode (the `.abc` ArkTS / JS compiles to); the
+format is detected from the file:
+
+- **Inputs**: a `.hap` / `.hsp`, an `.app` (inner haps may be compressed), a bare `.abc`, or a directory /
+  `,` list read as one program; every `ets/*.abc` of a hap is read, and the entry column of a row says which
+  one it came from. The files of a directory are recognized by content (the `PANDA` magic, a zip holding
+  `module.json` / `ets/*.abc`), whatever their names and extensions.
+- **Encrypted packages**: a hap from the app store has an encrypted `ets/modules.abc`. It is named in a
+  `# warning:` on stderr and left out (`findrefs` / `callgraph` exit with 2); nothing is decrypted. Put the
+  decrypted abc next to the hap and pass that directory: code comes from the decrypted file, `module.json`,
+  resources and the rest from the hap. The two are paired by the header (version, size, checksum) and the
+  checksum of the body, not by file name.
+- **Names**: a class is a record (a module: `&entry/src/main/ets/pages/Index&`, libraries carry a version,
+  `&@ohos/lib/Index&1.0.0`, older files have `com.a.b/entry/ets/pages/Index`; a path suffix, `pages/Index`,
+  is enough), a method is a function (raw `#~@0>#build` or restored `Index.build`).
+
+| command | Android | HarmonyOS |
+|---|---|---|
+| `listclass` | classes | records; `--all` adds pseudo records (annotations) |
+| `getclass` / `disassemble` | smali | pandasm-style disassembly; `--method` for one function, `--entry` picks the abc |
+| `getmanifest` / `manifest-summary` | `AndroidManifest.xml` | `module.json` (`--file pack.info` / `pkgContextInfo.json`); in the summary each ability / extension carries `record=`, and a `callbacks` line lists its `onXxx` functions |
+| `findrefs string` / `method` / `all` | ✓ | ✓ (`method` finds where a function is **defined**, not its calls) |
+| `findrefs prop` / `global` / `import` / `number` / `call` | — | ✓ |
+| `findrefs type` / `field` / `extends` / `impl` / `rules`, `--context` | ✓ | — |
+| `callgraph` | ✓ | ✓: `--to call:REGEX`, `--from method:NAME`, `--no-defines`, `--unresolved`, `--entry`; no `--virtual` / `--unless` |
+| `hierarchy` | ✓ | ✓: the parent is read where each class is defined; `CLASS` is a class name, `RECORD->CLASS`, or a parent outside the program, `import:REGEX` / `global:REGEX`; `--method` sees the members of the class literal |
+| `resources` | `resources.arsc` | `resources.index`, same options; QUERY is `0x…`, `string/name`, `$string:name` or `app.string.name` |
+| `xml` | binary XML | prints a text file of the package as it is: `'$profile:main_pages'` (page list, route table) or a path in the package |
+| `getclass --res-names` | resource id constants | appends `# string/name "value"` to the row of a `$r(...)` object |
+
+```sh
+asc manifest-summary entry.hap | grep -E '^(ability|callbacks|uri)'    # exported abilities, callbacks, deep links
+asc getclass entry.hap entryability/EntryAbility --method EntryAbility.onCreate
+asc findrefs entry.hap import '@ohos:' --requests                      # which system modules are used
+asc findrefs entry.hap call '^import:@ohos:net\.http'                  # who calls into the http module
+asc findrefs entry.hap prop request --exact --access call              # calls by member name, any receiver
+asc findrefs entry.hap all 'call:^import:@ohos:net\.http' 'string:^https?://'
+asc hierarchy entry.hap UIAbility --method onCreate                    # who extends UIAbility, who overrides onCreate
+asc xml entry.hap '$profile:main_pages'                                # the page list; the routerMap likewise
+asc resources entry.hap --search 'Sign in' --in value                  # text -> id, then findrefs number ID
+asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
+asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6  # who reaches http
+asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --depth 8 --max-nodes 5000
+```
+
+A `findrefs` row is `entry | RECORD->function+0xPC | restored name | instruction ; resolved callee`; the second
+column can be pasted as it is into `getclass` / `callgraph`:
+
+```
+ets/modules.abc | &entry/src/main/ets/common/Utils/utils&->#~@0<#o0O0OOoo+0xef | utils.o0O0OOoo | callthis2 v10, v11, v12 ; import:@ohos:net.http#default.createHttp().request(expr, expr)
+```
+
+An ArkTS call instruction names no callee; its origin is tracked inside the function only, so results say how
+much is known:
+
+- Callee paths (what `findrefs call` and `callgraph --to` match): `import:REQUEST#NAME.member`,
+  `global:NAME.member`, `this.member` and `local:FUNCTION` are known origins; `argN` is the Nth parameter of
+  the function, `this@F` / `argN@F` the `this` / parameter of the enclosing function F captured by a closure,
+  `x().member` a member of a call result, `lex(level,slot)` a captured variable with several writers, `?`
+  unknown.
+- `callgraph` rows: no mark is a proved call; `[new]` a construction; `[this-class]` is `this.m()` matched by
+  name in the class of the caller, not guaranteed; `[defines]` creates a closure, it is not a call
+  (`--no-defines` drops them); `[external]` is a leaf rooted at an import / global for which the program has
+  no function (system APIs, but also members of call results and imports that did not resolve);
+  `[unresolved]` is a leaf of unknown origin (`--callees --unresolved` lists them, otherwise a row ends in
+  the count, `unresolved=N`); `(repeated)` marks a node expanded elsewhere.
+- Callbacks the system calls (lifecycle `onXxx`, event handlers) have no callers; where a path stops at
+  `[unresolved]`, continue by name: `findrefs method NAME --exact` (who defines it), `findrefs prop NAME
+  --exact --access call` (the other call sites).
+
+- `hierarchy` rows: `[external]` is a parent outside the program (a system class, a global), `[unresolved]` a
+  parent of unknown origin, `[reassigned]` a class a decorator assigned again after its definition (the
+  subclass extends it or what the decorator put there, not guaranteed), `[function]` a plain function used
+  as a base class.
+- A resource id is unique within one package only; `resources` rows of a program of several packages start
+  with the package, and the hits of `findrefs number ID` are to be matched on the entry column.
+
+Limits: a HarmonyOS program is served by the same daemon as APKs (the analyses stay resident), but has no
+disk cache (it opens in milliseconds); the call graph does not use the class hierarchy (`super()` and
+inherited methods are `[unresolved]`); `findrefs all` takes no excluded conditions; static ArkTS
+(`modules_static.abc`) is not supported; abc versions above 24.x have not been checked
+against real samples; a directory mixing DEX and HarmonyOS files is an Android program, so pass the HarmonyOS
+files by their own path.
+
 ## For agents
 
 - **Cut output, spilled to a file**: nothing is cut unless asked. `--limit N` / `--max-bytes N` (or
@@ -83,7 +170,9 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
   status|stop|start` controls it, `ASC_DAEMON=off` turns it off.
 - **MCP**: `asc mcp` is a resident session over stdio with the tools `getclass`, `findrefs`,
   `callgraph`, `hierarchy`, `listclass`, `getmanifest`, `manifest_summary`, `resources`. Passing an
-  `apk` path opens it; the `apk_id` in replies can stand in for the path. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
+  `apk` path opens it; the `apk_id` in replies can stand in for the path. `apk` may also be a HarmonyOS
+  program: `listclass`, `getclass`, `findrefs`, `callgraph`, `getmanifest` and `manifest_summary` work on it, and
+  the first reply says what those tools take there. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
   APKs in one call. Replies stay within `max_bytes` (default 16384); the rest is spilled to a file or paged,
   per `spill`.
   Field queries accept `"access": "read"` / `"write"`; `field_accesses` aligns with `matched`, and contextual
@@ -140,6 +229,8 @@ reproduce them: [benchmark/README.md](benchmark/README.md).
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crates, implementation and design trade-offs.
 - [benchmark/README.md](benchmark/README.md): correctness and performance evaluation.
+- [docs/ark-abc-design.md](docs/ark-abc-design.md) (Chinese): design of the HarmonyOS / ABC support, measured call
+  resolution precision.
 
 ## Credits
 

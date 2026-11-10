@@ -151,6 +151,7 @@ dependencies = [
 name = "asc-cli"
 version = "0.1.0"
 dependencies = [
+ "asc-ark-engine",
  "asc-engine",
  "asc-findrefs",
  "asc-fixture",
@@ -234,6 +235,7 @@ dependencies = [
 name = "asc-mcp"
 version = "0.1.0"
 dependencies = [
+ "asc-ark-engine",
  "asc-engine",
  "asc-findrefs",
  "asc-fixture",
