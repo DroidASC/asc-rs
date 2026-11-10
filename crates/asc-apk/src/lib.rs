@@ -139,13 +139,40 @@ pub struct ArchiveId<'a> {
 /// One file of an [`Apk`].
 struct Archive {
     path: PathBuf,
-    map: Mmap,
+    map: Data,
     /// Its name in a program of several archives (`services.jar`,
     /// `app/TeleService/TeleService.apk`), which prefixes its entry names;
     /// empty for a lone archive.
     label: String,
     /// A bare DEX file rather than a zip: one stored entry, the whole file.
     bare_dex: bool,
+}
+
+/// The bytes of one archive: a mapped file, or an entry of another archive
+/// that is itself an archive ([`Apk::open_nested`]).
+enum Data {
+    Mapped(Mmap),
+    /// A stored entry, read in place: `range` of archive `archive` of `outer`.
+    Window {
+        outer: Arc<[Archive]>,
+        archive: usize,
+        range: std::ops::Range<usize>,
+    },
+    /// An inflated entry.
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for Data {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Data::Mapped(map) => map,
+            // The range was taken from this very archive when the window was made.
+            Data::Window { outer, archive, range } => &outer[*archive].map[range.clone()],
+            Data::Owned(bytes) => bytes,
+        }
+    }
 }
 
 /// `n` bytes at `o`, or `None` if they are not all inside `b` (offsets come
@@ -199,7 +226,7 @@ impl Archive {
         // modified while it is mapped (same contract as the Python mmap use).
         let map = unsafe { Mmap::map(&file) }.map_err(|source| ApkError::Io { path: path.clone(), source })?;
         let bare_dex = map.starts_with(b"dex\n");
-        Ok(Archive { path, map, label, bare_dex })
+        Ok(Archive { path, map: Data::Mapped(map), label, bare_dex })
     }
 
     /// `inner` (a name inside this archive) as the program names it:
@@ -563,11 +590,17 @@ impl Apk {
 
     /// Compressed payload of `entry` inside the mapping.
     pub fn raw_payload(&self, entry: &Entry) -> Result<&[u8]> {
+        let range = self.payload_range(entry)?;
+        Ok(&self.archive(entry).map[range])
+    }
+
+    /// Where [`Apk::raw_payload`] of `entry` lies in its archive's bytes.
+    fn payload_range(&self, entry: &Entry) -> Result<std::ops::Range<usize>> {
         let archive = self.archive(entry);
         let data = &archive.map[..];
         let bad = || ApkError::BadLocalHeader(entry.name.clone());
         if archive.bare_dex {
-            return offset(entry.comp_size).and_then(|n| data.get(..n)).ok_or_else(bad);
+            return offset(entry.comp_size).filter(|&n| n <= data.len()).map(|n| 0..n).ok_or_else(bad);
         }
         let lh = offset(entry.local_header_off).ok_or_else(bad)?;
         if bytes_at(data, lh, 4) != Some(LH_SIG) {
@@ -578,7 +611,48 @@ impl Apk {
         let extra_len = u16_at(data, lh + 28).ok_or_else(bad)? as usize;
         let start = lh + 30 + name_len + extra_len;
         let end = offset(entry.comp_size).and_then(|n| start.checked_add(n));
-        end.and_then(|end| data.get(start..end)).ok_or_else(bad)
+        end.filter(|&end| start <= end && end <= data.len()).map(|end| start..end).ok_or_else(bad)
+    }
+
+    /// The raw bytes of a lone archive's file (a zip, or a file that is not
+    /// one, which a caller may know how to read); `None` for a program of
+    /// several archives.
+    pub fn lone_data(&self) -> Option<&[u8]> {
+        match &self.archives[..] {
+            [lone] => Some(&lone.map),
+            _ => None,
+        }
+    }
+
+    /// Bytes of the archives this holds on the heap: the inflated ones of
+    /// [`Apk::open_nested`]. Clones share them.
+    pub fn owned_bytes(&self) -> usize {
+        self.archives.iter().map(|archive| if let Data::Owned(bytes) = &archive.map { bytes.capacity() } else { 0 }).sum()
+    }
+
+    /// Open `entry`, an archive inside this one (a `.hap` of an `.app`, a jar
+    /// of a zip), as an archive of its own with this one's limits. A stored
+    /// entry is read in place; a Deflate entry is inflated into memory and
+    /// kept there for as long as the returned [`Apk`] lives. Its entry names
+    /// are the names inside it.
+    pub fn open_nested(&self, entry: &Entry) -> Result<Apk> {
+        let map = match entry.method {
+            METHOD_STORED => {
+                // Checks the declared size against the payload like any other read.
+                self.read_entry(entry)?;
+                Data::Window { outer: Arc::clone(&self.archives), archive: entry.archive, range: self.payload_range(entry)? }
+            }
+            _ => Data::Owned(self.read_entry(entry)?.into_owned()),
+        };
+        let bare_dex = map.starts_with(b"dex\n");
+        let nested = Archive { path: self.archive(entry).path.clone(), map, label: String::new(), bare_dex };
+        Ok(Apk {
+            path: self.path.clone(),
+            archives: Arc::new([nested]),
+            limits: self.limits,
+            notes: Arc::new([]),
+            version: self.version.clone(),
+        })
     }
 
     /// Extract `entry`: stored entries are borrowed straight from the mapping,
@@ -1047,5 +1121,33 @@ mod tests {
             Prefix::Aborted(_) => panic!("unexpected abort"),
         }
         assert!(matches!(apk.inflate_until(&entry, |_| PrefixStep::Abort).unwrap(), Prefix::Aborted(_)));
+    }
+
+    #[test]
+    fn nested_archives_open_in_place_or_inflated() {
+        let inner = asc_fixture::make_apk(&[("ets/modules.abc", b"PANDA body"), ("module.json", b"{}")], false);
+        for deflate in [false, true] {
+            let file = write_temp(&asc_fixture::make_apk(&[("entry.hap", &inner), ("pack.info", b"{}")], deflate));
+            let outer = Apk::open(file.path()).unwrap();
+            assert!(outer.lone_data().is_some_and(|data| data.starts_with(LH_SIG)));
+            let entry = outer.find_entry("entry.hap").unwrap().unwrap();
+            assert_eq!(entry.method, if deflate { METHOD_DEFLATE } else { METHOD_STORED });
+            let nested = outer.open_nested(&entry).unwrap();
+            assert_eq!(nested.lone_data(), Some(&inner[..]));
+            // A stored inner archive is a window on the outer mapping, not a copy.
+            let outer_range = outer.lone_data().unwrap().as_ptr_range();
+            assert_eq!(outer_range.contains(&nested.lone_data().unwrap().as_ptr()), !deflate);
+            let names: Vec<String> = nested.entries().unwrap().into_iter().map(|e| e.name).collect();
+            assert_eq!(names, ["ets/modules.abc", "module.json"]);
+            let abc = nested.find_entry("ets/modules.abc").unwrap().unwrap();
+            assert!(matches!(nested.read_entry(&abc).unwrap(), Cow::Borrowed(b"PANDA body")));
+            // The nested archive keeps the outer bytes alive on its own.
+            drop(outer);
+            assert_eq!(nested.read("module.json").unwrap(), b"{}");
+        }
+        let not_zip = write_temp(&asc_fixture::make_apk(&[("x.hap", b"not a zip")], false));
+        let outer = Apk::open(not_zip.path()).unwrap();
+        let nested = outer.open_nested(&outer.find_entry("x.hap").unwrap().unwrap()).unwrap();
+        assert!(matches!(nested.entries(), Err(ApkError::NoEocd)));
     }
 }

@@ -6,6 +6,10 @@
 //! [`DexBuilder`], a small two-phase assembler (declare the constant pool,
 //! resolve it to canonical sorted ids, then add classes with bytecode that
 //! uses those ids).
+//!
+//! The HarmonyOS side lives in [`abc`] (synthetic ArkCompiler ABC files:
+//! [`abc::AbcBuilder`], the [`abc::Asm`] assembler, [`abc::make_abc`]) and
+//! [`hap`] (`.hap` / `.app` archives).
 
 use asc_dex::checksum::seal;
 use asc_dex::debug_info::{DebugInfo, DebugOp, DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE};
@@ -15,7 +19,12 @@ use asc_dex::{mutf8, NO_INDEX};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
+pub mod abc;
+pub mod hap;
 pub mod res;
+
+pub use abc::{make_abc, make_multi_region_abc, AbcBuilder};
+pub use hap::{make_app, make_hap};
 
 fn uleb(value: u32) -> Vec<u8> {
     let mut v = Vec::new();

@@ -22,9 +22,24 @@ impl SharedCache {
             return Vec::new();
         }
         let sizes: Vec<usize> = engines.iter().map(|e| e.resident_bytes()).collect();
-        let (held, closing) = within_share(&sizes, self.memory_capacity() / RESIDENT_SHARE);
+        self.fit_resident_bytes(&sizes)
+    }
+
+    /// [`SharedCache::fit_resident`] by what each open program holds
+    /// outside the cache, for a host whose programs are not all
+    /// [`Engine`]s (another format's engines share the budget).
+    pub fn fit_resident_bytes(&self, sizes: &[usize]) -> Vec<usize> {
+        if self.memory_capacity() == 0 {
+            return Vec::new();
+        }
+        let (held, closing) = within_share(sizes, self.resident_share());
         self.set_reserved(held);
         closing
+    }
+
+    /// The bytes open programs may hold outside the cache: half the memory budget.
+    pub fn resident_share(&self) -> usize {
+        self.memory_capacity() / RESIDENT_SHARE
     }
 }
 

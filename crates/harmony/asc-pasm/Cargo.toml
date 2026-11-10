@@ -1,0 +1,17 @@
+[package]
+name = "asc-pasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pandasm-style disassembly of ArkCompiler ABC records and functions for asc-rs."
+
+[dependencies]
+asc-abc.workspace = true
+asc-arkisa.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Reads the real `.hap` / `.app` samples in the integration tests.
+zip.workspace = true

@@ -77,6 +77,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-abc"
+version = "0.1.0"
+dependencies = [
+ "asc-fixture",
+ "memchr",
+ "thiserror",
+ "zip",
+]
+
+[[package]]
 name = "asc-apk"
 version = "0.1.0"
 dependencies = [
@@ -88,6 +98,27 @@ dependencies = [
  "tempfile",
  "thiserror",
 ]
+
+[[package]]
+name = "asc-ark-engine"
+version = "0.1.0"
+dependencies = [
+ "asc-abc",
+ "asc-apk",
+ "asc-arkisa",
+ "asc-fixture",
+ "asc-hap",
+ "asc-pasm",
+ "memchr",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-arkisa"
+version = "0.1.0"
 
 [[package]]
 name = "asc-arsc"
@@ -183,7 +214,19 @@ dependencies = [
 name = "asc-fixture"
 version = "0.1.0"
 dependencies = [
+ "asc-abc",
+ "asc-arkisa",
  "asc-dex",
+ "zip",
+]
+
+[[package]]
+name = "asc-hap"
+version = "0.1.0"
+dependencies = [
+ "asc-fixture",
+ "serde_json",
+ "thiserror",
  "zip",
 ]
 
@@ -198,6 +241,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "asc-pasm"
+version = "0.1.0"
+dependencies = [
+ "asc-abc",
+ "asc-arkisa",
+ "thiserror",
+ "zip",
 ]
 
 [[package]]

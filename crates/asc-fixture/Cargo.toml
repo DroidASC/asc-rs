@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Synthetic DEX/APK fixtures shared by asc-rs tests."
+description = "Synthetic DEX/APK and ABC/HAP fixtures shared by asc-rs tests."
 publish = false
 
 [dependencies]
+asc-abc.workspace = true
+asc-arkisa.workspace = true
 asc-dex.workspace = true
 zip.workspace = true

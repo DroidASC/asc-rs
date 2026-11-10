@@ -1,0 +1,24 @@
+[package]
+name = "asc-ark-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "HarmonyOS (HAP / ABC) query engine for asc-rs: program opening, record listing, disassembly and reference search."
+
+[dependencies]
+asc-abc.workspace = true
+asc-arkisa.workspace = true
+asc-pasm.workspace = true
+asc-apk.workspace = true
+asc-hap.workspace = true
+memchr.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# `make_apk` builds the synthetic `.hap` / `.app` archives of the tests.
+asc-fixture.workspace = true
+tempfile.workspace = true

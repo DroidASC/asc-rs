@@ -1,0 +1,18 @@
+[package]
+name = "asc-abc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Zero-copy, lazy ArkCompiler ABC (Panda file) reader primitives for asc-rs (header, class index, regions, classes, methods, code, literal arrays, module records)."
+
+[dependencies]
+memchr.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Builds the synthetic files of the integration tests.
+asc-fixture.workspace = true
+# Reads the real `.hap` / `.app` samples in the integration tests.
+zip.workspace = true

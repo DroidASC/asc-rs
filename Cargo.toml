@@ -14,6 +14,11 @@ members = [
     "crates/asc-mcp",
     "crates/asc-cli",
     "crates/asc-fixture",
+    "crates/harmony/asc-abc",
+    "crates/harmony/asc-arkisa",
+    "crates/harmony/asc-pasm",
+    "crates/harmony/asc-ark-engine",
+    "crates/harmony/asc-hap",
 ]
 
 [workspace.package]
@@ -36,6 +41,11 @@ asc-arsc = { path = "crates/asc-arsc" }
 asc-engine = { path = "crates/asc-engine" }
 asc-mcp = { path = "crates/asc-mcp" }
 asc-fixture = { path = "crates/asc-fixture" }
+asc-abc = { path = "crates/harmony/asc-abc" }
+asc-arkisa = { path = "crates/harmony/asc-arkisa" }
+asc-pasm = { path = "crates/harmony/asc-pasm" }
+asc-ark-engine = { path = "crates/harmony/asc-ark-engine" }
+asc-hap = { path = "crates/harmony/asc-hap" }
 
 thiserror = "2"
 memmap2 = "0.9"
