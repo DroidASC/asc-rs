@@ -32,6 +32,8 @@ pub struct CodeItem<'a> {
     /// Instruction bytes (`insns_size * 2`).
     pub insns: &'a [u8],
     pub tries: Vec<TryItem>,
+    /// The handlers a try item can name, by ascending offset: those past
+    /// the first 64 KiB of the list are parsed over but not kept.
     pub handlers: Vec<CatchHandler>,
     /// Offset just past the item.
     pub end: usize,
@@ -85,7 +87,8 @@ impl<'a> CodeItem<'a> {
             let remaining = buf.len().saturating_sub(p);
             handlers.reserve((count as usize).min(remaining).min(MAX_RESERVE));
             for _ in 0..count {
-                let offset = (p - list_base) as u16;
+                // `handler_off` is a u16: a handler further down cannot be named.
+                let offset = u16::try_from(p - list_base).ok();
                 let (size, n) = read_sleb128(buf, p)?;
                 p += n;
                 let remaining = buf.len().saturating_sub(p);
@@ -104,7 +107,9 @@ impl<'a> CodeItem<'a> {
                 } else {
                     None
                 };
-                handlers.push(CatchHandler { offset, catches, catch_all_addr });
+                if let Some(offset) = offset {
+                    handlers.push(CatchHandler { offset, catches, catch_all_addr });
+                }
             }
         }
         Ok(CodeItem { offset: off, registers_size, ins_size, outs_size, tries_size, debug_info_off, insns, tries, handlers, end: p })
@@ -116,9 +121,11 @@ impl<'a> CodeItem<'a> {
         self.insns.len() / 2
     }
 
-    /// Find the handler referenced by a try item.
+    /// Find the handler referenced by a try item. A binary search: up to
+    /// 65535 try items may each look one up among as many handlers.
     pub fn handler_for(&self, try_item: &TryItem) -> Option<&CatchHandler> {
-        self.handlers.iter().find(|h| h.offset == try_item.handler_off)
+        let i = self.handlers.binary_search_by_key(&try_item.handler_off, |h| h.offset).ok()?;
+        self.handlers.get(i)
     }
 }
 
@@ -160,6 +167,29 @@ mod tests {
         assert_eq!(item.handlers[1].catch_all_addr, Some(6));
         assert_eq!(item.handler_for(&item.tries[0]).unwrap().offset, 1);
         assert_eq!(item.end, v.len());
+    }
+
+    #[test]
+    fn handlers_are_found_among_many_and_only_below_64k() {
+        // 30000 catch-all handlers of 3 bytes each: the list runs past 64 KiB.
+        let mut v = header(1, 1);
+        v.extend_from_slice(&[0x0e, 0x00, 0, 0]);
+        v.extend_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0]);
+        let try_at = v.len() - 2;
+        v.extend_from_slice(&[0xb0, 0xea, 0x01]); // count = 30000
+        for _ in 0..30_000 {
+            v.extend_from_slice(&[0x00, 0x80, 0x01]); // size 0, catch-all @128
+        }
+        let item = CodeItem::parse(&v, 0).unwrap();
+        assert_eq!(item.end, v.len());
+        // At offsets 3, 6, ..., 0xffff; the next, 0x10002, would have wrapped to 2.
+        assert_eq!(item.handlers.len(), 0xffff / 3);
+        assert!(item.handlers.windows(2).all(|w| w[0].offset < w[1].offset));
+        for (handler_off, found) in [(3, Some(3)), (0xfffc, Some(0xfffc)), (0xffff, Some(0xffff)), (4, None), (2, None)] {
+            v[try_at..try_at + 2].copy_from_slice(&u16::to_le_bytes(handler_off));
+            let item = CodeItem::parse(&v, 0).unwrap();
+            assert_eq!(item.handler_for(&item.tries[0]).map(|h| h.offset), found, "handler_off {handler_off:#x}");
+        }
     }
 
     #[test]
