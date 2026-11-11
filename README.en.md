@@ -39,214 +39,50 @@ asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 | `resources` / `xml` | Query `resources.arsc`; decode any binary XML |
 | `mcp` / `daemon` / `cache` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`) |
 
+The APK argument may also be a jar, a `.dex`, or several files analysed as one program (a directory, or paths
+joined with `,`): see [docs/query.en.md](docs/query.en.md#several-files-as-one-program).
+
 All options: `asc --help` and `asc <command> --help`. Exit status: 0 success, 1 error, 2 some
 DEX (or ABC) entries could not be searched (the other results are valid).
 
-## Output and query syntax
-
-One record per line, columns separated by ` | `; lines starting with `#` are headers, totals and hints, so
-grep / cut work. A `findrefs` row is `dex | method (full signature) | matched`:
-
-```
-classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
-classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/Store;->count:I [write]
-```
-
-- Classes are `com.a.B` or `Lcom/a/B;`.
-- Members are written the same way in the CLI, MCP and rules: `Lcom/a/B;->name(I)V`, `com.a.B->name`,
-  `com.a.B#name`, `com.a.B.name`, `B.name` (a class without a package matches any package). A bare name is a
-  regex / substring; `=name` is exact.
-- A signature picks that overload: `run(I)V`, parameters only `run(I)`, Java style `run(int, String)`;
-  fields `f:I`.
-- Field references are labelled `[read]` for `iget*` / `sget*` and `[write]` for `iput*` / `sput*`.
-  `findrefs app.apk field TARGET --access read` (or `write`) keeps only that access; omitting it prints both.
-- Conditions are `KIND:VALUE` (`string:`, `literal:`, `type:`, `method:`, `field:`); in `rules` they combine
-  with `&`, or come from `--file`, one per line.
-- An empty result prints `hint:` lines on stderr: DEX entries searched, case sensitivity, a framework class
-  the APK does not define, the closest class or the methods it has, and so on.
+Output is one record per line, columns separated by ` | `; lines starting with `#` are headers, totals and
+hints. How classes and members are written, overloads by signature, field read / write labels, `KIND:VALUE`
+conditions and rules: [docs/query.en.md](docs/query.en.md).
 
 ## HarmonyOS (HAP / ABC)
 
 The same `asc` and the same commands read ArkCompiler bytecode (the `.abc` ArkTS / JS compiles to); the
-format is detected from the file:
-
-- **Inputs**: a `.hap` / `.hsp`, an `.app` (inner haps may be compressed), a bare `.abc`, or a directory /
-  `,` list read as one program; every `ets/*.abc` of a hap is read, and the entry column of a row says which
-  one it came from. The files of a directory are recognized by content (the `PANDA` magic, a zip holding
-  `module.json` / `ets/*.abc`), whatever their names and extensions (but a file named `.apk` / `.dex` / `.jar` / `.aar` / `.apex` is an
-  Android file, and is not looked into). An unpacked package directory
-  (`module.json` and `ets/*.abc`) is the package: manifest, resources and `xml` work on it. Packages inside a
-  zip are found by content, at any depth up to 4 zips in a file (4 GiB inflated in all); an entry carries
-  its whole path, `shop.app/entry.hap/ets/modules.abc`.
-- **Encrypted packages**: a hap from the app store has an encrypted `ets/modules.abc`. It is named in a
-  `# warning:` on stderr and left out (`findrefs` / `callgraph` exit with 2); nothing is decrypted. Put the
-  decrypted abc next to the hap and pass that directory: code comes from the decrypted file, `module.json`,
-  resources and the rest from the hap. The two are paired by the header (version, size, checksum) and the
-  checksum of the body, not by file name; an unpacked hap pairs the same way, with the decrypted file in or
-  next to its directory.
-- **Names**: a class is a record (a module: `&entry/src/main/ets/pages/Index&`, libraries carry a version,
-  `&@ohos/lib/Index&1.0.0`, older files have `com.a.b/entry/ets/pages/Index`; a path suffix, `pages/Index`,
-  is enough), a method is a function (raw `#~@0>#build` or restored `Index.build`).
-
-| command | Android | HarmonyOS |
-|---|---|---|
-| `listclass` | classes | records; an annotation interface the program declares is marked `kind=annotation`; `--all` adds the compiler's pseudo records |
-| `getclass` / `disassemble` | smali | pandasm-style disassembly; `--method` for one function, `--entry` picks the abc |
-| `getmanifest` / `manifest-summary` | `AndroidManifest.xml` | `module.json` (`--file pack.info` / `pkgContextInfo.json`); in the summary each ability / extension carries `record=`, and a `callbacks` line lists its `onXxx` functions |
-| `findrefs string` / `method` / `all` / `rules`, `--context` | ✓ | ✓ (`method` finds where a function is **defined**, not its calls; combined with other parts it means "the function is named so"); `!PART` / `--none` exclude; `call:{RULE}` is "calls a function matching RULE" and nests |
-| `findrefs prop` / `global` / `import` / `number` / `call` | — | ✓ |
-| `findrefs type` / `field` / `extends` / `impl` | ✓ | — (`hierarchy` answers inheritance) |
-| `callgraph` | ✓ | ✓: `--to` / `--from` / `--unless` take rules (`--to call:REGEX` roots at a callee path), `--no-defines`, `--unresolved`, `--entry`; no `--virtual` |
-| `hierarchy` | ✓ | ✓: the parent is read where each class is defined; `CLASS` is a class name, `RECORD->CLASS`, or a parent outside the program, `import:REGEX` / `global:REGEX`; `--method` sees the members (those defined after an accessor too) of the class |
-| `resources` | `resources.arsc` | `resources.index`, same options; QUERY is `0x…`, `string/name`, `$string:name` or `app.string.name` |
-| `xml` | binary XML | prints a text file of the package as it is: `'$profile:main_pages'` (page list, route table) or a path in the package |
-| `getclass --res-names` | resource id constants | appends `# string/name "value"` to the row of a `$r(...)` object |
+format is detected from the content: a `.hap` / `.hsp`, an `.app`, a bare `.abc`, an unpacked package
+directory, or a directory holding such files. A class is a record, a method is a function.
 
 ```sh
 asc manifest-summary entry.hap | grep -E '^(ability|callbacks|uri)'    # exported abilities, callbacks, deep links
 asc getclass entry.hap entryability/EntryAbility --method EntryAbility.onCreate
-asc findrefs entry.hap import '@ohos:' --requests                      # which system modules are used
 asc findrefs entry.hap call '^import:@ohos:net\.http'                  # who calls into the http module
-asc findrefs entry.hap prop request --exact --access call              # calls by member name, any receiver
-asc findrefs entry.hap all 'call:^import:@ohos:net\.http' 'string:^https?://'
-asc findrefs entry.hap all 'call:^import:@ohos:net\.http' '!string:^https?://' --context 3   # an exclusion; with context
-asc findrefs entry.hap call '{string:(?i)oaid}'                        # who calls the functions using that string
-asc hierarchy entry.hap UIAbility --method onCreate                    # who extends UIAbility, who overrides onCreate
-asc xml entry.hap '$profile:main_pages'                                # the page list; the routerMap likewise
-asc resources entry.hap --search 'Sign in' --in value                  # text -> id, then findrefs number ID
-asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
 asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6  # who reaches http
-asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --unless 'string:(?i)mock' --depth 8 --max-nodes 5000
 ```
 
-A `findrefs` row is `entry | RECORD->function+0xPC | restored name | instruction ; resolved callee`; the second
-column can be pasted as it is into `getclass` / `callgraph`:
-
-```
-ets/modules.abc | &entry/src/main/ets/common/Utils/utils&->#~@0<#o0O0OOoo+0xef | utils.o0O0OOoo | callthis2 v10, v11, v12 ; import:@ohos:net.http#default.createHttp().request(expr, expr)
-```
-
-An ArkTS call instruction names no callee; its origin is tracked inside the function only, so results say how
-much is known:
-
-- Callee paths (what `findrefs call` and `callgraph --to` match): `import:REQUEST#NAME.member`,
-  `global:NAME.member`, `this.member` and `local:FUNCTION` are known origins; `argN` is the Nth parameter of
-  the function, `this@F` / `argN@F` the `this` / parameter of the enclosing function F captured by a closure,
-  `x().member` a member of a call result, `lex(level,slot)` a captured variable with several writers, `?`
-  unknown.
-- `callgraph` rows: no mark is a proved call; `[new]` a construction; `[super]` links `super()` / `super.m()` to
-  the parent; `[this-class]` / `[inherited]` / `[instance]` are methods matched by name (in the class of the
-  caller, in an ancestor, on an object of a known class: an exported `new C()`, or what a function / static property such
-  as `C.getInstance()` hands out), not guaranteed; `[reassigned]`
-  went through a class a decorator assigned again and holds if the decorator kept the class; `[defines]` creates a closure, it is not a call
-  (`--no-defines` drops them); `[external]` is a leaf rooted outside the program (a system module, a
-  native library, a global); `[unlinked]` is a leaf rooted at a record of the program but linked to no function
-  (a member of a call result and the like): its path names the record, continue there by hand;
-  `[unresolved]` is a leaf of unknown origin (`--callees --unresolved` lists them, otherwise a row ends in
-  the count, `unresolved=N`); `(repeated)` marks a node expanded elsewhere; `[N+ subclasses skipped]`
-  says the class has more than 512 subclasses and call sites inherited through the rest were not looked for.
-- Callbacks the system calls (lifecycle `onXxx`, event handlers) have no callers; where a path stops at
-  `[unresolved]`, continue by name: `findrefs method NAME --exact` (who defines it), `findrefs prop NAME
-  --exact --access call` (the other call sites).
-
-- `hierarchy` rows: `[external]` is a parent outside the program (a system class, a global), `[unresolved]` a
-  parent of unknown origin, `[reassigned]` a class a decorator assigned again after its definition (the
-  subclass extends it or what the decorator put there, not guaranteed), `[function]` a plain function used
-  as a base class.
-- A resource id is unique within one package only; with several packages, `findrefs number ID --entry
-  PACKAGE` keeps the search to one package (`listclass` and the others take `--entry` too).
-- `manifest-summary` also has `page` / `route` rows (each item of the page list and the route table, with
-  `record=`, ready for `getclass`) and `abc` rows (each abc entry, and the decrypted file standing in for an
-  encrypted one); a `pack.info` that is the same in several packages is listed once.
-- A string over 2048 bytes is written `"…"… (+N bytes)`; a match behind the cut adds `match at byte N` and
-  the text around it.
-- Where a debug build names its local variables, a function header of `getclass` has a line
-  `; locals [from, to): v3 name, …`.
-- `getclass --lines` (`disassemble --debuginfo` likewise) writes `; line N` where the source line changes; a
-  user annotation on a function is written `; @RECORD(name=value)` (`findrefs string` finds the strings of
-  annotations too, on rows marked `annotation`); in an abc compiled without merging, the
-  functions are all in the record `_GLOBAL`.
-- A package with `ets/sourceMaps.map` (debug builds only) gets a `source-maps … modules=N` row in
-  `manifest-summary`; `getclass` heads the record with `; source ORIGINAL-PATH` and a function with `line N
-  (source line M)`: `line N` is a line of the compiled intermediate file, from 0, `source line` the line of
-  the source; a function marked `(no source line)` was generated by the build (state accessors, `rerender`).
-
-Limits: a HarmonyOS program is served by the same daemon as APKs (the analyses stay resident), but has no
-disk cache (it opens in milliseconds); `super()` / inherited methods whose parent is outside the
-program stay leaves, and a singleton getter is linked only where what it returns is certain (not when it
-forwards to another class or keeps instances by key; a hot-fix stub at the entry of a function is not counted
-as what it returns, so the edge is that of the code as shipped); there are no call-site value constraints (`method:X[arg0=…]`) and no virtual dispatch; static ArkTS
-(`modules_static.abc`) is not supported; versions 9.0.0.0–24.0.0.0 were checked
-against the official disassembler on output of the official compiler, later ones were not; a directory mixing DEX and HarmonyOS files is an Android program, so pass the HarmonyOS
-files by their own path.
+Inputs, encrypted packages, the command table next to Android, what each call graph mark means, and the
+limits: [docs/harmonyos.en.md](docs/harmonyos.en.md).
 
 ## For agents
 
-- **Cut output, spilled to a file**: nothing is cut unless asked. `--limit N` / `--max-bytes N` (or
-  `$ASC_LIMIT` / `$ASC_MAX_BYTES`) keep stdout short; the whole output goes to `out/` in the cache
-  directory and the last line says where and how to continue:
-
-  ```
-  # records 1-50 of 523 shown; full output in /home/u/.cache/asc/out/3f2a….txt (grep it, or rerun with --offset 50)
-  ```
-
 - **Skill**: [`skills/asc/SKILL.md`](skills/asc/SKILL.md) is an
   [Agent Skill](https://agentskills.io/specification) for agents that work through a shell.
-- **Daemon** (Unix): one-shot commands are handed to a per-user daemon that keeps opened APKs resident; the
-  output (stdout, stderr, exit status) is byte-identical to running without it. The first command starts
-  it and it exits when idle; Ctrl-C in the client cancels the query in the daemon. `asc daemon
-  status|stop|start` controls it, `ASC_DAEMON=off` turns it off.
-- **MCP**: `asc mcp` is a resident session over stdio with the tools `getclass`, `findrefs`,
-  `callgraph`, `hierarchy`, `listclass`, `getmanifest`, `manifest_summary`, `resources`. Passing an
-  `apk` path opens it; the `apk_id` in replies can stand in for the path. `apk` may also be a HarmonyOS
-  program: `listclass`, `getclass`, `findrefs`, `callgraph`, `getmanifest` and `manifest_summary` work on it, and
-  the first reply says what those tools take there. `findrefs`, `listclass`, `manifest_summary` and `resources` take `apks` / `dir` to cover many
-  APKs in one call. Replies stay within `max_bytes` (default 16384); the rest is spilled to a file or paged,
-  per `spill`.
-  Field queries accept `"access": "read"` / `"write"`; `field_accesses` aligns with `matched`, and contextual
-  sites also carry `access`.
+- **Daemon** (Unix): a one-shot command is handed to a per-user daemon that keeps programs open; the output
+  is byte for byte what it is without the daemon. `ASC_DAEMON=off` turns it off.
+- **MCP**: `asc mcp` is a resident session on stdio.
+- **Cut output**: nothing is cut unless asked (`--limit` / `--max-bytes`); the whole output goes to a file
+  and the last line says how to continue.
 
-  ```json
-  { "mcpServers": { "asc": { "command": "/absolute/path/to/asc", "args": ["mcp"] } } }
-  ```
+Details and the MCP configuration: [docs/agents.en.md](docs/agents.en.md).
 
-## Caching and resources
+## Caching and settings
 
-Inflated DEX files, derived search tables and query results are cached on disk (shared across processes,
-on by default); resident processes (`mcp`, the daemon) also keep an in-memory LRU. The cache only speeds
-things up and can be deleted at any time; files carry a CRC, so damage is just a miss.
-
-Threads, memory and disk are one set of settings. `asc config` lists each with its value, its source
-and what it comes to on this machine (`--json` for scripts and agents). A flag (`--set KEY=VALUE`) beats
-the environment (`$ASC_<KEY>`, named in `--json`), which beats the config file
-`~/.config/asc/config.toml` (under `$XDG_CONFIG_HOME`, or `$ASC_CONFIG`; empty reads none), which
-beats the default. `auto` defaults are computed for this machine, and resident processes register so they
-split memory and threads.
-
-| setting | default |
-|---|---|
-| `threads` (`--threads`) | auto: the logical CPUs; with other busy processes 4 × CPUs / busy processes, at least 2 |
-| `memory.max` (`--memory-mb`) | auto = 25%: (available memory + what resident processes hold) × 25% / resident processes; or `4G`, `40%` |
-| `memory.ceiling` | auto: 1/16 of physical memory within 2G..8G (2G on a 12 GB machine, 6G on 96 GB) |
-| `memory.split` | on: split between resident processes |
-| `cache.enabled` (`--no-cache`), `cache.dir` (`--cache-dir`) | on; `$XDG_CACHE_HOME/asc` or `~/.cache/asc` |
-| `cache.max` (`--cache-max-mb`) | auto = 20%: (free space + the cache) × 20%, at most `cache.ceiling` (32G), keeping 1 GiB / 5% free |
-| `cache.tiers`, `cache.min_dex` | `dex,derived,rendered`; DEX under 4M are not written to L1 |
-| `cache.write_queue`, `cache.writers` | 512M (and at most the memory budget); auto: one per 8 CPUs, 1..4 |
-| `cache.spill` (`--spill-mb`) | 64M: budget of `out/`, where cut outputs go |
-| `daemon.idle`, `daemon.wait` | 15m; 300ms. `ASC_DAEMON=off` turns the daemon off |
-
-```toml
-# ~/.config/asc/config.toml
-threads = 8
-[memory]
-max = "4G"
-[cache]
-max = "10%"
-```
-
-`--debug` prints timing and cache statistics on stderr.
+Inflated DEX, derived search tables and query results are cached on disk (on by default, safe to delete);
+resident processes also keep an in-memory LRU. `asc config` lists each setting of threads, memory and disk
+with its value and source; all settings and defaults: [docs/configuration.en.md](docs/configuration.en.md).
+`--debug` prints timings and cache statistics on stderr.
 
 ## Performance
 
@@ -256,10 +92,14 @@ reproduce them: [benchmark/README.md](benchmark/README.md).
 
 ## Documentation
 
+- [docs/query.en.md](docs/query.en.md): output format, query syntax, several files as one program.
+- [docs/harmonyos.en.md](docs/harmonyos.en.md): using asc on HarmonyOS (HAP / ABC).
+- [docs/agents.en.md](docs/agents.en.md): cut output and spill files, the daemon, MCP.
+- [docs/configuration.en.md](docs/configuration.en.md): cache, thread and memory settings.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crates, implementation and design trade-offs.
-- [benchmark/README.md](benchmark/README.md): correctness and performance evaluation.
 - [docs/ark-abc-design.md](docs/ark-abc-design.md) (Chinese): design of the HarmonyOS / ABC support, measured call
   resolution precision.
+- [benchmark/README.md](benchmark/README.md): correctness and performance evaluation.
 
 ## Credits
 
