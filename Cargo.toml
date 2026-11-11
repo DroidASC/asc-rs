@@ -11,6 +11,8 @@ members = [
     "crates/asc-axml",
     "crates/asc-arsc",
     "crates/asc-engine",
+    "crates/asc-decompile-protocol",
+    "crates/asc-decompile",
     "crates/asc-mcp",
     "crates/asc-cli",
     "crates/asc-fixture",
@@ -40,6 +42,8 @@ asc-axml = { version = "0.1.1", path = "crates/asc-axml" }
 asc-arsc = { version = "0.1.1", path = "crates/asc-arsc" }
 asc-engine = { version = "0.1.1", path = "crates/asc-engine" }
 asc-mcp = { version = "0.1.1", path = "crates/asc-mcp" }
+asc-decompile-protocol = { version = "0.1.1", path = "crates/asc-decompile-protocol" }
+asc-decompile = { version = "0.1.1", path = "crates/asc-decompile" }
 asc-fixture = { path = "crates/asc-fixture" }
 asc-abc = { version = "0.1.1", path = "crates/harmony/asc-abc" }
 asc-arkisa = { version = "0.1.1", path = "crates/harmony/asc-arkisa" }
@@ -57,6 +61,7 @@ memchr = "2.7"
 clap = { version = "4.5", features = ["derive"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 tempfile = "3"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 

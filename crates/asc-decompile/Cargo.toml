@@ -1,0 +1,17 @@
+[package]
+name = "asc-decompile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Client for asc's decompiler backends: process pool, lifecycle and JSON-RPC over stdio."
+
+[dependencies]
+asc-decompile-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
