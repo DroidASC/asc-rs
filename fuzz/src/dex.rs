@@ -51,6 +51,13 @@ pub fn walk(dex: &Dex<'_>) {
     for idx in 0..dex.method_count().min(MAX_ITEMS) {
         let _ = dex.method_display(idx);
     }
+    for idx in 0..dex.method_handle_count().unwrap_or(0).min(MAX_ITEMS) {
+        let _ = dex.method_handle(idx);
+    }
+    for idx in 0..dex.call_site_count().unwrap_or(0).min(MAX_ITEMS) {
+        let _ = dex.call_site_off(idx);
+        let _ = dex.call_site(idx);
+    }
     for class in dex.class_defs().take(MAX_ITEMS as usize).flatten() {
         walk_class(dex, &class);
     }
