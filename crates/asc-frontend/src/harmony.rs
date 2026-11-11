@@ -348,6 +348,7 @@ pub fn entries_hint(engine: &Engine) -> String {
 
 /// A tree as both front ends print it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreeText {
     /// One line per row.
     pub lines: Vec<String>,

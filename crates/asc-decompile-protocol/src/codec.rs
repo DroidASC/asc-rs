@@ -10,6 +10,7 @@ pub const MAX_MESSAGE_BYTES: usize = 64 << 20;
 /// A framing failure. None of them leave the stream in a known state: the
 /// peer should be treated as broken.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FrameError {
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),

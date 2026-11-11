@@ -8,6 +8,7 @@ use std::path::Path;
 
 /// One kind of search and what it looks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Target<'a> {
     /// Strings: a regex, or (`literal`) a substring.
     String { value: &'a str, literal: bool },
@@ -25,6 +26,7 @@ pub enum Target<'a> {
 
 /// A method or field as a search names it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Member<'a> {
     /// The class: exact (`Lc;`, `c.B`), or a pattern with `fuzzy_class`.
     pub class: Option<&'a str>,
@@ -34,6 +36,32 @@ pub struct Member<'a> {
     pub name: Option<&'a str>,
     /// `name` is the exact name.
     pub exact: bool,
+}
+
+impl<'a> Member<'a> {
+    /// The member with [`class`](#structfield.class) set.
+    #[must_use]
+    pub fn class(self, class: Option<&'a str>) -> Self {
+        Member { class, ..self }
+    }
+
+    /// The member with [`fuzzy_class`](#structfield.fuzzy_class) set.
+    #[must_use]
+    pub fn fuzzy_class(self, fuzzy_class: bool) -> Self {
+        Member { fuzzy_class, ..self }
+    }
+
+    /// The member with [`name`](#structfield.name) set.
+    #[must_use]
+    pub fn name(self, name: Option<&'a str>) -> Self {
+        Member { name, ..self }
+    }
+
+    /// The member with [`exact`](#structfield.exact) set.
+    #[must_use]
+    pub fn exact(self, exact: bool) -> Self {
+        Member { exact, ..self }
+    }
 }
 
 impl Target<'_> {

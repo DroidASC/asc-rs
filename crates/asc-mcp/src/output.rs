@@ -380,6 +380,7 @@ fn raw_name(header: &str) -> &str {
 
 /// How much of the structured result to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Structured {
     /// Everything the tool produced.
     Full,

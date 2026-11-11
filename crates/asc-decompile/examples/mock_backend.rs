@@ -90,17 +90,12 @@ impl Mock {
                     return;
                 }
                 let options = serde_json::to_string(&request.params["options"]).unwrap();
-                let result = InitializeResult {
-                    protocol_version: self.flags.protocol_version,
-                    backend: Implementation { name: "mock".into(), version: "1.0".into() },
-                    options_hash: options,
-                    inputs: vec![InputKind::Archive, InputKind::Slice],
-                    languages: vec![Language::Java],
-                    mappings: true,
-                    method_status: true,
-                    max_concurrency: self.flags.max_concurrency.try_into().unwrap(),
-                    platform: None,
-                };
+                let result = InitializeResult::new(self.flags.protocol_version, Implementation::new("mock", "1.0"), options)
+                    .inputs(vec![InputKind::Archive, InputKind::Slice])
+                    .languages(vec![Language::Java])
+                    .mappings(true)
+                    .method_status(true)
+                    .max_concurrency(self.flags.max_concurrency.try_into().unwrap());
                 self.out.respond(request.id, Ok(result)).unwrap();
             }
             "program/open" => {
@@ -113,7 +108,7 @@ impl Mock {
                     let id = format!("p{next}");
                     self.log(&format!("open {} {id}", std::process::id()));
                     self.programs.lock().unwrap().insert(id.clone(), params);
-                    Ok(ProgramOpenResult { program_id: ProgramId(id) })
+                    Ok(ProgramOpenResult::new(ProgramId(id)))
                 });
                 self.out.respond(request.id, result).unwrap();
             }
@@ -158,13 +153,7 @@ impl Mock {
         }
         let mut units = Vec::new();
         for class in &params.classes {
-            let ok = |text: String| ClassUnit {
-                class: class.clone(),
-                outcome: UnitOutcome::Ok { path: None, text },
-                methods: Vec::new(),
-                diagnostics: Vec::new(),
-                lines: Vec::new(),
-            };
+            let ok = |text: String| ClassUnit::new(class.clone(), UnitOutcome::Ok { path: None, text });
             let pid = std::process::id();
             let normal = ok(format!("// pid={pid} program={} class={class}", params.program_id.0));
             let unit = match class.as_str() {
@@ -193,25 +182,16 @@ impl Mock {
                     self.programs.lock().unwrap().clear();
                     normal
                 }
-                "Lfail;" => ClassUnit { outcome: UnitOutcome::Failed { reason: "mock failure".into() }, ..normal },
-                "Lpartial;" => ClassUnit {
-                    outcome: UnitOutcome::Partial { path: Some("Partial.java".into()), text: "class Partial {}".into() },
-                    methods: vec![MethodReport {
-                        signature: "f()V".into(),
-                        status: MethodStatus::Failed,
-                        reason: Some("irreducible loop".into()),
-                    }],
-                    ..normal
-                },
+                "Lfail;" => ClassUnit::new(class.clone(), UnitOutcome::Failed { reason: "mock failure".into() }),
+                "Lpartial;" => {
+                    let outcome = UnitOutcome::Partial { path: Some("Partial.java".into()), text: "class Partial {}".into() };
+                    let failed = MethodReport::new("f()V", MethodStatus::Failed).reason(Some("irreducible loop".into()));
+                    ClassUnit::new(class.clone(), outcome).methods(vec![failed])
+                }
                 "Lprogress;" => {
                     if let Some(token) = &params.progress_token {
                         for step in 0..2 {
-                            let progress = ProgressParams {
-                                progress_token: token.clone(),
-                                progress: f64::from(step),
-                                total: Some(2.0),
-                                message: None,
-                            };
+                            let progress = ProgressParams::new(token.clone(), f64::from(step)).total(Some(2.0));
                             self.out.notify::<Progress>(&progress).unwrap();
                         }
                     }
@@ -231,7 +211,7 @@ impl Mock {
             };
             units.push(unit);
         }
-        Ok(Some(DecompileClassesResult { units }))
+        Ok(Some(DecompileClassesResult::new(units)))
     }
 
     /// Sleeps `work`; `false` if cancelled first.

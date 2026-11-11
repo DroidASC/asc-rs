@@ -24,7 +24,7 @@
 //! let backend = Backend::new("dexdec", spec);
 //! let options = CallOptions::default();
 //! let input = ProgramInput::Archive { files: vec!["app.apk".into()] };
-//! let program = backend.open_program(ProgramOpenParams { input, mappings: None }, &options)?;
+//! let program = backend.open_program(ProgramOpenParams::new(input), &options)?;
 //! let result = program.decompile(&DecompileRequest::java(["Lcom/example/Main;"]), &options)?;
 //! println!("{}", result.units[0].text().unwrap_or("<failed>"));
 //! # Ok::<(), asc_decompile::Error>(())
@@ -59,7 +59,7 @@ pub struct Backend {
 impl Backend {
     /// Creates the pool; no process starts until the first request.
     pub fn new(name: impl Into<String>, spec: BackendSpec) -> Self {
-        let client = Implementation { name: "asc".to_owned(), version: env!("CARGO_PKG_VERSION").to_owned() };
+        let client = Implementation::new("asc", env!("CARGO_PKG_VERSION"));
         Self::with_client(name, spec, client)
     }
 

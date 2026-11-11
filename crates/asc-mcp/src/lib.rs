@@ -1403,16 +1403,16 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
             }
         }
         _ => {
-            let member = Member {
-                class: str_arg(args, "class")?,
-                fuzzy_class: bool_arg(args, "fuzzy_class")?.unwrap_or(false),
-                // The target may come whole in `value` (as for the other kinds).
-                name: match str_arg(args, "name")? {
-                    Some(n) => Some(n),
-                    None => str_arg(args, "value")?,
-                },
-                exact: bool_arg(args, "exact")?.unwrap_or(false),
+            // The target may come whole in `value` (as for the other kinds).
+            let name = match str_arg(args, "name")? {
+                Some(n) => Some(n),
+                None => str_arg(args, "value")?,
             };
+            let member = Member::default()
+                .class(str_arg(args, "class")?)
+                .fuzzy_class(bool_arg(args, "fuzzy_class")?.unwrap_or(false))
+                .name(name)
+                .exact(bool_arg(args, "exact")?.unwrap_or(false));
             if kind == "method" { Target::Method(member) } else { Target::Field { member, access } }
         }
     };

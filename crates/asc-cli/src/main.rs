@@ -1498,11 +1498,11 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 Find::Extends { output, value } => (io.query(Target::Extends(&value))?, output),
                 Find::Impl { output, value } => (io.query(Target::Impl(&value))?, output),
                 Find::Method { output, name, class_name, fuzzy_class, exact } => {
-                    let member = Member { class: class_name.as_deref(), fuzzy_class, name: name.as_deref(), exact };
+                    let member = Member::default().class(class_name.as_deref()).fuzzy_class(fuzzy_class).name(name.as_deref()).exact(exact);
                     (io.query(Target::Method(member))?, output)
                 }
                 Find::Field { output, name, class_name, fuzzy_class, exact } => {
-                    let member = Member { class: class_name.as_deref(), fuzzy_class, name: name.as_deref(), exact };
+                    let member = Member::default().class(class_name.as_deref()).fuzzy_class(fuzzy_class).name(name.as_deref()).exact(exact);
                     (io.query(Target::Field { member, access: access.map(TryInto::try_into).transpose()? })?, output)
                 }
             };

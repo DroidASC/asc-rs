@@ -2,6 +2,7 @@
 //! signature, or an outline when the whole class is too long to send.
 
 /// One `.method` … `.end method` block of a class's smali.
+#[non_exhaustive]
 pub struct MethodBlock<'a> {
     /// `name(params)ret`.
     pub signature: &'a str,
@@ -23,6 +24,7 @@ impl MethodBlock<'_> {
 }
 
 /// A class's smali split into its header and its methods.
+#[non_exhaustive]
 pub struct ClassText<'a> {
     /// Up to the first field or method (`.class`, `.super`, `.source`, interfaces).
     pub header: &'a str,

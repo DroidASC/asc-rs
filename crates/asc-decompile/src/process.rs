@@ -146,7 +146,7 @@ impl Process {
     }
 
     fn handshake(&self, spec: &BackendSpec, client: &Implementation) -> Result<InitializeResult, Error> {
-        let params = InitializeParams { protocol_version: PROTOCOL_VERSION, client: client.clone(), options: spec.options.clone() };
+        let params = InitializeParams::new(PROTOCOL_VERSION, client.clone()).options(spec.options.clone());
         let reply = self.send_request::<Initialize>(self.next_id(), &params, None)?;
         let startup_error = |reason: String| Error::Startup { reason, stderr_tail: self.stderr_tail() };
         let result = match reply.recv_timeout(spec.startup_timeout) {
@@ -215,7 +215,7 @@ impl Process {
             _ => "cancelled by the client",
         };
         // Best effort: a dead process fails the reply below anyway.
-        let _ = self.notify::<Cancelled>(&CancelledParams { request_id: id.clone(), reason: Some(reason.to_owned()) });
+        let _ = self.notify::<Cancelled>(&CancelledParams::new(id.clone()).reason(Some(reason.to_owned())));
         match reply.recv_timeout(self.lifecycle.cancel_grace) {
             // Finishing anyway is allowed; the work is not wasted.
             Ok(Ok(value)) => decode::<M>(Ok(value)),

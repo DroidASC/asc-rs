@@ -112,13 +112,22 @@ impl<'de> Deserialize<'de> for Empty {
 
 /// Name and version of either end.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Implementation {
     pub name: String,
     pub version: String,
 }
 
+impl Implementation {
+    /// The end called `name`, at `version`.
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Implementation {
+        Implementation { name: name.into(), version: version.into() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct InitializeParams {
     /// The highest version the client speaks.
     pub protocol_version: u32,
@@ -128,8 +137,22 @@ pub struct InitializeParams {
     pub options: Map<String, Value>,
 }
 
+impl InitializeParams {
+    /// `client` speaking at most `protocol_version`, with no backend options.
+    pub fn new(protocol_version: u32, client: Implementation) -> InitializeParams {
+        InitializeParams { protocol_version, client, options: Map::new() }
+    }
+
+    /// These parameters with the backend's `options` table.
+    #[must_use]
+    pub fn options(self, options: Map<String, Value>) -> InitializeParams {
+        InitializeParams { options, ..self }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct InitializeResult {
     /// The highest version the backend supports that is not above the client's.
     pub protocol_version: u32,
@@ -157,6 +180,59 @@ pub struct InitializeResult {
 }
 
 impl InitializeResult {
+    /// `backend` at `protocol_version` with `options_hash`, accepting no
+    /// input and writing no language yet; no mappings, no per-method
+    /// status, one request at a time, no platform.
+    pub fn new(protocol_version: u32, backend: Implementation, options_hash: impl Into<String>) -> InitializeResult {
+        InitializeResult {
+            protocol_version,
+            backend,
+            options_hash: options_hash.into(),
+            inputs: Vec::new(),
+            languages: Vec::new(),
+            mappings: false,
+            method_status: false,
+            max_concurrency: one(),
+            platform: None,
+        }
+    }
+
+    /// This result accepting the program `inputs`.
+    #[must_use]
+    pub fn inputs(self, inputs: Vec<InputKind>) -> InitializeResult {
+        InitializeResult { inputs, ..self }
+    }
+
+    /// This result writing `languages`.
+    #[must_use]
+    pub fn languages(self, languages: Vec<Language>) -> InitializeResult {
+        InitializeResult { languages, ..self }
+    }
+
+    /// This result honouring `mappings` in `program/open`, or not.
+    #[must_use]
+    pub fn mappings(self, mappings: bool) -> InitializeResult {
+        InitializeResult { mappings, ..self }
+    }
+
+    /// This result reporting per-method failures, or not.
+    #[must_use]
+    pub fn method_status(self, method_status: bool) -> InitializeResult {
+        InitializeResult { method_status, ..self }
+    }
+
+    /// This result handling `max_concurrency` requests at once.
+    #[must_use]
+    pub fn max_concurrency(self, max_concurrency: NonZeroU32) -> InitializeResult {
+        InitializeResult { max_concurrency, ..self }
+    }
+
+    /// This result shipping the `platform` classpath.
+    #[must_use]
+    pub fn platform(self, platform: Option<String>) -> InitializeResult {
+        InitializeResult { platform, ..self }
+    }
+
     pub fn accepts(&self, kind: InputKind) -> bool {
         self.inputs.contains(&kind)
     }
@@ -184,6 +260,7 @@ where
 /// Form of the program handed to a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum InputKind {
     /// The original APK / jar / DEX files.
     Archive,
@@ -193,6 +270,7 @@ pub enum InputKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum Language {
     Java,
     Kotlin,
@@ -200,6 +278,7 @@ pub enum Language {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ProgramOpenParams {
     pub input: ProgramInput,
     /// Names asc wants in the output; only sent to backends declaring `mappings`.
@@ -207,9 +286,23 @@ pub struct ProgramOpenParams {
     pub mappings: Option<Mappings>,
 }
 
+impl ProgramOpenParams {
+    /// Open `input`, with no mappings.
+    pub fn new(input: ProgramInput) -> ProgramOpenParams {
+        ProgramOpenParams { input, mappings: None }
+    }
+
+    /// These parameters with the names asc wants in the output.
+    #[must_use]
+    pub fn mappings(self, mappings: Option<Mappings>) -> ProgramOpenParams {
+        ProgramOpenParams { mappings, ..self }
+    }
+}
+
 /// The program to open, tagged by `kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum ProgramInput {
     /// Original program files analysed together as one program.
     Archive { files: Vec<PathBuf> },
@@ -234,6 +327,7 @@ impl ProgramInput {
 
 /// Roles of the classes in a slice, as type descriptors.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SliceManifest {
     /// Classes the request is about.
     #[serde(default)]
@@ -248,6 +342,7 @@ pub struct SliceManifest {
 
 /// Renames in asc's member notation (the one `findrefs` prints), applied as user renames.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Mappings {
     /// Class descriptor → new simple or qualified name.
     #[serde(default)]
@@ -273,14 +368,30 @@ pub struct ProgramId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ProgramOpenResult {
     pub program_id: ProgramId,
 }
 
+impl ProgramOpenResult {
+    /// The session the backend opened, `program_id`.
+    pub fn new(program_id: ProgramId) -> ProgramOpenResult {
+        ProgramOpenResult { program_id }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ProgramCloseParams {
     pub program_id: ProgramId,
+}
+
+impl ProgramCloseParams {
+    /// Close the session `program_id`.
+    pub fn new(program_id: ProgramId) -> ProgramCloseParams {
+        ProgramCloseParams { program_id }
+    }
 }
 
 /// Token tying `notifications/progress` to the request that asked for it.
@@ -302,6 +413,7 @@ impl From<RequestId> for ProgressToken {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct DecompileClassesParams {
     pub program_id: ProgramId,
     /// Type descriptors, e.g. `Lbin/mt/json/JSONObject;`.
@@ -314,17 +426,46 @@ pub struct DecompileClassesParams {
     pub progress_token: Option<ProgressToken>,
 }
 
+impl DecompileClassesParams {
+    /// `classes` of `program_id` in `language`, nested classes folded in, no
+    /// progress asked for.
+    pub fn new(program_id: ProgramId, classes: Vec<String>, language: Language) -> DecompileClassesParams {
+        DecompileClassesParams { program_id, classes, language, nested: true, progress_token: None }
+    }
+
+    /// These parameters folding nested classes into their outer class, or not.
+    #[must_use]
+    pub fn nested(self, nested: bool) -> DecompileClassesParams {
+        DecompileClassesParams { nested, ..self }
+    }
+
+    /// These parameters asking for progress under `progress_token`.
+    #[must_use]
+    pub fn progress_token(self, progress_token: Option<ProgressToken>) -> DecompileClassesParams {
+        DecompileClassesParams { progress_token, ..self }
+    }
+}
+
 fn yes() -> bool {
     true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DecompileClassesResult {
     pub units: Vec<ClassUnit>,
 }
 
+impl DecompileClassesResult {
+    /// The output of each requested class.
+    pub fn new(units: Vec<ClassUnit>) -> DecompileClassesResult {
+        DecompileClassesResult { units }
+    }
+}
+
 /// The output for one requested class. A failed class does not fail the batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ClassUnit {
     /// Type descriptor of the class.
     pub class: String,
@@ -341,6 +482,30 @@ pub struct ClassUnit {
 }
 
 impl ClassUnit {
+    /// The `outcome` for `class`, with no method report, diagnostic or line
+    /// mapping.
+    pub fn new(class: impl Into<String>, outcome: UnitOutcome) -> ClassUnit {
+        ClassUnit { class: class.into(), outcome, methods: Vec::new(), diagnostics: Vec::new(), lines: Vec::new() }
+    }
+
+    /// This unit with its per-method status.
+    #[must_use]
+    pub fn methods(self, methods: Vec<MethodReport>) -> ClassUnit {
+        ClassUnit { methods, ..self }
+    }
+
+    /// This unit with `diagnostics`.
+    #[must_use]
+    pub fn diagnostics(self, diagnostics: Vec<Diagnostic>) -> ClassUnit {
+        ClassUnit { diagnostics, ..self }
+    }
+
+    /// This unit with its source line to method correspondence.
+    #[must_use]
+    pub fn lines(self, lines: Vec<LineMapping>) -> ClassUnit {
+        ClassUnit { lines, ..self }
+    }
+
     pub fn status(&self) -> UnitStatus {
         match self.outcome {
             UnitOutcome::Ok { .. } => UnitStatus::Ok,
@@ -361,6 +526,7 @@ impl ClassUnit {
 /// `status` with the members that depend on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum UnitOutcome {
     Ok {
         /// Suggested relative path; for display only, never used to write files.
@@ -382,6 +548,7 @@ pub enum UnitOutcome {
 /// [`UnitOutcome`] without its data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum UnitStatus {
     Ok,
     Partial,
@@ -389,6 +556,7 @@ pub enum UnitStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MethodReport {
     /// `name(Args)Ret`, without the owner.
     pub signature: String,
@@ -397,14 +565,29 @@ pub struct MethodReport {
     pub reason: Option<String>,
 }
 
+impl MethodReport {
+    /// The method `signature` (`name(Args)Ret`) and its `status`, with no reason.
+    pub fn new(signature: impl Into<String>, status: MethodStatus) -> MethodReport {
+        MethodReport { signature: signature.into(), status, reason: None }
+    }
+
+    /// This report saying why.
+    #[must_use]
+    pub fn reason(self, reason: Option<String>) -> MethodReport {
+        MethodReport { reason, ..self }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum MethodStatus {
     Ok,
     Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
@@ -412,8 +595,22 @@ pub struct Diagnostic {
     pub method: Option<String>,
 }
 
+impl Diagnostic {
+    /// `message` at `severity`, about the whole class.
+    pub fn new(severity: Severity, message: impl Into<String>) -> Diagnostic {
+        Diagnostic { severity, message: message.into(), method: None }
+    }
+
+    /// This diagnostic about one `method` (`name(Args)Ret`).
+    #[must_use]
+    pub fn method(self, method: Option<String>) -> Diagnostic {
+        Diagnostic { method, ..self }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum Severity {
     Error,
     Warning,
@@ -421,6 +618,7 @@ pub enum Severity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LineMapping {
     /// 1-based line in [`UnitOutcome`]'s `text`.
     pub line: u32,
@@ -429,16 +627,38 @@ pub struct LineMapping {
     pub pc: u32,
 }
 
+impl LineMapping {
+    /// Source `line` (from 1) comes from `method` at dex `pc`.
+    pub fn new(line: u32, method: impl Into<String>, pc: u32) -> LineMapping {
+        LineMapping { line, method: method.into(), pc }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct CancelledParams {
     pub request_id: RequestId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
+impl CancelledParams {
+    /// Cancel `request_id`, giving no reason.
+    pub fn new(request_id: RequestId) -> CancelledParams {
+        CancelledParams { request_id, reason: None }
+    }
+
+    /// These parameters saying why.
+    #[must_use]
+    pub fn reason(self, reason: Option<String>) -> CancelledParams {
+        CancelledParams { reason, ..self }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ProgressParams {
     pub progress_token: ProgressToken,
     pub progress: f64,
@@ -446,6 +666,25 @@ pub struct ProgressParams {
     pub total: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+impl ProgressParams {
+    /// `progress` made on the request of `progress_token`, of no known total.
+    pub fn new(progress_token: ProgressToken, progress: f64) -> ProgressParams {
+        ProgressParams { progress_token, progress, total: None, message: None }
+    }
+
+    /// This progress out of `total`.
+    #[must_use]
+    pub fn total(self, total: Option<f64>) -> ProgressParams {
+        ProgressParams { total, ..self }
+    }
+
+    /// This progress with a `message` to show.
+    #[must_use]
+    pub fn message(self, message: Option<String>) -> ProgressParams {
+        ProgressParams { message, ..self }
+    }
 }
 
 #[cfg(test)]

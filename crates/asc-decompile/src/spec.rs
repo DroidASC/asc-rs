@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 /// Launch and lifecycle settings of one backend (§4). Defaults follow the document.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BackendSpec {
     /// Executable; looked up on `PATH` when it has no `/`.
     pub command: PathBuf,
@@ -35,6 +36,62 @@ pub struct BackendSpec {
 }
 
 impl BackendSpec {
+    /// The spec with [`args`](#structfield.args) set.
+    #[must_use]
+    pub fn args(self, args: Vec<OsString>) -> Self {
+        BackendSpec { args, ..self }
+    }
+
+    /// The spec with [`env`](#structfield.env) set.
+    #[must_use]
+    pub fn env(self, env: BTreeMap<OsString, OsString>) -> Self {
+        BackendSpec { env, ..self }
+    }
+
+    /// The spec with [`cwd`](#structfield.cwd) set.
+    #[must_use]
+    pub fn cwd(self, cwd: Option<PathBuf>) -> Self {
+        BackendSpec { cwd, ..self }
+    }
+
+    /// The spec with [`instances`](#structfield.instances) set.
+    #[must_use]
+    pub fn instances(self, instances: NonZeroUsize) -> Self {
+        BackendSpec { instances, ..self }
+    }
+
+    /// The spec with [`idle`](#structfield.idle) set.
+    #[must_use]
+    pub fn idle(self, idle: Duration) -> Self {
+        BackendSpec { idle, ..self }
+    }
+
+    /// The spec with [`timeout`](#structfield.timeout) set.
+    #[must_use]
+    pub fn timeout(self, timeout: Duration) -> Self {
+        BackendSpec { timeout, ..self }
+    }
+
+    /// The spec with [`startup_timeout`](#structfield.startup_timeout) set.
+    #[must_use]
+    pub fn startup_timeout(self, startup_timeout: Duration) -> Self {
+        BackendSpec { startup_timeout, ..self }
+    }
+
+    /// The spec with [`options`](#structfield.options) set.
+    #[must_use]
+    pub fn options(self, options: Map<String, Value>) -> Self {
+        BackendSpec { options, ..self }
+    }
+
+    /// The spec with [`lifecycle`](#structfield.lifecycle) set.
+    #[must_use]
+    pub fn lifecycle(self, lifecycle: Lifecycle) -> Self {
+        BackendSpec { lifecycle, ..self }
+    }
+}
+
+impl BackendSpec {
     pub fn new(command: impl Into<PathBuf>) -> Self {
         Self {
             command: command.into(),
@@ -53,6 +110,7 @@ impl BackendSpec {
 
 /// Grace periods and restart policy fixed by §5–§6.4; only tests have reason to change them.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Lifecycle {
     /// After a timeout or cancellation, how long a backend may take to answer
     /// `notifications/cancelled` before it is killed.
@@ -67,6 +125,44 @@ pub struct Lifecycle {
     pub max_startup_failures: u32,
     /// Size of each process's stderr ring buffer.
     pub stderr_capacity: usize,
+}
+
+impl Lifecycle {
+    /// The lifecycle with [`cancel_grace`](#structfield.cancel_grace) set.
+    #[must_use]
+    pub fn cancel_grace(self, cancel_grace: Duration) -> Self {
+        Lifecycle { cancel_grace, ..self }
+    }
+
+    /// The lifecycle with [`shutdown_grace`](#structfield.shutdown_grace) set.
+    #[must_use]
+    pub fn shutdown_grace(self, shutdown_grace: Duration) -> Self {
+        Lifecycle { shutdown_grace, ..self }
+    }
+
+    /// The lifecycle with [`backoff_initial`](#structfield.backoff_initial) set.
+    #[must_use]
+    pub fn backoff_initial(self, backoff_initial: Duration) -> Self {
+        Lifecycle { backoff_initial, ..self }
+    }
+
+    /// The lifecycle with [`backoff_max`](#structfield.backoff_max) set.
+    #[must_use]
+    pub fn backoff_max(self, backoff_max: Duration) -> Self {
+        Lifecycle { backoff_max, ..self }
+    }
+
+    /// The lifecycle with [`max_startup_failures`](#structfield.max_startup_failures) set.
+    #[must_use]
+    pub fn max_startup_failures(self, max_startup_failures: u32) -> Self {
+        Lifecycle { max_startup_failures, ..self }
+    }
+
+    /// The lifecycle with [`stderr_capacity`](#structfield.stderr_capacity) set.
+    #[must_use]
+    pub fn stderr_capacity(self, stderr_capacity: usize) -> Self {
+        Lifecycle { stderr_capacity, ..self }
+    }
 }
 
 impl Default for Lifecycle {
@@ -92,6 +188,7 @@ impl Lifecycle {
 
 /// Queue lane of a request (§10): interactive requests overtake queued batch ones.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Priority {
     /// A user or MCP client is waiting on it.
     #[default]
@@ -123,12 +220,39 @@ pub type ProgressSink = Arc<dyn Fn(&ProgressParams) + Send + Sync>;
 
 /// Per-call settings.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub struct CallOptions {
     pub priority: Priority,
     pub cancel: Option<CancelToken>,
     pub progress: Option<ProgressSink>,
     /// Overrides [`BackendSpec::timeout`].
     pub timeout: Option<Duration>,
+}
+
+impl CallOptions {
+    /// The options with [`priority`](#structfield.priority) set.
+    #[must_use]
+    pub fn priority(self, priority: Priority) -> Self {
+        CallOptions { priority, ..self }
+    }
+
+    /// The options with [`cancel`](#structfield.cancel) set.
+    #[must_use]
+    pub fn cancel(self, cancel: Option<CancelToken>) -> Self {
+        CallOptions { cancel, ..self }
+    }
+
+    /// The options with [`progress`](#structfield.progress) set.
+    #[must_use]
+    pub fn progress(self, progress: Option<ProgressSink>) -> Self {
+        CallOptions { progress, ..self }
+    }
+
+    /// The options with [`timeout`](#structfield.timeout) set.
+    #[must_use]
+    pub fn timeout(self, timeout: Option<Duration>) -> Self {
+        CallOptions { timeout, ..self }
+    }
 }
 
 impl std::fmt::Debug for CallOptions {

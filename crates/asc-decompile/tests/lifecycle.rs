@@ -31,18 +31,16 @@ fn spec(args: &[&str]) -> BackendSpec {
     spec.args = args.iter().map(Into::into).collect();
     spec.timeout = Duration::from_secs(5);
     spec.startup_timeout = Duration::from_secs(5);
-    spec.lifecycle = Lifecycle {
-        cancel_grace: Duration::from_millis(300),
-        shutdown_grace: Duration::from_millis(200),
-        backoff_initial: Duration::from_millis(10),
-        backoff_max: Duration::from_millis(40),
-        ..Lifecycle::default()
-    };
+    spec.lifecycle = Lifecycle::default()
+        .cancel_grace(Duration::from_millis(300))
+        .shutdown_grace(Duration::from_millis(200))
+        .backoff_initial(Duration::from_millis(10))
+        .backoff_max(Duration::from_millis(40));
     spec
 }
 
 fn archive() -> ProgramOpenParams {
-    ProgramOpenParams { input: ProgramInput::Archive { files: vec!["/data/app.apk".into()] }, mappings: None }
+    ProgramOpenParams::new(ProgramInput::Archive { files: vec!["/data/app.apk".into()] })
 }
 
 fn open(backend: &Backend) -> Program {
@@ -139,7 +137,7 @@ fn forwards_progress() {
     let program = open(&backend);
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
-    let options = CallOptions { progress: Some(Arc::new(move |p| sink.lock().unwrap().push(p.progress))), ..CallOptions::default() };
+    let options = CallOptions::default().progress(Some(Arc::new(move |p| sink.lock().unwrap().push(p.progress))));
     decompile_with(&program, "Lprogress;", &options).unwrap();
     assert_eq!(*seen.lock().unwrap(), [0.0, 1.0]);
 }
@@ -148,7 +146,7 @@ fn forwards_progress() {
 fn backend_errors_surface_as_rpc_errors() {
     let backend = Backend::new("mock", spec(&[]));
     let input = ProgramInput::Archive { files: vec!["/data/unsupported".into()] };
-    let err = backend.open_program(ProgramOpenParams { input, mappings: None }, &CallOptions::default()).unwrap_err();
+    let err = backend.open_program(ProgramOpenParams::new(input), &CallOptions::default()).unwrap_err();
     assert!(matches!(&err, Error::Rpc(e) if e.code == ErrorCode::UNSUPPORTED_INPUT), "{err}");
     assert!(!err.is_backend_failure());
 }
@@ -159,7 +157,7 @@ fn timeout_sends_cancel_and_keeps_the_process() {
     let program = open(&backend);
     let pid = pid_of(&decompile(&program, "La;").unwrap());
 
-    let options = CallOptions { timeout: Some(Duration::from_millis(100)), ..CallOptions::default() };
+    let options = CallOptions::default().timeout(Some(Duration::from_millis(100)));
     let started = Instant::now();
     let err = decompile_with(&program, "Lslow/5000;", &options).unwrap_err();
     assert!(matches!(err, Error::Timeout(_)), "{err}");
@@ -174,7 +172,7 @@ fn timeout_kills_a_backend_that_ignores_cancel() {
     let program = open(&backend);
     let pid = pid_of(&decompile(&program, "La;").unwrap());
 
-    let options = CallOptions { timeout: Some(Duration::from_millis(100)), ..CallOptions::default() };
+    let options = CallOptions::default().timeout(Some(Duration::from_millis(100)));
     let started = Instant::now();
     let err = decompile_with(&program, "Lstubborn/5000;", &options).unwrap_err();
     assert!(matches!(err, Error::Timeout(_)), "{err}");
@@ -196,7 +194,7 @@ fn caller_cancellation_aborts_the_request() {
         thread::sleep(Duration::from_millis(100));
         canceller.cancel();
     });
-    let options = CallOptions { cancel: Some(token), ..CallOptions::default() };
+    let options = CallOptions::default().cancel(Some(token));
     let started = Instant::now();
     let err = decompile_with(&program, "Lslow/5000;", &options).unwrap_err();
     assert!(matches!(err, Error::Cancelled), "{err}");
@@ -360,7 +358,7 @@ fn race(program: &Program, classes: &[(&str, Priority)], stagger: Duration) -> V
             let done = &done;
             scope.spawn(move || {
                 thread::sleep(stagger * u32::try_from(index).unwrap());
-                let options = CallOptions { priority, ..CallOptions::default() };
+                let options = CallOptions::default().priority(priority);
                 decompile_with(program, class, &options).unwrap();
                 done.lock().unwrap().push(format!("{index}"));
             });
@@ -409,6 +407,6 @@ fn program_close_releases_sessions() {
     assert_eq!(log_lines(&log.0, "close"), 1);
 
     let slice = ProgramInput::Slice { files: vec!["/c/s.dex".into()], manifest: Default::default() };
-    drop(backend.open_program(ProgramOpenParams { input: slice, mappings: None }, &CallOptions::default()).unwrap());
+    drop(backend.open_program(ProgramOpenParams::new(slice), &CallOptions::default()).unwrap());
     assert_eq!(log_lines(&log.0, "close"), 2, "dropping a program closes it too");
 }

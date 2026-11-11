@@ -15,12 +15,21 @@ use crate::spec::CallOptions;
 
 /// What to decompile from an open [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DecompileRequest {
     /// Type descriptors, e.g. `Lbin/mt/json/JSONObject;`.
     pub classes: Vec<String>,
     pub language: Language,
     /// Fold inner and anonymous classes into their outer class.
     pub nested: bool,
+}
+
+impl DecompileRequest {
+    /// The request with [`nested`](#structfield.nested) set.
+    #[must_use]
+    pub fn nested(self, nested: bool) -> Self {
+        DecompileRequest { nested, ..self }
+    }
 }
 
 impl DecompileRequest {
@@ -73,13 +82,9 @@ impl Program {
         loop {
             let program_id = self.session_on(&lease, options)?;
             let id = lease.process.next_id();
-            let params = DecompileClassesParams {
-                program_id,
-                classes: request.classes.clone(),
-                language: request.language,
-                nested: request.nested,
-                progress_token: options.progress.is_some().then(|| id.clone().into()),
-            };
+            let params = DecompileClassesParams::new(program_id, request.classes.clone(), request.language)
+                .nested(request.nested)
+                .progress_token(options.progress.is_some().then(|| id.clone().into()));
             let result = lease.process.call_as::<DecompileClasses>(id, &params, &lease.control(options));
             lease.observe(&result);
             match result {
@@ -109,7 +114,7 @@ impl Program {
         for session in sessions {
             let Some(process) = session.process.upgrade().filter(|process| process.is_usable()) else { continue };
             // `program/close` does not count against `maxConcurrency` (§6.1 counts decompile/classes only).
-            if let Err(err) = process.call::<ProgramClose>(&ProgramCloseParams { program_id: session.id }, &control) {
+            if let Err(err) = process.call::<ProgramClose>(&ProgramCloseParams::new(session.id), &control) {
                 first_error.get_or_insert(err);
             }
         }
