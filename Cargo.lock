@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "asc-abc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-fixture",
  "memchr",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "asc-apk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-fixture",
  "flate2",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "asc-ark-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-abc",
  "asc-apk",
@@ -118,11 +118,11 @@ dependencies = [
 
 [[package]]
 name = "asc-arkisa"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "asc-arsc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-axml",
  "thiserror",
@@ -130,14 +130,14 @@ dependencies = [
 
 [[package]]
 name = "asc-axml"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "asc-cache"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-apk",
  "crc32fast",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "asc-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-ark-engine",
  "asc-engine",
@@ -164,11 +164,11 @@ dependencies = [
 
 [[package]]
 name = "asc-dalvik"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "asc-dex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-fixture",
  "memchr",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "asc-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-apk",
  "asc-arsc",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "asc-findrefs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-dalvik",
  "asc-dex",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "asc-fixture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-abc",
  "asc-arkisa",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "asc-hap"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-fixture",
  "serde_json",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "asc-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-ark-engine",
  "asc-engine",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "asc-pasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-abc",
  "asc-arkisa",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "asc-rebuild"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-dalvik",
  "asc-dex",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "asc-smali"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asc-dalvik",
  "asc-dex",
