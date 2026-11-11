@@ -10,6 +10,7 @@ members = [
     "crates/asc-cache",
     "crates/asc-axml",
     "crates/asc-arsc",
+    "crates/asc-query",
     "crates/asc-engine",
     "crates/asc-decompile-protocol",
     "crates/asc-decompile",
@@ -42,6 +43,7 @@ asc-apk = { version = "0.1.1", path = "crates/asc-apk" }
 asc-cache = { version = "0.1.1", path = "crates/asc-cache" }
 asc-axml = { version = "0.1.1", path = "crates/asc-axml" }
 asc-arsc = { version = "0.1.1", path = "crates/asc-arsc" }
+asc-query = { version = "0.1.1", path = "crates/asc-query" }
 asc-engine = { version = "0.1.1", path = "crates/asc-engine" }
 asc-mcp = { version = "0.1.1", path = "crates/asc-mcp" }
 asc-decompile-protocol = { version = "0.1.1", path = "crates/asc-decompile-protocol" }

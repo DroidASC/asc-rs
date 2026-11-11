@@ -937,8 +937,9 @@ enum Find {
     /// rs.asc.B.name or rs.asc.B#name (CLASS exact, `~CLASS` fuzzy, without
     /// package any package; NAME a regex / substring, `=NAME` or a name
     /// with its signature exact). method:{RULE} is a call of any method whose
-    /// code matches RULE (a rule as for `rules`), method:@FILE of any method
-    /// FILE lists (one per line; findrefs output works). `!CONDITION` is
+    /// code matches RULE (a rule as for `rules`), method:{@FILE} (or
+    /// method:@FILE) of any method FILE lists (one per line; findrefs output
+    /// works). `!CONDITION` is
     /// one more --none. The last column lists what each condition matched,
     /// in order.
     ///
@@ -965,11 +966,12 @@ enum Find {
     ///
     /// Each rule is a condition as for `all` (also extends:CLASS,
     /// impl:CLASS), or several joined with `&` for a compound rule, `!`
-    /// before the ones a method must not match. `&` inside `{}` or `()`, or
-    /// written `\&`, belongs to its condition.
+    /// before the ones a method must not match. A `&` joins only ahead of
+    /// `KIND:` or `!KIND:` and outside `{}` / `()`; anywhere else, or
+    /// written `\&`, it belongs to its condition.
     ///
-    /// HarmonyOS: the conditions of `all`; a `&` joins only ahead of
-    /// `KIND:` (record names hold `&`). Each rule is one search.
+    /// HarmonyOS: the conditions of `all` (record names keep their `&`).
+    /// Each rule is one search.
     Rules {
         /// Also write every result to this file.
         #[arg(short, long)]

@@ -817,8 +817,8 @@ fn what_is_not_supported_yet_says_what_is() {
                    import:REGEX or global:REGEX over its path; findrefs method NAME lists the functions of a name, constructors among them)";
     let walks = "(callgraph takes: [RECORD] FUNCTION or --to RULE, --from RULE, --unless RULE, --callees, --depth, --max-nodes, \
                  --no-defines, --unresolved, --entry; RECORD->FUNCTION as result rows print it is a target too)";
-    let no_rule =
-        "\"type:x\" is not a condition: write KIND:VALUE with KIND one of string, literal, prop, global, import, method, number, call";
+    let no_rule = "bad rule \"type:x\": unknown kind \"type\": use one of string, literal, prop, global, import, method, number, call \
+                   at column 1";
     let searches = "(supported: findrefs string, prop, global, import, method, number, call, all, rules)";
     let conditions = "(supported: string:, literal:, prop:, global:, import:, method:, number:, call:)";
     let not_yet = "is not supported for HarmonyOS programs yet";
@@ -902,10 +902,10 @@ fn what_is_not_supported_yet_says_what_is() {
         (&["findrefs", "all", "!string:b"], "a rule needs a condition without `!` (`!` only removes functions)".into()),
         (&["findrefs", "all", "string:a", "--none", "type:Index"], format!("findrefs type: {not_yet} {conditions}")),
         (&["findrefs", "all", "string:a & prop:b"], "\"string:a & prop:b\" is several conditions; give one KIND:VALUE here".into()),
-        (&["findrefs", "all", "call:{string:a"], "call:{string:a: expected `}` at the end of the set".into()),
+        (&["findrefs", "all", "call:{string:a"], "bad rule \"call:{string:a\": expected `}` at column 15".into()),
         (&["findrefs", "call", "{@nowhere.txt}"], "cannot read function list nowhere.txt: No such file or directory (os error 2)".into()),
         (&["findrefs", "all", "type:Index"], format!("findrefs type: {not_yet} {conditions}")),
-        (&["findrefs", "all", "prop:"], "prop: needs a value".into()),
+        (&["findrefs", "all", "prop:"], "bad rule \"prop:\": empty value at column 6".into()),
         (
             &["findrefs", "string", "token", "--access", "read"],
             "--access is only valid for `findrefs prop` and `findrefs global` on HarmonyOS programs".into(),

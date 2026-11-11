@@ -110,6 +110,7 @@ dependencies = [
  "asc-fixture",
  "asc-hap",
  "asc-pasm",
+ "asc-query",
  "memchr",
  "regex",
  "serde_json",
@@ -213,6 +214,7 @@ dependencies = [
  "asc-dex",
  "asc-findrefs",
  "asc-fixture",
+ "asc-query",
  "asc-rebuild",
  "asc-smali",
  "libc",
@@ -282,6 +284,10 @@ dependencies = [
  "thiserror",
  "zip",
 ]
+
+[[package]]
+name = "asc-query"
+version = "0.1.1"
 
 [[package]]
 name = "asc-rebuild"

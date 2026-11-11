@@ -83,6 +83,12 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
   record 头多一行 `; source 原始路径`，函数头写成 `line N (source line M)`：`line N` 是编译中间文件的行（从 0 计），
   `source line` 才是源码行；`(no source line)` 的函数是构建生成的（状态变量访问器、`rerender` 等）。
 
+- 规则（`findrefs all` / `rules`、`callgraph --to / --from / --unless`）写法与 DEX 侧相同（[query.md](query.md#规则写法)）：
+  `&` 只在后面紧跟 `KIND:` / `!KIND:` 且不在 `{}` / `()` 内时才连接，record 名里的 `&` 保持原样。本版本的变化：`()` 内的
+  `&` 不再连接；花括号里的规则在第一个未配对的 `}` 处结束（`call:{string:a}b}` 报错，以前是正则 `a}b`）；
+  `call:={RULE}` 等同 `call:{RULE}`，`call:*{RULE}` 报错（分派只有 DEX 有）；未知 KIND 和空值与规则的其他错误一样报成
+  `bad rule "规则": 原因 at column N`。
+
 限制：HarmonyOS 程序和 APK 共用同一个 daemon（调用图等分析结果驻留复用），但没有磁盘 cache（打开是毫秒级）；
 父类在程序外的 `super()` / 继承方法仍是叶子，单例 getter 只在返回值来源确定时才接上（转发给别的类、按 key 存的多例
 不接；函数入口的热修复桩不算作它的返回值，边反映的是出厂代码）；没有调用点取值约束（`method:X[arg0=…]`）和虚分派；

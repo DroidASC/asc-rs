@@ -483,8 +483,8 @@ pub mod defs {
             "all": {"type": "array", "items": condition, "description": "Instead of kind: methods matching every condition."},
             "none": {"type": "array", "items": condition, "description": "With all: minus methods matching any."},
             "rule": {"type": "string", "description": "Instead of kind: a rule as the CLI writes it, `KIND:VALUE` \
-                joined by `&`, `!` before a part to exclude; method:{RULE} = calls of the methods whose code matches \
-                RULE, method:@FILE = calls of the methods FILE lists."},
+                joined by `&` (a `&` joins only ahead of `KIND:`), `!` before a part to exclude; method:{RULE} = \
+                calls of the methods whose code matches RULE, method:{@FILE} = calls of the methods FILE lists."},
             "rules": {"type": "array", "items": condition, "description": "Several queries (or all / none, or rule \
                 strings) in one pass, output grouped `r1 | ...`."},
         })

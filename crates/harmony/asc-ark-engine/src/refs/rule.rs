@@ -1,128 +1,120 @@
-//! The rule syntax of `findrefs all` / `rules` and of the endpoints of a
-//! call graph walk, the one the DEX side has with the kinds of this engine.
+//! The rules of `findrefs all` / `rules` and of the endpoints of a call
+//! graph walk: the syntax both engines read ([`asc_query::rule`]), with the
+//! kinds of this engine.
 //!
 //! ```text
-//! rule  := part ( '&' part )*
-//! part  := [ '!' ] KIND ':' value
-//! value := '{' rule '}'      call only: call sites that lead to a function the rule matches
-//!        | '{@' PATH '}'     call only: to a function the file lists
-//!        | TEXT              the kind's own syntax, e.g. a regex
+//! call:  ['='] '{' rule '}'      call sites that lead to a function the rule matches
+//!        ['='] '{@' PATH '}'     call sites that lead to a function the file lists
+//!        TEXT                    a regex over the callee path
+//! other: TEXT                    the kind's own syntax, e.g. a regex
 //! ```
 //!
 //! `KIND` is one of [`Query::KINDS`] or another spelling of one
 //! ([`Query::kind_named`]: `property:`, `functions:`), at every depth.
 //!
 //! A rule of one part without `!` is that condition; several make a
-//! [`Query::All`] whose `!` parts are [`Query::Not`]. A `&` joins two parts
-//! only where `KIND:` or `!KIND:` follows it, outside `{}`: record names and
-//! module requests are full of `&` (`&entry/src/main/ets/pages/Index&`).
-//! `\&` never joins, and `\{` / `\}` are not brackets.
+//! [`Query::All`] whose `!` parts are [`Query::Not`]. Record names and
+//! module requests are full of `&` (`&entry/src/main/ets/pages/Index&`),
+//! which the shared syntax keeps in the value: a `&` joins only ahead of
+//! `KIND:` or `!KIND:`.
 //!
-//! The DEX side writes a set of methods `method:{RULE}` / `method:@FILE`,
-//! because its `method:` condition is a call. Here a call is `call:`, so
-//! the set goes there, and the file inside the braces: a callee path may
-//! start with `@` itself (`call:@ohos:net`).
+//! The DEX side writes a set of methods `method:{RULE}`, because its
+//! `method:` condition is a call. Here a call is `call:`, so the set goes
+//! there. A callee path may start with `@` itself (`call:@ohos:net`), so a
+//! file of functions always goes in the braces. Sets are exact, as a `=`
+//! in front says on the DEX side; `*` (follow dispatch) is DEX-only.
 
 use std::path::Path;
+
+use asc_query::rule::{Grammar, Mode, Part, Rule, Set, Shape, SyntaxError, Value};
 
 use super::{FunctionSet, NumberQuery, Pattern, Query};
 use crate::{EngineError, Result};
 
-/// Sets inside sets deeper than this are a mistake or hostile.
-const MAX_DEPTH: usize = 8;
+/// The kinds of ArkCompiler code.
+struct Ark;
 
-/// Where the next part of a rule starts after a `&`: at `KIND:` or `!KIND:`.
-fn starts_part(rest: &str) -> bool {
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix('!').unwrap_or(rest).trim_start();
-    let word = rest.split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or_default();
-    !word.is_empty() && rest[word.len()..].starts_with(':')
+impl Grammar for Ark {
+    type Kind = &'static str;
+    const KINDS: &'static str = "string, literal, prop, global, import, method, number, call";
+
+    fn kind(word: &str) -> std::result::Result<&'static str, String> {
+        Query::kind_named(word).ok_or_else(|| format!("unknown kind {word:?}: use one of {}", Ark::KINDS))
+    }
+
+    fn shape(kind: &'static str) -> Shape {
+        match kind {
+            "call" => Shape::Set { bare_file: false },
+            _ => Shape::Text,
+        }
+    }
 }
 
 /// The parts of `rule`: what stands between the `&` that join conditions.
 pub(crate) fn parts(rule: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let (mut start, mut depth, mut escaped) = (0, 0usize, false);
-    for (at, c) in rule.char_indices() {
-        match c {
-            _ if escaped => {}
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            '&' if depth == 0 && starts_part(&rule[at + 1..]) => {
-                parts.push(rule[start..at].trim());
-                start = at + 1;
-            }
-            _ => {}
-        }
-        escaped = c == '\\' && !escaped;
-    }
-    parts.push(rule[start..].trim());
-    parts
-}
-
-fn unknown(spec: &str) -> EngineError {
-    EngineError::Query(format!("{spec:?} is not a condition: write KIND:VALUE with KIND one of {}", Query::KINDS.join(", ")))
-}
-
-/// The value of a `call:` condition: a set in braces, or a callee path regex.
-fn call(value: &str, dir: Option<&Path>, depth: usize) -> Result<Query> {
-    let Some(body) = value.strip_prefix('{') else { return Ok(Query::Call(Pattern::regex(value)?)) };
-    let Some(body) = body.strip_suffix('}') else {
-        return Err(EngineError::Query(format!("call:{value}: expected `}}` at the end of the set")));
-    };
-    if depth >= MAX_DEPTH {
-        return Err(EngineError::Query(format!("call:{value}: sets are nested deeper than {MAX_DEPTH} levels")));
-    }
-    let set = match body.trim().strip_prefix('@') {
-        Some(path) => {
-            let path = path.trim();
-            // An absolute `path` replaces `dir` when joined.
-            let full = dir.map_or_else(|| Path::new(path).to_path_buf(), |dir| dir.join(path));
-            let text = std::fs::read_to_string(&full).map_err(|e| EngineError::Query(format!("cannot read function list {path}: {e}")))?;
-            FunctionSet::listed(&text)
-        }
-        None => FunctionSet::Matching(Box::new(rule(body, dir, depth + 1)?)),
-    };
-    Ok(Query::CallTo(set))
-}
-
-/// One part without its `!`.
-fn condition(spec: &str, dir: Option<&Path>, depth: usize) -> Result<Query> {
-    let (kind, value) = spec.split_once(':').ok_or_else(|| unknown(spec))?;
-    let (kind, value) = (Query::kind_named(kind).ok_or_else(|| unknown(spec))?, value.trim());
-    if value.is_empty() {
-        return Err(EngineError::Query(format!("{kind}: needs a value")));
-    }
-    match kind {
-        "string" => Query::string_regex(value),
-        "literal" => Ok(Query::string_literal(value)),
-        "prop" => Ok(Query::Prop { name: Pattern::name(value)?, access: None }),
-        "global" => Ok(Query::Global { name: Pattern::name(value)?, access: None }),
-        "import" => Query::import(value, false),
-        "method" => Query::method(value, Pattern::name),
-        "number" => Ok(Query::Number(value.parse::<NumberQuery>()?)),
-        _ => call(value, dir, depth),
-    }
-}
-
-fn rule(spec: &str, dir: Option<&Path>, depth: usize) -> Result<Query> {
-    let (mut all, mut none) = (Vec::new(), Vec::new());
-    for part in parts(spec) {
-        match part.strip_prefix('!') {
-            Some(excluded) => none.push(condition(excluded.trim_start(), dir, depth)?),
-            None => all.push(condition(part, dir, depth)?),
-        }
-    }
-    Query::compound(all, none)
+    asc_query::rule::parts(rule)
 }
 
 pub(super) fn parse(spec: &str, dir: Option<&Path>) -> Result<Query> {
-    rule(spec, dir, 0)
+    let rule = Rule::parse::<Ark>(spec).map_err(syntax)?;
+    Reader { src: spec, dir }.rule(&rule)
+}
+
+fn syntax(error: SyntaxError) -> EngineError {
+    EngineError::Query(error.to_string())
+}
+
+/// What the parts of a parsed rule mean on ArkCompiler code.
+struct Reader<'a> {
+    src: &'a str,
+    dir: Option<&'a Path>,
+}
+
+impl Reader<'_> {
+    fn error(&self, at: usize, message: &str) -> EngineError {
+        syntax(SyntaxError::new(self.src, at, message))
+    }
+
+    fn rule(&self, rule: &Rule<'_, &'static str>) -> Result<Query> {
+        let (mut all, mut none) = (Vec::new(), Vec::new());
+        for part in &rule.parts {
+            let query = self.condition(part)?;
+            if part.negated { none.push(query) } else { all.push(query) }
+        }
+        Query::compound(all, none)
+    }
+
+    fn condition(&self, part: &Part<'_, &'static str>) -> Result<Query> {
+        let value = match &part.value {
+            Value::Text(text) => text.text,
+            Value::Set { tail, .. } if !tail.text.is_empty() => return Err(self.error(tail.at, "unexpected text after the set")),
+            Value::Set { mode: Mode::Every, .. } => {
+                return Err(self.error(part.at, "`*` before a set follows dispatch, which only DEX code has"));
+            }
+            Value::Set { set: Set::Rule(rule), .. } => return Ok(Query::CallTo(FunctionSet::Matching(Box::new(self.rule(rule)?)))),
+            Value::Set { set: Set::File(file), .. } => {
+                let path = file.path.text;
+                let text = file.read(self.dir).map_err(|e| EngineError::Query(format!("cannot read function list {path}: {e}")))?;
+                return Ok(Query::CallTo(FunctionSet::listed(&text)));
+            }
+        };
+        match part.kind {
+            "string" => Query::string_regex(value),
+            "literal" => Ok(Query::string_literal(value)),
+            "prop" => Ok(Query::Prop { name: Pattern::name(value)?, access: None }),
+            "global" => Ok(Query::Global { name: Pattern::name(value)?, access: None }),
+            "import" => Query::import(value, false),
+            "method" => Query::method(value, Pattern::name),
+            "number" => Ok(Query::Number(value.parse::<NumberQuery>()?)),
+            _ => Ok(Query::Call(Pattern::regex(value)?)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asc_query::rule::MAX_DEPTH;
 
     fn shape(spec: &str) -> String {
         fn of(query: &Query) -> String {
@@ -182,16 +174,26 @@ mod tests {
             spelled("call:{functions:=load & !text:a & call:{num:7 & property:b}}"),
             spelled("call:{method:=load & !string:a & call:{number:7 & prop:b}}")
         );
-        assert!(shape("call:{field:a}").starts_with("error: \"field:a\" is not a condition"));
+        assert_eq!(
+            shape("call:{field:a}"),
+            "error: bad rule \"call:{field:a}\": unknown kind \"field\": use one of string, literal, prop, global, import, method, number, \
+             call at column 7"
+        );
     }
 
     #[test]
     fn what_is_not_a_rule_says_why() {
         assert_eq!(shape("!string:a"), "error: a rule needs a condition without `!` (`!` only removes functions)");
-        assert_eq!(shape("call:{string:a"), "error: call:{string:a: expected `}` at the end of the set");
+        assert_eq!(shape("call:{string:a"), "error: bad rule \"call:{string:a\": expected `}` at column 15");
+        assert_eq!(shape("call:{string:a} x"), "error: bad rule \"call:{string:a} x\": unexpected text after the set at column 17");
+        assert_eq!(
+            shape("call:*{string:a}"),
+            "error: bad rule \"call:*{string:a}\": `*` before a set follows dispatch, which only DEX code has at column 1"
+        );
+        assert_eq!(shape("call:={string:a}"), shape("call:{string:a}"));
         assert_eq!(shape("call:{!string:a}"), "error: a rule needs a condition without `!` (`!` only removes functions)");
-        assert!(shape("call:{type:La;}").starts_with("error: \"type:La;\" is not a condition: write KIND:VALUE with KIND one of string, "));
-        assert_eq!(shape("prop:"), "error: prop: needs a value");
+        assert!(shape("call:{type:La;}").contains(": unknown kind \"type\": use one of string, "));
+        assert_eq!(shape("prop:"), "error: bad rule \"prop:\": empty value at column 6");
         assert!(shape("call:{@/nonexistent/list.txt}").starts_with("error: cannot read function list /nonexistent/list.txt: "));
         let deep = format!("{}string:a{}", "call:{".repeat(MAX_DEPTH + 1), "}".repeat(MAX_DEPTH + 1));
         assert!(shape(&deep).contains("nested deeper than 8 levels"), "{}", shape(&deep));

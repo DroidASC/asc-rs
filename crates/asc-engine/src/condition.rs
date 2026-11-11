@@ -1,12 +1,15 @@
-//! The condition language of findrefs rules and callgraph endpoints.
+//! The conditions of findrefs rules and callgraph endpoints on DEX code.
+//!
+//! The syntax is the one both engines read ([`asc_query::rule`]); here are
+//! the kinds and what their values mean:
 //!
 //! ```text
-//! rule  := part ( '&' part )*
-//! part  := [ '!' ] KIND ':' value
-//! value := ['=' | '*'] '{' rule '}' calls  method only: calls of the methods whose code matches the rule
-//!        | ['=' | '*'] '@' PATH calls    method only: calls of the methods listed in a file
-//!        | TEXT calls        method: a method target, e.g. Lc;->m(I)V
-//!        | TEXT              the other KINDs' own syntax, e.g. a regex
+//! method: ['=' | '*'] '{' rule '}' calls    calls of the methods whose code matches the rule
+//!         ['=' | '*'] '{@' PATH '}' calls   calls of the methods listed in a file
+//!         ['=' | '*'] '@' PATH calls        the same
+//!         TARGET calls                      a method target, e.g. Lc;->m(I)V
+//! in:     '{' CONDITION '}'                 the methods of a class the condition matches
+//! other:  TEXT                              the kind's own syntax, e.g. a regex
 //! calls := ( '[' constraint ( ',' constraint )* ']' )*
 //! constraint := ( 'arg' N | 'this' ) ( '=' | '==' ) arg
 //!             | 'ret' ( '=' | '==' ) ( 'used' | 'unused' )
@@ -15,10 +18,7 @@
 //! ```
 //!
 //! A rule of one positive part is that condition; several parts make a
-//! compound ([`Query::All`]) whose `!` parts are its `none` list. TEXT runs
-//! to the next `&` outside `{}` / `()`, or to the `}` closing the enclosing
-//! body; `\` keeps the next character from ending it (`string:a\&b` is the
-//! regex `a\&b`).
+//! compound ([`Query::All`]) whose `!` parts are its `none` list.
 //!
 //! A `{rule}` or `@PATH` set also takes the calls that may dispatch to its
 //! methods ([`Query::Virtual`]): those naming a method on a supertype of its
@@ -36,27 +36,41 @@
 //! the values. A REGEX runs to the next `,` / `]` outside `()` / `{}`, or is
 //! quoted like TEXT (`\"`, `\\` escape).
 //!
-//! Bodies (`method:{...}`, `in:{...}`) nest at most [`MAX_DEPTH`] deep.
+//! Sets (`method:{...}`, `in:{...}`) nest at most [`MAX_DEPTH`] deep.
 
 use crate::names::{exact_method, format_class_name, member_query, parse_kind};
 use crate::{EngineError, Result};
 use asc_findrefs::{CallConstraint, Certainty, Defined, MemberQuery, Query, ResultWant, Slot, Want};
+use asc_query::rule::{Grammar, Mode, Part, Rule, Set, SetFile, Shape, SyntaxError, Text, Value};
 use std::path::Path;
 
-/// Bodies inside bodies deeper than this are a mistake or hostile: each
-/// level is another pass over the code, and the parser recurses per level.
-/// The Ark rules use the same limit.
-pub const MAX_DEPTH: usize = 8;
+pub use asc_query::rule::MAX_DEPTH;
+
+/// The kinds of DEX code.
+struct Dex;
+
+impl Grammar for Dex {
+    type Kind = &'static str;
+    const KINDS: &'static str = "string, literal, type, method, field, extends, impl";
+
+    fn kind(word: &str) -> std::result::Result<&'static str, String> {
+        parse_kind(word).map_err(|e| e.to_string())
+    }
+
+    fn shape(kind: &'static str) -> Shape {
+        match kind {
+            "method" => Shape::Set { bare_file: true },
+            "in" => Shape::Set { bare_file: false },
+            _ => Shape::Text,
+        }
+    }
+}
 
 /// Parse a rule (see the module docs). `@PATH` files are read relative to
 /// `dir` (the current directory when `None`).
 pub fn parse_rule_in(spec: &str, dir: Option<&Path>) -> Result<Query> {
-    let mut p = Parser { src: spec, pos: 0, dir, depth: 0 };
-    let q = p.rule(false)?;
-    match p.peek() {
-        None => Ok(q),
-        Some(c) => Err(p.error(&format!("unexpected {c:?}"))),
-    }
+    let rule = Rule::parse::<Dex>(spec).map_err(syntax)?;
+    Reader { src: spec, dir }.rule(&rule)
 }
 
 /// Parse one condition (a rule of a single part without `!`).
@@ -85,21 +99,130 @@ pub fn method_set(text: &str) -> Result<Vec<MemberQuery>> {
         .collect()
 }
 
-struct Parser<'a> {
-    src: &'a str,
-    pos: usize,
-    dir: Option<&'a Path>,
-    /// Bodies open at the cursor.
-    depth: usize,
+fn syntax(error: SyntaxError) -> EngineError {
+    EngineError::Query(error.to_string())
 }
 
-impl<'a> Parser<'a> {
-    fn rest(&self) -> &str {
-        &self.src[self.pos..]
+/// What the parts of a parsed rule mean on DEX code.
+struct Reader<'a> {
+    src: &'a str,
+    dir: Option<&'a Path>,
+}
+
+impl Reader<'_> {
+    fn error(&self, at: usize, message: &str) -> EngineError {
+        syntax(SyntaxError::new(self.src, at, message))
+    }
+
+    fn rule(&self, rule: &Rule<'_, &'static str>) -> Result<Query> {
+        let mut all = Vec::new();
+        let mut none = Vec::new();
+        for part in &rule.parts {
+            let query = self.condition(part)?;
+            if part.negated { none.push(query) } else { all.push(query) }
+        }
+        match (all.len(), none.is_empty()) {
+            (0, _) => Err(self.error(rule.parts[0].at, "a rule needs a condition without `!` (`!` only removes methods)")),
+            (1, true) => Ok(all.pop().expect("one condition")),
+            _ => Ok(Query::All { all, none }),
+        }
+    }
+
+    fn condition(&self, part: &Part<'_, &'static str>) -> Result<Query> {
+        let text = match (part.kind, &part.value) {
+            ("method", value) => return self.method(value),
+            // `in:{CLASS-CONDITION}`: the methods of a matching class.
+            ("in", Value::Set { mode: Mode::Plain, set: Set::Rule(inner), tail }) if tail.text.is_empty() => {
+                return match inner.parts.as_slice() {
+                    [one] if !one.negated => Ok(Query::Defined(Defined::In(Box::new(self.condition(one)?)))),
+                    _ => Err(self.error(part.at, "in: takes one class condition, e.g. in:{extends:android.app.Activity}")),
+                };
+            }
+            (_, Value::Text(text)) if part.kind != "in" => text.text,
+            _ => return Err(self.error(part.at, "in: takes a class condition in braces, e.g. in:{extends:android.app.Activity}")),
+        };
+        Ok(match part.kind {
+            "string" => Query::String(text.to_string()),
+            "literal" => Query::StringLiteral(text.to_string()),
+            "type" => Query::Type(text.to_string()),
+            "extends" => Query::Extends(format_class_name(text)?),
+            "impl" => Query::Implements(format_class_name(text)?),
+            "override" => Query::Defined(Defined::Override(member_query("method", None, false, Some(text), false)?)),
+            "annotation" => Query::Defined(Defined::Annotation(crate::defs::annotation_descriptor(text)?)),
+            "flag" => Query::Defined(Defined::Flags(crate::defs::parse_flags(text)?)),
+            _ => Query::Field(member_query("field", None, false, Some(text), false)?),
+        })
+    }
+
+    /// The value of a `method:` condition: a set or a target, then its
+    /// constraints.
+    fn method(&self, value: &Value<'_, &'static str>) -> Result<Query> {
+        let (target, calls) = match value {
+            Value::Text(text) => {
+                let (target, calls) = split_constraints(*text);
+                if target.text.is_empty() {
+                    return Err(self.error(target.at, "empty value"));
+                }
+                (Query::Method(member_query("method", None, false, Some(target.text), false)?), calls)
+            }
+            Value::Set { mode, set, tail } => {
+                let (set, calls) = match set {
+                    Set::Rule(rule) => (Query::Nested(Box::new(self.rule(rule)?)), *tail),
+                    // A bare `@PATH` runs to the end of the part, its constraints included.
+                    Set::File(file) if tail.text.is_empty() => {
+                        let (path, calls) = split_constraints(file.path);
+                        (self.method_file(SetFile { path })?, calls)
+                    }
+                    Set::File(file) => (self.method_file(*file)?, *tail),
+                };
+                let dispatched = match mode {
+                    // `={...}` / `=@PATH`: the set's own methods, without dispatch.
+                    Mode::Exact => set,
+                    // `*{...}` / `*@PATH`: dispatch through every supertype.
+                    Mode::Every => Query::Virtual { target: Box::new(set), via: Default::default(), fan_out: None },
+                    Mode::Plain => {
+                        Query::Virtual { target: Box::new(set), via: Default::default(), fan_out: Some(crate::compose::DEFAULT_FAN_OUT) }
+                    }
+                };
+                (dispatched, calls)
+            }
+        };
+        let constraints = Constraints { src: self.src, pos: calls.at, end: calls.at + calls.text.len() }.all()?;
+        Ok(if constraints.is_empty() { target } else { Query::Call { target: Box::new(target), constraints } })
+    }
+
+    /// The method set of `method:@PATH`, read now so the query (and its
+    /// cache key) holds the file's content.
+    fn method_file(&self, file: SetFile<'_>) -> Result<Query> {
+        let path = file.path.text;
+        let text = file.read(self.dir).map_err(|e| EngineError::Query(format!("cannot read method set {path}: {e}")))?;
+        Ok(Query::MethodSet(method_set(&text).map_err(|e| EngineError::Query(format!("{path}: {e}")))?))
+    }
+}
+
+/// `text` split before its first call constraint: the target and the
+/// constraints, each without the blanks around it.
+fn split_constraints(text: Text<'_>) -> (Text<'_>, Text<'_>) {
+    let at = constraint_start(text.text).unwrap_or(text.text.len());
+    let calls = &text.text[at..];
+    (Text { text: text.text[..at].trim_end(), at: text.at }, Text { text: calls, at: text.at + at })
+}
+
+/// The call constraints after a method target or set: `[...][...]`, the
+/// cursor and end offsets in the rule `src`.
+struct Constraints<'a> {
+    src: &'a str,
+    pos: usize,
+    end: usize,
+}
+
+impl<'a> Constraints<'a> {
+    fn rest(&self) -> &'a str {
+        &self.src[self.pos..self.end]
     }
 
     fn skip_ws(&mut self) {
-        self.pos = self.src.len() - self.rest().trim_start().len();
+        self.pos = self.end - self.rest().trim_start().len();
     }
 
     /// The next non-blank character, not consumed.
@@ -117,104 +240,11 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, what: &str) -> EngineError {
-        EngineError::Query(format!("bad rule {:?}: {what} at column {}", self.src, self.pos + 1))
+        syntax(SyntaxError::new(self.src, self.pos, what))
     }
 
-    /// The `{...}` body at the cursor, its `{` already eaten, parsed by
-    /// `inner` one level deeper.
-    fn body<T>(&mut self, inner: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        if self.depth >= MAX_DEPTH {
-            return Err(self.error(&format!("bodies are nested deeper than {MAX_DEPTH} levels")));
-        }
-        self.depth += 1;
-        let parsed = inner(self)?;
-        self.depth -= 1;
-        if !self.eat('}') {
-            return Err(self.error("expected `}`"));
-        }
-        Ok(parsed)
-    }
-
-    /// `part ('&' part)*`, up to the end or (`nested`) the closing `}`.
-    fn rule(&mut self, nested: bool) -> Result<Query> {
-        let mut all = Vec::new();
-        let mut none = Vec::new();
-        loop {
-            if self.eat('!') {
-                none.push(self.condition(nested)?);
-            } else {
-                all.push(self.condition(nested)?);
-            }
-            if !self.eat('&') {
-                break;
-            }
-        }
-        match (all.len(), none.is_empty()) {
-            (0, _) => Err(self.error("a rule needs a condition without `!` (`!` only removes methods)")),
-            (1, true) => Ok(all.pop().expect("one condition")),
-            _ => Ok(Query::All { all, none }),
-        }
-    }
-
-    /// `KIND ':' value`.
-    fn condition(&mut self, nested: bool) -> Result<Query> {
-        self.skip_ws();
-        let kind_len = self.rest().find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(self.rest().len());
-        if kind_len == 0 || !self.rest()[kind_len..].starts_with(':') {
-            return Err(self.error("expected KIND:VALUE, KIND one of string, literal, type, method, field, extends, impl"));
-        }
-        let kind = parse_kind(&self.rest()[..kind_len])?;
-        self.pos += kind_len + 1;
-        self.skip_ws();
-        if kind == "method" {
-            return self.method(nested);
-        }
-        // `in:{CLASS-CONDITION}`: the methods of a matching class.
-        if kind == "in" {
-            if !self.eat('{') {
-                return Err(self.error("in: takes a class condition in braces, e.g. in:{extends:android.app.Activity}"));
-            }
-            let inner = self.body(|p| p.condition(true))?;
-            return Ok(Query::Defined(Defined::In(Box::new(inner))));
-        }
-        let value = self.text(nested)?.trim();
-        Ok(match kind {
-            "string" => Query::String(value.to_string()),
-            "literal" => Query::StringLiteral(value.to_string()),
-            "type" => Query::Type(value.to_string()),
-            "extends" => Query::Extends(crate::names::format_class_name(value)?),
-            "impl" => Query::Implements(crate::names::format_class_name(value)?),
-            "override" => Query::Defined(Defined::Override(member_query("method", None, false, Some(value), false)?)),
-            "annotation" => Query::Defined(Defined::Annotation(crate::defs::annotation_descriptor(value)?)),
-            "flag" => Query::Defined(Defined::Flags(crate::defs::parse_flags(value)?)),
-            _ => Query::Field(member_query("field", None, false, Some(value), false)?),
-        })
-    }
-
-    /// The value of a `method:` condition: `{RULE}`, `@PATH` or a target,
-    /// then its constraints.
-    fn method(&mut self, nested: bool) -> Result<Query> {
-        // `={...}` / `=@PATH`: the set's own methods, without dispatch;
-        // `*{...}` / `*@PATH`: dispatch through every supertype.
-        let mode = ["={", "=@", "*{", "*@"].iter().find(|p| self.rest().starts_with(**p)).map(|p| p.as_bytes()[0]);
-        if let Some(m) = mode {
-            self.eat(char::from(m));
-        }
-        let dispatch = |set| match mode {
-            Some(b'=') => set,
-            Some(_) => Query::Virtual { target: Box::new(set), via: Default::default(), fan_out: None },
-            None => Query::Virtual { target: Box::new(set), via: Default::default(), fan_out: Some(crate::compose::DEFAULT_FAN_OUT) },
-        };
-        let target = if self.eat('{') {
-            let inner = self.body(|p| p.rule(true))?;
-            dispatch(Query::Nested(Box::new(inner)))
-        } else if self.eat('@') {
-            let path = self.text_until(nested, Stop::Constraint)?.trim();
-            dispatch(self.method_file(path)?)
-        } else {
-            let target = self.text_until(nested, Stop::Constraint)?.trim();
-            Query::Method(member_query("method", None, false, Some(target), false)?)
-        };
+    /// Every constraint, up to the end.
+    fn all(mut self) -> Result<Vec<CallConstraint>> {
         let mut constraints = Vec::new();
         while self.eat('[') {
             loop {
@@ -227,10 +257,10 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        if !self.rest()[..text_len(self.rest(), nested)].trim().is_empty() {
+        if self.peek().is_some() {
             return Err(self.error("unexpected text after the method"));
         }
-        Ok(if constraints.is_empty() { target } else { Query::Call { target: Box::new(target), constraints } })
+        Ok(constraints)
     }
 
     /// One constraint inside `[...]`.
@@ -340,46 +370,6 @@ impl<'a> Parser<'a> {
         }
         Err(self.error("unterminated `\"`"))
     }
-
-    /// Consume TEXT: up to a `&` outside brackets, or the `}` that closes
-    /// the enclosing body (`nested`).
-    fn text(&mut self, nested: bool) -> Result<&'a str> {
-        self.text_until(nested, Stop::Text)
-    }
-
-    /// [`Parser::text`], ending before the first constraint too with
-    /// [`Stop::Constraint`].
-    fn text_until(&mut self, nested: bool, stop: Stop) -> Result<&'a str> {
-        let start = self.pos;
-        let len = text_len(self.rest(), nested);
-        self.pos += match stop {
-            Stop::Text => len,
-            Stop::Constraint => constraint_start(&self.rest()[..len]).unwrap_or(len),
-        };
-        let value = &self.src[start..self.pos];
-        if value.trim().is_empty() {
-            return Err(self.error("empty value"));
-        }
-        Ok(value)
-    }
-
-    /// The method set of `method:@PATH`, read now so the query (and its
-    /// cache key) holds the file's content.
-    fn method_file(&self, path: &str) -> Result<Query> {
-        // An absolute `path` replaces `dir` when joined.
-        let full = self.dir.map_or_else(|| Path::new(path).to_path_buf(), |d| d.join(path));
-        let text = std::fs::read_to_string(&full).map_err(|e| EngineError::Query(format!("cannot read method set {path}: {e}")))?;
-        Ok(Query::MethodSet(method_set(&text).map_err(|e| EngineError::Query(format!("{path}: {e}")))?))
-    }
-}
-
-/// Where a value's TEXT ends.
-#[derive(Clone, Copy)]
-enum Stop {
-    /// At the end of the TEXT.
-    Text,
-    /// Also at the `[` of a call constraint.
-    Constraint,
 }
 
 /// Whether a method target carries call constraints (`X[arg0=1]`).
@@ -433,26 +423,6 @@ fn parse_int(s: &str) -> Option<i64> {
     Some(if neg { n.checked_neg()? } else { n })
 }
 
-/// Bytes of TEXT at the start of `s`: up to a `&` outside `{}` / `()`, or an
-/// unmatched `}` when `nested`. A `\` keeps the next character in.
-fn text_len(s: &str, nested: bool) -> usize {
-    let mut depth = 0usize;
-    let mut chars = s.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '\\' => {
-                chars.next();
-            }
-            '{' | '(' => depth += 1,
-            '}' | ')' if depth > 0 => depth -= 1,
-            '}' if nested => return i,
-            '&' if depth == 0 => return i,
-            _ => {}
-        }
-    }
-    s.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,8 +448,13 @@ mod tests {
             q,
             Query::All { all: vec![Query::String("a".into()), method("Lc;->m(I)V")], none: vec![Query::StringLiteral("b".into())] }
         );
-        // Inside `{}` / `()` or after `\`, `&` is part of the value.
+        // Inside `{}` / `()`, after `\` or where no KIND: follows, `&` is part of the value.
         assert_eq!(parse_rule("string:(a&b)").unwrap(), Query::String("(a&b)".into()));
+        assert_eq!(
+            parse_rule("string:a&b & literal:c&d").unwrap(),
+            Query::All { all: vec![Query::String("a&b".into()), Query::StringLiteral("c&d".into())], none: vec![] }
+        );
+        assert_eq!(parse_rule("string:a & ").unwrap(), Query::String("a &".into()));
         assert_eq!(parse_rule(r"string:a{1}\&b").unwrap(), Query::String(r"a{1}\&b".into()));
         assert_eq!(
             parse_condition("extends:android.app.Activity").unwrap(),
@@ -611,6 +586,12 @@ mod tests {
         assert!(matches!(parse_rule_in("method:@s.txt", Some(dir.path())).unwrap(), Query::Virtual { .. }));
         assert!(matches!(parse_rule_in("method:=@s.txt", Some(dir.path())).unwrap(), Query::MethodSet(_)));
         assert!(matches!(parse_rule_in("method:*@s.txt", Some(dir.path())).unwrap(), Query::Virtual { fan_out: None, .. }));
+        // The file may also go in the braces, as the HarmonyOS side writes it.
+        assert_eq!(parse_rule_in("method:{@s.txt}", Some(dir.path())).unwrap(), parse_rule_in("method:@s.txt", Some(dir.path())).unwrap());
+        assert_eq!(
+            parse_rule_in("method:={ @s.txt }[arg0=1]", Some(dir.path())).unwrap(),
+            parse_rule_in("method:=@s.txt[arg0=1]", Some(dir.path())).unwrap()
+        );
     }
 
     #[test]
@@ -632,7 +613,8 @@ mod tests {
             ("method:x[arg0=1.5]", "expected *, a number"),
             ("method:x[ret=maybe]", "ret takes used or unused"),
             ("!string:a", "needs a condition without `!`"),
-            ("string:a & ", "expected KIND:VALUE"),
+            ("string:a & bogus:b", "unknown kind \"bogus\""),
+            ("in:{extends:a.B & !extends:c.D}", "in: takes one class condition"),
             ("method:@", "empty value"),
             ("method:@/nonexistent/set.txt", "cannot read method set"),
         ] {

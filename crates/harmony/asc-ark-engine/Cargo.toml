@@ -13,6 +13,7 @@ asc-arkisa.workspace = true
 asc-pasm.workspace = true
 asc-apk.workspace = true
 asc-cache.workspace = true
+asc-query.workspace = true
 asc-hap.workspace = true
 memchr.workspace = true
 regex.workspace = true

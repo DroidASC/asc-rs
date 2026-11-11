@@ -326,8 +326,9 @@ fn what_is_not_supported_yet_says_what_is() {
     let hap = inputs.sample_hap();
     let kinds = KINDS;
     let no_rule = |rule: &str| {
+        let kind = rule.split_once(':').map_or(rule, |(kind, _)| kind);
         format!(
-            "{rule:?} is not a condition: write KIND:VALUE with KIND one of string, literal, prop, global, import, method, number, call"
+            "bad rule {rule:?}: unknown kind {kind:?}: use one of string, literal, prop, global, import, method, number, call at column 1"
         )
     };
     let cases: [(&str, Value, String); 35] = [

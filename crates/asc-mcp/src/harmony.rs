@@ -1256,11 +1256,11 @@ mod tests {
             asked(json!({"all": ["string:a"], "none": [{"kind": "import", "value": "net", "requests": true}]})),
             Err("`requests` is a listing, not a condition of `none`".to_owned())
         );
-        assert_eq!(asked(json!({"rule": "call:{string:a"})), Err("call:{string:a: expected `}` at the end of the set".to_owned()));
+        assert_eq!(asked(json!({"rule": "call:{string:a"})), Err("bad rule \"call:{string:a\": expected `}` at column 15".to_owned()));
         assert_eq!(asked(json!({"kind": "string"})), Err("a string query needs `value`".to_owned()));
         assert_eq!(asked(json!({})), Err(format!("findrefs needs `kind` ({kinds}) and `value`")));
         assert_eq!(asked(json!({"rule": "nonsense"})).map_err(|e| e.contains("nonsense")), Err(true));
-        assert_eq!(asked(json!({"rule": "prop:"})), Err("prop: needs a value".to_owned()));
+        assert_eq!(asked(json!({"rule": "prop:"})), Err("bad rule \"prop:\": empty value at column 6".to_owned()));
         assert_eq!(asked(json!({"all": []})), Err("`all` needs at least one condition".to_owned()));
         assert_eq!(
             asked(json!({"kind": "string", "value": "a", "all": ["string:b"]})),

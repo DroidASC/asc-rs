@@ -53,7 +53,7 @@ in one method), `!` before a part to drop methods matching it. `rules`, `all`,
 - `method:{RULE}`: calls of the methods whose own code matches RULE. Nest freely:
   `method:{method:{literal:imei}}` is two levels up. Answered in one pass per level, so prefer
   it to looping `findrefs` over a list of methods.
-- `method:@FILE`: calls of the methods FILE lists, one per line; earlier findrefs / callgraph
+- `method:{@FILE}` (or `method:@FILE`): calls of the methods FILE lists, one per line; earlier findrefs / callgraph
   output works as it is (the first `Lcls;->m(..)` on each line is taken), as do other spellings.
 - `method:{RULE}` and `method:@FILE` follow virtual dispatch by default: a call naming the same
   method on a supertype of the matched class (an interface it implements) or on a subclass that
@@ -67,8 +67,8 @@ in one method), `!` before a part to drop methods matching it. `rules`, `all`,
   `# dispatch not followed via Lsup;->m(..) (N implementers)` line (MCP: `notes`); to include
   one, add `method:Lsup;->m` as its own rule, or write `method:*{RULE}` to follow every
   supertype. `method:={RULE}` / `method:=@FILE` match only the set's own methods.
-- `string:` regexes match each string on its own: `^abc$` is the whole string. Write `\&` for
-  a literal `&` in a regex.
+- `string:` regexes match each string on its own: `^abc$` is the whole string. A `&` joins
+  parts only where `KIND:` follows it; write `\&` there for a literal `&` in a regex.
 
 Definition predicates name method **definitions** (rows have no call site; the matched column
 names the predicate). They answer from the class definitions, not a code scan, and span every

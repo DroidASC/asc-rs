@@ -1,0 +1,8 @@
+[package]
+name = "asc-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The query language of asc-rs as both engines read it: the KIND:VALUE rule syntax."

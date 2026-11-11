@@ -26,6 +26,29 @@ classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/as
 - An empty result prints `hint:` lines on stderr: DEX entries searched, case sensitivity, a framework class
   the APK does not define, the closest class or the methods it has, and so on.
 
+## Rule syntax
+
+One syntax for the DEX and the HarmonyOS side, in the CLI (`all`, `rules`, `callgraph --to / --from / --unless`)
+and in MCP (`rule`, `rules`, `all` / `none` strings); only the kinds differ:
+
+- A rule is `KIND:VALUE` parts joined with `&`, `!` before a part a method must not match.
+- A `&` joins two parts only where `KIND:` or `!KIND:` follows it (blanks allowed), and only outside `{}` /
+  `()`; anywhere else it belongs to the value: `string:a&b` is the regex `a&b`. `\&` never joins, `\{`, `\}`,
+  `\(`, `\)` are no brackets.
+- A set of methods: `method:{RULE}` (calls of the methods whose code matches RULE) and `method:{@FILE}` /
+  `method:@FILE` (of the methods FILE lists). `=` in front keeps the set's own methods, `*` follows every
+  supertype (see the skill for dispatch). On HarmonyOS the set goes under `call:` (`call:{RULE}`,
+  `call:{@FILE}`), where `@` alone starts a callee path (`call:@ohos:net`).
+- Sets nest at most 8 levels deep. An unmatched `}` closes the set it is in.
+- An error names the rule, what is wrong and the column: `bad rule "method:{string:a": expected `}` at column 17`.
+
+Changes in this version: on DEX code a `&` that is not followed by `KIND:` no longer splits the rule (it was an
+error; `string:a & ` was one too), `method:{@FILE}` is a new spelling of `method:@FILE`, and `in:{…}` with
+several conditions says that it takes one. On HarmonyOS
+code `&` inside `()` no longer joins, a rule in braces ends at the first unmatched `}` (`call:{string:a}b}`
+is now an error, it was the regex `a}b`), `call:={RULE}` is `call:{RULE}` and `call:*{RULE}` is an error, and
+an unknown kind or an empty value reads like the other errors (`bad rule "prop:": empty value at column 6`).
+
 ## Several files as one program
 
 The APK argument may also be a jar, a `.dex`, or several files analysed as one program: a directory (every

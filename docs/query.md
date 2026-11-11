@@ -23,6 +23,25 @@ classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/as
   也可以用 `--file` 每行一条。
 - 查不到时 stderr 会给出 `hint:`：搜了多少 DEX、大小写、APK 未定义的 framework 类、最接近的类或已有的方法等。
 
+## 规则写法
+
+DEX 与 HarmonyOS 共用一套写法，CLI（`all`、`rules`、`callgraph --to / --from / --unless`）和 MCP（`rule`、`rules`、
+`all` / `none` 的字符串）都一样，只是 KIND 不同：
+
+- 规则由 `KIND:VALUE` 用 `&` 连接，`!` 开头的部分表示方法不能匹配它。
+- `&` 只在后面紧跟 `KIND:` 或 `!KIND:`（可有空白）且不在 `{}` / `()` 内时才连接两部分，否则属于值本身：
+  `string:a&b` 是正则 `a&b`。`\&` 从不连接，`\{`、`\}`、`\(`、`\)` 不算括号。
+- 方法集合：`method:{RULE}`（调用了代码匹配 RULE 的方法）、`method:{@FILE}` / `method:@FILE`（FILE 列出的方法）。
+  前面加 `=` 只取集合自身的方法，加 `*` 沿所有父类型分派（见 skill）。HarmonyOS 上集合写在 `call:` 下
+  （`call:{RULE}`、`call:{@FILE}`），因为单独的 `@` 是被调用路径的开头（`call:@ohos:net`）。
+- 集合最多嵌套 8 层；未配对的 `}` 结束它所在的集合。
+- 出错时给出规则、原因和列号：`bad rule "method:{string:a": expected `}` at column 17`。
+
+本版本的变化：DEX 上后面不跟 `KIND:` 的 `&` 不再切分规则（以前报错，`string:a & ` 也报错），`method:{@FILE}` 是
+`method:@FILE` 的新写法，`in:{…}` 里写多个条件时明确报错只收一个。HarmonyOS 上 `()` 内的 `&` 不再连接；花括号里的规则在第一个未配对的 `}` 处结束
+（`call:{string:a}b}` 现在报错，以前是正则 `a}b`）；`call:={RULE}` 等同 `call:{RULE}`，`call:*{RULE}` 报错；未知 KIND
+和空值的报错与其他错误格式一致（`bad rule "prop:": empty value at column 6`）。
+
 ## 多个文件作为一个程序
 
 APK 参数也可以是 jar、`.dex`，或作为一个程序一起分析的多个文件：一个目录（其下所有 `*.apk`、`*.jar`、`*.zip`、`*.dex`），
