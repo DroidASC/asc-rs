@@ -55,7 +55,9 @@ asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^Entry
 ```
 
 A `findrefs` row is `entry | RECORD->function+0xPC | restored name | instruction ; resolved callee`; the second
-column can be pasted as it is into `getclass` / `callgraph`:
+column can be pasted as it is into `getclass` / `callgraph`. `getclass` (CLI and MCP alike) looks a function up
+as written first and then without its `+0xPC`, whether it comes after `->` or in `--method`; a function the
+record lacks is an error that lists the functions it has.
 
 ```
 ets/modules.abc | &entry/src/main/ets/common/Utils/utils&->#~@0<#o0O0OOoo+0xef | utils.o0O0OOoo | callthis2 v10, v11, v12 ; import:@ohos:net.http#default.createHttp().request(expr, expr)

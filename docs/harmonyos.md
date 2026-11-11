@@ -48,7 +48,8 @@ asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^Entry
 ```
 
 `findrefs` 的一行是 `entry | RECORD->函数+0xPC | 还原名 | 指令 ; 解析出的被调用者`，第二列可以原样贴给 `getclass` /
-`callgraph`：
+`callgraph`。`getclass`（CLI 与 MCP 一致）先按原样查函数，找不到再去掉 `+0xPC` 查，无论它写在 `->` 后还是
+`--method` 里；记录里没有的函数会报错并列出该记录有哪些函数。
 
 ```
 ets/modules.abc | &entry/src/main/ets/common/Utils/utils&->#~@0<#o0O0OOoo+0xef | utils.o0O0OOoo | callthis2 v10, v11, v12 ; import:@ohos:net.http#default.createHttp().request(expr, expr)

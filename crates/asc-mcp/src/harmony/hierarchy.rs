@@ -85,7 +85,7 @@ pub(super) fn hierarchy(session: &Session, args: &Value, call: &Call) -> ToolRes
     };
     let engine = &session.engine;
     let mut tree = walk(session, query, &call.cancel).map_err(|e| match &e {
-        EngineError::Ambiguous { candidates, .. } if super::several_entries_define(candidates) => {
+        EngineError::Ambiguous { candidates, .. } if asc_frontend::harmony::several_entries_define(candidates) => {
             ToolError(format!("{e}\n(name the entry, the first column, with `entry`)"))
         }
         EngineError::NotFound { what: "class" | "parent path", .. } => {

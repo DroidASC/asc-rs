@@ -25,11 +25,11 @@ use crate::{
     usize_arg,
 };
 use asc_ark_engine::{
-    Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, ListingStyle, Manifest, ManifestLine,
-    NameFilter, Pattern, Query, RefContext, RefRow, RefSite, text,
+    Access, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, ListingStyle, Manifest, ManifestLine, NameFilter,
+    Pattern, Query, RefContext, RefRow, RefSite, text,
 };
 use asc_engine::{Threads, names};
-use asc_frontend::harmony::{MAX_ENTRIES_LISTED, entries_hint, name_pattern, several_entries_define, without_pc};
+use asc_frontend::harmony::{ClassTarget, MAX_ENTRIES_LISTED, SearchArgs, SearchKind, entries_hint};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -44,8 +44,6 @@ const MAX_OPEN: usize = 8;
 /// function, for the program's introduction.
 const GETCLASS_USAGE: &str = "# getclass: debug_info=true writes `; line N` where the line of the debug info changes (with \
                               ets/sourceMaps.map in the package: its source line too)\n";
-/// Bytes of function names a "no such function" error lists.
-const MAX_FUNCTIONS_LISTED: usize = 2 << 10;
 
 /// Why a HarmonyOS program is no target of a call over many APKs (the
 /// section that reports it names the path).
@@ -67,7 +65,7 @@ pub(crate) fn refuse_on_dex(args: &Value, arg: &str, why: &str) -> Result<(), To
 /// `listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, findrefs kind=string|literal|…`.
 fn supported() -> String {
     let tools: Vec<&str> = CARRIED.iter().map(|carried| carried.tool).collect();
-    format!("{} kind={}", tools.join(", "), RefKind::names("|"))
+    format!("{} kind={}", tools.join(", "), kind_names("|"))
 }
 
 fn unsupported(what: &str) -> ToolError {
@@ -76,7 +74,7 @@ fn unsupported(what: &str) -> ToolError {
 
 /// As [`unsupported`], for a `findrefs` kind or argument.
 fn unsupported_search(what: &str) -> ToolError {
-    ToolError(format!("findrefs {what} is not supported for HarmonyOS programs yet (supported kinds: {})", RefKind::names(", ")))
+    ToolError(format!("findrefs {what} is not supported for HarmonyOS programs yet (supported kinds: {})", kind_names(", ")))
 }
 
 fn dex_only(arg: &str) -> ToolError {
@@ -154,7 +152,7 @@ impl Session {
             text.push_str(&format!("# abc | ... {} more (see `program`)\n", entries.len() - MAX_ENTRIES_LISTED));
         }
         // Said here, once per program, instead of in the tool schemas every turn pays for.
-        text.push_str(&format!("# findrefs `value` by kind: {}; {ENTRY_USAGE}\n", RefKind::usages()));
+        text.push_str(&format!("# findrefs `value` by kind: {}; {ENTRY_USAGE}\n", kind_usages()));
         text.push_str(MANIFEST_USAGE);
         text.push_str(resources::USAGE);
         text.push_str(callgraph::USAGE);
@@ -345,69 +343,15 @@ fn listclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     Ok((text, structured))
 }
 
-/// What `getclass` is asked for: a record, or one function of it.
-struct Target<'a> {
-    record: &'a str,
-    function: Option<&'a str>,
-}
-
-impl<'a> Target<'a> {
-    /// `class` with `method`, or the location column of a findrefs row
-    /// pasted as the class: `RECORD->FUNCTION` or `RECORD->FUNCTION+0xPC`.
-    fn parse(class: &'a str, method: Option<&'a str>) -> Target<'a> {
-        if method.is_some() {
-            return Target { record: class, function: method };
-        }
-        match class.split_once("->") {
-            Some((record, function)) => Target { record, function: Some(function) },
-            None => Target { record: class, function: None },
-        }
-    }
-}
-
-/// `#~@0>#build (Index.build), ...`: the functions of the record disassembled as `source`.
-fn function_list(source: &str) -> String {
-    let mut headers = source.lines().filter_map(|line| line.strip_prefix(".function "));
-    let mut out = String::new();
-    while let Some(header) = headers.next() {
-        if out.len() + header.len() > MAX_FUNCTIONS_LISTED {
-            out.push_str(&format!("... {} more", 1 + headers.count()));
-            break;
-        }
-        match header.split_once("  ; ") {
-            Some((raw, restored)) => out.push_str(&format!("{raw} ({restored}), ")),
-            None => out.push_str(&format!("{header}, ")),
-        }
-    }
-    out.trim_end_matches(", ").to_owned()
-}
-
 /// A record's disassembly, or one function's.
 fn getclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     let class = str_arg(args, "class")?.ok_or_else(|| ToolError("getclass needs `class` (a record, as listclass prints them)".into()))?;
-    let target = Target::parse(class, str_arg(args, "method")?);
+    let target = ClassTarget::parse(class, str_arg(args, "method")?);
     let entry = str_arg(args, "entry")?;
     let engine = &session.engine;
     // The debug directives of a listing are its `; line N` lines.
-    let style = ListingStyle { lines: bool_arg(args, "debug_info")?.unwrap_or(false) };
-    let get = |function: Option<&str>| engine.get_class_as(&ClassQuery { record: target.record, function, entry }, style);
-    let source = match get(target.function) {
-        // The function as a findrefs row names it, with the instruction's offset.
-        Err(EngineError::NotFound { what: "function", .. }) if target.function.is_some_and(|f| without_pc(f) != f) => {
-            get(target.function.map(without_pc))
-        }
-        other => other,
-    };
-    let mut source = source.map_err(|e| match &e {
-        EngineError::Ambiguous { candidates, .. } if several_entries_define(candidates) => {
-            ToolError(format!("{e}\n(name the entry, the first column, with `entry`)"))
-        }
-        EngineError::NotFound { what: "function", .. } => match get(None) {
-            Ok(whole) => ToolError(format!("{e}; its functions: {}", function_list(&whole.text))),
-            Err(_) => ToolError(e.to_string()),
-        },
-        _ => ToolError(e.to_string()),
-    })?;
+    let style = ListingStyle::default().lines(bool_arg(args, "debug_info")?.unwrap_or(false));
+    let mut source = target.listing(engine, entry, style).map_err(|e| ToolError(target.explain(engine, entry, &e, "`entry`")))?;
     // As on the DEX side: resource ids are named unless the caller declines.
     if bool_arg(args, "resource_names")?.unwrap_or(true) {
         engine.annotate_resource_ids(&mut source);
@@ -420,110 +364,33 @@ fn getclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     Ok((text, structured))
 }
 
-/// The arguments of one condition object, beyond its kind.
-struct Spec<'a> {
-    value: Cow<'a, str>,
-    literal: bool,
-    exact: bool,
-    access: Option<Access>,
-    /// `decl`: import declarations only.
-    declarations_only: bool,
+/// The kinds of a findrefs call, joined with `separator`.
+fn kind_names(separator: &str) -> String {
+    SearchKind::ALL.iter().map(SearchKind::name).collect::<Vec<_>>().join(separator)
 }
 
-impl Spec<'_> {
-    /// The name of a property or a global, as the CLI reads one.
-    fn name(&self, text: &str) -> Result<Pattern, EngineError> {
-        name_pattern(text, self.literal, self.exact)
-    }
+/// `kind: what value is` of every kind, for the program's introduction.
+fn kind_usages() -> String {
+    let kinds: Vec<String> = SearchKind::ALL.iter().map(|kind| format!("{}: {}", kind.name(), kind.usage())).collect();
+    format!(
+        "{}; all=[conditions]: functions matching every one, none=[conditions]: minus those matching any (in a rule: `a & b & \
+         !c`; there method:NAME is the function of that name itself); rules=[rule, ...]: several searches, rows `r1 | ...`; \
+         context=N or \"method\": the listing around each hit",
+        kinds.join("; ")
+    )
 }
 
-/// One kind of reference `findrefs` searches a HarmonyOS program for. A kind
-/// the engine learns is one more row of [`RefKind::ALL`].
-struct RefKind {
-    /// As `kind` and `KIND:VALUE` conditions spell it: one of
-    /// [`Query::KINDS`]. The other spellings models use are the engine's
-    /// ([`Query::kind_named`]), which reads them inside rules too.
-    name: &'static str,
-    /// The query a condition object asks for.
-    query: fn(&Spec<'_>) -> Result<Query, EngineError>,
-    /// What `value` is, for the program's introduction.
-    usage: &'static str,
-}
-
-impl RefKind {
-    const ALL: &'static [RefKind] = &[
-        RefKind {
-            name: "string",
-            query: |spec| if spec.literal { Ok(Query::string_literal(&*spec.value)) } else { Query::string_regex(&spec.value) },
-            usage: "regex (literal=true: text)",
-        },
-        RefKind { name: "literal", query: |spec| Ok(Query::string_literal(&*spec.value)), usage: "text" },
-        RefKind {
-            name: "prop",
-            query: |spec| Ok(Query::Prop { name: spec.name(&spec.value)?, access: spec.access }),
-            usage: "property name regex (exact / literal), access=read|write|define|call",
-        },
-        RefKind {
-            name: "global",
-            query: |spec| Query::global(spec.name(&spec.value)?, spec.access),
-            usage: "global name regex (exact / literal), access=read|write",
-        },
-        RefKind {
-            name: "import",
-            query: |spec| match Query::import(&spec.value, spec.literal)? {
-                Query::Import { request, name, .. } => Ok(Query::Import { request, name, declarations_only: spec.declarations_only }),
-                other => Ok(other),
-            },
-            usage: "REQUEST[#NAME], REQUEST a regex over the module request (@ohos:net.http), decl=true for the declarations \
-                    only, requests=true for the distinct requests",
-        },
-        RefKind {
-            name: "method",
-            query: |spec| Query::method(without_pc(&spec.value), |name| name_pattern(name, false, spec.exact)),
-            usage: "[RECORD->]FUNCTION, where it is defined (or `class` + `name`; exact)",
-        },
-        RefKind { name: "number", query: |spec| Ok(Query::Number(spec.value.parse()?)), usage: "1919810, 0x1d4b42, 1.5 or A..B" },
-        RefKind {
-            name: "call",
-            query: |spec| match (spec.literal, spec.value.starts_with('{')) {
-                (true, _) => Ok(Query::Call(Pattern::contains(&*spec.value))),
-                (false, true) => Query::condition(&format!("call:{}", spec.value)),
-                (false, false) => Ok(Query::Call(Pattern::regex(&spec.value)?)),
-            },
-            usage: "regex over the resolved callee (import:@ohos:net.http#default.createHttp, global:console.log, this.x), or \
-                    {RULE}: the calls that lead to a function RULE matches (call:{string:token}; nests)",
-        },
-    ];
-
-    /// The kinds, joined with `separator`.
-    fn names(separator: &str) -> String {
-        RefKind::ALL.iter().map(|kind| kind.name).collect::<Vec<_>>().join(separator)
-    }
-
-    /// `kind: what value is` of every kind, for the program's introduction.
-    fn usages() -> String {
-        let kinds: Vec<String> = RefKind::ALL.iter().map(|kind| format!("{}: {}", kind.name, kind.usage)).collect();
-        format!(
-            "{}; all=[conditions]: functions matching every one, none=[conditions]: minus those matching any (in a rule: `a & b & \
-             !c`; there method:NAME is the function of that name itself); rules=[rule, ...]: several searches, rows `r1 | ...`; \
-             context=N or \"method\": the listing around each hit",
-            kinds.join("; ")
-        )
-    }
-
-    fn find(kind: &str) -> Result<&'static RefKind, ToolError> {
-        let named = Query::kind_named(kind);
-        let found = named.and_then(|name| RefKind::ALL.iter().find(|known| known.name == name));
-        found.ok_or_else(|| unsupported_search(&format!("kind={}", kind.trim())))
-    }
+/// The kind `kind` names, or the error of one HarmonyOS programs lack.
+fn find_kind(kind: &str) -> Result<&'static SearchKind, ToolError> {
+    SearchKind::named(kind).ok_or_else(|| unsupported_search(&format!("kind={}", kind.trim())))
 }
 
 /// `access` of a condition object.
-fn access_arg(args: &Value, kind: &RefKind) -> Result<Option<Access>, ToolError> {
+fn access_arg(args: &Value, kind: &SearchKind) -> Result<Option<Access>, ToolError> {
     if str_arg(args, "access")?.is_none() {
         return Ok(None);
     }
-    if !matches!(kind.name, "prop" | "global") {
+    if !matches!(kind.name(), "prop" | "global") {
         return Err(ToolError("`access` is only valid for kind=prop and kind=global on HarmonyOS programs".into()));
     }
     const CHOICES: &[(&str, &[&str])] = &[("read", &["get", "load"]), ("write", &["set", "store"]), ("define", &[]), ("call", &[])];
@@ -610,37 +477,34 @@ impl Conditions {
 impl Search {
     /// The query a condition object spells: `{kind, value, ...}`.
     fn of_object(args: &Value) -> Result<Search, ToolError> {
-        let kind =
-            str_arg(args, "kind")?.ok_or_else(|| ToolError(format!("findrefs needs `kind` ({}) and `value`", RefKind::names(", "))))?;
+        let kind = str_arg(args, "kind")?.ok_or_else(|| ToolError(format!("findrefs needs `kind` ({}) and `value`", kind_names(", "))))?;
         // Looked up before the value is asked for: a DEX kind names its target otherwise.
-        let known = RefKind::find(kind)?;
+        let known = find_kind(kind)?;
         if asks_for(args, "fuzzy_class") {
             return Err(dex_only("fuzzy_class"));
         }
         let access = access_arg(args, known)?;
         let flag = |arg: &str| -> Result<bool, ToolError> {
             let asked = bool_arg(args, arg)?.unwrap_or(false);
-            if asked && known.name != "import" {
+            if asked && known.name() != "import" {
                 return Err(ToolError(format!("`{arg}` is only valid for kind=import")));
             }
             Ok(asked)
         };
         let (declarations_only, requests) = (flag("decl")?, flag("requests")?);
         // A function is also named as on the DEX side: `name`, in `class`.
-        let name = if known.name == "method" { str_arg(args, "name")? } else { None };
-        let value = str_arg(args, "value")?.or(name).ok_or_else(|| ToolError(format!("a {} query needs `value`", known.name)))?;
+        let name = if known.name() == "method" { str_arg(args, "name")? } else { None };
+        let value = str_arg(args, "value")?.or(name).ok_or_else(|| ToolError(format!("a {} query needs `value`", known.name())))?;
         let value = match str_arg(args, "class")? {
-            Some(record) if known.name == "method" => Cow::Owned(format!("{record}->{value}")),
+            Some(record) if known.name() == "method" => Cow::Owned(format!("{record}->{value}")),
             _ => Cow::Borrowed(value),
         };
-        let spec = Spec {
-            value,
-            literal: bool_arg(args, "literal")?.unwrap_or(false),
-            exact: bool_arg(args, "exact")?.unwrap_or(false),
-            access,
-            declarations_only,
-        };
-        match (known.query)(&spec)? {
+        let search = SearchArgs::new(&value)
+            .literal(bool_arg(args, "literal")?.unwrap_or(false))
+            .exact(bool_arg(args, "exact")?.unwrap_or(false))
+            .access(access)
+            .declarations_only(declarations_only);
+        match known.query(&search)? {
             Query::Import { .. } if requests && declarations_only => Err(ToolError("give `decl` or `requests`, not both".into())),
             Query::Import { request, name: None, .. } if requests => Ok(Search::Requests(request)),
             Query::Import { .. } if requests => Err(ToolError("`requests` lists module requests: leave out the #NAME".into())),
@@ -656,8 +520,8 @@ impl Search {
             // Not `KIND:VALUE` at all: the DEX side says what is.
             return Err(names::parse_rule(spec).map_or_else(|e| ToolError(e.to_string()), |_| unsupported_search(spec)));
         };
-        let known = RefKind::find(kind)?;
-        Ok(Query::condition(&format!("{}:{value}", known.name))?)
+        let known = find_kind(kind)?;
+        Ok(Query::condition(&format!("{}:{value}", known.name()))?)
     }
 
     /// The rules of `rules`, each with how it was asked: a rule string, or
@@ -1042,18 +906,6 @@ fn manifest_summary(session: &Session, args: &Value, _: &Call) -> ToolResult {
 mod tests {
     use super::*;
 
-    #[test]
-    fn targets_come_apart_at_the_arrow() {
-        let t = Target::parse("&a/b&->#~@0>#build+0x12", None);
-        assert_eq!((t.record, t.function), ("&a/b&", Some("#~@0>#build+0x12")));
-        let t = Target::parse("pages/Index", Some("Index.build"));
-        assert_eq!((t.record, t.function), ("pages/Index", Some("Index.build")));
-        assert_eq!(Target::parse("pages/Index", None).function, None);
-        assert_eq!(without_pc("#~@0>#build+0x12"), "#~@0>#build");
-        assert_eq!(without_pc("#~@0>#build"), "#~@0>#build");
-        assert_eq!(without_pc("a+0xzz"), "a+0xzz");
-    }
-
     /// The search `args` ask for, as its debug text (a `Query` does not compare).
     fn asked(args: Value) -> Result<String, String> {
         Search::of_call(&args).map(|search| format!("{search:?}")).map_err(|e| e.0)
@@ -1250,14 +1102,5 @@ mod tests {
         .into();
         let kept: Vec<&str> = reachable(&lines).into_iter().map(|line| line.text.split(' ').next().unwrap()).collect();
         assert_eq!(kept, ["bundle", "module", "callbacks", "define-permission", "ability", "callbacks", "skill", "deeplink", "note"]);
-    }
-
-    #[test]
-    fn function_lists_stay_short() {
-        let source = ".record r\n.function #~@0>#build  ; Index.build\n; x\n  0000  lda v0\n\n.function func_main_0\n";
-        assert_eq!(function_list(source), "#~@0>#build (Index.build), func_main_0");
-        let many: String = (0..400).map(|i| format!(".function f{i:0>20}\n")).collect();
-        let listed = function_list(&many);
-        assert!(listed.len() <= MAX_FUNCTIONS_LISTED + 32 && listed.ends_with(" more"), "{listed}");
     }
 }

@@ -120,6 +120,25 @@ pub struct ClassQuery<'q> {
     pub entry: Option<&'q str>,
 }
 
+impl<'q> ClassQuery<'q> {
+    /// The whole of `record`, in any entry.
+    pub fn new(record: &'q str) -> ClassQuery<'q> {
+        ClassQuery { record, function: None, entry: None }
+    }
+
+    /// One function of the record instead of all of it.
+    #[must_use]
+    pub fn function(self, function: Option<&'q str>) -> Self {
+        ClassQuery { function, ..self }
+    }
+
+    /// The record in this ABC entry only.
+    #[must_use]
+    pub fn entry(self, entry: Option<&'q str>) -> Self {
+        ClassQuery { entry, ..self }
+    }
+}
+
 /// How [`Engine::get_class_as`] writes a listing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListingStyle {
@@ -127,6 +146,14 @@ pub struct ListingStyle {
     /// of only the first line of a function in its header. With source
     /// maps in the package each says its source line too.
     pub lines: bool,
+}
+
+impl ListingStyle {
+    /// Write `; line N` wherever the line changes (see [`ListingStyle::lines`](#structfield.lines)).
+    #[must_use]
+    pub fn lines(self, lines: bool) -> Self {
+        ListingStyle { lines }
+    }
 }
 
 /// Disassembly of a record or function.

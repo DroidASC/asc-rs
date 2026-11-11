@@ -212,9 +212,12 @@ fn getclass_prints_one_function() {
     for location in [format!("{INDEX_PAGE}->#~@0>#build"), format!("{INDEX_PAGE}->#~@0>#build+0x1b"), "pages/Index->#~@0>#build".into()] {
         assert_eq!(inputs.lines(&["getclass", &hap, &location]), by_raw_name, "{location}");
     }
+    assert_eq!(inputs.lines(&["getclass", &hap, "pages/Index", "--method", "#~@0>#build+0x1b"]), by_raw_name);
 
+    // A function the record lacks: the error lists the ones it has.
     let error = inputs.error(&["getclass", &hap, "pages/Index", "--method", "render"]);
-    assert_eq!(error, format!("Error: function render of {INDEX_PAGE} not found\n"));
+    assert!(error.starts_with(&format!("Error: function render of {INDEX_PAGE} not found; its functions: func_main_0, ")), "{error}");
+    assert!(error.contains("#~@0>#build (Index.build)"), "{error}");
 }
 
 #[test]

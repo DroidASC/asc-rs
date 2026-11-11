@@ -13,11 +13,12 @@
 use crate::output::Io;
 use crate::{ClassArgs, Command, Common, EXIT_OK, EXIT_PARTIAL, FieldAccessArg, Find, RESOURCE_SEARCH_ROWS};
 use asc_ark_engine::{
-    Access, CallQuery, CallRoots, ClassQuery, Direction, Document, Engine, EngineError, EntryStatus, HierarchyQuery, Lineage, ListOptions,
+    Access, CallQuery, CallRoots, Direction, Document, Engine, EngineError, EntryStatus, HierarchyQuery, Lineage, ListOptions,
     ListingStyle, Manifest, NameFilter, Pattern, Query, RefBatch, RefContext, ResourceField, ResourceTables,
 };
 use asc_frontend::harmony::{
-    TreeText, entries_hint, function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots, several_entries_define, without_pc,
+    ClassTarget, SearchArgs, SearchKind, TreeText, entries_hint, function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots,
+    several_entries_define,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -393,40 +394,15 @@ fn package_files(io: &mut Io<'_>, engine: &Engine, target: &str, output: Option<
     io.emit_records(&text, output)
 }
 
-/// What `getclass` is asked for: a record, or one function of it.
-struct Target<'a> {
-    record: &'a str,
-    function: Option<&'a str>,
-}
-
-impl<'a> Target<'a> {
-    /// `RECORD` with `--method FUNCTION`, or the location column of a
-    /// findrefs row pasted as it is: `RECORD->FUNCTION` or
-    /// `RECORD->FUNCTION+0xPC`.
-    fn parse(class: &'a str, method: Option<&'a str>) -> Target<'a> {
-        if method.is_some() {
-            return Target { record: class, function: method };
-        }
-        match class.split_once("->") {
-            Some((record, function)) => Target { record, function: Some(without_pc(function)) },
-            None => Target { record: class, function: None },
-        }
-    }
-}
-
 fn getclass(io: &mut Io<'_>, common: &Common, args: &ClassArgs) -> Result<(), String> {
     if args.dump_dex.is_some() {
         return Err(dex_only("--dump-dex"));
     }
     let engine = open(io, common, &args.apk_path)?;
-    let target = Target::parse(&args.dalvik_class, args.method_signature.as_deref());
-    let query = ClassQuery { record: target.record, function: target.function, entry: args.entry.as_deref() };
-    let mut source = engine.get_class_as(&query, ListingStyle { lines: args.lines }).map_err(|e| match &e {
-        EngineError::Ambiguous { candidates, .. } if several_entries_define(candidates) => {
-            format!("{e}\n(name the entry, the first column, with --entry)")
-        }
-        _ => e.to_string(),
-    })?;
+    let target = ClassTarget::parse(&args.dalvik_class, args.method_signature.as_deref());
+    let entry = args.entry.as_deref();
+    let style = ListingStyle::default().lines(args.lines);
+    let mut source = target.listing(&engine, entry, style).map_err(|e| target.explain(&engine, entry, &e, "--entry"))?;
     if args.res_names {
         engine.annotate_resource_ids(&mut source);
     }
@@ -443,12 +419,6 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: &ClassArgs) -> Result<(), St
 /// A name pattern: a regex, or with `--literal` / `--exact` plain text.
 fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
     asc_frontend::harmony::pattern(text, literal, exact).map_err(|e| e.to_string())
-}
-
-/// As [`pattern`], for the name of a property, a global or a function:
-/// `=NAME` is the exact name too, as a condition writes it.
-fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
-    asc_frontend::harmony::name_pattern(text, literal, exact).map_err(|e| e.to_string())
 }
 
 /// What a `findrefs` command line asks for.
@@ -517,23 +487,28 @@ fn search(io: &Io<'_>, find: Find, access: Option<FieldAccessArg>) -> Result<Sea
     }
     let access = access.map(Access::from);
     let refs = |query, output| Ok(Search::Refs { query, output });
+    // A search kind as the MCP server reads it too.
+    let kind = |name: &str, args: SearchArgs<'_>| {
+        let kind = SearchKind::named(name).ok_or_else(|| unsupported_search(name))?;
+        kind.query(&args).map_err(|e| e.to_string())
+    };
     let kind = match find {
-        Find::String { output, literal: true, value } => return refs(Query::string_literal(value), output),
-        Find::String { output, literal: false, value } => return refs(Query::string_regex(&value).map_err(|e| e.to_string())?, output),
+        Find::String { output, literal, value } => return refs(kind("string", SearchArgs::new(&value).literal(literal))?, output),
         Find::Prop { output, literal, exact, name } => {
-            return refs(Query::Prop { name: name_pattern(&name, literal, exact)?, access }, output);
+            return refs(kind("prop", SearchArgs::new(&name).literal(literal).exact(exact).access(access))?, output);
         }
         Find::Global { output, literal, exact, name } => {
-            return refs(Query::global(name_pattern(&name, literal, exact)?, access).map_err(|e| e.to_string())?, output);
+            return refs(kind("global", SearchArgs::new(&name).literal(literal).exact(exact).access(access))?, output);
         }
-        Find::Import { output, literal, decl, requests, value } => {
-            let query = Query::import(&value, literal).map_err(|e| e.to_string())?;
-            return match query {
-                Query::Import { request, name: None, .. } if requests => Ok(Search::Requests { pattern: request, output }),
-                Query::Import { .. } if requests => Err("--requests lists module requests: leave out the #NAME".into()),
-                Query::Import { request, name, .. } => refs(Query::Import { request, name, declarations_only: decl }, output),
+        Find::Import { output, literal, decl: _, requests: true, value } => {
+            return match Query::import(&value, literal).map_err(|e| e.to_string())? {
+                Query::Import { request, name: None, .. } => Ok(Search::Requests { pattern: request, output }),
+                Query::Import { .. } => Err("--requests lists module requests: leave out the #NAME".into()),
                 _ => Err(unsupported_search("import")),
             };
+        }
+        Find::Import { output, literal, decl, requests: false, value } => {
+            return refs(kind("import", SearchArgs::new(&value).literal(literal).declarations_only(decl))?, output);
         }
         Find::Method { fuzzy_class: true, .. } => return Err(dex_only("--fuzzy-class")),
         Find::Method { name: None, .. } => return Err("findrefs method needs a function name on a HarmonyOS program".into()),
@@ -541,19 +516,15 @@ fn search(io: &Io<'_>, find: Find, access: Option<FieldAccessArg>) -> Result<Sea
             // RECORD->FUNCTION, as a result row prints it, or the record in --class.
             let spec = match class_name {
                 Some(record) => format!("{record}->{name}"),
-                None => without_pc(&name).to_owned(),
+                None => name,
             };
-            return refs(
-                Query::method(&spec, |name| name_pattern(name, false, exact).map_err(EngineError::Query)).map_err(|e| e.to_string())?,
-                output,
-            );
+            return refs(kind("method", SearchArgs::new(&spec).exact(exact))?, output);
         }
-        Find::Number { output, value } => return refs(Query::Number(value.parse().map_err(|e: EngineError| e.to_string())?), output),
+        Find::Number { output, value } => return refs(kind("number", SearchArgs::new(&value))?, output),
         // `call '{RULE}'`: the calls of the functions a rule matches, as in a condition.
-        Find::Call { output, literal: false, path } if path.starts_with('{') => {
-            return refs(condition(io, &format!("call:{path}"))?, output);
+        Find::Call { output, literal, path } => {
+            return refs(kind("call", SearchArgs::new(&path).literal(literal).dir(io.cwd()))?, output);
         }
-        Find::Call { output, literal, path } => return refs(Query::Call(pattern(&path, literal, false)?), output),
         Find::All { output, none, conditions } => {
             // `!COND` among the conditions is one more --none.
             let (excluded, conditions): (Vec<String>, Vec<String>) = conditions.into_iter().partition(|spec| spec.starts_with('!'));

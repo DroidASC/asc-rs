@@ -86,6 +86,11 @@ impl<'a> Io<'a> {
         Io { out, err, cwd: None, engines, cancel, window: Window::default(), spill: None }
     }
 
+    /// The directory relative paths are read against (the process's own when `None`).
+    pub(crate) fn cwd(&self) -> Option<&'a Path> {
+        self.cwd
+    }
+
     /// Resolve relative paths against `cwd` (a client's directory).
     pub(crate) fn with_cwd(mut self, cwd: &'a Path) -> Io<'a> {
         self.cwd = Some(cwd);

@@ -1,13 +1,247 @@
-//! What both front ends make of HarmonyOS arguments and answers: function
-//! spellings as call graph roots, name patterns, call trees as rows, and the
-//! hints of an empty answer. Each front end passes how it spells a search
+//! What both front ends make of HarmonyOS arguments and answers: the target
+//! of `getclass`, the search kinds of `findrefs`, function spellings as call
+//! graph roots, name patterns, call trees as rows, and the hints of an empty
+//! answer. Each front end passes how it spells a search
 //! (`findrefs call` on the command line, `findrefs kind=call` in MCP), so the
 //! hints read right in both.
 
-use asc_ark_engine::{CallNode, CallRoots, CallTree, Direction, Engine, EngineError, Pattern, Query};
+use asc_ark_engine::{
+    Access, CallNode, CallRoots, CallTree, ClassQuery, ClassSource, Direction, Engine, EngineError, ListingStyle, Pattern, Query,
+};
+use std::path::Path;
 
 /// ABC entries a list of them names ([`entries_hint`]) before it counts the rest.
 pub const MAX_ENTRIES_LISTED: usize = 12;
+
+/// Bytes of function headers [`function_list`] lists before it counts the rest.
+pub const MAX_FUNCTIONS_LISTED: usize = 2 << 10;
+
+/// What `getclass` is asked for: a record, or one function of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassTarget<'a> {
+    record: &'a str,
+    function: Option<&'a str>,
+}
+
+impl<'a> ClassTarget<'a> {
+    /// `class` with `method`, or the location column of a findrefs row
+    /// pasted as the class: `RECORD->FUNCTION` or `RECORD->FUNCTION+0xPC`.
+    pub fn parse(class: &'a str, method: Option<&'a str>) -> ClassTarget<'a> {
+        if method.is_some() {
+            return ClassTarget { record: class, function: method };
+        }
+        match class.split_once("->") {
+            Some((record, function)) => ClassTarget { record, function: Some(function) },
+            None => ClassTarget { record: class, function: None },
+        }
+    }
+
+    /// The record, as given.
+    pub fn record(&self) -> &'a str {
+        self.record
+    }
+
+    /// The function, as given (a `+0xPC` included).
+    pub fn function(&self) -> Option<&'a str> {
+        self.function
+    }
+
+    /// The listing of the target in `entry` (any entry when `None`). A
+    /// function is looked up as written first, then, if no function has
+    /// that name, without the `+0xPC` of a findrefs row.
+    ///
+    /// # Errors
+    /// As [`Engine::get_class_as`]; [`ClassTarget::explain`] says them the
+    /// way both front ends do.
+    pub fn listing(&self, engine: &Engine, entry: Option<&str>, style: ListingStyle) -> Result<ClassSource, EngineError> {
+        let get = |function: Option<&str>| engine.get_class_as(&ClassQuery::new(self.record).function(function).entry(entry), style);
+        match get(self.function) {
+            Err(EngineError::NotFound { what: "function", .. }) if self.function.is_some_and(|f| without_pc(f) != f) => {
+                get(self.function.map(without_pc))
+            }
+            other => other,
+        }
+    }
+
+    /// The text of an error of [`ClassTarget::listing`]: an ambiguous record
+    /// says to name its entry (`entry_arg`: how the front end spells that
+    /// argument), a function the record lacks lists the ones it has.
+    pub fn explain(&self, engine: &Engine, entry: Option<&str>, error: &EngineError, entry_arg: &str) -> String {
+        match error {
+            EngineError::Ambiguous { candidates, .. } if several_entries_define(candidates) => {
+                format!("{error}\n(name the entry, the first column, with {entry_arg})")
+            }
+            EngineError::NotFound { what: "function", .. } => {
+                match engine.get_class_as(&ClassQuery::new(self.record).entry(entry), ListingStyle::default()) {
+                    Ok(whole) => format!("{error}; its functions: {}", function_list(&whole.text)),
+                    Err(_) => error.to_string(),
+                }
+            }
+            _ => error.to_string(),
+        }
+    }
+}
+
+/// `#~@0>#build (Index.build), ...`: the functions of the record a listing
+/// disassembles, at most about [`MAX_FUNCTIONS_LISTED`] bytes of them.
+pub fn function_list(source: &str) -> String {
+    let mut headers = source.lines().filter_map(|line| line.strip_prefix(".function "));
+    let mut out = String::new();
+    while let Some(header) = headers.next() {
+        if out.len() + header.len() > MAX_FUNCTIONS_LISTED {
+            out.push_str(&format!("... {} more", 1 + headers.count()));
+            break;
+        }
+        match header.split_once("  ; ") {
+            Some((raw, restored)) => out.push_str(&format!("{raw} ({restored}), ")),
+            None => out.push_str(&format!("{header}, ")),
+        }
+    }
+    out.trim_end_matches(", ").to_owned()
+}
+
+/// What one search kind of `findrefs` is given beyond the kind: the value
+/// and the flags that refine it. A flag a kind does not read is ignored;
+/// each front end rejects the ones it does not allow.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchArgs<'a> {
+    value: &'a str,
+    literal: bool,
+    exact: bool,
+    access: Option<Access>,
+    declarations_only: bool,
+    dir: Option<&'a Path>,
+}
+
+impl<'a> SearchArgs<'a> {
+    /// `value` with every flag off.
+    pub fn new(value: &'a str) -> SearchArgs<'a> {
+        SearchArgs { value, ..SearchArgs::default() }
+    }
+
+    /// The value is plain text, not a regex (`string`, `prop`, `global`,
+    /// `import`, `call`).
+    #[must_use]
+    pub fn literal(self, literal: bool) -> Self {
+        SearchArgs { literal, ..self }
+    }
+
+    /// A name is the whole name, not a regex (`prop`, `global`, `method`).
+    #[must_use]
+    pub fn exact(self, exact: bool) -> Self {
+        SearchArgs { exact, ..self }
+    }
+
+    /// How a property or global is used (`prop`, `global`).
+    #[must_use]
+    pub fn access(self, access: Option<Access>) -> Self {
+        SearchArgs { access, ..self }
+    }
+
+    /// The import declarations only, not their uses (`import`).
+    #[must_use]
+    pub fn declarations_only(self, declarations_only: bool) -> Self {
+        SearchArgs { declarations_only, ..self }
+    }
+
+    /// The directory `call:{@FILE}` reads `FILE` relative to (the current
+    /// directory when `None`).
+    #[must_use]
+    pub fn dir(self, dir: Option<&'a Path>) -> Self {
+        SearchArgs { dir, ..self }
+    }
+
+    /// The name of a property or a global, as a condition spells it.
+    fn name(&self) -> Result<Pattern, EngineError> {
+        name_pattern(self.value, self.literal, self.exact)
+    }
+}
+
+/// One kind of reference `findrefs` searches a HarmonyOS program for, as
+/// both front ends read its arguments. A kind the engine learns is one more
+/// row of [`SearchKind::ALL`].
+#[derive(Debug)]
+pub struct SearchKind {
+    name: &'static str,
+    query: fn(&SearchArgs<'_>) -> Result<Query, EngineError>,
+    usage: &'static str,
+}
+
+impl SearchKind {
+    /// Every kind, in the order a usage text lists them.
+    pub const ALL: &'static [SearchKind] = &[
+        SearchKind {
+            name: "string",
+            query: |args| if args.literal { Ok(Query::string_literal(args.value)) } else { Query::string_regex(args.value) },
+            usage: "regex (literal=true: text)",
+        },
+        SearchKind { name: "literal", query: |args| Ok(Query::string_literal(args.value)), usage: "text" },
+        SearchKind {
+            name: "prop",
+            query: |args| Ok(Query::Prop { name: args.name()?, access: args.access }),
+            usage: "property name regex (exact / literal), access=read|write|define|call",
+        },
+        SearchKind {
+            name: "global",
+            query: |args| Query::global(args.name()?, args.access),
+            usage: "global name regex (exact / literal), access=read|write",
+        },
+        SearchKind {
+            name: "import",
+            query: |args| match Query::import(args.value, args.literal)? {
+                Query::Import { request, name, .. } => Ok(Query::Import { request, name, declarations_only: args.declarations_only }),
+                other => Ok(other),
+            },
+            usage: "REQUEST[#NAME], REQUEST a regex over the module request (@ohos:net.http), decl=true for the declarations \
+                    only, requests=true for the distinct requests",
+        },
+        SearchKind {
+            name: "method",
+            query: |args| Query::method(without_pc(args.value), |name| name_pattern(name, false, args.exact)),
+            usage: "[RECORD->]FUNCTION, where it is defined (or `class` + `name`; exact)",
+        },
+        SearchKind { name: "number", query: |args| Ok(Query::Number(args.value.parse()?)), usage: "1919810, 0x1d4b42, 1.5 or A..B" },
+        SearchKind {
+            name: "call",
+            query: |args| match (args.literal, args.value.starts_with('{')) {
+                (true, _) => Ok(Query::Call(Pattern::contains(args.value))),
+                (false, true) => match Query::rule(&format!("call:{}", args.value), args.dir)? {
+                    Query::All(_) => Err(EngineError::Query(format!("call:{} is several conditions; give one here", args.value))),
+                    query => Ok(query),
+                },
+                (false, false) => Ok(Query::Call(Pattern::regex(args.value)?)),
+            },
+            usage: "regex over the resolved callee (import:@ohos:net.http#default.createHttp, global:console.log, this.x), or \
+                    {RULE}: the calls that lead to a function RULE matches (call:{string:token}; nests)",
+        },
+    ];
+
+    /// The kind `kind` names, in any spelling [`Query::kind_named`] reads.
+    pub fn named(kind: &str) -> Option<&'static SearchKind> {
+        let name = Query::kind_named(kind)?;
+        SearchKind::ALL.iter().find(|known| known.name == name)
+    }
+
+    /// The kind as `findrefs KIND` and `KIND:VALUE` conditions spell it:
+    /// one of [`Query::KINDS`].
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// What the value of this kind is, for a usage text.
+    pub fn usage(&self) -> &'static str {
+        self.usage
+    }
+
+    /// The query this kind asks for with `args`.
+    ///
+    /// # Errors
+    /// [`EngineError::Query`] for a value the kind cannot read (an invalid
+    /// regex, a number that is none, a `{RULE}` that is several).
+    pub fn query(&self, args: &SearchArgs<'_>) -> Result<Query, EngineError> {
+        (self.query)(args)
+    }
+}
 
 /// `function` without the `+0xPC` a findrefs row appends to it.
 pub fn without_pc(function: &str) -> &str {
@@ -181,6 +415,40 @@ mod tests {
         assert_eq!(without_pc("a+0xzz"), "a+0xzz");
         assert!(several_entries_define(&["a.abc | &x&".into(), "b.abc | &x&".into()]));
         assert!(!several_entries_define(&["a.abc | &x&".into(), "a.abc | &y&".into()]));
+    }
+
+    #[test]
+    fn targets_come_apart_at_the_arrow() {
+        let t = ClassTarget::parse("&a/b&->#~@0>#build+0x12", None);
+        assert_eq!((t.record(), t.function()), ("&a/b&", Some("#~@0>#build+0x12")));
+        let t = ClassTarget::parse("pages/Index", Some("Index.build"));
+        assert_eq!((t.record(), t.function()), ("pages/Index", Some("Index.build")));
+        assert_eq!(ClassTarget::parse("pages/Index", None).function(), None);
+    }
+
+    #[test]
+    fn function_lists_stay_short() {
+        let source = ".record r\n.function #~@0>#build  ; Index.build\n; x\n  0000  lda v0\n\n.function func_main_0\n";
+        assert_eq!(function_list(source), "#~@0>#build (Index.build), func_main_0");
+        let many: String = (0..400).map(|i| format!(".function f{i:0>20}\n")).collect();
+        let listed = function_list(&many);
+        assert!(listed.len() <= MAX_FUNCTIONS_LISTED + 32 && listed.ends_with(" more"), "{listed}");
+    }
+
+    #[test]
+    fn search_kinds_read_their_flags() {
+        let query = |kind: &str, args: SearchArgs<'_>| SearchKind::named(kind).unwrap().query(&args).unwrap();
+        assert!(matches!(query("string", SearchArgs::new("a.b").literal(true)), Query::StringLiteral(_)));
+        assert!(matches!(query("call", SearchArgs::new("{string:token}")), Query::CallTo(_)));
+        assert!(matches!(query("call", SearchArgs::new("x(").literal(true)), Query::Call(_)));
+        let Query::Prop { access, .. } = query("prop", SearchArgs::new("=x").access(Some(Access::Write))) else { panic!() };
+        assert_eq!(access, Some(Access::Write));
+        let Query::Import { declarations_only, .. } = query("import", SearchArgs::new("@ohos:net.http").declarations_only(true)) else {
+            panic!()
+        };
+        assert!(declarations_only);
+        assert!(SearchKind::named("call").unwrap().query(&SearchArgs::new("x(")).is_err());
+        assert!(SearchKind::named("type").is_none());
     }
 
     #[test]
