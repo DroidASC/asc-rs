@@ -14,6 +14,7 @@ members = [
     "crates/asc-engine",
     "crates/asc-decompile-protocol",
     "crates/asc-decompile",
+    "crates/asc-frontend",
     "crates/asc-mcp",
     "crates/asc-cli",
     "crates/asc-fixture",
@@ -45,6 +46,7 @@ asc-axml = { version = "0.1.1", path = "crates/asc-axml" }
 asc-arsc = { version = "0.1.1", path = "crates/asc-arsc" }
 asc-query = { version = "0.1.1", path = "crates/asc-query" }
 asc-engine = { version = "0.1.1", path = "crates/asc-engine" }
+asc-frontend = { version = "0.1.1", path = "crates/asc-frontend" }
 asc-mcp = { version = "0.1.1", path = "crates/asc-mcp" }
 asc-decompile-protocol = { version = "0.1.1", path = "crates/asc-decompile-protocol" }
 asc-decompile = { version = "0.1.1", path = "crates/asc-decompile" }

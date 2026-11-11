@@ -756,7 +756,13 @@ fn findrefs_combines_conditions_in_one_method() {
         call(2, "findrefs", json!({"apk": a, "all": [{"kind": "string", "value": "token"}], "none": [{"kind": "string", "value": "oke"}]})),
         call(3, "findrefs", json!({"apk": a, "kind": "string", "value": "x", "all": [{"kind": "string", "value": "x"}]})),
         call(4, "findrefs", json!({"apk": a, "none": [{"kind": "string", "value": "x"}]})),
-        call(5, "findrefs", json!({"apk": a, "all": [{"kind": "extends", "value": "java.lang.Object"}]})),
+        call(
+            5,
+            "findrefs",
+            json!({"apk": a, "all": [{"kind": "extends", "value": "java.lang.Object"}, {"kind": "string", "value": "token"}]}),
+        ),
+        // One condition alone is that query, as in the CLI's `all` and in a rule.
+        call(6, "findrefs", json!({"apk": a, "all": [{"kind": "extends", "value": "java.lang.Object"}]})),
     ]);
     let both = ok(&replies[0]);
     assert_eq!(both["total"], 4);
@@ -765,11 +771,15 @@ fn findrefs_combines_conditions_in_one_method() {
     assert_eq!(ok(&replies[1])["total"], 0);
     // A complete query beside `all` is one more condition.
     assert_eq!(ok(&replies[2])["total"], 0);
-    for r in &replies[3..] {
+    for r in &replies[3..5] {
         assert_eq!(r["result"]["isError"], true, "{r}");
     }
     assert!(text(&replies[3]).contains("at least one"));
     assert!(text(&replies[4]).contains("cannot be combined"));
+    assert_eq!(
+        ok(&replies[5])["total"],
+        ok(&session(&[call(7, "findrefs", json!({"apk": a, "kind": "extends", "value": "java.lang.Object"}))])[0])["total"]
+    );
 }
 
 #[test]

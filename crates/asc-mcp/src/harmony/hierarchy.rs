@@ -5,6 +5,7 @@ use super::Session;
 use crate::rules::{HIERARCHY_DEPTH, HIERARCHY_DIRECTIONS, HIERARCHY_MAX_NODES};
 use crate::{Call, ToolError, ToolResult, choice_arg, str_arg, usize_arg};
 use asc_ark_engine::{ClassNode, ClassRow, EngineError, HierarchyQuery, HierarchyTree, Lineage};
+use asc_frontend::harmony::no_class_hint;
 use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 
@@ -13,16 +14,6 @@ pub(super) const USAGE: &str = "# hierarchy: class=NAME (EntryAbility) or RECORD
      subclasses of a parent outside the program (import:@ohos:app\\.ability\\.UIAbility, ^global:ViewPU$); direction, depth, max_nodes, \
      `entry`; method=NAME marks `[defines FUNCTION]` from the class's members. Rows: `[external]` / `[unresolved]` are parents that are \
      no class of the program (the path is where tracking stopped), `[reassigned]` a parent read from a binding a decorator reassigns\n";
-
-/// What a class of a HarmonyOS program is named by, for the error of a name
-/// that finds none (`search`: how the front end spells the search that
-/// lists the functions of a name, constructors included).
-pub fn no_class_hint(search: &str) -> String {
-    format!(
-        "a class is named as rows print it, RECORD->CLASS, or by its name alone; a parent outside the program by import:REGEX or \
-         global:REGEX over its path; {search} lists the functions of a name, constructors among them"
-    )
-}
 
 /// A row as JSON.
 fn row_json(row: &ClassRow) -> Value {

@@ -58,7 +58,7 @@ pub use asc_apk::Limits as InflateLimits;
 pub use asc_apk::archive_of;
 pub use asc_arsc;
 pub use asc_cache;
-pub use asc_cache::{Threads, auto_threads, auto_threads_for};
+pub use asc_cache::{MAPPED_CHARGE_DIVISOR, Threads, auto_threads, auto_threads_for};
 pub use asc_findrefs::{ClassQuery, ClassRelation, FieldAccess, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use budget::{Device, MemoryPolicy, available_memory, total_memory};
@@ -420,20 +420,6 @@ pub struct LogicalDex {
     pub state: Arc<SearchState>,
     persisted: Arc<tiers::Persisted>,
 }
-
-/// The memory cache charges file-backed bytes (mapped from the disk cache
-/// or the APK) at this fraction of their size, heap bytes in full.
-///
-/// File pages are not what runs a machine out of memory: the kernel drops
-/// clean ones under pressure (they are re-read from the file) and every
-/// process mapping the same L1 / L2 file or APK shares one copy, so charging
-/// them in full made each of N processes evict as if it held its own copy,
-/// and summed to N times the real footprint in the process registry
-/// (`MemAvailable`, which the budget starts from, already counts reclaimable
-/// page cache). They still cost something (address space, page cache churn,
-/// the re-reads), so they are not free either: the LRU still bounds them, at
-/// up to this many times the budget.
-pub const MAPPED_CHARGE_DIVISOR: usize = 8;
 
 /// A cached inflated entry.
 pub struct CachedEntry {

@@ -18,6 +18,7 @@ path = "src/main.rs"
 asc-ark-engine.workspace = true
 asc-engine.workspace = true
 asc-findrefs.workspace = true
+asc-frontend.workspace = true
 asc-mcp.workspace = true
 clap.workspace = true
 libc = "0.2"

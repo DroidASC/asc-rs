@@ -160,6 +160,7 @@ dependencies = [
  "asc-engine",
  "asc-findrefs",
  "asc-fixture",
+ "asc-frontend",
  "asc-mcp",
  "clap",
  "libc",
@@ -252,6 +253,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "asc-frontend"
+version = "0.1.1"
+dependencies = [
+ "asc-ark-engine",
+ "asc-engine",
+ "asc-findrefs",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "asc-hap"
 version = "0.1.1"
 dependencies = [
@@ -270,9 +282,9 @@ dependencies = [
  "asc-engine",
  "asc-findrefs",
  "asc-fixture",
+ "asc-frontend",
  "regex",
  "serde_json",
- "sha2",
  "tempfile",
 ]
 

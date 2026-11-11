@@ -1,0 +1,17 @@
+[package]
+name = "asc-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "What the asc CLI and MCP server share above the engines: which engine answers for a program, findrefs arguments as queries, spilled output, class outlines and HarmonyOS call trees."
+
+[dependencies]
+asc-ark-engine.workspace = true
+asc-engine.workspace = true
+asc-findrefs.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

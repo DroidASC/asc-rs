@@ -35,8 +35,6 @@
 //! and gets an `apk_id` of the same series; the tools that carry over answer
 //! it from its own engine, the others say what does ([`harmony`]).
 
-pub mod class_text;
-pub mod format;
 pub mod harmony;
 mod lenient;
 pub mod multi;
@@ -47,13 +45,15 @@ mod rules;
 use asc_engine::asc_cache::LockExt;
 use asc_engine::{
     Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch,
-    RefContext, RefResult, SharedCache, SmaliOptions, Threads, condition, hints, names,
+    RefContext, RefResult, SharedCache, SmaliOptions, Threads, hints, names,
 };
 use asc_findrefs::{FieldAccess, Query};
-use class_text::ClassText;
-use format::ProgramFormat;
+use asc_frontend::class_text::ClassText;
+use asc_frontend::findrefs::{Member, Target};
+use asc_frontend::format::{self, ProgramFormat};
+use asc_frontend::spill::SpillDir;
 use multi::{Report, Reports, Section};
-use output::{FITTED, FULL, SpillDir, Structured};
+use output::{FITTED, FULL, Structured};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
@@ -256,7 +256,7 @@ impl OpenProgram {
     fn resident_bytes(&self) -> usize {
         match self {
             OpenProgram::Android(apk) => apk.engine.resident_bytes(),
-            OpenProgram::Harmony(program) => harmony::resident_bytes(&program.engine),
+            OpenProgram::Harmony(program) => program.engine.resident_bytes(),
         }
     }
 }
@@ -631,7 +631,7 @@ impl Server {
     /// outside the cache exceeds their share of the memory budget
     /// ([`SharedCache::fit_resident_bytes`]): the class graphs and resource
     /// tables of APKs, the inflated packages and call graph analyses of
-    /// HarmonyOS programs ([`harmony::resident_bytes`]). Their apk_ids open
+    /// HarmonyOS programs ([`asc_ark_engine::Engine::resident_bytes`]). Their apk_ids open
     /// them again.
     pub fn trim_sessions(&self) {
         // Sized outside the sessions lock: sizing takes each engine's cache locks.
@@ -643,7 +643,7 @@ impl Server {
         };
         open.sort_unstable_by_key(|(used, _)| std::cmp::Reverse(*used));
         if let Some((_, OpenProgram::Harmony(program))) = open.first() {
-            harmony::shed_analyses(&program.engine, self.cache.resident_share());
+            program.engine.shed_analyses(self.cache.resident_share());
         }
         let sizes: Vec<usize> = open.iter().map(|(_, program)| program.resident_bytes()).collect();
         let closing = self.cache.fit_resident_bytes(&sizes);
@@ -1379,7 +1379,7 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
     if kind != "field" && access.is_some() {
         return Err(ToolError("`access` is only valid with `kind: \"field\"`".into()));
     }
-    Ok(match kind {
+    let target = match kind {
         "string" | "literal" | "type" | "extends" | "impl" => {
             let value = match str_arg(args, "value")? {
                 Some(v) => v,
@@ -1390,40 +1390,28 @@ fn parse_query(args: &Value) -> Result<Query, ToolError> {
                 None => return Err(ToolError(format!("a {kind} query needs `value`"))),
             };
             match kind {
-                "literal" => Query::StringLiteral(value.to_string()),
-                "string" if bool_arg(args, "literal")?.unwrap_or(false) => Query::StringLiteral(value.to_string()),
-                "string" => Query::String(value.to_string()),
-                "type" => Query::Type(value.to_string()),
-                "extends" => Query::Extends(names::format_class_name(value.trim())?),
-                _ => Query::Implements(names::format_class_name(value.trim())?),
+                "literal" => Target::String { value, literal: true },
+                "string" => Target::String { value, literal: bool_arg(args, "literal")?.unwrap_or(false) },
+                "type" => Target::Type(value),
+                "extends" => Target::Extends(value),
+                _ => Target::Impl(value),
             }
         }
         _ => {
-            // The target may come whole in `value` (as for the other kinds).
-            let name = match str_arg(args, "name")? {
-                Some(n) => Some(n),
-                None => str_arg(args, "value")?,
+            let member = Member {
+                class: str_arg(args, "class")?,
+                fuzzy_class: bool_arg(args, "fuzzy_class")?.unwrap_or(false),
+                // The target may come whole in `value` (as for the other kinds).
+                name: match str_arg(args, "name")? {
+                    Some(n) => Some(n),
+                    None => str_arg(args, "value")?,
+                },
+                exact: bool_arg(args, "exact")?.unwrap_or(false),
             };
-            // `X[arg0=1]`: a call-constrained target reads as a rule.
-            if let Some(target) = name.filter(|n| kind == "method" && args.get("class").is_none() && condition::has_constraints(n)) {
-                return Ok(names::parse_rule(&format!("method:{target}"))?);
-            }
-            let m = names::member_query(
-                kind,
-                str_arg(args, "class")?,
-                bool_arg(args, "fuzzy_class")?.unwrap_or(false),
-                name,
-                bool_arg(args, "exact")?.unwrap_or(false),
-            )?;
-            if kind == "method" {
-                Query::Method(m)
-            } else if let Some(access) = access {
-                Query::FieldAccess { field: m, access }
-            } else {
-                Query::Field(m)
-            }
+            if kind == "method" { Target::Method(member) } else { Target::Field { member, access } }
         }
-    })
+    };
+    Ok(target.query(None)?)
 }
 
 /// `direction` of callgraph, with the spellings models also use.
@@ -2029,7 +2017,7 @@ mod tests {
 
         // A budget the mapped code fits in but not the analyses of a walk:
         // the program used last stays open and gives them back.
-        let held = harmony::resident_bytes(&asc_ark_engine::Engine::open(&paths[0]).unwrap());
+        let held = asc_ark_engine::Engine::open(&paths[0]).unwrap().resident_bytes();
         let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 2 * held + 64, ..CacheConfig::default() }));
         walk(&server, json!({"apk": paths[0]}));
         assert!(analyses(&server, "apk1").unwrap() > 64);

@@ -16,7 +16,9 @@ use asc_ark_engine::{
     Access, CallQuery, CallRoots, ClassQuery, Direction, Document, Engine, EngineError, EntryStatus, HierarchyQuery, Lineage, ListOptions,
     ListingStyle, Manifest, NameFilter, Pattern, Query, RefBatch, RefContext, ResourceField, ResourceTables,
 };
-use asc_mcp::harmony::{TreeText, function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots};
+use asc_frontend::harmony::{
+    TreeText, entries_hint, function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots, several_entries_define, without_pc,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -208,7 +210,7 @@ fn open(io: &mut Io<'_>, common: &Common, path: &Path) -> Result<Arc<Engine>, St
 /// says when it fails: an entry that is not there is told what is.
 fn entry_error(engine: &Engine, error: &EngineError) -> String {
     match error {
-        EngineError::NoEntry(_) => format!("{error} ({})", asc_mcp::harmony::entries_hint(engine)),
+        EngineError::NoEntry(_) => format!("{error} ({})", entries_hint(engine)),
         other => other.to_string(),
     }
 }
@@ -412,21 +414,6 @@ impl<'a> Target<'a> {
     }
 }
 
-/// `function` without the `+0xPC` a findrefs row appends to it.
-fn without_pc(function: &str) -> &str {
-    match function.rsplit_once("+0x") {
-        Some((name, pc)) if !name.is_empty() && !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_hexdigit()) => name,
-        _ => function,
-    }
-}
-
-/// Whether two of the `entry | record` candidates of an ambiguous record are
-/// one record in different entries: more of its path cannot tell those apart.
-fn several_entries_define(candidates: &[String]) -> bool {
-    let records: Vec<&str> = candidates.iter().filter_map(|candidate| candidate.split_once(" | ")).map(|(_, record)| record).collect();
-    records.iter().enumerate().any(|(i, record)| records[..i].contains(record))
-}
-
 fn getclass(io: &mut Io<'_>, common: &Common, args: &ClassArgs) -> Result<(), String> {
     if args.dump_dex.is_some() {
         return Err(dex_only("--dump-dex"));
@@ -453,6 +440,17 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: &ClassArgs) -> Result<(), St
     io.emit_records(&source.text, args.output.as_ref())
 }
 
+/// A name pattern: a regex, or with `--literal` / `--exact` plain text.
+fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
+    asc_frontend::harmony::pattern(text, literal, exact).map_err(|e| e.to_string())
+}
+
+/// As [`pattern`], for the name of a property, a global or a function:
+/// `=NAME` is the exact name too, as a condition writes it.
+fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
+    asc_frontend::harmony::name_pattern(text, literal, exact).map_err(|e| e.to_string())
+}
+
 /// What a `findrefs` command line asks for.
 enum Search {
     Refs {
@@ -470,24 +468,6 @@ enum Search {
         rules: Vec<Query>,
         output: Option<PathBuf>,
     },
-}
-
-/// A name pattern: a regex, or with `--literal` / `--exact` plain text.
-fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
-    match (literal, exact) {
-        (_, true) => Ok(Pattern::exact(text)),
-        (true, false) => Ok(Pattern::contains(text)),
-        (false, false) => Pattern::regex(text).map_err(|e| e.to_string()),
-    }
-}
-
-/// As [`pattern`], for the name of a property, a global or a function:
-/// `=NAME` is the exact name too, as a condition writes it.
-fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, String> {
-    match text.strip_prefix('=') {
-        Some(name) if !literal && !exact => Ok(Pattern::exact(name)),
-        _ => pattern(text, literal, exact),
-    }
 }
 
 impl From<FieldAccessArg> for Access {

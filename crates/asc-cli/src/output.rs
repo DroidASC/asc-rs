@@ -5,7 +5,7 @@
 use crate::Common;
 use asc_engine::{Engine, condition};
 use asc_findrefs::Query;
-use asc_mcp::output::SpillDir;
+use asc_frontend::spill::SpillDir;
 use std::borrow::Cow;
 use std::fmt::Display;
 use std::fs::File;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 /// Supplies the engine a command runs on: the DEX engine or the HarmonyOS
-/// one, by the format of the program ([`asc_mcp::format::ProgramFormat`]).
+/// one, by the format of the program ([`asc_frontend::format::ProgramFormat`]).
 pub(crate) trait Engines: Sync {
     fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine>;
 
@@ -110,6 +110,11 @@ impl<'a> Io<'a> {
     /// DEX side: the files it names are relative to the client's directory.
     pub(crate) fn harmony_rule(&self, spec: &str) -> Result<asc_ark_engine::Query, String> {
         asc_ark_engine::Query::rule(spec, self.cwd).map_err(|e| e.to_string())
+    }
+
+    /// The query of a findrefs search, its files read as [`Io::rule`] reads them.
+    pub(crate) fn query(&self, target: asc_frontend::findrefs::Target<'_>) -> Result<Query, String> {
+        target.query(self.cwd).map_err(|e| e.to_string())
     }
 
     /// One findrefs condition, read as [`Io::rule`] does.

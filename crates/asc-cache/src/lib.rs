@@ -59,6 +59,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// A memory budget charges file-backed bytes (mapped from the disk cache,
+/// the APK or a HarmonyOS package) at this fraction of their size, heap bytes in full.
+///
+/// File pages are not what runs a machine out of memory: the kernel drops
+/// clean ones under pressure (they are re-read from the file) and every
+/// process mapping the same L1 / L2 file or APK shares one copy, so charging
+/// them in full made each of N processes evict as if it held its own copy,
+/// and summed to N times the real footprint in the process registry
+/// (`MemAvailable`, which the budget starts from, already counts reclaimable
+/// page cache). They still cost something (address space, page cache churn,
+/// the re-reads), so they are not free either: the LRU still bounds them, at
+/// up to this many times the budget.
+pub const MAPPED_CHARGE_DIVISOR: usize = 8;
+
 /// Identity of an APK for cache purposes.
 ///
 /// A program of several archives has a key of its own (rendered results,

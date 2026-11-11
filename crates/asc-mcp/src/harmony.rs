@@ -10,7 +10,7 @@
 //! that names what does work. A session holds the engine and nothing else:
 //! the engine opens in milliseconds, indexes nothing and keeps nothing on
 //! disk, so the disk caches of the DEX side take no part. What it holds in
-//! memory ([`resident_bytes`]) counts against the memory budget next to the
+//! memory ([`Engine::resident_bytes`]) counts against the memory budget next to the
 //! DEX engines, and at most [`MAX_OPEN`] programs stay open; the ids of the
 //! others open them again. A program whose files changed is opened again
 //! before it answers.
@@ -18,9 +18,6 @@
 mod callgraph;
 mod hierarchy;
 mod resources;
-
-pub use callgraph::{TreeText, function_roots, no_callers_hint, no_leaf_hint, rule_roots};
-pub use hierarchy::no_class_hint;
 
 use crate::res::{self, Filter};
 use crate::{
@@ -31,7 +28,8 @@ use asc_ark_engine::{
     Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, ListingStyle, Manifest, ManifestLine,
     NameFilter, Pattern, Query, RefContext, RefRow, RefSite, text,
 };
-use asc_engine::{MAPPED_CHARGE_DIVISOR, Threads, names};
+use asc_engine::{Threads, names};
+use asc_frontend::harmony::{MAX_ENTRIES_LISTED, entries_hint, name_pattern, several_entries_define, without_pc};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -46,32 +44,8 @@ const MAX_OPEN: usize = 8;
 /// function, for the program's introduction.
 const GETCLASS_USAGE: &str = "# getclass: debug_info=true writes `; line N` where the line of the debug info changes (with \
                               ets/sourceMaps.map in the package: its source line too)\n";
-/// ABC entries the description of a program lists by name.
-const MAX_ENTRIES_LISTED: usize = 12;
 /// Bytes of function names a "no such function" error lists.
 const MAX_FUNCTIONS_LISTED: usize = 2 << 10;
-
-/// What an open HarmonyOS program counts for in the memory budget of a
-/// resident host, next to the class graphs and resource tables of DEX
-/// engines (`asc_engine::Engine::resident_bytes`): what it holds on the heap
-/// in full, and the code it reads in place from its mapped files at
-/// 1/[`MAPPED_CHARGE_DIVISOR`], as the memory cache charges a DEX entry it
-/// maps.
-pub fn resident_bytes(engine: &Engine) -> usize {
-    let held = engine.memory_use();
-    held.heap() + held.mapped / MAPPED_CHARGE_DIVISOR
-}
-
-/// For the program a host used last, which stays open whatever its size:
-/// when it alone is over `share` (the bytes open programs may hold,
-/// `SharedCache::resident_share`), it gives back what its call graph walks
-/// computed. The next walk computes what it needs again. (The class graph of
-/// a DEX engine cannot be had in part, so there is no such step there.)
-pub fn shed_analyses(engine: &Engine, share: usize) {
-    if share > 0 && resident_bytes(engine) > share {
-        engine.release_analyses();
-    }
-}
 
 /// Why a HarmonyOS program is no target of a call over many APKs (the
 /// section that reports it names the path).
@@ -118,18 +92,6 @@ const MANIFEST_USAGE: &str = "# manifest_summary: module.json, each ability / ex
 /// What keeps `findrefs` and `listclass` to part of a program, for the program's introduction.
 const ENTRY_USAGE: &str = "entry=NAME (also listclass): only that abc entry or package (entry.hap), as rows name it: a resource id is \
      unique within one package only";
-
-/// `entries: a, b, ... (N more)`: the ABC entries of the program, for the
-/// error of an `entry` that names none of them.
-pub fn entries_hint(engine: &Engine) -> String {
-    let names: Vec<&str> = engine.entries().map(|entry| entry.name.as_str()).collect();
-    let mut hint = format!("entries: {}", names.iter().take(MAX_ENTRIES_LISTED).copied().collect::<Vec<_>>().join(", "));
-    if names.len() > MAX_ENTRIES_LISTED {
-        hint.push_str(&format!(", ... {} more", names.len() - MAX_ENTRIES_LISTED));
-    }
-    hint.push_str("; a package names all of its entries");
-    hint
-}
 
 /// An engine error of a call that `entry` keeps to part of the program.
 fn entry_error(engine: &Engine, error: EngineError) -> ToolError {
@@ -403,21 +365,6 @@ impl<'a> Target<'a> {
     }
 }
 
-/// `function` without the `+0xPC` a findrefs row appends to it.
-fn without_pc(function: &str) -> &str {
-    match function.rsplit_once("+0x") {
-        Some((name, pc)) if !name.is_empty() && !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_hexdigit()) => name,
-        _ => function,
-    }
-}
-
-/// Whether two of the `entry | record` candidates of an ambiguous record are
-/// one record in different entries: more of its path cannot tell those apart.
-fn several_entries_define(candidates: &[String]) -> bool {
-    let records: Vec<&str> = candidates.iter().filter_map(|candidate| candidate.split_once(" | ")).map(|(_, record)| record).collect();
-    records.iter().enumerate().any(|(i, record)| records[..i].contains(record))
-}
-
 /// `#~@0>#build (Index.build), ...`: the functions of the record disassembled as `source`.
 fn function_list(source: &str) -> String {
     let mut headers = source.lines().filter_map(|line| line.strip_prefix(".function "));
@@ -481,25 +428,6 @@ struct Spec<'a> {
     access: Option<Access>,
     /// `decl`: import declarations only.
     declarations_only: bool,
-}
-
-/// A pattern, as the CLI reads one: a regex, or with `literal` / `exact`
-/// plain text.
-fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
-    match (literal, exact) {
-        (_, true) => Ok(Pattern::exact(text)),
-        (true, false) => Ok(Pattern::contains(text)),
-        (false, false) => Pattern::regex(text),
-    }
-}
-
-/// As [`pattern`], for the name of a property, a global or a function:
-/// `=NAME` is the exact name too, as a condition writes it.
-fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
-    match text.strip_prefix('=') {
-        Some(name) if !literal && !exact => Ok(Pattern::exact(name)),
-        _ => pattern(text, literal, exact),
-    }
 }
 
 impl Spec<'_> {

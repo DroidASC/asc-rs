@@ -225,6 +225,28 @@ impl Engine {
         }
     }
 
+    /// What the engine counts for in the memory budget of a resident host,
+    /// next to the class graphs and resource tables of DEX engines (the DEX
+    /// engine's `resident_bytes`): what it holds on the heap in full, and the
+    /// code it reads in place from its mapped files at
+    /// 1/[`MAPPED_CHARGE_DIVISOR`](asc_cache::MAPPED_CHARGE_DIVISOR), as the
+    /// memory cache charges a DEX entry it maps.
+    pub fn resident_bytes(&self) -> usize {
+        let held = self.memory_use();
+        held.heap() + held.mapped / asc_cache::MAPPED_CHARGE_DIVISOR
+    }
+
+    /// For the program a host used last, which stays open whatever its size:
+    /// when it alone is over `share` (the bytes open programs may hold), give
+    /// back what its call graph walks computed ([`Engine::release_analyses`]).
+    /// The next walk computes what it needs again. (The class graph of a DEX
+    /// engine cannot be had in part, so there is no such step there.)
+    pub fn shed_analyses(&self, share: usize) {
+        if share > 0 && self.resident_bytes() > share {
+            self.release_analyses();
+        }
+    }
+
     /// Forget what call graph walks and `call:` searches computed and return
     /// the bytes it took ([`MemoryUse::analyses`]). Answers do not change:
     /// the next query computes what it needs again. A query running now

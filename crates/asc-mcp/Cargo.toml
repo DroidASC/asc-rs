@@ -10,10 +10,10 @@ description = "asc-rs MCP server: a resident stdio session that keeps APKs open 
 [dependencies]
 asc-ark-engine.workspace = true
 asc-engine.workspace = true
+asc-frontend.workspace = true
 asc-findrefs.workspace = true
 regex.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 
 [dev-dependencies]
 asc-fixture.workspace = true

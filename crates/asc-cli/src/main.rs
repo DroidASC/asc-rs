@@ -9,8 +9,8 @@ mod settings;
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::config::Config;
 use asc_engine::{CacheConfig, CallQuery, CallRoots, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext, names};
-use asc_findrefs::Query;
-use asc_mcp::format::{ProgramFormat, left_out_note};
+use asc_frontend::findrefs::{self, Member, Target};
+use asc_frontend::format::{ProgramFormat, left_out_note};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use output::{Io, LocalEngines, SpillTarget, Window};
 use std::collections::HashMap;
@@ -358,7 +358,7 @@ impl Common {
     fn spill(&self) -> Option<SpillTarget> {
         let config = self.config();
         let bytes = config.cache_spill.value.0;
-        (bytes > 0).then(|| SpillTarget { dir: asc_mcp::output::SpillDir::default_dir(config.cache_dir().as_deref()), bytes })
+        (bytes > 0).then(|| SpillTarget { dir: asc_frontend::spill::SpillDir::default_dir(config.cache_dir().as_deref()), bytes })
     }
 
     /// Cache of the resident hosts (`mcp`, the daemon): the memory budget
@@ -1290,7 +1290,7 @@ fn class_methods(
     }
     let mut src = engine.get_class_method_cancellable(descriptor, opts, None, cancel).map_err(|e| e.to_string())?;
     if let Some(m) = method {
-        let parsed = asc_mcp::class_text::ClassText::parse(&src.source);
+        let parsed = asc_frontend::class_text::ClassText::parse(&src.source);
         let picked = parsed.select(m);
         if picked.is_empty() {
             return Err(format!("{descriptor} has no method {m:?}; its methods: {}", parsed.signatures(4 << 10)));
@@ -1488,44 +1488,22 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                     let (excluded, conditions): (Vec<String>, Vec<String>) = conditions.into_iter().partition(|c| c.starts_with('!'));
                     let parse =
                         |c: &[String]| c.iter().map(|c| io.condition(c.strip_prefix('!').unwrap_or(c))).collect::<Result<Vec<_>, _>>();
-                    let mut all = parse(&conditions)?;
+                    let all = parse(&conditions)?;
                     let mut none = parse(&none)?;
                     none.extend(parse(&excluded)?);
-                    // One condition is that query itself (`all 'method:{...}'`).
-                    if all.len() == 1 && none.is_empty() {
-                        (all.pop().expect("one condition"), output)
-                    } else {
-                        (Query::All { all, none }, output)
-                    }
+                    (findrefs::compound(all, none).map_err(|e| e.to_string())?, output)
                 }
-                Find::String { output, literal: false, value } => (Query::String(value), output),
-                Find::String { output, literal: true, value } => (Query::StringLiteral(value), output),
-                Find::Type { output, value } => (Query::Type(value), output),
-                // The class-def lookups need the precise Dalvik form.
-                Find::Extends { output, value } => (Query::Extends(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
-                Find::Impl { output, value } => (Query::Implements(names::format_class_name(&value).map_err(|e| e.to_string())?), output),
-                // `method '{RULE}'` / `method @FILE` (`={...}` / `=@FILE` without
-                // dispatch) / `method 'X[arg0=1]'`, as in a condition.
-                Find::Method { output, name: Some(name), class_name: None, .. }
-                    if name.trim_start_matches(['=', '*']).starts_with(['{', '@']) || asc_engine::condition::has_constraints(&name) =>
-                {
-                    (io.condition(&format!("method:{name}"))?, output)
+                Find::String { output, literal, value } => (io.query(Target::String { value: &value, literal })?, output),
+                Find::Type { output, value } => (io.query(Target::Type(&value))?, output),
+                Find::Extends { output, value } => (io.query(Target::Extends(&value))?, output),
+                Find::Impl { output, value } => (io.query(Target::Impl(&value))?, output),
+                Find::Method { output, name, class_name, fuzzy_class, exact } => {
+                    let member = Member { class: class_name.as_deref(), fuzzy_class, name: name.as_deref(), exact };
+                    (io.query(Target::Method(member))?, output)
                 }
-                Find::Method { output, name, class_name, fuzzy_class, exact } => (
-                    Query::Method(
-                        names::member_query("method", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
-                            .map_err(|e| e.to_string())?,
-                    ),
-                    output,
-                ),
                 Find::Field { output, name, class_name, fuzzy_class, exact } => {
-                    let field = names::member_query("field", class_name.as_deref(), fuzzy_class, name.as_deref(), exact)
-                        .map_err(|e| e.to_string())?;
-                    let query = match access {
-                        Some(access) => Query::FieldAccess { field, access: access.try_into()? },
-                        None => Query::Field(field),
-                    };
-                    (query, output)
+                    let member = Member { class: class_name.as_deref(), fuzzy_class, name: name.as_deref(), exact };
+                    (io.query(Target::Field { member, access: access.map(TryInto::try_into).transpose()? })?, output)
                 }
             };
             let engine = io.engine(common, &apk_path);

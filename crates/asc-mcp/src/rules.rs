@@ -70,7 +70,7 @@ pub(crate) fn compound(args: &Value) -> Result<Option<Query>, ToolError> {
     if all.is_empty() {
         return Err(ToolError("`all` needs at least one condition (`none` only removes methods)".into()));
     }
-    Ok(Some(Query::All { all, none: conditions(args, "none")? }))
+    Ok(Some(asc_frontend::findrefs::compound(all, conditions(args, "none")?)?))
 }
 
 /// `all(string "a", method Lb;->c) none(...)` for a compound, else the plain description.

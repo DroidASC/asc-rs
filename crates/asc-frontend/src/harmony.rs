@@ -1,0 +1,272 @@
+//! What both front ends make of HarmonyOS arguments and answers: function
+//! spellings as call graph roots, name patterns, call trees as rows, and the
+//! hints of an empty answer. Each front end passes how it spells a search
+//! (`findrefs call` on the command line, `findrefs kind=call` in MCP), so the
+//! hints read right in both.
+
+use asc_ark_engine::{CallNode, CallRoots, CallTree, Direction, Engine, EngineError, Pattern, Query};
+
+/// ABC entries a list of them names ([`entries_hint`]) before it counts the rest.
+pub const MAX_ENTRIES_LISTED: usize = 12;
+
+/// `function` without the `+0xPC` a findrefs row appends to it.
+pub fn without_pc(function: &str) -> &str {
+    match function.rsplit_once("+0x") {
+        Some((name, pc)) if !name.is_empty() && !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_hexdigit()) => name,
+        _ => function,
+    }
+}
+
+/// Whether two of the `entry | record` candidates of an ambiguous record are
+/// one record in different entries: more of its path cannot tell those apart.
+pub fn several_entries_define(candidates: &[String]) -> bool {
+    let records: Vec<&str> = candidates.iter().filter_map(|candidate| candidate.split_once(" | ")).map(|(_, record)| record).collect();
+    records.iter().enumerate().any(|(i, record)| records[..i].contains(record))
+}
+
+/// A name pattern: a regex, or (`literal` / `exact`) plain text.
+///
+/// # Errors
+/// An invalid regex.
+pub fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
+    match (literal, exact) {
+        (_, true) => Ok(Pattern::exact(text)),
+        (true, false) => Ok(Pattern::contains(text)),
+        (false, false) => Pattern::regex(text),
+    }
+}
+
+/// As [`pattern`], for the name of a property, a global or a function:
+/// `=NAME` is the exact name too, as a condition writes it.
+///
+/// # Errors
+/// An invalid regex.
+pub fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
+    match text.strip_prefix('=') {
+        Some(name) if !literal && !exact => Ok(Pattern::exact(name)),
+        _ => pattern(text, literal, exact),
+    }
+}
+
+/// The roots `to` names: the callee paths a lone `call:PATTERN` matches,
+/// else the functions the rule matches.
+pub fn rule_roots(rule: Query) -> CallRoots {
+    match rule {
+        Query::Call(pattern) => CallRoots::Leaf(pattern),
+        other => CallRoots::Matching(other),
+    }
+}
+
+/// The root a function spelling names: `function` in `record`, or one text
+/// as result rows print it (`RECORD->FUNCTION`, `RECORD->FUNCTION+0xPC`), or
+/// a function name alone (every function of that name).
+pub fn function_roots(record: Option<&str>, function: &str, entry: Option<&str>) -> CallRoots {
+    let (record, function) = match (record, function.split_once("->")) {
+        (None, Some((record, function))) => (Some(record), function),
+        _ => (record, function),
+    };
+    CallRoots::Function { record: record.map(str::to_owned), function: without_pc(function).to_owned(), entry: entry.map(str::to_owned) }
+}
+
+/// The hint of a walk whose `to` pattern matched no callee path (`search`:
+/// how the front end spells the search that lists them).
+pub fn no_leaf_hint(rule: &str, search: &str) -> String {
+    format!(
+        "no call site has a callee path matching {rule}: the paths are what {search} prints \
+         (import:REQUEST#NAME.member, global:NAME.member, this.member); `{search} .` lists them all"
+    )
+}
+
+/// The hint of a callers walk from functions that found no caller, or
+/// `None` (`search`: how the front end spells a search for call sites by
+/// member name).
+pub fn no_callers_hint(tree: &CallTree, search: &str) -> Option<String> {
+    let only_roots = !tree.rows.is_empty() && tree.rows.iter().all(|row| row.depth == 0 && matches!(row.node, CallNode::Function { .. }));
+    (tree.direction == Direction::Callers && tree.depth > 0 && only_roots).then(|| {
+        format!(
+            "no caller was resolved: a function the system calls (a lifecycle or event callback) or one reached only through a \
+             value (a property, an argument) has none; {search} lists call sites by member name"
+        )
+    })
+}
+
+/// What a class of a HarmonyOS program is named by, for the error of a name
+/// that finds none (`search`: how the front end spells the search that
+/// lists the functions of a name, constructors included).
+pub fn no_class_hint(search: &str) -> String {
+    format!(
+        "a class is named as rows print it, RECORD->CLASS, or by its name alone; a parent outside the program by import:REGEX or \
+         global:REGEX over its path; {search} lists the functions of a name, constructors among them"
+    )
+}
+
+/// `entries: a, b, ... (N more)`: the ABC entries of the program, for the
+/// error of an `entry` that names none of them.
+pub fn entries_hint(engine: &Engine) -> String {
+    let names: Vec<&str> = engine.entries().map(|entry| entry.name.as_str()).collect();
+    let mut hint = format!("entries: {}", names.iter().take(MAX_ENTRIES_LISTED).copied().collect::<Vec<_>>().join(", "));
+    if names.len() > MAX_ENTRIES_LISTED {
+        hint.push_str(&format!(", ... {} more", names.len() - MAX_ENTRIES_LISTED));
+    }
+    hint.push_str("; a package names all of its entries");
+    hint
+}
+
+/// A tree as both front ends print it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeText {
+    /// One line per row.
+    pub lines: Vec<String>,
+    /// `#` lines after the rows: what the walk covered, what was left out.
+    pub footer: String,
+}
+
+impl TreeText {
+    /// The rows of `tree`. Rows name their ABC entry only when the
+    /// functions of the tree come from several; `several_entries`: the
+    /// program has more than one, and the footer then names the one entry
+    /// of a tree that has one.
+    pub fn of(tree: &CallTree, several_entries: bool) -> TreeText {
+        let mut entries = tree.rows.iter().filter_map(|row| match &row.node {
+            CallNode::Function { entry, .. } => Some(entry.as_str()),
+            CallNode::Leaf { .. } => None,
+        });
+        let first = entries.next();
+        let with_entry = entries.any(|entry| Some(entry) != first);
+        let lines = tree.lines(with_entry);
+        let mut footer = tree.footer();
+        if let (Some(entry), true, false) = (first, several_entries, with_entry) {
+            let at = footer.find('\n').unwrap_or(footer.len());
+            footer.insert_str(at, &format!("; all in {entry}"));
+        }
+        TreeText { lines, footer }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asc_ark_engine::{CallRow, EdgeKind, LeafKind};
+
+    fn function(entry: &str, name: &str) -> CallNode {
+        CallNode::Function { entry: entry.into(), record: "&a/b&".into(), function: format!("#~@0>#{name}"), restored: format!("B.{name}") }
+    }
+
+    fn row(depth: usize, parent: Option<usize>, node: CallNode) -> CallRow {
+        let kind = parent.map(|_| EdgeKind::Call);
+        CallRow { depth, parent, node, kind, sites: 1, repeated: false, unresolved: None, from: false, subclasses_skipped: 0 }
+    }
+
+    fn tree(rows: Vec<CallRow>) -> CallTree {
+        let functions = rows.iter().filter(|row| matches!(row.node, CallNode::Function { .. })).count();
+        let leaves = rows.len() - functions;
+        CallTree {
+            direction: Direction::Callers,
+            depth: 3,
+            rows,
+            functions,
+            leaves,
+            truncated: false,
+            records_scanned: 1,
+            pruned: 0,
+            reached: None,
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn functions_lose_the_pc_of_a_row() {
+        assert_eq!(without_pc("#~@0>#build+0x12"), "#~@0>#build");
+        assert_eq!(without_pc("#~@0>#build"), "#~@0>#build");
+        assert_eq!(without_pc("a+0xzz"), "a+0xzz");
+        assert!(several_entries_define(&["a.abc | &x&".into(), "b.abc | &x&".into()]));
+        assert!(!several_entries_define(&["a.abc | &x&".into(), "a.abc | &y&".into()]));
+    }
+
+    #[test]
+    fn names_are_regexes_unless_exact() {
+        let matches = |pattern: Result<Pattern, EngineError>, text: &str| pattern.unwrap().is_match(text);
+        assert!(matches(name_pattern("=load", false, false), "load") && !matches(name_pattern("=load", false, false), "reload"));
+        assert!(matches(name_pattern("^re", false, false), "reload"));
+        assert!(matches(name_pattern("a.b", true, false), "xa.by") && !matches(name_pattern("a.b", true, false), "axb"));
+        assert!(matches(pattern("=x", false, true), "=x"));
+        assert!(pattern("(", false, false).is_err());
+    }
+
+    #[test]
+    fn roots_come_from_every_spelling() {
+        let root = |record, function| match function_roots(record, function, Some("ets/modules.abc")) {
+            CallRoots::Function { record, function, entry } => (record, function, entry),
+            other => panic!("{other:?}"),
+        };
+        let entry = Some("ets/modules.abc".to_owned());
+        assert_eq!(root(None, "&a/b&->#~@0>#build+0x1f"), (Some("&a/b&".to_owned()), "#~@0>#build".to_owned(), entry.clone()));
+        assert_eq!(root(Some("pages/Index"), "Index.build"), (Some("pages/Index".to_owned()), "Index.build".to_owned(), entry.clone()));
+        assert_eq!(root(None, "Index.build"), (None, "Index.build".to_owned(), entry));
+        let roots = |rule: &str| rule_roots(Query::rule(rule, None).unwrap());
+        assert!(matches!(roots("call:^import:@ohos:net\\.http"), CallRoots::Leaf(_)));
+        assert!(matches!(roots("string:token"), CallRoots::Matching(Query::StringRegex(_))));
+        assert!(matches!(roots("call:x & string:token"), CallRoots::Matching(Query::All(_))));
+        assert!(matches!(roots("call:{string:token}"), CallRoots::Matching(Query::CallTo(_))));
+    }
+
+    #[test]
+    fn a_tree_of_one_entry_names_it_once() {
+        let one = tree(vec![row(0, None, function("a.abc", "x")), row(1, Some(0), function("a.abc", "y"))]);
+        let text = TreeText::of(&one, true);
+        assert_eq!(text.lines, ["0 &a/b&->#~@0>#x | B.x", "  1 <- &a/b&->#~@0>#y | B.y"]);
+        assert_eq!(text.footer, "# 2 rows, 2 distinct functions, 0 leaves (callers, depth 3); 1 records scanned; all in a.abc");
+        assert!(!TreeText::of(&one, false).footer.contains("all in"));
+        let two = tree(vec![row(0, None, function("a.abc", "x")), row(1, Some(0), function("b.abc", "y"))]);
+        let text = TreeText::of(&two, true);
+        assert_eq!(text.lines, ["0 &a/b&->#~@0>#x | B.x [a.abc]", "  1 <- &a/b&->#~@0>#y | B.y [b.abc]"]);
+        assert!(!text.footer.contains("all in"), "{}", text.footer);
+    }
+
+    #[test]
+    fn from_rows_and_what_was_left_out_are_said() {
+        let mut walked = tree(vec![row(0, None, function("a.abc", "send")), row(1, Some(0), function("a.abc", "onCreate"))]);
+        walked.rows[1].from = true;
+        walked.pruned = 2;
+        walked.reached = Some(asc_ark_engine::Reached { from: 1, walked: 6 });
+        let text = TreeText::of(&walked, true);
+        assert_eq!(text.lines, ["0 &a/b&->#~@0>#send | B.send", "  1 <- &a/b&->#~@0>#onCreate | B.onCreate [from]"]);
+        assert_eq!(
+            text.footer,
+            "# 2 rows, 2 distinct functions, 0 leaves (callers, depth 3); 1 records scanned; 1 from functions reached; \
+             2 functions left out by unless; all in a.abc"
+        );
+        let mut nowhere = tree(Vec::new());
+        nowhere.reached = Some(asc_ark_engine::Reached { from: 0, walked: 6 });
+        let footer = TreeText::of(&nowhere, false).footer;
+        assert!(
+            footer.contains("; 0 from functions reached\n# from: none of the 6 callers walked matches (depth 3); a path ends"),
+            "{footer}"
+        );
+    }
+
+    #[test]
+    fn leaves_and_skipped_subclasses_are_said() {
+        let leaf = |path: &str, kind| row(1, Some(0), CallNode::Leaf { path: path.into(), kind });
+        let mut walked = tree(vec![
+            row(0, None, function("a.abc", "send")),
+            leaf("import:@ohos:net.http#default.createHttp", LeafKind::External),
+            leaf("import:lib#Store.open().read", LeafKind::Unlinked),
+            leaf("arg0.then", LeafKind::Unresolved),
+        ]);
+        walked.rows[0].subclasses_skipped = 3;
+        let text = TreeText::of(&walked, true);
+        assert_eq!(
+            text.lines,
+            [
+                "0 &a/b&->#~@0>#send | B.send [3+ subclasses skipped]",
+                "  1 <- import:@ohos:net.http#default.createHttp [external]",
+                "  1 <- import:lib#Store.open().read [unlinked]",
+                "  1 <- arg0.then [unresolved]",
+            ]
+        );
+        // The entry goes on the first line of the footer, what was skipped on its own.
+        let (first, skipped) = text.footer.split_once('\n').unwrap();
+        assert!(first.ends_with("; all in a.abc") && skipped.starts_with("# subclasses skipped: 1 rows are methods"), "{}", text.footer);
+    }
+}

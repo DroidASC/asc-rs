@@ -29,7 +29,7 @@
 //! budget, the least recently used programs closing beyond their share
 //! ([`SharedCache::fit_resident_bytes`]): the class graphs and resource
 //! tables of DEX programs, the inflated packages and call graph analyses of
-//! HarmonyOS programs ([`asc_mcp::harmony::resident_bytes`]). A HarmonyOS
+//! HarmonyOS programs ([`asc_ark_engine::Engine::resident_bytes`]). A HarmonyOS
 //! program is opened again once its files change
 //! ([`asc_ark_engine::Engine::is_current`]); the DEX engine checks the same
 //! on every open of its own.
@@ -39,7 +39,7 @@ use crate::{Cli, Common, run_program};
 use asc_ark_engine::EngineError as HarmonyError;
 use asc_engine::asc_cache::LockExt;
 use asc_engine::{Busy, Engine, SharedCache};
-use asc_mcp::format::ProgramFormat;
+use asc_frontend::format::ProgramFormat;
 use clap::Parser;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -485,7 +485,7 @@ impl Resident {
     fn resident_bytes(&self) -> usize {
         match self {
             Resident::Android(engine) => engine.resident_bytes(),
-            Resident::Harmony(engine) => asc_mcp::harmony::resident_bytes(engine),
+            Resident::Harmony(engine) => engine.resident_bytes(),
         }
     }
 }
@@ -726,7 +726,7 @@ impl Daemon {
         // The program in use stays whatever its size; a HarmonyOS one alone
         // over the share gives its analyses back first.
         if let Some((_, _, Resident::Harmony(engine))) = open.first() {
-            asc_mcp::harmony::shed_analyses(engine, self.cache.resident_share());
+            engine.shed_analyses(self.cache.resident_share());
         }
         let sizes: Vec<usize> = open.iter().map(|(_, _, program)| program.resident_bytes()).collect();
         let closing = self.cache.fit_resident_bytes(&sizes);
