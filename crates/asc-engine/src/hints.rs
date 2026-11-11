@@ -17,7 +17,7 @@ const MAX_MEMBERS: usize = 8;
 const FRAMEWORK: &[&str] = &["Landroid/", "Ljava/", "Ljavax/", "Lkotlin/", "Ldalvik/", "Lorg/json/", "Lorg/xml/", "Lorg/w3c/", "Lsun/"];
 
 /// Whether `descriptor` is in a package the Android runtime provides.
-pub fn is_framework_class(descriptor: &str) -> bool {
+pub(crate) fn is_framework_class(descriptor: &str) -> bool {
     FRAMEWORK.iter().any(|p| descriptor.starts_with(p))
 }
 

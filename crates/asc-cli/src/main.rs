@@ -1660,8 +1660,8 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
                 opts.sdk_prefixes = p;
             }
             opts.structured = match structured {
-                StructuredArg::Compact => asc_mcp::output::Structured::Compact,
-                StructuredArg::Full => asc_mcp::output::Structured::Full,
+                StructuredArg::Compact => asc_mcp::Structured::Compact,
+                StructuredArg::Full => asc_mcp::Structured::Full,
             };
             if spill_bytes == 0 {
                 opts.spill_dir = None;

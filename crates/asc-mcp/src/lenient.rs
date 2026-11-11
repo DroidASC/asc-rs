@@ -37,7 +37,7 @@ const METHOD_TOOLS: &[(&str, &str)] = &[("method_name", "method"), ("methodName"
 
 /// `args` with the aliases of `tool` renamed and model habits undone, or
 /// `None` when nothing needed changing.
-pub fn normalize(tool: &str, args: &Value) -> Option<Value> {
+pub(crate) fn normalize(tool: &str, args: &Value) -> Option<Value> {
     let mut out = args.as_object()?.clone();
     let mut changed = rename(&mut out, COMMON);
     match tool {

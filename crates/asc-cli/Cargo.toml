@@ -37,3 +37,6 @@ pkg-fmt = "tgz"
 
 [package.metadata.release]
 tag = true
+
+[lints]
+workspace = true

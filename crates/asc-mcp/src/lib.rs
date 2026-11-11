@@ -35,10 +35,10 @@
 //! and gets an `apk_id` of the same series; the tools that carry over answer
 //! it from its own engine, the others say what does ([`harmony`]).
 
-pub mod harmony;
+mod harmony;
 mod lenient;
-pub mod multi;
-pub mod output;
+mod multi;
+mod output;
 mod res;
 mod rules;
 
@@ -53,7 +53,8 @@ use asc_frontend::findrefs::{Member, Target};
 use asc_frontend::format::{self, ProgramFormat};
 use asc_frontend::spill::SpillDir;
 use multi::{Report, Reports, Section};
-use output::{FITTED, FULL, Structured};
+pub use output::Structured;
+use output::{FITTED, FULL};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
@@ -65,7 +66,7 @@ use std::thread;
 use std::time::Instant;
 
 /// Protocol version answered when the client does not name one.
-pub const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
+const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
 const FINDREFS_LIMIT: usize = 500;
 const LISTCLASS_LIMIT: usize = 1000;
@@ -77,6 +78,7 @@ const PER_APK: usize = 10;
 const PACKAGE_DEPTH: usize = 3;
 
 /// Server settings.
+#[non_exhaustive]
 pub struct Options {
     pub threads: Threads,
     pub debug: bool,
@@ -153,7 +155,7 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
                     inflight.lock_or_default().insert(id.clone(), Arc::clone(&cancel));
                     let (server, send, inflight) = (&server, &send, &inflight);
                     running.push(scope.spawn(move || {
-                        let reply = server.handle_call(&line, &Call { cancel: Arc::clone(&cancel) });
+                        let reply = server.handle_call(&line, &Call::new(Arc::clone(&cancel)));
                         inflight.lock_or_default().remove(&id);
                         if !cancel.load(Ordering::Relaxed) {
                             send(reply);
@@ -198,10 +200,15 @@ fn classify(line: &str) -> Message {
 /// Per-call state handed to every tool.
 pub struct Call {
     /// Raised by `notifications/cancelled`; long tools poll it.
-    pub cancel: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Call {
+    /// A call that stops once `cancel` is raised.
+    pub fn new(cancel: Arc<AtomicBool>) -> Call {
+        Call { cancel }
+    }
+
     fn check(&self) -> Result<(), ToolError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(ToolError("cancelled".into()));
@@ -233,7 +240,7 @@ const TOOLS: &[Tool] = &[
 ];
 
 /// An APK of the session.
-pub struct OpenApk {
+pub(crate) struct OpenApk {
     pub id: String,
     pub path: PathBuf,
     pub engine: Engine,
@@ -319,7 +326,7 @@ pub struct Server {
 }
 
 /// A tool failure, reported to the client as `isError: true`.
-pub struct ToolError(pub String);
+pub(crate) struct ToolError(pub String);
 
 impl<E: std::fmt::Display> From<E> for ToolError {
     fn from(e: E) -> ToolError {
@@ -328,7 +335,7 @@ impl<E: std::fmt::Display> From<E> for ToolError {
 }
 
 /// A tool's text (`content`) and data (`structuredContent`).
-pub type ToolResult = Result<(String, Value), ToolError>;
+pub(crate) type ToolResult = Result<(String, Value), ToolError>;
 
 /// Counts over the APKs of a sweep.
 /// One APK of a findrefs sweep: its entries and their dedup claims, or the
@@ -340,7 +347,7 @@ struct SweepTarget {
 }
 
 #[derive(Default)]
-pub struct SweepStats {
+pub(crate) struct SweepStats {
     pub with_hits: usize,
     pub hits: usize,
     pub errors: usize,
@@ -370,7 +377,7 @@ impl Server {
 
     /// Handle one JSON-RPC message; `None` for notifications.
     pub fn handle_line(&self, line: &str) -> Option<Value> {
-        self.handle_call(line, &Call { cancel: Arc::new(AtomicBool::new(false)) })
+        self.handle_call(line, &Call::new(Arc::new(AtomicBool::new(false))))
     }
 
     /// [`Server::handle_line`] for a message whose tool call `call` can cancel.
@@ -593,7 +600,7 @@ impl Server {
     }
 
     /// The session for `path`, opening it if needed.
-    pub fn open_path(&self, path: &Path) -> Result<Arc<OpenApk>, ToolError> {
+    pub(crate) fn open_path(&self, path: &Path) -> Result<Arc<OpenApk>, ToolError> {
         let path = canonical(&path.to_string_lossy())?;
         let mut sessions = self.lock_sessions();
         if let Some(apk) = sessions.apks.iter().find(|a| a.path == path).cloned() {
@@ -633,7 +640,7 @@ impl Server {
     /// tables of APKs, the inflated packages and call graph analyses of
     /// HarmonyOS programs ([`asc_ark_engine::Engine::resident_bytes`]). Their apk_ids open
     /// them again.
-    pub fn trim_sessions(&self) {
+    pub(crate) fn trim_sessions(&self) {
         // Sized outside the sessions lock: sizing takes each engine's cache locks.
         let mut open: Vec<(u64, OpenProgram)> = {
             let sessions = self.lock_sessions();
@@ -675,7 +682,7 @@ impl Server {
     /// (`None`: when the APKs' DEX would not fit the memory budget anyway, so
     /// a sweep does not evict what other calls still use), an APK's cached DEX
     /// leaves memory as soon as its last unit finishes.
-    pub fn sweep<C, U, R>(
+    pub(crate) fn sweep<C, U, R>(
         &self,
         paths: &[PathBuf],
         call: &Call,
@@ -738,7 +745,7 @@ impl Server {
     }
 
     /// Keep `report` for its cursor and return its first page.
-    pub fn report(&self, report: Report) -> ToolResult {
+    pub(crate) fn report(&self, report: Report) -> ToolResult {
         let report = Arc::new(report);
         let id = self.reports.lock_or_default().keep(Arc::clone(&report));
         Ok(with_full_report(&report, report.page(0, Some(id))))
@@ -1506,7 +1513,7 @@ fn canonical(path: &str) -> Result<PathBuf, ToolError> {
     Ok(PathBuf::from(parts.join(",")))
 }
 
-pub fn str_arg<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, ToolError> {
+pub(crate) fn str_arg<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, ToolError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s)),
@@ -1515,7 +1522,7 @@ pub fn str_arg<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, ToolEr
 }
 
 /// A boolean argument; `"true"` / `"false"` are taken too, as models write them.
-pub fn bool_arg(args: &Value, key: &str) -> Result<Option<bool>, ToolError> {
+pub(crate) fn bool_arg(args: &Value, key: &str) -> Result<Option<bool>, ToolError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(*b)),
@@ -1528,7 +1535,12 @@ pub fn bool_arg(args: &Value, key: &str) -> Result<Option<bool>, ToolError> {
 /// An enumerated string argument, `default` when absent. `choices` pairs
 /// each value with the other spellings models use for it; case and a
 /// trailing `s` do not matter. Unknown values fail with the valid ones.
-pub fn choice_arg(args: &Value, key: &str, default: &'static str, choices: &[(&'static str, &[&str])]) -> Result<&'static str, ToolError> {
+pub(crate) fn choice_arg(
+    args: &Value,
+    key: &str,
+    default: &'static str,
+    choices: &[(&'static str, &[&str])],
+) -> Result<&'static str, ToolError> {
     let Some(v) = str_arg(args, key)? else { return Ok(default) };
     let v = v.trim().to_ascii_lowercase();
     let find = |v: &str| choices.iter().find(|(c, aliases)| *c == v || aliases.contains(&v)).map(|(c, _)| *c);
@@ -1539,7 +1551,7 @@ pub fn choice_arg(args: &Value, key: &str, default: &'static str, choices: &[(&'
 }
 
 /// A non-negative integer argument, also given as a string of digits.
-pub fn usize_arg(args: &Value, key: &str) -> Result<Option<usize>, ToolError> {
+pub(crate) fn usize_arg(args: &Value, key: &str) -> Result<Option<usize>, ToolError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(v) => as_usize(v).map(Some).ok_or_else(|| ToolError(format!("`{key}` must be a non-negative integer"))),
@@ -1654,19 +1666,19 @@ fn tool_definitions() -> Value {
 /// instructions say). Parameters say what they are and their default in a
 /// few words, those every tool shares only where the instructions do not:
 /// the list is what an agent reads before its first call.
-pub mod defs {
+pub(crate) mod defs {
     use serde_json::{Map, Value, json};
 
     /// What every tool is: it reads the APK and answers; caches are not
     /// part of what the tool changes.
-    pub fn read_only() -> Value {
+    pub(crate) fn read_only() -> Value {
         json!({"readOnlyHint": true, "openWorldHint": false})
     }
 
     /// `structuredContent` of the main path, as `(field, type)`; `?` after
     /// the type admits null. Spill and page fields (`file`, `page`, ...) come
     /// on top when the reply is over its budget, so no field is required.
-    pub fn shape(fields: &[(&str, &str)]) -> Value {
+    pub(crate) fn shape(fields: &[(&str, &str)]) -> Value {
         let props: Map<String, Value> = fields
             .iter()
             .map(|(name, ty)| {
@@ -1682,14 +1694,14 @@ pub mod defs {
 
     /// [`shape`] of a tool that also takes many APKs: its single-APK fields
     /// plus the fields every multi-APK reply has (one `apks` item per APK).
-    pub fn shape_many(fields: &[(&str, &str)]) -> Value {
+    pub(crate) fn shape_many(fields: &[(&str, &str)]) -> Value {
         // `errors` too, but a rule set's single-APK reply lists them instead.
         const MANY: [(&str, &str); 5] =
             [("apks_total", "integer"), ("apks", "array"), ("shown", "array"), ("cursor", "string?"), ("empty", "array")];
         shape(&[fields, &MANY[..]].concat())
     }
 
-    pub fn apk_props() -> Value {
+    pub(crate) fn apk_props() -> Value {
         json!({
             "apk_id": {"type": "string"},
             "apk": {
@@ -1702,7 +1714,7 @@ pub mod defs {
 
     /// Budget and spill properties every tool takes (explained in the server
     /// instructions too).
-    pub fn output_props() -> Value {
+    pub(crate) fn output_props() -> Value {
         json!({
             "max_bytes": {"type": "integer"},
             "spill": {"type": "string", "description": "auto, always or never."},
@@ -1711,7 +1723,7 @@ pub mod defs {
     }
 
     /// The selection and paging properties of a multi-APK call.
-    pub fn many() -> Value {
+    pub(crate) fn many() -> Value {
         json!({
             "apks": {"type": "array", "items": {"type": "string"}},
             "dir": {"type": "string"},
@@ -1723,7 +1735,7 @@ pub mod defs {
         })
     }
 
-    pub fn page_props(limit: usize) -> Value {
+    pub(crate) fn page_props(limit: usize) -> Value {
         json!({
             "offset": {"type": "integer"},
             "limit": {"type": "integer", "description": format!("Default {limit}.")},
@@ -1731,7 +1743,7 @@ pub mod defs {
     }
 
     /// `base` plus every property of `extra`.
-    pub fn merge(mut base: Value, extra: &[Value]) -> Value {
+    pub(crate) fn merge(mut base: Value, extra: &[Value]) -> Value {
         if let Some(p) = base.as_object_mut() {
             for e in extra.iter().filter_map(Value::as_object) {
                 p.extend(e.clone());
@@ -1740,7 +1752,7 @@ pub mod defs {
         base
     }
 
-    pub fn getclass() -> Value {
+    pub(crate) fn getclass() -> Value {
         json!({
             "description": "A class as smali. Over the budget: an outline (fields, method signatures and sizes) unless \
                 full=true; then ask for methods.",
@@ -1759,7 +1771,7 @@ pub mod defs {
         })
     }
 
-    pub fn findrefs() -> Value {
+    pub(crate) fn findrefs() -> Value {
         json!({
             "description": "Methods referencing a string / type / method / field, one per line: `dex | Lcls;->m(I)V | \
                 \"str\", Lx;->f:I`; or classes extending / implementing a type. context=N or \"method\" adds the code. \
@@ -1788,7 +1800,7 @@ pub mod defs {
         })
     }
 
-    pub fn callgraph() -> Value {
+    pub(crate) fn callgraph() -> Value {
         json!({
             "description": "Callers (default) or callees of a method across every DEX, as an indented tree (`2 <- \
                 Lx;->m()V`). `[no body]`: not in the APK. Static calls only unless virtual=true. Instead of class + \
@@ -1813,7 +1825,7 @@ pub mod defs {
         })
     }
 
-    pub fn listclass() -> Value {
+    pub(crate) fn listclass() -> Value {
         json!({
             "description": "Classes the APK defines, optionally under a prefix. With apks / dir: count and first classes per APK.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
@@ -1824,7 +1836,7 @@ pub mod defs {
         })
     }
 
-    pub fn getmanifest() -> Value {
+    pub(crate) fn getmanifest() -> Value {
         json!({
             "description": "AndroidManifest.xml as XML (records: manifest_summary).",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({

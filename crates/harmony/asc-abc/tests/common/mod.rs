@@ -20,7 +20,7 @@ use asc_fixture::abc::{
 
 /// What a full walk saw.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Stats {
+pub(crate) struct Stats {
     pub classes: u32,
     pub foreign_classes: u32,
     pub pseudo_records: u32,
@@ -50,7 +50,7 @@ pub struct Stats {
 /// Touch every structure reachable in `abc`. Returns the first error; never
 /// panics on malformed input. With `strict`, also asserts the invariants a
 /// compiler-produced file satisfies.
-pub fn walk(abc: &Abc<'_>, strict: bool) -> Result<Stats, AbcError> {
+pub(crate) fn walk(abc: &Abc<'_>, strict: bool) -> Result<Stats, AbcError> {
     let mut stats = Stats::default();
     let len = abc.bytes().len();
     let in_file = |off: u32| (off as usize) < len;
@@ -320,24 +320,24 @@ fn workspace_root() -> PathBuf {
 
 /// Directory of the ReArk samples: `$ASC_ABC_SAMPLES`, else
 /// `<workspace>/../ark/ReArk/samples`.
-pub fn samples_dir() -> PathBuf {
+pub(crate) fn samples_dir() -> PathBuf {
     std::env::var_os("ASC_ABC_SAMPLES").map_or_else(|| workspace_root().join("../ark/ReArk/samples"), PathBuf::from)
 }
 
 /// Directory of the large sample, `$ASC_ABC_LARGE_SAMPLE`: an app-store
 /// package `entry.hap` and its decrypted `modules.abc`. There is no
 /// default: `None` when the variable is not set.
-pub fn large_sample_dir() -> Option<PathBuf> {
+pub(crate) fn large_sample_dir() -> Option<PathBuf> {
     std::env::var_os("ASC_ABC_LARGE_SAMPLE").map(PathBuf::from)
 }
 
 /// The decrypted `modules.abc` of the large sample.
-pub fn load_large_sample() -> Option<Vec<u8>> {
+pub(crate) fn load_large_sample() -> Option<Vec<u8>> {
     std::fs::read(large_sample_dir()?.join("modules.abc")).ok()
 }
 
 /// Entry `entry` of the large sample's `entry.hap`.
-pub fn load_large_sample_entry(entry: &str) -> Option<Vec<u8>> {
+pub(crate) fn load_large_sample_entry(entry: &str) -> Option<Vec<u8>> {
     load_abc(&large_sample_dir()?.join("entry.hap"), entry)
 }
 
@@ -351,7 +351,7 @@ fn zip_entry(archive: Vec<u8>, name: &str) -> Vec<u8> {
 
 /// Entry `entry` of the `.hap` at `path`; for an `.app`, of its inner
 /// `entry-default.hap`. `None` when the sample is not there (CI).
-pub fn load_abc(path: &Path, entry: &str) -> Option<Vec<u8>> {
+pub(crate) fn load_abc(path: &Path, entry: &str) -> Option<Vec<u8>> {
     let mut archive = std::fs::read(path).ok()?;
     if path.extension().is_some_and(|ext| ext == "app") {
         archive = zip_entry(archive, "entry-default.hap");
@@ -360,16 +360,16 @@ pub fn load_abc(path: &Path, entry: &str) -> Option<Vec<u8>> {
 }
 
 /// `ets/modules.abc` of a ReArk sample.
-pub fn load_sample(file: &str) -> Option<Vec<u8>> {
+pub(crate) fn load_sample(file: &str) -> Option<Vec<u8>> {
     load_abc(&samples_dir().join(file), "ets/modules.abc")
 }
 
-pub const RECORD_A: &str = "&entry/src/main/ets/pages/Index&";
-pub const RECORD_B: &str = "com.example.app/entry/ets/model/Util";
+pub(crate) const RECORD_A: &str = "&entry/src/main/ets/pages/Index&";
+pub(crate) const RECORD_B: &str = "com.example.app/entry/ets/model/Util";
 /// The foreign class of [`synthetic`]; also the class of its annotations.
-pub const FOREIGN: &str = "_ESTypeAnnotation";
+pub(crate) const FOREIGN: &str = "_ESTypeAnnotation";
 /// The `i64` field `big` of record A.
-pub const BIG: u64 = 0x1122_3344_5566_7788;
+pub(crate) const BIG: u64 = 0x1122_3344_5566_7788;
 
 /// Description of [`synthetic`]: a two-region file, version 12.0.6.0
 /// (literal array index present), with a correct checksum.
@@ -380,7 +380,7 @@ pub const BIG: u64 = 0x1122_3344_5566_7788;
 /// `hello`: the same strings under different 16-bit ids. The second and
 /// third function of B store a wrong region number (7, out of range, and
 /// 0, the other region).
-pub fn synthetic_builder() -> (AbcBuilder, LiteralArrayId) {
+pub(crate) fn synthetic_builder() -> (AbcBuilder, LiteralArrayId) {
     let mut builder = AbcBuilder::new();
     builder.foreign_class(FOREIGN);
     let literal_array =
@@ -447,7 +447,7 @@ pub fn synthetic_builder() -> (AbcBuilder, LiteralArrayId) {
 
 /// The file [`synthetic_builder`] describes and the offset of its declared
 /// literal array.
-pub fn synthetic() -> (AbcFile, u32) {
+pub(crate) fn synthetic() -> (AbcFile, u32) {
     let (builder, literal_array) = synthetic_builder();
     let file = builder.build();
     let literal_array = file.layout.literal_array(literal_array);
@@ -455,17 +455,17 @@ pub fn synthetic() -> (AbcFile, u32) {
 }
 
 /// Deterministic xorshift generator for the mutation tests.
-pub struct Rng(pub u64);
+pub(crate) struct Rng(pub u64);
 
 impl Rng {
-    pub fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
 
-    pub fn below(&mut self, bound: usize) -> usize {
+    pub(crate) fn below(&mut self, bound: usize) -> usize {
         (self.next() % bound as u64) as usize
     }
 }

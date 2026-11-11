@@ -34,14 +34,14 @@ fn ceil_boundary(text: &str, at: usize) -> usize {
 }
 
 /// The bytes of `text` that [`quoted_cut`] shows under `limit`.
-pub fn shown_bytes(text: &str, limit: usize) -> usize {
+pub(crate) fn shown_bytes(text: &str, limit: usize) -> usize {
     floor_boundary(text, limit)
 }
 
 /// `text` in quotes on one line, at most `limit` bytes of it (cut back to a
 /// character boundary), what was dropped counted after the closing quote:
 /// `"abc"… (+120 bytes)`, as a listing cuts a string literal.
-pub fn quoted_cut(text: &str, limit: usize) -> String {
+pub(crate) fn quoted_cut(text: &str, limit: usize) -> String {
     let end = shown_bytes(text, limit);
     let mut out = quoted(&text[..end]);
     if end < text.len() {
@@ -61,7 +61,7 @@ pub fn cut(text: &str, limit: usize) -> Cow<'_, str> {
 /// Where a match lies in a string too long to show whole, with the text
 /// around it: `match at byte 51234: …"token=abc"…`. A `…` says that the
 /// string goes on at that side.
-pub fn match_excerpt(text: &str, matched: std::ops::Range<usize>) -> String {
+pub(crate) fn match_excerpt(text: &str, matched: std::ops::Range<usize>) -> String {
     let start = floor_boundary(text, matched.start.saturating_sub(MATCH_CONTEXT_BYTES));
     let shown = matched.end.min(matched.start.saturating_add(MATCH_SHOWN_BYTES));
     let end = ceil_boundary(text, shown.saturating_add(MATCH_CONTEXT_BYTES));
@@ -79,14 +79,14 @@ pub fn match_excerpt(text: &str, matched: std::ops::Range<usize>) -> String {
 /// The [`match_excerpt`] of a match (`matched`, a byte range of `text`)
 /// that starts beyond the [`ROW_STRING_BYTES`] a row shows of `text`;
 /// `None` when the match is in the part shown.
-pub fn excerpt_beyond(text: &str, matched: Option<std::ops::Range<usize>>) -> Option<String> {
+pub(crate) fn excerpt_beyond(text: &str, matched: Option<std::ops::Range<usize>>) -> Option<String> {
     let matched = matched.filter(|matched| matched.start >= shown_bytes(text, ROW_STRING_BYTES))?;
     Some(match_excerpt(text, matched))
 }
 
 /// A matched string for a result row: [`quoted_cut`] under
 /// [`ROW_STRING_BYTES`], with the [`excerpt_beyond`] of its match behind it.
-pub fn quoted_match(text: &str, matched: Option<std::ops::Range<usize>>) -> String {
+pub(crate) fn quoted_match(text: &str, matched: Option<std::ops::Range<usize>>) -> String {
     let mut out = quoted_cut(text, ROW_STRING_BYTES);
     if let Some(excerpt) = excerpt_beyond(text, matched) {
         out.push(' ');

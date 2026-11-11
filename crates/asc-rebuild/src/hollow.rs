@@ -44,7 +44,7 @@ impl<'a> Selection<'a> {
     /// descriptor starts with its name followed by `$`. Enclosing classes and
     /// siblings stay out. A nested class that cannot be hollowed is dropped;
     /// the requested class failing fails the selection.
-    pub fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Selection<'a>> {
+    pub(crate) fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Selection<'a>> {
         let (target_idx, target_def) =
             dex.find_class_def(&mutf8::encode(descriptor))?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
         // Nested types sort as one run of type ids; most classes have none,
@@ -69,17 +69,17 @@ impl<'a> Selection<'a> {
         Ok(sel)
     }
 
-    pub fn target(&self) -> &Hollow<'a> {
+    pub(crate) fn target(&self) -> &Hollow<'a> {
         &self.classes[self.target]
     }
 
-    pub fn has_nested(&self) -> bool {
+    pub(crate) fn has_nested(&self) -> bool {
         self.classes.len() > 1
     }
 
     /// Drop each nested class `check` rejects, recording its error as the
     /// reason. The requested class is not checked.
-    pub fn retain_nested<E: Display>(
+    pub(crate) fn retain_nested<E: Display>(
         &mut self,
         dex: &Dex<'_>,
         mut check: impl FnMut(&Hollow<'a>) -> std::result::Result<(), E>,

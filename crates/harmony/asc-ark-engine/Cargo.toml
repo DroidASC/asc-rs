@@ -24,3 +24,6 @@ thiserror.workspace = true
 # `make_apk` builds the synthetic `.hap` / `.app` archives of the tests.
 asc-fixture.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

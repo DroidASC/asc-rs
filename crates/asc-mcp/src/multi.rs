@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Default budget of one APK's section.
-pub const MAX_APK_BYTES: usize = 4 << 10;
+pub(crate) const MAX_APK_BYTES: usize = 4 << 10;
 /// Most apk_ids of empty APKs a page lists by name.
 const MAX_EMPTY_LISTED: usize = 32;
 /// Directory levels `dir` descends.
@@ -25,7 +25,7 @@ const MAX_DEPTH: usize = 8;
 
 /// The APK paths `args` selects with `apks` or `dir` / `glob`, sorted; `None`
 /// when neither is given (a single-APK call).
-pub fn targets(args: &Value) -> Result<Option<Vec<PathBuf>>, ToolError> {
+pub(crate) fn targets(args: &Value) -> Result<Option<Vec<PathBuf>>, ToolError> {
     let mut paths = match (args.get("apks"), args.get("dir")) {
         (None | Some(Value::Null), None | Some(Value::Null)) => return Ok(None),
         (Some(_), Some(d)) if !d.is_null() => return Err(ToolError("pass `apks` or `dir`, not both".into())),
@@ -75,7 +75,7 @@ fn walk(dir: &Path, glob: &str, depth: usize, out: &mut Vec<PathBuf>) -> std::io
 }
 
 /// Shell-style match of a file name: `*` any run, `?` one byte.
-pub fn glob_match(pat: &[u8], name: &[u8]) -> bool {
+pub(crate) fn glob_match(pat: &[u8], name: &[u8]) -> bool {
     let (mut p, mut n) = (0, 0);
     // Where the last `*` was and the name position it is matching up to.
     let mut star = None;
@@ -99,10 +99,10 @@ pub fn glob_match(pat: &[u8], name: &[u8]) -> bool {
 
 /// What one APK of a fan-out produced: its units' results in plan order, or
 /// why it could not be planned (or was cancelled).
-pub type Outcome<R> = Result<Vec<R>, String>;
+pub(crate) type Outcome<R> = Result<Vec<R>, String>;
 
 /// An APK's plan: the context its units share, and the weighted units.
-pub type Plan<C, U> = Result<(C, Vec<(u64, U)>), String>;
+pub(crate) type Plan<C, U> = Result<(C, Vec<(u64, U)>), String>;
 
 /// Run `run` over every unit of every APK. `plan` opens an APK and splits it
 /// into `(weight, unit)`s sharing a context `C`; all units of all APKs share
@@ -111,7 +111,7 @@ pub type Plan<C, U> = Result<(C, Vec<(u64, U)>), String>;
 /// unit finishes, its context is dropped (with whatever it maps) and `done`
 /// runs (to release what the APK caches). Units not started when `cancel` is
 /// raised are skipped and the APK reports an error.
-pub fn fan_out<C, U, R>(
+pub(crate) fn fan_out<C, U, R>(
     threads: Threads,
     apks: &[Arc<OpenApk>],
     cancel: &AtomicBool,
@@ -218,7 +218,7 @@ where
 }
 
 /// One APK's part of a report.
-pub struct Section {
+pub(crate) struct Section {
     /// Lines without their trailing newline; the first one names the APK.
     pub lines: Vec<String>,
     pub json: Value,
@@ -230,7 +230,7 @@ impl Section {
     }
 
     /// The APK's error as a one-line section.
-    pub fn error(apk: &str, path: &Path, err: &str) -> Section {
+    pub(crate) fn error(apk: &str, path: &Path, err: &str) -> Section {
         Section {
             lines: vec![format!("{apk} | error | {} | {err}", path.display())],
             json: json!({"apk_id": apk, "path": path.display().to_string(), "error": err}),
@@ -239,7 +239,7 @@ impl Section {
 }
 
 /// A multi-APK result, kept by the server so a cursor can page through it.
-pub struct Report {
+pub(crate) struct Report {
     pub tool: &'static str,
     /// First line of every page: what was asked and the totals.
     pub header: String,
@@ -253,7 +253,7 @@ pub struct Report {
 
 impl Report {
     /// Every section, as one text (what a spill file holds).
-    pub fn full_text(&self) -> String {
+    pub(crate) fn full_text(&self) -> String {
         let mut text = format!("{}\n", self.header);
         for l in self.sections.iter().flat_map(|s| &s.lines) {
             text.push_str(l);
@@ -267,7 +267,7 @@ impl Report {
 
     /// The page starting at section `from`: whole sections up to the byte
     /// budget (at least one), and the section index to continue from.
-    pub fn page(&self, from: usize, cursor_id: Option<usize>) -> (String, Value) {
+    pub(crate) fn page(&self, from: usize, cursor_id: Option<usize>) -> (String, Value) {
         let from = from.min(self.sections.len());
         let mut text = format!("{}\n", self.header);
         let mut end = from;
@@ -326,7 +326,7 @@ impl Report {
 
 /// Reports kept for cursors, newest last.
 #[derive(Default)]
-pub struct Reports {
+pub(crate) struct Reports {
     next_id: usize,
     kept: Vec<(usize, Arc<Report>)>,
 }
@@ -335,7 +335,7 @@ pub struct Reports {
 const KEPT_REPORTS: usize = 16;
 
 impl Reports {
-    pub fn keep(&mut self, report: Arc<Report>) -> usize {
+    pub(crate) fn keep(&mut self, report: Arc<Report>) -> usize {
         self.next_id += 1;
         let id = self.next_id;
         if self.kept.len() == KEPT_REPORTS {
@@ -345,19 +345,19 @@ impl Reports {
         id
     }
 
-    pub fn get(&self, id: usize) -> Option<Arc<Report>> {
+    pub(crate) fn get(&self, id: usize) -> Option<Arc<Report>> {
         self.kept.iter().find(|(i, _)| *i == id).map(|(_, r)| Arc::clone(r))
     }
 }
 
 /// Parse a cursor `"<report>:<section>"`.
-pub fn parse_cursor(c: &str) -> Option<(usize, usize)> {
+pub(crate) fn parse_cursor(c: &str) -> Option<(usize, usize)> {
     let (a, b) = c.split_once(':')?;
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
 /// Package prefixes of common third-party SDKs, as descriptor prefixes.
-pub const DEFAULT_SDK_PREFIXES: &[&str] = &[
+pub(crate) const DEFAULT_SDK_PREFIXES: &[&str] = &[
     "Landroid/support/",
     "Landroidx/",
     "Lkotlin/",
@@ -396,7 +396,7 @@ pub const DEFAULT_SDK_PREFIXES: &[&str] = &[
 ];
 
 /// Descriptor-form package prefixes (`Lcom/foo/`) from `com.foo` / `Lcom/foo/` spellings.
-pub fn normalize_prefix(p: &str) -> String {
+pub(crate) fn normalize_prefix(p: &str) -> String {
     let mut d = p.trim().replace('.', "/");
     if !d.starts_with('L') {
         d.insert(0, 'L');
@@ -408,13 +408,13 @@ pub fn normalize_prefix(p: &str) -> String {
 }
 
 /// The class descriptor of a result's `Lcls;->member` (or a bare `Lcls;`).
-pub fn result_class(method: &str) -> &str {
+pub(crate) fn result_class(method: &str) -> &str {
     method.split("->").next().unwrap_or(method)
 }
 
 /// The first `depth` package segments of a class descriptor, as `Lcom/foo/`;
 /// the default package is `L`.
-pub fn package_of(class: &str, depth: usize) -> &str {
+pub(crate) fn package_of(class: &str, depth: usize) -> &str {
     let body = class.strip_prefix('L').unwrap_or(class);
     let mut end = 0;
     for (i, _) in body.match_indices('/').take(depth) {
@@ -424,7 +424,7 @@ pub fn package_of(class: &str, depth: usize) -> &str {
 }
 
 /// The SDK prefix `class` falls under, if any.
-pub fn sdk_of<'a>(prefixes: &'a [String], class: &str) -> Option<&'a str> {
+pub(crate) fn sdk_of<'a>(prefixes: &'a [String], class: &str) -> Option<&'a str> {
     prefixes.iter().map(String::as_str).filter(|p| class.starts_with(p)).max_by_key(|p| p.len())
 }
 

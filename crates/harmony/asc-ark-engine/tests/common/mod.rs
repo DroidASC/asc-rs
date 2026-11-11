@@ -15,7 +15,7 @@ fn workspace_root() -> PathBuf {
 
 /// A ReArk sample: `$ASC_ABC_SAMPLES/<file>`, else
 /// `<workspace>/../ark/ReArk/samples/<file>`. `None` when it is not there.
-pub fn sample(file: &str) -> Option<PathBuf> {
+pub(crate) fn sample(file: &str) -> Option<PathBuf> {
     let dir = std::env::var_os("ASC_ABC_SAMPLES").map_or_else(|| workspace_root().join("../ark/ReArk/samples"), PathBuf::from);
     Some(dir.join(file)).filter(|path| path.is_file())
 }
@@ -23,14 +23,14 @@ pub fn sample(file: &str) -> Option<PathBuf> {
 /// The directory of the large sample, `$ASC_ABC_LARGE_SAMPLE`: an
 /// app-store package `entry.hap` and its decrypted `modules.abc`. There is
 /// no default: `None` unless the variable is set and both files are there.
-pub fn large_sample_dir() -> Option<PathBuf> {
+pub(crate) fn large_sample_dir() -> Option<PathBuf> {
     let dir = PathBuf::from(std::env::var_os("ASC_ABC_LARGE_SAMPLE")?);
     Some(dir).filter(|dir| dir.join("entry.hap").is_file() && dir.join("modules.abc").is_file())
 }
 
 /// `data` with everything after the 60-byte header scrambled: what an
 /// app-store encrypted file looks like (plain header, checksum included).
-pub fn encrypted(data: &[u8]) -> Vec<u8> {
+pub(crate) fn encrypted(data: &[u8]) -> Vec<u8> {
     let mut out = data.to_vec();
     for (i, byte) in out.iter_mut().enumerate().skip(asc_abc::HEADER_SIZE) {
         *byte ^= 0xa5 ^ (i as u8).wrapping_mul(31);
@@ -39,56 +39,56 @@ pub fn encrypted(data: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Default)]
-pub struct Sink(pub Vec<u8>);
+pub(crate) struct Sink(pub Vec<u8>);
 
 impl Sink {
-    pub fn pos(&self) -> u32 {
+    pub(crate) fn pos(&self) -> u32 {
         self.0.len() as u32
     }
 
-    pub fn u8(&mut self, v: u8) -> &mut Sink {
+    pub(crate) fn u8(&mut self, v: u8) -> &mut Sink {
         self.0.push(v);
         self
     }
 
-    pub fn u16(&mut self, v: u16) -> &mut Sink {
+    pub(crate) fn u16(&mut self, v: u16) -> &mut Sink {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
 
-    pub fn u32(&mut self, v: u32) -> &mut Sink {
+    pub(crate) fn u32(&mut self, v: u32) -> &mut Sink {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
 
-    pub fn uleb(&mut self, v: u32) -> &mut Sink {
+    pub(crate) fn uleb(&mut self, v: u32) -> &mut Sink {
         asc_abc::leb128::write_uleb128(&mut self.0, v);
         self
     }
 
-    pub fn sleb(&mut self, v: i32) -> &mut Sink {
+    pub(crate) fn sleb(&mut self, v: i32) -> &mut Sink {
         asc_abc::leb128::write_sleb128(&mut self.0, v);
         self
     }
 
-    pub fn bytes(&mut self, v: &[u8]) -> &mut Sink {
+    pub(crate) fn bytes(&mut self, v: &[u8]) -> &mut Sink {
         self.0.extend_from_slice(v);
         self
     }
 
     /// An ASCII `String` item; returns its offset.
-    pub fn string(&mut self, s: &str) -> u32 {
+    pub(crate) fn string(&mut self, s: &str) -> u32 {
         let off = self.pos();
         self.uleb((s.len() as u32) << 1 | 1).bytes(s.as_bytes()).u8(0);
         off
     }
 
-    pub fn patch_u32(&mut self, at: u32, v: u32) {
+    pub(crate) fn patch_u32(&mut self, at: u32, v: u32) {
         self.0[at as usize..at as usize + 4].copy_from_slice(&v.to_le_bytes());
     }
 }
 
-pub fn adler32(data: &[u8]) -> u32 {
+pub(crate) fn adler32(data: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32);
     for &byte in data {
         a = (a + u32::from(byte)) % 65521;
@@ -99,7 +99,7 @@ pub fn adler32(data: &[u8]) -> u32 {
 
 /// Offsets of the interesting items of [`synthetic`].
 #[derive(Debug, Clone, Copy)]
-pub struct Synthetic {
+pub(crate) struct Synthetic {
     pub class_index: u32,
     pub region_headers: u32,
     pub class_a: u32,
@@ -117,13 +117,13 @@ pub struct Synthetic {
     pub methods_b: [u32; 3],
 }
 
-pub const RECORD_A: &str = "&entry/src/main/ets/pages/Index&";
-pub const RECORD_B: &str = "com.example.app/entry/ets/model/Util";
+pub(crate) const RECORD_A: &str = "&entry/src/main/ets/pages/Index&";
+pub(crate) const RECORD_B: &str = "com.example.app/entry/ets/model/Util";
 
 /// A two-region file, version 12.0.6.0 (literal array index present), with
 /// a correct checksum. Region 0 holds record A, region 1 record B; both
 /// name string `hello` but under different 16-bit ids.
-pub fn synthetic() -> (Vec<u8>, Synthetic) {
+pub(crate) fn synthetic() -> (Vec<u8>, Synthetic) {
     let mut s = Sink::default();
     s.bytes(&asc_abc::MAGIC).u32(0).bytes(&[12, 0, 6, 0]);
     s.bytes(&[0; 44]);

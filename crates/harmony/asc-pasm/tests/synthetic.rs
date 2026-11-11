@@ -74,16 +74,16 @@ impl Sink {
 
 /// Ids the instructions of a synthetic function can use.
 mod id {
-    pub const HELLO: u8 = 0;
-    pub const ESCAPES: u8 = 1;
+    pub(crate) const HELLO: u8 = 0;
+    pub(crate) const ESCAPES: u8 = 1;
     /// Twenty integers: 0, 100, 200 …
-    pub const NUMBERS: u8 = 2;
+    pub(crate) const NUMBERS: u8 = 2;
     /// The first function of the record.
-    pub const FIRST_FUNCTION: u8 = 3;
-    pub const MIXED: u8 = 4;
+    pub(crate) const FIRST_FUNCTION: u8 = 3;
+    pub(crate) const MIXED: u8 = 4;
     /// Points outside the file.
-    pub const DANGLING: u8 = 5;
-    pub const COUNT: u32 = 6;
+    pub(crate) const DANGLING: u8 = 5;
+    pub(crate) const COUNT: u32 = 6;
 }
 
 /// A one-region file, version 13.0.1.0 (no literal array index), holding one

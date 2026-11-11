@@ -299,7 +299,7 @@ fn annotate(table: &ResTable, smali: &str) -> String {
 }
 
 /// `0x7f0d0001` / `7f0d0001` / `@0x7f0d0001`.
-pub fn parse_id(s: &str) -> Option<u32> {
+pub(crate) fn parse_id(s: &str) -> Option<u32> {
     let s = s.trim_start_matches('@');
     let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
     (hex.len() == 8).then(|| u32::from_str_radix(hex, 16).ok()).flatten()

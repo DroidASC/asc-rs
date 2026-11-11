@@ -16,3 +16,6 @@ thiserror.workspace = true
 [dev-dependencies]
 asc-fixture.workspace = true
 asc-rebuild.workspace = true
+
+[lints]
+workspace = true

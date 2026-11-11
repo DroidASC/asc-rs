@@ -15,3 +15,6 @@ thiserror.workspace = true
 [dev-dependencies]
 asc-fixture.workspace = true
 zip.workspace = true
+
+[lints]
+workspace = true

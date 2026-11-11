@@ -14,7 +14,7 @@ use std::path::Path;
 pub const MAX_ENTRIES_LISTED: usize = 12;
 
 /// Bytes of function headers [`function_list`] lists before it counts the rest.
-pub const MAX_FUNCTIONS_LISTED: usize = 2 << 10;
+const MAX_FUNCTIONS_LISTED: usize = 2 << 10;
 
 /// What `getclass` is asked for: a record, or one function of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +84,7 @@ impl<'a> ClassTarget<'a> {
 
 /// `#~@0>#build (Index.build), ...`: the functions of the record a listing
 /// disassembles, at most about [`MAX_FUNCTIONS_LISTED`] bytes of them.
-pub fn function_list(source: &str) -> String {
+fn function_list(source: &str) -> String {
     let mut headers = source.lines().filter_map(|line| line.strip_prefix(".function "));
     let mut out = String::new();
     while let Some(header) = headers.next() {
@@ -244,7 +244,7 @@ impl SearchKind {
 }
 
 /// `function` without the `+0xPC` a findrefs row appends to it.
-pub fn without_pc(function: &str) -> &str {
+fn without_pc(function: &str) -> &str {
     match function.rsplit_once("+0x") {
         Some((name, pc)) if !name.is_empty() && !pc.is_empty() && pc.bytes().all(|b| b.is_ascii_hexdigit()) => name,
         _ => function,
@@ -275,7 +275,7 @@ pub fn pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, Engine
 ///
 /// # Errors
 /// An invalid regex.
-pub fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
+fn name_pattern(text: &str, literal: bool, exact: bool) -> Result<Pattern, EngineError> {
     match text.strip_prefix('=') {
         Some(name) if !literal && !exact => Ok(Pattern::exact(name)),
         _ => pattern(text, literal, exact),

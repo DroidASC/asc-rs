@@ -306,7 +306,7 @@ impl TypeLocator {
 /// are a binary search straight over the table; the name index is a sorted
 /// `(name_idx, id)` vector, which is several times cheaper to build than a
 /// hash map of vectors.
-pub struct MemberLocator {
+pub(crate) struct MemberLocator {
     pub(crate) table_off: usize,
     pub(crate) count: u32,
     /// `[name_idx, id]` sorted.

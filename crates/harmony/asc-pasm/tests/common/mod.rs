@@ -16,12 +16,12 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
-pub fn samples_dir() -> PathBuf {
+pub(crate) fn samples_dir() -> PathBuf {
     std::env::var_os("ASC_ABC_SAMPLES").map_or_else(|| workspace_root().join("../ark/ReArk/samples"), PathBuf::from)
 }
 
 /// `$ASC_ABC_LARGE_SAMPLE`; `None` when the variable is not set.
-pub fn large_sample_dir() -> Option<PathBuf> {
+pub(crate) fn large_sample_dir() -> Option<PathBuf> {
     std::env::var_os("ASC_ABC_LARGE_SAMPLE").map(PathBuf::from)
 }
 
@@ -35,7 +35,7 @@ fn zip_entry(archive: Vec<u8>, name: &str) -> Vec<u8> {
 
 /// Entry `entry` of the `.hap` at `path`; for an `.app`, of its inner
 /// `entry-default.hap`. `None` when the sample is not there.
-pub fn load_abc(path: &Path, entry: &str) -> Option<Vec<u8>> {
+pub(crate) fn load_abc(path: &Path, entry: &str) -> Option<Vec<u8>> {
     let mut archive = std::fs::read(path).ok()?;
     if path.extension().is_some_and(|ext| ext == "app") {
         archive = zip_entry(archive, "entry-default.hap");
@@ -44,6 +44,6 @@ pub fn load_abc(path: &Path, entry: &str) -> Option<Vec<u8>> {
 }
 
 /// `ets/modules.abc` of a ReArk sample.
-pub fn load_sample(file: &str) -> Option<Vec<u8>> {
+pub(crate) fn load_sample(file: &str) -> Option<Vec<u8>> {
     load_abc(&samples_dir().join(file), "ets/modules.abc")
 }

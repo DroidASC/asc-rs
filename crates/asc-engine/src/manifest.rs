@@ -194,7 +194,7 @@ impl IntentFilter {
 }
 
 /// `android:protectionLevel` flags as text (`signature|privileged`).
-pub fn protection_level_name(level: u32) -> String {
+pub(crate) fn protection_level_name(level: u32) -> String {
     let base = match level & 0xf {
         0 => "normal".to_string(),
         1 => "dangerous".to_string(),

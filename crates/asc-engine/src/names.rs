@@ -33,19 +33,14 @@ pub fn format_class_name(name: &str) -> Result<String> {
 /// `Lcom/poc/Main;` → `com/poc/Main`: the descriptor's own `L` / `;` removed,
 /// package separators kept. Only the leading `L` is syntax, so
 /// `Lpkg/LLoader;` → `pkg/LLoader` while `LLoader;` is class `Loader`.
-pub fn class_inner(descriptor: &str) -> &str {
+pub(crate) fn class_inner(descriptor: &str) -> &str {
     let d = descriptor.strip_prefix('L').unwrap_or(descriptor);
     d.strip_suffix(';').unwrap_or(d)
 }
 
-/// `Lcom/poc/Main;` → `com.poc.Main` (other inputs unchanged).
-pub fn dalvik_to_dot(name: &str) -> String {
-    if name.starts_with('L') && name.ends_with(';') { name[1..name.len() - 1].replace('/', ".") } else { name.to_string() }
-}
-
 /// Normalise a `listclass` prefix: `com.poc` / `com/poc` become `Lcom/poc`,
 /// a prefix already starting with `L` is used as is (like the Python tool).
-pub fn class_prefix(prefix: &str) -> Result<String> {
+pub(crate) fn class_prefix(prefix: &str) -> Result<String> {
     let p = prefix.trim();
     if p.is_empty() {
         return Err(EngineError::Query("Class prefix cannot be empty".into()));
@@ -58,7 +53,7 @@ pub fn class_prefix(prefix: &str) -> Result<String> {
 
 /// Normalise a class query: fuzzy patterns only get their dots swapped for
 /// slashes, precise names become full descriptors.
-pub fn normalize_class_query(name: &str, fuzzy: bool) -> Result<String> {
+pub(crate) fn normalize_class_query(name: &str, fuzzy: bool) -> Result<String> {
     if fuzzy {
         if name.contains('.') && !name.contains('/') {
             return Ok(name.replace('.', "/"));
@@ -71,7 +66,7 @@ pub fn normalize_class_query(name: &str, fuzzy: bool) -> Result<String> {
 /// A method / field target as agents write it, split into its parts. Every
 /// field borrows from the spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemberTarget<'a> {
+pub(crate) struct MemberTarget<'a> {
     /// The class part, as written (`Lcom/a/B;`, `com.a.B`, `B`, `~pattern`).
     pub class: Option<&'a str>,
     /// The member name (or name pattern).
@@ -86,7 +81,7 @@ impl<'a> MemberTarget<'a> {
     /// name (or name pattern) has no class. A dot only separates the class
     /// when what precedes it reads as a class (identifiers, the last one
     /// capitalised: `WebView.loadUrl`, not the regex `get.*Id`).
-    pub fn parse(spec: &'a str) -> MemberTarget<'a> {
+    pub(crate) fn parse(spec: &'a str) -> MemberTarget<'a> {
         let s = spec.trim();
         let (class, member) = if let Some((c, m)) = s.split_once("->") {
             (Some(c.trim()), m.trim())
@@ -134,7 +129,7 @@ fn dotted_member_split(spec: &str) -> Option<usize> {
 
 /// Whether `spec` names a class rather than a member: `Lcom/a/B;` or a dotted
 /// `com.a.B` whose last part is capitalised.
-pub fn looks_like_class(spec: &str) -> bool {
+pub(crate) fn looks_like_class(spec: &str) -> bool {
     let s = spec.trim();
     if s.starts_with('L') && s.ends_with(';') && !s.contains("->") {
         return true;
@@ -247,7 +242,7 @@ pub fn parse_kind(kind: &str) -> Result<&'static str> {
 }
 
 /// The Levenshtein distance of `a` and `b`, or `None` once it exceeds `max`.
-pub fn edit_distance(a: &str, b: &str, max: usize) -> Option<usize> {
+pub(crate) fn edit_distance(a: &str, b: &str, max: usize) -> Option<usize> {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     if a.len().abs_diff(b.len()) > max {
         return None;
@@ -326,7 +321,7 @@ fn java_element_type(t: &str) -> Option<String> {
 /// (`(ILjava/lang/String;)V`) or Java types separated by commas
 /// (`(int, java.lang.String) void`); a Java class without package
 /// (`String`) is that simple name in any package.
-pub fn parse_signature(signature: &str, method: bool) -> Result<MemberSignature> {
+pub(crate) fn parse_signature(signature: &str, method: bool) -> Result<MemberSignature> {
     let bad = |why: &str| {
         EngineError::Query(format!(
             "bad signature {signature:?}: {why}; write a method's as (params)ret, e.g. (ILjava/lang/String;)V or (int, String), \
@@ -408,7 +403,7 @@ fn type_match(t: &str) -> Option<TypeMatch> {
 
 /// The query of exactly the method `signature` names, `Lcls;->name(params)ret`
 /// as findrefs and callgraph print it (whatever characters the name holds).
-pub fn exact_method(signature: &str) -> Result<MemberQuery> {
+pub(crate) fn exact_method(signature: &str) -> Result<MemberQuery> {
     let bad = || EngineError::Query(format!("not a method signature: {signature:?} (want Lcls;->name(params)ret)"));
     let (class, member) = signature.trim().split_once("->").ok_or_else(bad)?;
     let p = member.find('(').ok_or_else(bad)?;
@@ -455,7 +450,6 @@ mod tests {
         assert_eq!(format_class_name("Lcom/poc/Main;").unwrap(), "Lcom/poc/Main;");
         assert_eq!(format_class_name("com/poc/Main").unwrap(), "Lcom/poc/Main;");
         assert_eq!(format_class_name("[Ljava/lang/Object;").unwrap(), "[Ljava/lang/Object;");
-        assert_eq!(dalvik_to_dot("Lcom/poc/Main;"), "com.poc.Main");
         assert_eq!(normalize_class_query("com.poc", true).unwrap(), "com/poc");
         assert_eq!(normalize_class_query("poc", true).unwrap(), "poc");
         assert!(format_class_name("").is_err());

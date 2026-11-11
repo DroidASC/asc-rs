@@ -67,9 +67,9 @@ pub use classes::{ClassListing, DexClasses, EntryClasses, dex_classes};
 pub use compact::TextRows;
 pub use compose::{DEFAULT_FAN_OUT, MatchingMethods};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
-pub use manifest::{Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission, protection_level_name};
+pub use manifest::{Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
 pub use prebuild::PrebuildReport;
-pub use resources::{ResourceField, ResourceRow, parse_id};
+pub use resources::{ResourceField, ResourceRow};
 pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
 pub use tiers::Busy;
@@ -2276,7 +2276,7 @@ pub(crate) fn defined_rows(dex: &Dex<'_>, d: &asc_findrefs::Defined) -> Result<V
 }
 
 /// Turn raw hits into display results (grouped per method when `aggregate`).
-pub fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: bool) -> Result<Vec<RefResult>> {
+pub(crate) fn results_from_hits(dex: &Dex<'_>, kind: RefKind, hits: &[Hit], aggregate: bool) -> Result<Vec<RefResult>> {
     if !aggregate {
         let mut out = Vec::new();
         for hit in hits {

@@ -36,3 +36,6 @@ libc = "0.2"
 [dev-dependencies]
 asc-fixture.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

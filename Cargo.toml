@@ -34,6 +34,9 @@ license = "Apache-2.0"
 repository = "https://github.com/Ylarod/asc-rs"
 rust-version = "1.98"
 
+[workspace.lints.rust]
+unreachable_pub = "warn"
+
 [workspace.dependencies]
 asc-dex = { version = "0.1.1", path = "crates/asc-dex" }
 asc-dalvik = { version = "0.1.1", path = "crates/asc-dalvik" }

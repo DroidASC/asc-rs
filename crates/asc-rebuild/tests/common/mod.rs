@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// ART's `dexdump`, from `DEXDUMP=/path/to/dexdump` or the newest SDK
 /// build-tools. Verifier tests skip when it is missing, so CI without an
 /// Android SDK is unaffected.
-pub fn dexdump() -> Option<PathBuf> {
+pub(crate) fn dexdump() -> Option<PathBuf> {
     let found = std::env::var_os("DEXDUMP").map(PathBuf::from).or_else(|| {
         let home = std::env::var_os("HOME")?;
         let bt = Path::new(&home).join("Android/Sdk/build-tools");
@@ -22,7 +22,7 @@ pub fn dexdump() -> Option<PathBuf> {
 
 /// Run `bytes` through `dexdump`, which verifies the file the way ART does,
 /// and fail the test with its output when it rejects them.
-pub fn assert_verifies(dexdump: &Path, name: &str, bytes: &[u8]) {
+pub(crate) fn assert_verifies(dexdump: &Path, name: &str, bytes: &[u8]) {
     // Tests run in parallel and may verify the same class: one file per call.
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     let call = CALLS.fetch_add(1, Ordering::Relaxed);

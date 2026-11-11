@@ -197,28 +197,28 @@ impl<'d, 'a> Names<'d, 'a> {
         Names { dex, types: HashMap::new(), protos: HashMap::new(), fields: HashMap::new(), methods: HashMap::new() }
     }
 
-    pub fn type_(&mut self, idx: u32) -> Result<&str> {
+    pub(crate) fn type_(&mut self, idx: u32) -> Result<&str> {
         if !self.types.contains_key(&idx) {
             self.types.insert(idx, self.dex.type_descriptor(idx)?);
         }
         Ok(self.types[&idx].as_str())
     }
 
-    pub fn proto(&mut self, idx: u32) -> Result<&str> {
+    pub(crate) fn proto(&mut self, idx: u32) -> Result<&str> {
         if !self.protos.contains_key(&idx) {
             self.protos.insert(idx, proto_descriptor(self.dex, idx)?);
         }
         Ok(self.protos[&idx].as_str())
     }
 
-    pub fn field(&mut self, idx: u32) -> Result<&str> {
+    pub(crate) fn field(&mut self, idx: u32) -> Result<&str> {
         if !self.fields.contains_key(&idx) {
             self.fields.insert(idx, format::field_signature(self.dex, idx)?);
         }
         Ok(self.fields[&idx].as_str())
     }
 
-    pub fn method(&mut self, idx: u32) -> Result<&str> {
+    pub(crate) fn method(&mut self, idx: u32) -> Result<&str> {
         if !self.methods.contains_key(&idx) {
             self.methods.insert(idx, method_signature(self.dex, idx)?);
         }

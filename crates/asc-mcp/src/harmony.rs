@@ -100,7 +100,7 @@ fn entry_error(engine: &Engine, error: EngineError) -> ToolError {
 }
 
 /// A HarmonyOS program of the session.
-pub struct Session {
+pub(crate) struct Session {
     pub id: String,
     pub path: PathBuf,
     pub engine: Engine,

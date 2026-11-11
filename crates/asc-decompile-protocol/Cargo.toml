@@ -11,3 +11,6 @@ description = "Wire types and line-delimited JSON-RPC framing shared by asc and 
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

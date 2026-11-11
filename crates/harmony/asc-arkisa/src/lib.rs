@@ -104,18 +104,18 @@ pub struct Operand {
 
 /// Bits of [`Opcode::flags`]; names follow the `isa.yaml` properties.
 pub(crate) mod flag {
-    pub const ACC_READ: u16 = 1 << 0;
-    pub const ACC_WRITE: u16 = 1 << 1;
-    pub const JUMP: u16 = 1 << 2;
-    pub const CONDITIONAL: u16 = 1 << 3;
-    pub const RETURN: u16 = 1 << 4;
-    pub const THROW: u16 = 1 << 5;
-    pub const THROW_IF: u16 = 1 << 6;
-    pub const CALL: u16 = 1 << 7;
-    pub const RANGE_0: u16 = 1 << 8;
-    pub const RANGE_1: u16 = 1 << 9;
-    pub const IC_SLOT: u16 = 1 << 10;
-    pub const IC_TWO_SLOTS: u16 = 1 << 11;
+    pub(crate) const ACC_READ: u16 = 1 << 0;
+    pub(crate) const ACC_WRITE: u16 = 1 << 1;
+    pub(crate) const JUMP: u16 = 1 << 2;
+    pub(crate) const CONDITIONAL: u16 = 1 << 3;
+    pub(crate) const RETURN: u16 = 1 << 4;
+    pub(crate) const THROW: u16 = 1 << 5;
+    pub(crate) const THROW_IF: u16 = 1 << 6;
+    pub(crate) const CALL: u16 = 1 << 7;
+    pub(crate) const RANGE_0: u16 = 1 << 8;
+    pub(crate) const RANGE_1: u16 = 1 << 9;
+    pub(crate) const IC_SLOT: u16 = 1 << 10;
+    pub(crate) const IC_TWO_SLOTS: u16 = 1 << 11;
 }
 
 /// One row of the opcode table.

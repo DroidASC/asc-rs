@@ -54,7 +54,7 @@ pub fn field_signature(dex: &Dex<'_>, field_idx: u32) -> Result<String> {
 
 /// baksmali's method handle literal: `invoke-static@Lcls;->m(I)V`,
 /// `static-get@Lcls;->f:I`.
-pub fn method_handle(dex: &Dex<'_>, handle_idx: u32) -> Result<String> {
+pub(crate) fn method_handle(dex: &Dex<'_>, handle_idx: u32) -> Result<String> {
     let handle = dex.method_handle(handle_idx)?;
     let member = u32::from(handle.field_or_method_idx);
     let target = if handle.kind.is_field_accessor() { field_signature(dex, member)? } else { method_signature(dex, member)? };
@@ -63,7 +63,7 @@ pub fn method_handle(dex: &Dex<'_>, handle_idx: u32) -> Result<String> {
 
 /// baksmali's call site reference:
 /// `call_site_0("name", (args)Ret, extra...)@Lbootstrap;->m(...)Ljava/lang/invoke/CallSite;`.
-pub fn call_site(dex: &Dex<'_>, site_idx: u32) -> Result<String> {
+pub(crate) fn call_site(dex: &Dex<'_>, site_idx: u32) -> Result<String> {
     let site = dex.call_site(site_idx)?;
     let mut out =
         format!("call_site_{site_idx}(\"{}\", {}", escape_string(&dex.string(site.method_name)?), proto_descriptor(dex, site.method_type)?);
@@ -78,7 +78,7 @@ pub fn call_site(dex: &Dex<'_>, site_idx: u32) -> Result<String> {
 }
 
 /// Signed hex literal (`0x1a`, `-0x1a`).
-pub fn hex_i64(v: i64) -> String {
+pub(crate) fn hex_i64(v: i64) -> String {
     if v < 0 { format!("-0x{:x}", (v as i128).unsigned_abs()) } else { format!("0x{v:x}") }
 }
 
@@ -107,11 +107,11 @@ fn double_literal(f: f64) -> String {
 }
 
 /// Render an encoded value on one line (arrays/annotations use `depth`).
-pub fn value(dex: &Dex<'_>, v: &EncodedValue) -> Result<String> {
+pub(crate) fn value(dex: &Dex<'_>, v: &EncodedValue) -> Result<String> {
     value_indented(dex, v, 0)
 }
 
-pub fn value_indented(dex: &Dex<'_>, v: &EncodedValue, depth: usize) -> Result<String> {
+pub(crate) fn value_indented(dex: &Dex<'_>, v: &EncodedValue, depth: usize) -> Result<String> {
     Ok(match v {
         EncodedValue::Primitive { kind, .. } => match *kind {
             VALUE_BYTE => format!("{}t", hex_i64(v.as_i64().unwrap_or(0))),

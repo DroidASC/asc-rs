@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Environment variable overriding [`ProcessRegistry::default_dir`].
-pub const RUNTIME_DIR_ENV: &str = "ASC_RUNTIME_DIR";
+pub(crate) const RUNTIME_DIR_ENV: &str = "ASC_RUNTIME_DIR";
 
 /// Another registered process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

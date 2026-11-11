@@ -22,13 +22,13 @@ use serde_json::{Map, Value, json};
 use std::path::Path;
 
 /// Default output budget of one reply (text bytes, about 4k tokens).
-pub const MAX_BYTES: usize = 16 << 10;
+pub(crate) const MAX_BYTES: usize = 16 << 10;
 /// Smallest budget a call may ask for.
 const MIN_BYTES: usize = 256;
 /// Inline head of a reply whose full text went to a file.
 const HEAD_BYTES: usize = 2 << 10;
 /// Default disk budget of the spill directory.
-pub const SPILL_BUDGET: u64 = 64 << 20;
+pub(crate) const SPILL_BUDGET: u64 = 64 << 20;
 /// Structured-result key under which a tool passes the full text behind
 /// what it shows inline; removed before the reply is sent.
 pub(crate) const FULL: &str = "__full";
@@ -39,7 +39,7 @@ pub(crate) const FITTED: &str = "__fitted";
 
 /// Where text that does not fit the budget goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Spill {
+pub(crate) enum Spill {
     Auto,
     Always,
     Never,
@@ -58,12 +58,12 @@ impl Spill {
 }
 
 /// The budget a call asks for.
-pub fn budget(args: &Value) -> Result<usize, ToolError> {
+pub(crate) fn budget(args: &Value) -> Result<usize, ToolError> {
     Ok(usize_arg(args, "max_bytes")?.unwrap_or(MAX_BYTES).max(MIN_BYTES))
 }
 
 /// A reply fitted to its budget, and the file it points at, if any.
-pub struct Fitted {
+pub(crate) struct Fitted {
     pub text: String,
     pub structured: Value,
     /// An MCP `resource_link` content item for the spilled file.
@@ -94,7 +94,7 @@ impl Request<'_> {
 }
 
 /// Fit a tool's `text` to the budget `args` ask for (see the module docs).
-pub fn fit(tool: &str, args: &Value, text: String, mut structured: Value, spill: Option<&SpillDir>) -> Result<Fitted, ToolError> {
+pub(crate) fn fit(tool: &str, args: &Value, text: String, mut structured: Value, spill: Option<&SpillDir>) -> Result<Fitted, ToolError> {
     let req = Request { tool, args, budget: budget(args)?, mode: Spill::from_args(args)?, pageable: true };
     let full = structured.as_object_mut().and_then(|o| o.remove(FULL)).and_then(|v| match v {
         Value::String(s) => Some(s),
@@ -339,7 +339,7 @@ fn head(text: &str, max: usize) -> String {
 
 /// `(signature, first line, last line)` of every `.method` in smali `text`,
 /// 1-based.
-pub fn method_index(text: &str) -> Vec<(String, usize, usize)> {
+pub(crate) fn method_index(text: &str) -> Vec<(String, usize, usize)> {
     let mut out = Vec::new();
     let mut open: Option<(String, usize)> = None;
     for (i, line) in text.lines().enumerate() {
@@ -360,7 +360,7 @@ pub fn method_index(text: &str) -> Vec<(String, usize, usize)> {
 /// `text` of a HarmonyOS record, 1-based; the header is `RAW  ; RESTORED`
 /// (see [`raw_name`]). A function runs to the line before the next one (less
 /// the blank lines between them).
-pub fn function_index(text: &str) -> Vec<(String, usize, usize)> {
+pub(crate) fn function_index(text: &str) -> Vec<(String, usize, usize)> {
     let mut out: Vec<(String, usize, usize)> = Vec::new();
     for (i, line) in text.lines().enumerate() {
         if let Some(header) = line.strip_prefix(".function ") {

@@ -454,11 +454,11 @@ fn rules_section(
     (hits + sdk_hits, Some(Section { lines, json }))
 }
 
-pub mod defs {
+pub(crate) mod defs {
     use crate::defs::{apk_props, merge, shape};
     use serde_json::{Value, json};
 
-    pub fn hierarchy() -> Value {
+    pub(crate) fn hierarchy() -> Value {
         json!({
             "description": "Subclasses / implementers (default) or supertypes of a class, as an indented tree; with \
                 `method`, which of them override it.",
@@ -477,7 +477,7 @@ pub mod defs {
     }
 
     /// findrefs properties for compound conditions and rule sets.
-    pub fn findrefs_props() -> Value {
+    pub(crate) fn findrefs_props() -> Value {
         let condition = json!({"type": "object", "description": "{kind, value / name / class, ...} as for one query."});
         json!({
             "all": {"type": "array", "items": condition, "description": "Instead of kind: methods matching every condition."},

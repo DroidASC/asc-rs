@@ -70,11 +70,11 @@ pub(crate) struct Obj<'v, 'f> {
 }
 
 impl<'v, 'f> Obj<'v, 'f> {
-    pub fn root(map: &'v Map<String, Value>, findings: &'f mut Findings) -> Self {
+    pub(crate) fn root(map: &'v Map<String, Value>, findings: &'f mut Findings) -> Self {
         Obj { map, path: String::new(), findings, read: Vec::new() }
     }
 
-    pub fn to_value(&self) -> Value {
+    pub(crate) fn to_value(&self) -> Value {
         Value::Object(self.map.clone())
     }
 
@@ -101,13 +101,13 @@ impl<'v, 'f> Obj<'v, 'f> {
         picked
     }
 
-    pub fn str(&mut self, key: &'static str) -> Option<String> {
+    pub(crate) fn str(&mut self, key: &'static str) -> Option<String> {
         self.typed(key, "string", |v| v.as_str().map(str::to_owned))
     }
 
     /// A string, or a number or boolean spelled as text: for fields such
     /// as `port` and metadata values that tools write either way.
-    pub fn text(&mut self, key: &'static str) -> Option<String> {
+    pub(crate) fn text(&mut self, key: &'static str) -> Option<String> {
         self.typed(key, "string, number or boolean", |v| match v {
             Value::String(s) => Some(s.clone()),
             Value::Number(n) => Some(n.to_string()),
@@ -116,16 +116,16 @@ impl<'v, 'f> Obj<'v, 'f> {
         })
     }
 
-    pub fn bool(&mut self, key: &'static str) -> Option<bool> {
+    pub(crate) fn bool(&mut self, key: &'static str) -> Option<bool> {
         self.typed(key, "boolean", Value::as_bool)
     }
 
-    pub fn int(&mut self, key: &'static str) -> Option<i64> {
+    pub(crate) fn int(&mut self, key: &'static str) -> Option<i64> {
         self.typed(key, "integer", Value::as_i64)
     }
 
     /// An array of strings; elements of another type are noted and skipped.
-    pub fn strings(&mut self, key: &'static str) -> Vec<String> {
+    pub(crate) fn strings(&mut self, key: &'static str) -> Vec<String> {
         let Some(items) = self.typed(key, "array", Value::as_array) else {
             return Vec::new();
         };
@@ -139,13 +139,13 @@ impl<'v, 'f> Obj<'v, 'f> {
         out
     }
 
-    pub fn object<T>(&mut self, key: &'static str, read: impl FnOnce(&mut Obj<'v, '_>) -> T) -> Option<T> {
+    pub(crate) fn object<T>(&mut self, key: &'static str, read: impl FnOnce(&mut Obj<'v, '_>) -> T) -> Option<T> {
         let map = self.typed(key, "object", Value::as_object)?;
         Some(self.descend(map, self.child_path(key), read))
     }
 
     /// An array of objects; elements of another type are noted and skipped.
-    pub fn objects<T>(&mut self, key: &'static str, mut read: impl FnMut(&mut Obj<'v, '_>) -> T) -> Vec<T> {
+    pub(crate) fn objects<T>(&mut self, key: &'static str, mut read: impl FnMut(&mut Obj<'v, '_>) -> T) -> Vec<T> {
         let Some(items) = self.typed(key, "array", Value::as_array) else {
             return Vec::new();
         };
@@ -168,14 +168,14 @@ impl<'v, 'f> Obj<'v, 'f> {
     }
 
     /// Mark presentation-only keys as known so they are not reported.
-    pub fn ignore(&mut self, keys: &[&'static str]) {
+    pub(crate) fn ignore(&mut self, keys: &[&'static str]) {
         self.read.extend_from_slice(keys);
     }
 
     /// Report every key that no accessor asked for. `fooId`, the numeric
     /// resource id the packer writes next to a `$type:name` reference in
     /// `foo`, is not reported when `foo` is modelled.
-    pub fn finish(self) {
+    pub(crate) fn finish(self) {
         for key in self.map.keys() {
             let key = key.as_str();
             let known = |k: &str| self.read.contains(&k);
@@ -200,26 +200,26 @@ pub(crate) fn token(text: &str) -> Cow<'_, str> {
 pub(crate) struct Line(String);
 
 impl Line {
-    pub fn new(record: &str) -> Self {
+    pub(crate) fn new(record: &str) -> Self {
         Line(record.to_owned())
     }
 
     /// A bare positional word.
     #[must_use]
-    pub fn word(mut self, text: &str) -> Self {
+    pub(crate) fn word(mut self, text: &str) -> Self {
         self.0.push(' ');
         self.0.push_str(&token(text));
         self
     }
 
     #[must_use]
-    pub fn raw(mut self, key: &str, value: impl fmt::Display) -> Self {
+    pub(crate) fn raw(mut self, key: &str, value: impl fmt::Display) -> Self {
         self.0.push_str(&format!(" {key}={value}"));
         self
     }
 
     #[must_use]
-    pub fn opt(self, key: &str, value: Option<&str>) -> Self {
+    pub(crate) fn opt(self, key: &str, value: Option<&str>) -> Self {
         match value {
             Some(v) => {
                 let v = token(v);
@@ -230,12 +230,12 @@ impl Line {
     }
 
     #[must_use]
-    pub fn flag(self, key: &str, value: Option<bool>) -> Self {
+    pub(crate) fn flag(self, key: &str, value: Option<bool>) -> Self {
         self.num(key, value)
     }
 
     #[must_use]
-    pub fn num<T: fmt::Display>(self, key: &str, value: Option<T>) -> Self {
+    pub(crate) fn num<T: fmt::Display>(self, key: &str, value: Option<T>) -> Self {
         match value {
             Some(v) => self.raw(key, v),
             None => self.raw(key, "-"),
@@ -243,7 +243,7 @@ impl Line {
     }
 
     #[must_use]
-    pub fn list(self, key: &str, values: &[String]) -> Self {
+    pub(crate) fn list(self, key: &str, values: &[String]) -> Self {
         if values.is_empty() {
             return self.raw(key, "-");
         }
@@ -253,21 +253,21 @@ impl Line {
 
     /// Like [`Line::opt`], but prints nothing when the value is absent.
     #[must_use]
-    pub fn opt_present(self, key: &str, value: Option<&str>) -> Self {
+    pub(crate) fn opt_present(self, key: &str, value: Option<&str>) -> Self {
         if value.is_some() { self.opt(key, value) } else { self }
     }
 
     #[must_use]
-    pub fn flag_present(self, key: &str, value: Option<bool>) -> Self {
+    pub(crate) fn flag_present(self, key: &str, value: Option<bool>) -> Self {
         if value.is_some() { self.flag(key, value) } else { self }
     }
 
     #[must_use]
-    pub fn list_present(self, key: &str, values: &[String]) -> Self {
+    pub(crate) fn list_present(self, key: &str, values: &[String]) -> Self {
         if values.is_empty() { self } else { self.list(key, values) }
     }
 
-    pub fn end(self) -> String {
+    pub(crate) fn end(self) -> String {
         self.0
     }
 }

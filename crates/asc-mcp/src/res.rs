@@ -372,11 +372,11 @@ impl Server {
 }
 
 /// `tools/list` entries of this module's tools.
-pub mod defs {
+pub(crate) mod defs {
     use crate::defs::{apk_props, many, merge, shape_many};
     use serde_json::{Value, json};
 
-    pub fn manifest_summary() -> Value {
+    pub(crate) fn manifest_summary() -> Value {
         json!({
             "description": "The manifest's attack surface, one record per line: package, application flags, \
                 (uses-)permission, each component (`provider <class> exported=true (intent-filter) authorities=...`), \
@@ -396,7 +396,7 @@ pub mod defs {
         })
     }
 
-    pub fn resources() -> Value {
+    pub(crate) fn resources() -> Value {
         json!({
             "description": "resources.arsc rows `0x7f0d0001 | string/app_name [zh-rCN] | \"value\"`: `query` one \
                 resource (every configuration; resolve=true follows references), `search` names / values, or `xml` \

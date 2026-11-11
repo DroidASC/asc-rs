@@ -13,3 +13,6 @@ asc-abc.workspace = true
 asc-arkisa.workspace = true
 asc-dex.workspace = true
 zip.workspace = true
+
+[lints]
+workspace = true

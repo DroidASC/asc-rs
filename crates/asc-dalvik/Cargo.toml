@@ -12,3 +12,6 @@ description = "Dalvik opcode table, instruction formats and operand decoding for
 [dev-dependencies]
 asc-dex.workspace = true
 asc-fixture.workspace = true
+
+[lints]
+workspace = true

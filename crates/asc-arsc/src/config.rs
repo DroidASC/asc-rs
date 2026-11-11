@@ -4,10 +4,10 @@
 
 use std::fmt;
 
-pub const DENSITY_DEFAULT: u16 = 0;
-pub const DENSITY_MEDIUM: u16 = 160;
-pub const DENSITY_ANY: u16 = 0xfffe;
-pub const DENSITY_NONE: u16 = 0xffff;
+pub(crate) const DENSITY_DEFAULT: u16 = 0;
+pub(crate) const DENSITY_MEDIUM: u16 = 160;
+pub(crate) const DENSITY_ANY: u16 = 0xfffe;
+pub(crate) const DENSITY_NONE: u16 = 0xffff;
 
 const MASK_SCREENSIZE: u8 = 0x0f;
 const MASK_SCREENLONG: u8 = 0x30;

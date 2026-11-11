@@ -84,7 +84,7 @@ pub fn parse_condition_in(spec: &str, dir: Option<&Path>) -> Result<Query> {
 /// The methods of an `@file`: one per line, blank lines and `#` comments
 /// skipped. A line may be any method target spelling, or a line findrefs or
 /// callgraph printed: its first `Lcls;->name...` token is the method.
-pub fn method_set(text: &str) -> Result<Vec<MemberQuery>> {
+pub(crate) fn method_set(text: &str) -> Result<Vec<MemberQuery>> {
     let mut targets: Vec<&str> = text
         .lines()
         .map(str::trim)

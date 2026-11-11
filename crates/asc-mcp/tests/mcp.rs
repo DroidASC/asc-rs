@@ -480,7 +480,7 @@ fn cancelled_calls_stop_and_get_no_reply() {
     let path = apk.path().to_str().unwrap();
     let server = asc_mcp::Server::new(opts());
     let line = call(1, "findrefs", json!({"apk": path, "kind": "string", "value": "token"})).to_string();
-    let cancel = asc_mcp::Call { cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)) };
+    let cancel = asc_mcp::Call::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)));
     let reply = server.handle_call(&line, &cancel).unwrap();
     assert_eq!(reply["result"]["content"][0]["text"], "Error: cancelled");
     let many = call(2, "findrefs", json!({"apks": [path], "kind": "string", "value": "token"})).to_string();
@@ -1061,7 +1061,7 @@ fn compact_structured_content_leaves_the_bulk_to_the_text() {
     let apk = temp_apk();
     let a = apk.path().to_str().unwrap();
     let mut o = opts();
-    o.structured = asc_mcp::output::Structured::Compact;
+    o.structured = asc_mcp::Structured::Compact;
     let replies = session_with(o, &[call(1, "getclass", json!({"apk": a, "class": "Lexample/Test;"})), call(2, "tools/list", json!({}))]);
     let s = &replies[0]["result"]["structuredContent"];
     assert!(s.get("source").is_none() && s["omitted"] == json!(["source"]), "{s}");
