@@ -8,3 +8,7 @@ rust-version.workspace = true
 description = "Dalvik opcode table, instruction formats and operand decoding for asc-rs."
 
 [dependencies]
+
+[dev-dependencies]
+asc-dex.workspace = true
+asc-fixture.workspace = true

@@ -10,3 +10,6 @@ description = "Lazy, bounds-checked resources.arsc reader used by asc-rs: names,
 [dependencies]
 asc-axml.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+asc-fixture.workspace = true

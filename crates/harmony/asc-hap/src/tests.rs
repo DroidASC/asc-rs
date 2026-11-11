@@ -597,3 +597,38 @@ fn page_lists_and_route_tables() {
     assert_eq!(m.route_record_names(&by_source, Some(&packages)).candidates(), ["&@lib/pay/src/main/ets/Pay&1.2.0"]);
     assert!(names(3, true).candidates().is_empty());
 }
+
+/// Damaged documents are read as far as they go or rejected, never panic:
+/// deterministic mutants of every sample document through every reader.
+#[test]
+fn mutated_documents_never_panic() {
+    use asc_fixture::hap::{
+        LIBRARY_MODULE_JSON, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON, SAMPLE_PACK_INFO, SAMPLE_ROUTER_MAP, SAMPLE_SOURCE_MAPS,
+    };
+
+    let seeds =
+        [REALISTIC, SAMPLE_MODULE_JSON, LIBRARY_MODULE_JSON, SAMPLE_PACK_INFO, SAMPLE_MAIN_PAGES, SAMPLE_ROUTER_MAP, SAMPLE_SOURCE_MAPS];
+    for (i, seed) in seeds.iter().enumerate() {
+        for data in asc_fixture::mutate::mutants(seed.as_bytes(), 0x4a9 + i as u64, 300) {
+            if let Ok(m) = ModuleJson::parse(&data) {
+                let _ = (m.summary(), m.pretty());
+                for ability in m.components() {
+                    let _ = ability.deep_links();
+                    if let Some(src) = &ability.src_entry {
+                        let _ = m.record_names(src, None).candidates();
+                    }
+                }
+            }
+            let _ = PackInfo::parse(&data).map(|p| p.summary());
+            let _ = PkgContextInfo::parse(&data).map(|p| p.summary());
+            let _ = PageList::parse(&data);
+            let _ = RouterMap::parse(&data).map(|r| r.routes.iter().map(|route| route.line()).collect::<Vec<_>>());
+            if let Ok(maps) = crate::SourceMaps::index(&data) {
+                let keys: Vec<String> = maps.keys().map(str::to_owned).collect();
+                for key in keys {
+                    let _ = maps.module(&data, &key);
+                }
+            }
+        }
+    }
+}

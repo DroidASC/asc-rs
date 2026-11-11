@@ -21,6 +21,7 @@ use std::io::Write;
 
 pub mod abc;
 pub mod hap;
+pub mod mutate;
 pub mod res;
 
 pub use abc::{AbcBuilder, make_abc, make_multi_region_abc};

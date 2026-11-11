@@ -126,6 +126,7 @@ name = "asc-arsc"
 version = "0.1.1"
 dependencies = [
  "asc-axml",
+ "asc-fixture",
  "thiserror",
 ]
 
@@ -133,6 +134,7 @@ dependencies = [
 name = "asc-axml"
 version = "0.1.1"
 dependencies = [
+ "asc-fixture",
  "thiserror",
 ]
 
@@ -166,6 +168,10 @@ dependencies = [
 [[package]]
 name = "asc-dalvik"
 version = "0.1.1"
+dependencies = [
+ "asc-dex",
+ "asc-fixture",
+]
 
 [[package]]
 name = "asc-decompile"

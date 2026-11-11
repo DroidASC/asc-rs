@@ -9,3 +9,6 @@ description = "Android binary XML (AXML) decoder used by asc-rs to print Android
 
 [dependencies]
 thiserror.workspace = true
+
+[dev-dependencies]
+asc-fixture.workspace = true

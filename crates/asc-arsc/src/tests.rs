@@ -362,3 +362,15 @@ fn type_id_offset_at_the_limit_names_no_type() {
     assert_eq!(t.name(APP_NAME), None);
     exercise(&t);
 }
+
+#[test]
+fn mutated_tables_never_panic() {
+    let seeds = [sample(), asc_fixture::res::audit_manifest(30).1];
+    for (i, seed) in seeds.iter().enumerate() {
+        for mutant in asc_fixture::mutate::mutants(seed, 0xa5c + i as u64, 1500) {
+            if let Ok(t) = ResTable::parse(mutant) {
+                exercise(&t);
+            }
+        }
+    }
+}
