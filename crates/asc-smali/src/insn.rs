@@ -1,6 +1,6 @@
 //! Method body rendering: instructions, labels, payloads, try/catch.
 
-use crate::format::{escape_string, hex_i64};
+use crate::format::{call_site, escape_string, hex_i64, method_handle};
 use crate::{Names, Options, Result};
 use asc_dalvik::{Format, IndexKind, Instruction, PayloadKind};
 use asc_dex::code::CodeItem;
@@ -376,12 +376,20 @@ fn index_operand(names: &mut Names<'_, '_>, i: &Instruction, idx: u32, out: &mut
             out.push_str(names.proto(i.h as u32)?);
         }
         IndexKind::ProtoRef => out.push_str(names.proto(idx)?),
-        IndexKind::CallSiteRef => {
-            let _ = write!(out, "call_site@{idx}");
-        }
-        IndexKind::MethodHandleRef => {
-            let _ = write!(out, "method_handle@{idx}");
-        }
+        // An unresolvable call site / handle keeps the raw index rather than
+        // failing the whole listing.
+        IndexKind::CallSiteRef => match call_site(names.dex, idx) {
+            Ok(site) => out.push_str(&site),
+            Err(_) => {
+                let _ = write!(out, "call_site@{idx}");
+            }
+        },
+        IndexKind::MethodHandleRef => match method_handle(names.dex, idx) {
+            Ok(handle) => out.push_str(&handle),
+            Err(_) => {
+                let _ = write!(out, "method_handle@{idx}");
+            }
+        },
         IndexKind::None | IndexKind::Unknown => {
             let _ = write!(out, "@{idx}");
         }

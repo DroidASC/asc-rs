@@ -52,6 +52,31 @@ pub fn field_signature(dex: &Dex<'_>, field_idx: u32) -> Result<String> {
     Ok(format!("{}->{}:{}", dex.type_descriptor(id.class_idx as u32)?, dex.string(id.name_idx)?, dex.type_descriptor(id.type_idx as u32)?))
 }
 
+/// baksmali's method handle literal: `invoke-static@Lcls;->m(I)V`,
+/// `static-get@Lcls;->f:I`.
+pub fn method_handle(dex: &Dex<'_>, handle_idx: u32) -> Result<String> {
+    let handle = dex.method_handle(handle_idx)?;
+    let member = u32::from(handle.field_or_method_idx);
+    let target = if handle.kind.is_field_accessor() { field_signature(dex, member)? } else { method_signature(dex, member)? };
+    Ok(format!("{}@{target}", handle.kind))
+}
+
+/// baksmali's call site reference:
+/// `call_site_0("name", (args)Ret, extra...)@Lbootstrap;->m(...)Ljava/lang/invoke/CallSite;`.
+pub fn call_site(dex: &Dex<'_>, site_idx: u32) -> Result<String> {
+    let site = dex.call_site(site_idx)?;
+    let mut out =
+        format!("call_site_{site_idx}(\"{}\", {}", escape_string(&dex.string(site.method_name)?), proto_descriptor(dex, site.method_type)?);
+    for arg in &site.extra_args {
+        out.push_str(", ");
+        out.push_str(&value(dex, arg)?);
+    }
+    let bootstrap = dex.method_handle(site.bootstrap)?;
+    out.push_str(")@");
+    out.push_str(&method_signature(dex, bootstrap.field_or_method_idx.into())?);
+    Ok(out)
+}
+
 /// Signed hex literal (`0x1a`, `-0x1a`).
 pub fn hex_i64(v: i64) -> String {
     if v < 0 { format!("-0x{:x}", (v as i128).unsigned_abs()) } else { format!("0x{v:x}") }
@@ -105,7 +130,7 @@ pub fn value_indented(dex: &Dex<'_>, v: &EncodedValue, depth: usize) -> Result<S
             k => format!("<unknown value type {k:#x}>"),
         },
         EncodedValue::MethodType(p) => proto_descriptor(dex, *p)?,
-        EncodedValue::MethodHandle(h) => format!("method_handle@{h}"),
+        EncodedValue::MethodHandle(h) => method_handle(dex, *h).unwrap_or_else(|_| format!("method_handle@{h}")),
         EncodedValue::String(s) => format!("\"{}\"", escape_string(&dex.string(*s)?)),
         EncodedValue::Type(t) => dex.type_descriptor(*t)?,
         EncodedValue::Field(f) => field_signature(dex, *f)?,

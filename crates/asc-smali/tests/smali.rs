@@ -292,6 +292,32 @@ fn unknown_opcode_is_commented_and_skipped() {
 }
 
 #[test]
+fn invoke_custom_renders_call_sites_like_baksmali() {
+    let data = include_bytes!("../../asc-dex/tests/d8/callsites.dex");
+    let dex = Dex::parse(data).unwrap();
+    let text = asc_smali::disassemble_class(&dex, "LCallSites;", Default::default()).unwrap();
+    let metafactory = "Ljava/lang/invoke/LambdaMetafactory;->metafactory(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;\
+                       Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;\
+                       Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
+    let lambda = format!(
+        "invoke-custom {{v3}}, call_site_0(\"applyAsInt\", (I)Ljava/util/function/IntBinaryOperator;, (II)I, \
+         invoke-static@LCallSites;->lambda$lambdas$0(III)I, (II)I)@{metafactory}\n"
+    );
+    assert!(text.contains(&lambda), "{text}");
+    let ctor = format!(
+        "invoke-custom {{}}, call_site_1(\"get\", ()Ljava/util/function/Supplier;, ()Ljava/lang/Object;, \
+         invoke-constructor@Ljava/lang/String;-><init>()V, ()Ljava/lang/String;)@{metafactory}\n"
+    );
+    assert!(text.contains(&ctor), "{text}");
+    assert!(
+        text.contains(
+            "invoke-polymorphic {v0, v6, v1}, Ljava/lang/invoke/MethodHandle;->invokeExact([Ljava/lang/Object;)Ljava/lang/Object;, (II)I\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn invoke_custom_renders_call_site_index() {
     let text = original("Lexample/Custom;");
     assert!(text.contains("    invoke-custom {}, call_site@0\n    return-void\n"), "{text}");
