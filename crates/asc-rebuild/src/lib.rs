@@ -15,7 +15,9 @@
 //!
 //! The output defines the requested class and every class in the same DEX
 //! whose descriptor starts with its name followed by `$`. It can be handed
-//! to any decompiler or disassembler.
+//! to any decompiler or disassembler. Only the requested class has to
+//! rebuild: nested classes that cannot are left out and reported in
+//! [`Rebuilt::dropped`].
 
 mod collect;
 mod hollow;
@@ -23,6 +25,7 @@ mod tables;
 mod writer;
 
 use asc_dex::Dex;
+use std::fmt;
 use std::time::Instant;
 
 pub use tables::Tables;
@@ -89,12 +92,36 @@ pub struct Stats {
     pub size: usize,
 }
 
+/// A nested class left out of a rebuilt DEX.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedClass {
+    /// Descriptor such as `Lcom/poc/Main$1;`.
+    pub descriptor: String,
+    /// Why it was left out (the rebuild error it caused).
+    pub reason: String,
+}
+
+impl DroppedClass {
+    fn new(dex: &Dex<'_>, class_idx: u32, reason: String) -> Result<DroppedClass> {
+        Ok(DroppedClass { descriptor: dex.type_descriptor(class_idx)?, reason })
+    }
+}
+
+impl fmt::Display for DroppedClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.descriptor, self.reason)
+    }
+}
+
 /// Result of a rebuild.
 #[derive(Debug, Clone)]
 pub struct Rebuilt {
     pub bytes: Vec<u8>,
     pub stats: Stats,
     pub timings: Timings,
+    /// Nested classes that could not be rebuilt and are not defined in
+    /// `bytes`, in input order. Other classes may still reference their types.
+    pub dropped: Vec<DroppedClass>,
 }
 
 /// Rebuild the class `descriptor` (e.g. `Lcom/poc/Main;`) from `dex`.
@@ -102,16 +129,26 @@ pub struct Rebuilt {
 /// Includes its `$` nested classes at every depth in this DEX. For example,
 /// `LA;` includes `LA$a;` and `LA$a$b;`, while rebuilding `LA$a;` includes
 /// `LA$a$b;` but no definition for `LA;` or siblings such as `LA$c;`.
+///
+/// Only the requested class has to rebuild: a nested class that cannot
+/// (malformed bytecode, an unsupported feature, ...) is left out and listed
+/// in [`Rebuilt::dropped`]. When the classes only fail together (16-bit index
+/// limits, ...), the requested class is rebuilt alone and every nested class
+/// is listed.
 pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt> {
-    let t0 = Instant::now();
-    let hollow = hollow::Hollow::extract(dex, descriptor)?;
-    let t1 = Instant::now();
-    let refs = collect::collect(dex, &hollow)?;
-    let t2 = Instant::now();
-    let tables = Tables::build(dex, &refs)?;
-    let t3 = Instant::now();
-    let (bytes, methods_with_code) = writer::write(dex, &hollow, &tables)?;
-    let t4 = Instant::now();
+    let mut timings = Timings::default();
+    let mut sel = timed(&mut timings.hollow_us, || hollow::Selection::extract(dex, descriptor))?;
+    let refs = timed(&mut timings.collect_us, || collect::collect(dex, &mut sel))?;
+    let (tables, bytes, methods_with_code) = match assemble(dex, &sel.classes, refs, &mut timings) {
+        Ok(out) => out,
+        Err(e) if sel.has_nested() => {
+            let reason = format!("the nested classes do not rebuild together: {e}");
+            sel.retain_nested(dex, |_| Err(&reason))?;
+            let refs = timed(&mut timings.collect_us, || collect::collect(dex, &mut sel))?;
+            assemble(dex, &sel.classes, refs, &mut timings)?
+        }
+        Err(e) => return Err(e),
+    };
     Ok(Rebuilt {
         stats: Stats {
             strings: tables.strings.len(),
@@ -123,13 +160,31 @@ pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt> {
             size: bytes.len(),
         },
         bytes,
-        timings: Timings {
-            hollow_us: (t1 - t0).as_micros(),
-            collect_us: (t2 - t1).as_micros(),
-            map_us: (t3 - t2).as_micros(),
-            build_us: (t4 - t3).as_micros(),
-        },
+        timings,
+        dropped: sel.dropped,
     })
+}
+
+/// Close `refs`, map them and write the DEX defining `classes`; the steps
+/// that can only fail for the selection as a whole.
+fn assemble(
+    dex: &Dex<'_>,
+    classes: &[hollow::Hollow<'_>],
+    mut refs: collect::RefSet,
+    timings: &mut Timings,
+) -> Result<(Tables, Vec<u8>, usize)> {
+    timed(&mut timings.collect_us, || refs.close(dex))?;
+    let tables = timed(&mut timings.map_us, || Tables::build(dex, &refs))?;
+    let (bytes, methods_with_code) = timed(&mut timings.build_us, || writer::write(dex, classes, &tables))?;
+    Ok((tables, bytes, methods_with_code))
+}
+
+/// Run `f`, adding its wall time to `slot`.
+fn timed<T>(slot: &mut u128, f: impl FnOnce() -> T) -> T {
+    let t0 = Instant::now();
+    let out = f();
+    *slot += t0.elapsed().as_micros();
+    out
 }
 
 /// Convenience wrapper over raw bytes.

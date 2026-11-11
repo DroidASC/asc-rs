@@ -1,10 +1,12 @@
+mod common;
+
 use asc_dex::annotations::{AnnotationsDirectory, parse_annotation_set, parse_annotation_set_ref_list};
 use asc_dex::checksum::{adler32, sha1};
 use asc_dex::debug_info::{DebugInfo, DebugOp};
 use asc_dex::encoded::{AnnotationItem, EncodedAnnotation, EncodedValue, parse_annotation_item, parse_array};
 use asc_dex::{ClassDef, Dex, map_type, mutf8};
 use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec, TrySpec};
-use asc_rebuild::{RebuildError, rebuild_class_bytes};
+use asc_rebuild::{RebuildError, Rebuilt, rebuild_class_bytes};
 
 const ROOT: &str = "Lclass/A;";
 const CHILD: &str = "Lclass/A$a;";
@@ -267,6 +269,7 @@ fn nested_rebuild_remaps_each_classes_code_and_metadata_without_mixing_them() {
         let out = rebuild_class_bytes(&bytes, target).unwrap();
         let dex = Dex::parse(&out.bytes).unwrap();
         assert_eq!(descriptors(&dex), expected);
+        assert!(out.dropped.is_empty());
         assert_eq!(out.stats.methods_with_code, 2 * expected.len());
         assert_eq!(&out.bytes[12..32], sha1(&out.bytes[32..]));
         assert_eq!(u32::from_le_bytes(out.bytes[8..12].try_into().unwrap()), adler32(&out.bytes[12..]));
@@ -366,13 +369,85 @@ fn nested_classes_can_share_annotation_sets() {
     assert_eq!(rebuild_class_bytes(&out.bytes, ROOT).unwrap().bytes, out.bytes);
 }
 
+fn dropped(out: &Rebuilt) -> Vec<&str> {
+    out.dropped.iter().map(|d| d.descriptor.as_str()).collect()
+}
+
 #[test]
-fn malformed_nested_code_fails_the_rebuild_instead_of_dropping_the_class() {
+fn malformed_nested_code_drops_that_class_and_keeps_the_target() {
     let mut bytes = family_dex();
     let dex = Dex::parse(&bytes).unwrap();
     let offset = code(&dex, GRANDCHILD, "value").offset + asc_dex::code::CodeItem::HEADER_SIZE;
     bytes[offset] = 0x3e; // undefined opcode
-    for target in [ROOT, CHILD] {
-        assert!(matches!(rebuild_class_bytes(&bytes, target), Err(RebuildError::Bytecode { .. })));
+    let dexdump = common::dexdump();
+    for (target, kept) in [(ROOT, vec![ROOT, CHILD]), (CHILD, vec![CHILD])] {
+        let out = rebuild_class_bytes(&bytes, target).unwrap();
+        assert_eq!(descriptors(&Dex::parse(&out.bytes).unwrap()), kept);
+        assert_eq!(dropped(&out), [GRANDCHILD]);
+        assert!(out.dropped[0].reason.starts_with("malformed bytecode"), "{}", out.dropped[0]);
+        // The child still references the dropped class without defining it.
+        let dex = Dex::parse(&out.bytes).unwrap();
+        assert_eq!(field(&dex, index_at(code(&dex, CHILD, "value").insns, 2)), (GRANDCHILD.into(), "ZETA".into(), "I".into()));
+        if let Some(dexdump) = &dexdump {
+            common::assert_verifies(dexdump, target, &out.bytes);
+        }
     }
+    // The requested class itself still has to rebuild.
+    assert!(matches!(rebuild_class_bytes(&bytes, GRANDCHILD), Err(RebuildError::Bytecode { .. })));
+}
+
+#[test]
+fn unreadable_nested_class_data_drops_that_class() {
+    let mut bytes = family_dex();
+    let dex = Dex::parse(&bytes).unwrap();
+    let (i, _) = dex.find_class_def(&mutf8::encode(CHILD)).unwrap().unwrap();
+    let class_data_off = dex.class_def_off(i) + 24;
+    bytes[class_data_off..class_data_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let out = rebuild_class_bytes(&bytes, ROOT).unwrap();
+    assert_eq!(descriptors(&Dex::parse(&out.bytes).unwrap()), [ROOT, GRANDCHILD]);
+    assert_eq!(dropped(&out), [CHILD]);
+    assert!(rebuild_class_bytes(&bytes, CHILD).is_err());
+}
+
+/// `LA;` with two fields and two nested classes of 0x7FFF fields each: the
+/// nested pair fits a DEX, all three together do not.
+fn oversized_family_dex() -> Vec<u8> {
+    let members = |class: &str| if class == ROOT { 2 } else { 0x7FFF };
+    let mut builder = DexBuilder::new();
+    for class in FAMILY {
+        for f in 0..members(class) {
+            builder.field(class, &format!("f{f}"), "I");
+        }
+    }
+    let mut ids = builder.resolve();
+    for class in FAMILY {
+        let static_fields = (0..members(class)).map(|f| (ids.field(class, &format!("f{f}"), "I"), 9)).collect();
+        ids.add_class(ClassSpec { descriptor: class.into(), access: 1, static_fields, ..Default::default() });
+    }
+    ids.finish()
+}
+
+#[test]
+fn nested_classes_that_only_fail_together_leave_the_target_alone() {
+    let bytes = oversized_family_dex();
+    let out = rebuild_class_bytes(&bytes, ROOT).unwrap();
+    assert_eq!(descriptors(&Dex::parse(&out.bytes).unwrap()), [ROOT]);
+    assert_eq!(out.stats.fields, 2);
+    assert_eq!(dropped(&out), [CHILD, GRANDCHILD]);
+    assert!(out.dropped.iter().all(|d| d.reason.contains("16-bit index limits")), "{:?}", out.dropped);
+    // A selection that fits keeps every class.
+    let out = rebuild_class_bytes(&bytes, CHILD).unwrap();
+    assert_eq!(descriptors(&Dex::parse(&out.bytes).unwrap()), [CHILD, GRANDCHILD]);
+    assert!(out.dropped.is_empty());
+}
+
+#[test]
+fn nested_rebuilds_pass_dexdump_verifier_when_available() {
+    let Some(dexdump) = common::dexdump() else { return };
+    let family = family_dex();
+    for target in FAMILY {
+        common::assert_verifies(&dexdump, target, &rebuild_class_bytes(&family, target).unwrap().bytes);
+    }
+    let names = [GRANDCHILD, ROOT, "Lclass/A$ab;", CHILD, "Lclass/A$1;", "Lclass/Subclass;"];
+    common::assert_verifies(&dexdump, "class-only", &rebuild_class_bytes(&class_only_dex(&names), ROOT).unwrap().bytes);
 }

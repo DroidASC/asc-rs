@@ -123,6 +123,37 @@ fn getclass_rebuilds_nested_definitions_but_only_renders_the_requested_class() {
 }
 
 #[test]
+fn getclass_warns_about_nested_classes_left_out_of_the_rebuild() {
+    let classes = ["Lexample/Outer;", "Lexample/Outer$Broken;"];
+    let mut builder = asc_fixture::DexBuilder::new();
+    for ty in ["Ljava/lang/Object;", classes[0], classes[1]] {
+        builder.type_(ty);
+    }
+    let mut ids = builder.resolve();
+    for class in classes {
+        ids.add_class(asc_fixture::ClassSpec {
+            descriptor: class.into(),
+            superclass: Some("Ljava/lang/Object;".into()),
+            access: 1,
+            ..Default::default()
+        });
+    }
+    let mut bytes = ids.finish();
+    let dex = asc_dex::Dex::parse(&bytes).unwrap();
+    let (i, _) = dex.find_class_def(classes[1].as_bytes()).unwrap().unwrap();
+    let class_data_off = dex.class_def_off(i) + 24;
+    bytes[class_data_off..class_data_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &bytes)], true));
+    let engine = Engine::new(apk.path()).with_threads(1);
+    let source = engine.get_class(classes[0]).unwrap();
+    let rebuilt = source.rebuilt.as_ref().unwrap();
+    assert_eq!(rebuilt.dropped.iter().map(|d| d.descriptor.as_str()).collect::<Vec<_>>(), [classes[1]]);
+    let warning = source.warning.unwrap();
+    assert!(warning.starts_with("nested classes left out of the rebuilt DEX: Lexample/Outer$Broken; ("), "{warning}");
+    assert!(source.source.contains(&format!(".class public {}", classes[0])));
+}
+
+#[test]
 fn caches_serve_repeated_queries() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();

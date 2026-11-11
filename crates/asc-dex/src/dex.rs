@@ -2,6 +2,7 @@ use crate::class_data::ClassData;
 use crate::code::CodeItem;
 use crate::header::Header;
 use crate::{DexError, Result, leb128, mutf8, u16_at, u32_at};
+use std::ops::Range;
 
 /// One entry of the map list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +235,23 @@ impl<'a> Dex<'a> {
         binary_search(self.header.type_ids.size, |mid| Ok(mutf8::cmp_utf16(self.type_bytes(mid)?, descriptor)))
     }
 
+    /// Type indexes of the classes nested in class type `type_idx` with `$`:
+    /// for `LA;`, every descriptor starting with `LA$` (matched by UTF-16
+    /// code units like the table is sorted, see [`mutf8::cmp_utf16_prefix`]).
+    /// They form one run, and as `$` sorts below `;` the run ends shortly
+    /// before `type_idx`; galloping back from there finds an empty run in two
+    /// comparisons. Empty for a descriptor that does not end in `;`.
+    pub fn nested_type_idx_range(&self, type_idx: u32) -> Result<Range<u32>> {
+        let Some(name) = self.type_bytes(type_idx)?.strip_suffix(b";") else {
+            return Ok(type_idx..type_idx);
+        };
+        let prefix = [name, b"$"].concat();
+        let cmp = |idx: u32| Ok(mutf8::cmp_utf16_prefix(self.type_bytes(idx)?, &prefix));
+        let end = partition_point_near_end(type_idx, |idx| Ok(cmp(idx)?.is_le()))?;
+        let start = partition_point_near_end(end, |idx| Ok(cmp(idx)?.is_lt()))?;
+        Ok(start..end)
+    }
+
     // ---- protos ----------------------------------------------------------
 
     #[inline]
@@ -331,6 +349,29 @@ impl<'a> Dex<'a> {
         Ok(None)
     }
 
+    /// The class definitions whose `class_idx` lies in `types`, with their
+    /// class_def index, in class_def order. Only the `class_idx` of the other
+    /// definitions is read.
+    pub fn find_class_defs_by_type_range(&self, types: Range<u32>) -> Result<Vec<(u32, ClassDef)>> {
+        let mut found = Vec::new();
+        if types.is_empty() {
+            return Ok(found);
+        }
+        let size = self.header.class_defs.size;
+        let base = self.header.class_defs.off as usize;
+        let end = base + size as usize * ClassDef::SIZE;
+        if end > self.buf.len() {
+            return Err(DexError::BadRange { what: "class_defs", offset: base });
+        }
+        for i in 0..size {
+            let off = base + i as usize * ClassDef::SIZE;
+            if types.contains(&u32_at(self.buf, off)?) {
+                found.push((i, ClassDef::parse(self.buf, off)?));
+            }
+        }
+        Ok(found)
+    }
+
     /// Iterate over all class definitions.
     pub fn class_defs(&self) -> impl Iterator<Item = Result<ClassDef>> + '_ {
         (0..self.header.class_defs.size).map(move |i| self.class_def(i))
@@ -387,6 +428,33 @@ impl<'a> Dex<'a> {
     }
 }
 
+/// The first index below `end` from which `pred` is false up to `end`,
+/// `pred` being true on a prefix of `0..end` and false on the rest. Gallops
+/// back from `end` and bisects the bracket found, so it costs a logarithm of
+/// the distance from `end` rather than of `end`.
+fn partition_point_near_end(end: u32, mut pred: impl FnMut(u32) -> Result<bool>) -> Result<u32> {
+    // `pred` is false on `hi..end`.
+    let (mut hi, mut step) = (end, 1u32);
+    while hi > 0 {
+        let probe = hi.saturating_sub(step);
+        if pred(probe)? {
+            let (mut left, mut right) = (probe + 1, hi);
+            while left < right {
+                let mid = left + (right - left) / 2;
+                if pred(mid)? {
+                    left = mid + 1;
+                } else {
+                    right = mid;
+                }
+            }
+            return Ok(left);
+        }
+        hi = probe;
+        step = step.saturating_mul(2);
+    }
+    Ok(0)
+}
+
 /// Binary search over `size` sorted items; `cmp(mid)` orders item `mid`
 /// against the target.
 fn binary_search(size: u32, mut cmp: impl FnMut(u32) -> Result<std::cmp::Ordering>) -> Result<Option<u32>> {
@@ -434,5 +502,32 @@ mod tests {
         long[off] = 0x7f;
         let dex = Dex::parse(&long).unwrap();
         assert_eq!(dex.string(5).unwrap(), "token");
+    }
+
+    #[test]
+    fn nested_type_ranges_match_a_prefix_scan() {
+        let mut builder = asc_fixture::DexBuilder::new();
+        let mut names =
+            vec!["LA;", "LA$;", "LA#;", "LA%;", "LA0;", "LA\0;", "LAB;", "LB$x;", "L外😀;", "L外😀$内;", "L外😀\u{FFFF};", "[LA;", "I"];
+        let many: Vec<String> = (0..40).map(|i| format!("LA${i};")).chain((0..5).map(|i| format!("LA$1$x{i};"))).collect();
+        names.extend(many.iter().map(String::as_str));
+        for name in &names {
+            builder.type_(name);
+        }
+        let data = builder.resolve().finish();
+        let dex = Dex::parse(&data).unwrap();
+        let types: Vec<String> = (0..dex.type_count()).map(|i| dex.type_descriptor(i).unwrap()).collect();
+        assert!(types.windows(2).all(|w| w[0].encode_utf16().lt(w[1].encode_utf16())), "{types:?}");
+        for (idx, name) in types.iter().enumerate() {
+            let range = dex.nested_type_idx_range(idx as u32).unwrap();
+            let expected: Vec<&str> = match name.strip_suffix(';') {
+                Some(stem) => types.iter().map(String::as_str).filter(|t| t.starts_with(&format!("{stem}$"))).collect(),
+                None => Vec::new(),
+            };
+            let found: Vec<&str> = range.map(|i| types[i as usize].as_str()).collect();
+            assert_eq!(found, expected, "{name}");
+        }
+        let a = types.iter().position(|t| t == "LA;").unwrap() as u32;
+        assert_eq!(dex.nested_type_idx_range(a).unwrap().len(), 1 + 40 + 5);
     }
 }

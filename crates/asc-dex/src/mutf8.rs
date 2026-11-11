@@ -90,16 +90,37 @@ pub fn to_utf16(bytes: &[u8]) -> Vec<u16> {
 /// Allocation-free; only the code units from the first differing sequence
 /// on are decoded.
 pub fn cmp_utf16(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
-    let Some(mut i) = a.iter().zip(b).position(|(x, y)| x != y) else {
+    let Some(i) = a.iter().zip(b).position(|(x, y)| x != y) else {
         return a.len().cmp(&b.len());
     };
-    // Back up to the start of the sequence holding the first difference;
-    // everything before `i` is shared.
+    let i = sequence_start(a, b, i);
+    Units::new(&a[i..]).cmp(Units::new(&b[i..]))
+}
+
+/// Compare `s`, cut to the UTF-16 length of `prefix`, with `prefix`:
+/// `Equal` when the code units of `s` start with those of `prefix`, else the
+/// [`cmp_utf16`] order of `s` against `prefix`. In a table sorted by
+/// [`cmp_utf16`] this is monotonic, so the strings starting with `prefix`
+/// form one contiguous run that two binary searches can bound.
+/// Allocation-free; only the code units from the first differing sequence
+/// on are decoded.
+pub fn cmp_utf16_prefix(s: &[u8], prefix: &[u8]) -> std::cmp::Ordering {
+    let common = s.iter().zip(prefix).position(|(x, y)| x != y).unwrap_or(s.len().min(prefix.len()));
+    let i = sequence_start(s, prefix, common);
+    let rest = Units::new(&prefix[i..]);
+    Units::new(&s[i..]).take(rest.clone().count()).cmp(rest)
+}
+
+/// Back up from `i`, where `a` and `b` stop sharing bytes, to the start of
+/// the sequence holding it. Only continuation bytes are ever consumed by an
+/// earlier sequence, so both strings decode to the same code units up to
+/// there and start a fresh sequence right at it.
+fn sequence_start(a: &[u8], b: &[u8], mut i: usize) -> usize {
     let is_cont = |s: &[u8], k: usize| s.get(k).is_some_and(|c| c & 0xC0 == 0x80);
     while i > 0 && (is_cont(a, i) || is_cont(b, i)) {
         i -= 1;
     }
-    Units::new(&a[i..]).cmp(Units::new(&b[i..]))
+    i
 }
 
 /// Decode MUTF-8 bytes into a Rust string (lossy on unpaired surrogates).
@@ -216,5 +237,27 @@ mod tests {
                 assert_eq!(cmp(x, y), x.encode_utf16().cmp(y.encode_utf16()), "{x:?} vs {y:?}");
             }
         }
+    }
+
+    #[test]
+    fn utf16_prefix_order() {
+        use std::cmp::Ordering::*;
+        let cmp = |s: &str, p: &str| cmp_utf16_prefix(&encode(s), &encode(p));
+        assert_eq!(cmp("LA$a;", "LA$"), Equal);
+        assert_eq!(cmp("LA$", "LA$"), Equal);
+        assert_eq!(cmp("LA;", "LA$"), Greater);
+        assert_eq!(cmp("LA", "LA$"), Less);
+        assert_eq!(cmp("LA#;", "LA$"), Less);
+        // U+0000 is `C0 80` but sorts below `$`.
+        assert_eq!(cmp("LA\0;", "LA$"), Less);
+        // A supplementary prefix matches by surrogate units.
+        assert_eq!(cmp("L\u{1F600}$x;", "L\u{1F600}$"), Equal);
+        assert_eq!(cmp("L\u{E000};", "L\u{1F600}$"), Greater);
+        // The run of matches is contiguous in UTF-16 order.
+        let mut words = ["LA;", "LA$", "LA$\0", "LA$\u{FFFF};", "LA$\u{10000};", "LA\0", "LA%", "LB$;", "LA$a$b;", "L"];
+        words.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+        let keys: Vec<_> = words.iter().map(|w| cmp(w, "LA$")).collect();
+        assert!(keys.is_sorted(), "{words:?} -> {keys:?}");
+        assert_eq!(keys.iter().filter(|k| k.is_eq()).count(), 5);
     }
 }

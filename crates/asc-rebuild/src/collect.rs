@@ -1,6 +1,6 @@
 //! Phase 2: gather the selected classes' constant-pool dependencies.
 
-use crate::hollow::Hollow;
+use crate::hollow::{Hollow, Selection};
 use crate::{RebuildError, Result};
 use asc_dalvik::walk::{Stop, walk_insns};
 use asc_dalvik::{IndexKind, decode};
@@ -12,7 +12,8 @@ use std::collections::BTreeSet;
 /// sites and method handles.
 pub(crate) const UNSUPPORTED_CALL_SITES: &str = "invoke-custom / method handles (call_site_ids, method_handles)";
 
-/// Original indexes referenced by the class, closed over the id tables.
+/// Original indexes referenced by the selected classes; [`RefSet::close`]
+/// closes them over the id tables.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct RefSet {
     pub strings: BTreeSet<u32>,
@@ -47,7 +48,7 @@ impl RefSet {
     }
 
     /// Add everything an id-table item transitively needs.
-    fn close(&mut self, dex: &Dex<'_>) -> Result<()> {
+    pub(crate) fn close(&mut self, dex: &Dex<'_>) -> Result<()> {
         for &m in &self.methods.clone() {
             let id = dex.method_id(m)?;
             self.types.insert(id.class_idx as u32);
@@ -90,94 +91,113 @@ pub(crate) fn check_walk(method_idx: u32, stop: Stop) -> Result<()> {
     }
 }
 
-pub(crate) fn collect(dex: &Dex<'_>, classes: &[Hollow<'_>]) -> Result<RefSet> {
-    let mut refs = RefSet::default();
-    for h in classes {
-        collect_class(h, &mut refs)?;
-    }
-    refs.close(dex)?;
+/// The references of the selected classes, not yet closed. A nested class
+/// whose own references cannot be collected (malformed bytecode, method
+/// handles, ...) is dropped from `sel`; the requested class failing is an
+/// error.
+pub(crate) fn collect(dex: &Dex<'_>, sel: &mut Selection<'_>) -> Result<RefSet> {
+    let mut refs = RefSet::of_class(sel.target())?;
+    sel.retain_nested(dex, |h| RefSet::of_class(h).map(|r| refs.merge(r)))?;
     Ok(refs)
 }
 
-fn collect_class(h: &Hollow<'_>, refs: &mut RefSet) -> Result<()> {
-    let def = &h.def;
-    refs.types.insert(def.class_idx);
-    if def.superclass_idx != NO_INDEX {
-        refs.types.insert(def.superclass_idx);
-    }
-    if def.source_file_idx != NO_INDEX {
-        refs.strings.insert(def.source_file_idx);
-    }
-    for &t in &h.interfaces {
-        refs.types.insert(t as u32);
-    }
-    for f in h.class_data.fields() {
-        refs.fields.insert(f.field_idx);
-    }
-    for m in h.class_data.methods() {
-        refs.methods.insert(m.method_idx);
+impl RefSet {
+    /// Everything one class references directly.
+    fn of_class(h: &Hollow<'_>) -> Result<RefSet> {
+        let mut refs = RefSet::default();
+        refs.collect_class(h)?;
+        Ok(refs)
     }
 
-    for (&method_idx, code) in &h.code {
-        let insns = code.insns;
-        let mut unsupported = false;
-        let walk = walk_insns(insns, |step| {
-            let op = step.opcode;
-            match op.index {
-                IndexKind::StringRef => refs.add(RefKind::String, decode::get_index(insns, step.pc, op)),
-                IndexKind::TypeRef => refs.add(RefKind::Type, decode::get_index(insns, step.pc, op)),
-                IndexKind::FieldRef => refs.add(RefKind::Field, decode::get_index(insns, step.pc, op)),
-                IndexKind::MethodRef => refs.add(RefKind::Method, decode::get_index(insns, step.pc, op)),
-                IndexKind::MethodAndProtoRef => {
-                    refs.add(RefKind::Method, decode::get_index(insns, step.pc, op));
-                    refs.add(RefKind::Proto, decode::get_proto_index(insns, step.pc) as u32);
+    fn merge(&mut self, mut other: RefSet) {
+        self.strings.append(&mut other.strings);
+        self.types.append(&mut other.types);
+        self.protos.append(&mut other.protos);
+        self.fields.append(&mut other.fields);
+        self.methods.append(&mut other.methods);
+        self.method_handles |= other.method_handles;
+    }
+
+    fn collect_class(&mut self, h: &Hollow<'_>) -> Result<()> {
+        let def = &h.def;
+        self.types.insert(def.class_idx);
+        if def.superclass_idx != NO_INDEX {
+            self.types.insert(def.superclass_idx);
+        }
+        if def.source_file_idx != NO_INDEX {
+            self.strings.insert(def.source_file_idx);
+        }
+        for &t in &h.interfaces {
+            self.types.insert(t as u32);
+        }
+        for f in h.class_data.fields() {
+            self.fields.insert(f.field_idx);
+        }
+        for m in h.class_data.methods() {
+            self.methods.insert(m.method_idx);
+        }
+
+        for (&method_idx, code) in &h.code {
+            let insns = code.insns;
+            let mut unsupported = false;
+            let walk = walk_insns(insns, |step| {
+                let op = step.opcode;
+                match op.index {
+                    IndexKind::StringRef => self.add(RefKind::String, decode::get_index(insns, step.pc, op)),
+                    IndexKind::TypeRef => self.add(RefKind::Type, decode::get_index(insns, step.pc, op)),
+                    IndexKind::FieldRef => self.add(RefKind::Field, decode::get_index(insns, step.pc, op)),
+                    IndexKind::MethodRef => self.add(RefKind::Method, decode::get_index(insns, step.pc, op)),
+                    IndexKind::MethodAndProtoRef => {
+                        self.add(RefKind::Method, decode::get_index(insns, step.pc, op));
+                        self.add(RefKind::Proto, decode::get_proto_index(insns, step.pc) as u32);
+                    }
+                    IndexKind::ProtoRef => self.add(RefKind::Proto, decode::get_index(insns, step.pc, op)),
+                    IndexKind::CallSiteRef | IndexKind::MethodHandleRef => unsupported = true,
+                    IndexKind::None | IndexKind::Unknown => {}
                 }
-                IndexKind::ProtoRef => refs.add(RefKind::Proto, decode::get_index(insns, step.pc, op)),
-                IndexKind::CallSiteRef | IndexKind::MethodHandleRef => unsupported = true,
-                IndexKind::None | IndexKind::Unknown => {}
+            });
+            if unsupported {
+                return Err(RebuildError::Unsupported(UNSUPPORTED_CALL_SITES));
             }
-        });
-        if unsupported {
+            check_walk(method_idx, walk.stop)?;
+            for handler in &code.handlers {
+                for (t, _) in &handler.catches {
+                    self.types.insert(*t);
+                }
+            }
+        }
+
+        for info in h.debug.values() {
+            let mut strings = |s: u32| {
+                self.strings.insert(s);
+            };
+            let mut types_sink = BTreeSet::new();
+            info.visit_refs(&mut strings, &mut |t| {
+                types_sink.insert(t);
+            });
+            self.types.extend(types_sink);
+        }
+
+        if let Some(values) = &h.static_values {
+            for v in values {
+                visit_refs(v, &mut |k, i| self.add(k, i));
+            }
+        }
+        if let Some(dir) = &h.ann_dir {
+            for (f, _) in &dir.field_annotations {
+                self.fields.insert(*f);
+            }
+            for (m, _) in dir.method_annotations.iter().chain(dir.parameter_annotations.iter()) {
+                self.methods.insert(*m);
+            }
+        }
+        for item in h.ann_items.values() {
+            visit_annotation_refs(&item.annotation, &mut |k, i| self.add(k, i));
+        }
+        if self.method_handles {
             return Err(RebuildError::Unsupported(UNSUPPORTED_CALL_SITES));
         }
-        check_walk(method_idx, walk.stop)?;
-        for handler in &code.handlers {
-            for (t, _) in &handler.catches {
-                refs.types.insert(*t);
-            }
-        }
-    }
 
-    for info in h.debug.values() {
-        let mut strings = |s: u32| {
-            refs.strings.insert(s);
-        };
-        let mut types_sink = BTreeSet::new();
-        info.visit_refs(&mut strings, &mut |t| {
-            types_sink.insert(t);
-        });
-        refs.types.extend(types_sink);
+        Ok(())
     }
-
-    if let Some(values) = &h.static_values {
-        for v in values {
-            visit_refs(v, &mut |k, i| refs.add(k, i));
-        }
-    }
-    if let Some(dir) = &h.ann_dir {
-        for (f, _) in &dir.field_annotations {
-            refs.fields.insert(*f);
-        }
-        for (m, _) in dir.method_annotations.iter().chain(dir.parameter_annotations.iter()) {
-            refs.methods.insert(*m);
-        }
-    }
-    for item in h.ann_items.values() {
-        visit_annotation_refs(&item.annotation, &mut |k, i| refs.add(k, i));
-    }
-    if refs.method_handles {
-        return Err(RebuildError::Unsupported(UNSUPPORTED_CALL_SITES));
-    }
-
-    Ok(())
 }

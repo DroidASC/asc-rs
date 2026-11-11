@@ -125,7 +125,8 @@ pub struct ClassSource {
     /// rebuilt (see `warning`) and `source` was disassembled from the
     /// original DEX instead.
     pub rebuilt: Option<Rebuilt>,
-    /// Why the rebuild was skipped, when it was.
+    /// Why the rebuild was skipped, or which nested classes it left out
+    /// (see [`Rebuilt::dropped`]), when either happened.
     pub warning: Option<String>,
     /// Microseconds spent locating and inflating the DEX.
     pub scan_us: u128,
@@ -1583,7 +1584,13 @@ impl Engine {
             .ok_or_else(|| EngineError::ClassNotFound { class: descriptor.to_string(), hint: self.class_not_found_hint(descriptor) })?;
         let scan_us = t0.elapsed().as_micros();
         let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, descriptor, opts, method) {
-            Ok((r, s)) => (Some(r), s, None),
+            Ok((r, s)) => {
+                let warning = (!r.dropped.is_empty()).then(|| {
+                    let dropped = r.dropped.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
+                    format!("nested classes left out of the rebuilt DEX: {dropped}")
+                });
+                (Some(r), s, warning)
+            }
             // The class is there but cannot be rebuilt faithfully (undefined
             // opcode, invoke-custom, too many members for 16-bit indexes...):
             // still show it, disassembled from the original DEX, and say why

@@ -1,13 +1,14 @@
 //! Phase 1: pull the requested class and its nested classes out of the DEX.
 
-use crate::{RebuildError, Result};
+use crate::{DroppedClass, RebuildError, Result};
 use asc_dex::annotations::{AnnotationsDirectory, parse_annotation_set, parse_annotation_set_ref_list};
 use asc_dex::class_data::ClassData;
 use asc_dex::code::CodeItem;
 use asc_dex::debug_info::DebugInfo;
 use asc_dex::encoded::{AnnotationItem, EncodedValue, parse_annotation_item, parse_array};
-use asc_dex::{ClassDef, Dex};
+use asc_dex::{ClassDef, Dex, mutf8};
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Display;
 
 pub(crate) struct Hollow<'a> {
     pub def: ClassDef,
@@ -26,24 +27,78 @@ pub(crate) struct Hollow<'a> {
     pub ann_ref_lists: BTreeMap<u32, Vec<u32>>,
 }
 
-impl<'a> Hollow<'a> {
-    pub fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Vec<Hollow<'a>>> {
-        let (target, def) =
-            dex.find_class_def(&asc_dex::mutf8::encode(descriptor))?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
-        let prefix = asc_dex::mutf8::encode(&format!("{}$", descriptor.strip_suffix(';').unwrap_or(descriptor)));
-        let mut classes = Vec::new();
-        // Keep the input class_def order, including any superclass/interface
-        // definitions that precede their users. Only the `$` namespace below
-        // the target is selected; enclosing classes and siblings stay out.
-        for i in 0..dex.class_def_count() {
-            let class = if i == target { def } else { dex.class_def(i)? };
-            if i == target || dex.type_bytes(class.class_idx)?.starts_with(&prefix) {
-                classes.push(Self::from_def(dex, class)?);
+/// The requested class and its `$` nested classes, in input class_def order
+/// (so superclass / interface definitions keep preceding their users).
+pub(crate) struct Selection<'a> {
+    pub classes: Vec<Hollow<'a>>,
+    /// Position of the requested class in `classes`.
+    pub target: usize,
+    /// Nested classes left out, with the reason.
+    pub dropped: Vec<DroppedClass>,
+}
+
+impl<'a> Selection<'a> {
+    /// Hollow the class `descriptor` and every class of the DEX whose
+    /// descriptor starts with its name followed by `$`. Enclosing classes and
+    /// siblings stay out. A nested class that cannot be hollowed is dropped;
+    /// the requested class failing fails the selection.
+    pub fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Selection<'a>> {
+        let (target_idx, target_def) =
+            dex.find_class_def(&mutf8::encode(descriptor))?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
+        // Nested types sort as one run of type ids; most classes have none,
+        // and then the class_defs are not scanned at all.
+        let mut defs = dex.find_class_defs_by_type_range(dex.nested_type_idx_range(target_def.class_idx)?)?;
+        let at = defs.partition_point(|&(i, _)| i < target_idx);
+        defs.insert(at, (target_idx, target_def));
+
+        let mut sel = Selection { classes: Vec::with_capacity(defs.len()), target: 0, dropped: Vec::new() };
+        for (i, def) in defs {
+            match Hollow::from_def(dex, def) {
+                Ok(h) => {
+                    if i == target_idx {
+                        sel.target = sel.classes.len();
+                    }
+                    sel.classes.push(h);
+                }
+                Err(e) if i != target_idx => sel.dropped.push(DroppedClass::new(dex, def.class_idx, e.to_string())?),
+                Err(e) => return Err(e),
             }
         }
-        Ok(classes)
+        Ok(sel)
     }
 
+    pub fn target(&self) -> &Hollow<'a> {
+        &self.classes[self.target]
+    }
+
+    pub fn has_nested(&self) -> bool {
+        self.classes.len() > 1
+    }
+
+    /// Drop each nested class `check` rejects, recording its error as the
+    /// reason. The requested class is not checked.
+    pub fn retain_nested<E: Display>(
+        &mut self,
+        dex: &Dex<'_>,
+        mut check: impl FnMut(&Hollow<'a>) -> std::result::Result<(), E>,
+    ) -> Result<()> {
+        let target = self.target;
+        let mut kept = Vec::with_capacity(self.classes.len());
+        for (pos, h) in std::mem::take(&mut self.classes).into_iter().enumerate() {
+            if pos == target {
+                self.target = kept.len();
+            } else if let Err(e) = check(&h) {
+                self.dropped.push(DroppedClass::new(dex, h.def.class_idx, e.to_string())?);
+                continue;
+            }
+            kept.push(h);
+        }
+        self.classes = kept;
+        Ok(())
+    }
+}
+
+impl<'a> Hollow<'a> {
     fn from_def(dex: &Dex<'a>, def: ClassDef) -> Result<Hollow<'a>> {
         let buf = dex.buf();
         let class_data = dex.class_data(def.class_data_off)?;

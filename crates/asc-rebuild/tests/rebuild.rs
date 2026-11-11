@@ -1,3 +1,5 @@
+mod common;
+
 use asc_dex::Dex;
 use asc_dex::checksum::{adler32, sha1};
 use asc_dex::encoded::parse_array;
@@ -420,23 +422,10 @@ fn empty_id_tables_have_zero_offsets() {
 }
 
 /// Runs the rebuilt fixtures through ART's verifier when a `dexdump` binary is
-/// available (`DEXDUMP=/path/to/dexdump`, or the SDK's build-tools); skipped
-/// otherwise so CI without an Android SDK is unaffected.
+/// available; skipped otherwise.
 #[test]
 fn rebuilt_dex_passes_dexdump_verifier_when_available() {
-    let dexdump = std::env::var_os("DEXDUMP").map(std::path::PathBuf::from).or_else(|| {
-        let home = std::env::var_os("HOME")?;
-        let bt = std::path::Path::new(&home).join("Android/Sdk/build-tools");
-        let mut dirs: Vec<_> = std::fs::read_dir(bt).ok()?.flatten().map(|e| e.path()).collect();
-        dirs.sort();
-        dirs.into_iter().rev().map(|d| d.join("dexdump")).find(|p| p.is_file())
-    });
-    let Some(dexdump) = dexdump else {
-        eprintln!("dexdump not found; skipping");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("asc-rebuild-dexdump-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let Some(dexdump) = common::dexdump() else { return };
     for (data, class) in [
         (make_dex(), "Lexample/Test;"),
         (make_static_field_dex(), "Lexample/Statics;"),
@@ -444,12 +433,6 @@ fn rebuilt_dex_passes_dexdump_verifier_when_available() {
         (make_rich_dex(), "Lexample/Rich;"),
         (make_many_members_dex(3, false), "Lexample/Big;"),
     ] {
-        let out = rebuild_class_bytes(&data, class).unwrap();
-        let path = dir.join(format!("{}.dex", class.trim_matches(|c| c == 'L' || c == ';').replace('/', "_")));
-        std::fs::write(&path, &out.bytes).unwrap();
-        let res = std::process::Command::new(&dexdump).arg(&path).output().unwrap();
-        let stderr = String::from_utf8_lossy(&res.stderr);
-        assert!(res.status.success() && !stderr.contains("Failure to verify"), "{class}: {stderr}");
+        common::assert_verifies(&dexdump, class, &rebuild_class_bytes(&data, class).unwrap().bytes);
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

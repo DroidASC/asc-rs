@@ -89,7 +89,11 @@ includes `LA$a$b;` but not the enclosing `LA;` or siblings. Collect every index 
 sort the new id tables canonically, rewrite operands and data, seal with checksum and
 signature — the output is spec-valid (`dexdump` and jadx accept it, `--dump-dex` exports it).
 It is rendered as baksmali-style smali. Classes the rebuild refuses (undefined opcodes,
-`invoke-custom`, index overflow) are disassembled in place with a warning. `--method`
+`invoke-custom`, index overflow) are disassembled in place with a warning. A nested class
+the rebuild refuses is left out of the DEX instead (its type stays referenced, undefined),
+and so are all of them when they only overflow the indexes together; the warning lists them.
+Nested classes are found by galloping back from the target's type id (`$` sorts below `;`),
+so a class without any costs two string compares and no class_def scan. `--method`
 accepts a full signature, a prefix or a bare name.
 
 ## Caches
