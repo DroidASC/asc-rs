@@ -36,7 +36,8 @@ MT2.26.8（5 个 DEX，34 MB），反编译 `bin.mt.json.JSONObject`：
 - 整包加载慢的后端收益大（jadx 约 10×）；dexdec 几乎无收益，所以 dexdec 不走切片。
 - 单类切片有质量代价：两个后端都丢 `@Override`；dexdec 多出冗余强转（`((PluginView) x).requireId()`）；
   jadx 不再内联匿名类（少约 40 行）、丢 `throws` 的 import、反混淆别名与整包不同（`C8652` → `ۢۤܺ`，
-  jadx 按全局文件名冲突改名）。前三项由闭包切片解决，最后一项由 asc 下发命名映射解决（§7）。
+  jadx 按全局文件名冲突改名）。前三项由闭包切片解决；最后一项靠关掉后端自带的反混淆改名，名字就与输入形态
+  无关（§7）。
 - 上一轮差分测试（598 个 ART 用例，重编译后比对运行结果）：dexdec 549 通过、jadx 527，两者的错误
   互不重叠。多后端并存有实际价值：一个后端失败或可疑时可以换另一个。
 
@@ -150,9 +151,10 @@ instances = 2
               "manifest":{"targets":["Lbin/mt/json/JSONObject;"],
                           "attached":["Lbin/mt/json/JSONObject$Member;"],
                           "shells":["Lbin/mt/json/JSONValue;"]}},
-     "mappings":{"classes":{"Ll/ۢۤܺ;":"LinkedTable"},
-                 "fields":{"Lbin/mt/json/JSONObject;->a:I":"size"},
-                 "methods":{}}}}
+     "mappings":{"classes":{"Ll/ۢۤܺ;":"Lbin/mt/json/LinkedTable;"},
+                 "fields":{"Lbin/mt/json/JSONObject;->a:I":"size",
+                           "Lbin/mt/json/JSONObject;->b:Ll/ۢۤܺ;":"table"},
+                 "methods":{"Lbin/mt/json/JSONObject;->a(Ll/ۢۤܺ;I)V":"put"}}}}
 ← {"id":2,"result":{"programId":"p1"}}
 
 → {"id":9,"method":"program/close","params":{"programId":"p1"}}
@@ -164,6 +166,10 @@ instances = 2
   标出哪些类是请求目标、哪些是附属类、哪些是壳类（含义见 rebuild-slice.md）。后端不输出壳类，也不该
   把壳类里合成的方法体当真。
 - `mappings` 用 asc 的成员写法（与 `findrefs` 一致）。后端把它当作用户改名：输出时用新名字，引用处一起改。
+  键一律是 DEX 里的名字（混淆后的），包括成员签名里的类型：上例 `b` 字段的类型写 `Ll/ۢۤܺ;` 而不是改名后的类；
+  值是要显示的名字。`classes` 的值是完整描述符，包名可以变（mapping.txt 记录的是原始全名），内部类的值是完整
+  的二进制名（`Lpkg/Outer$Inner;`）；类换了包时，结果的 `path` 跟着新名字走。`fields` / `methods` 的值是简单名，
+  构造器（`<init>` / `<clinit>`）不出现。没有映射时三个表都为空。
 - 切片会话的生命周期由 asc 管：一次请求开一个，用完就关。archive 会话按程序常驻，被进程池的 LRU 淘汰
   时才关。后端必须真正释放会话（JEB 是 `unloadProject`），否则项目越积越多。
 
@@ -204,8 +210,15 @@ instances = 2
 
 ## 7. 命名
 
-- 名字一律以 asc 为准：反混淆别名、用户改名都由 asc 通过 `mappings` 下发。理由是同一个类在不同切片、不同
-  后端里必须叫同一个名字，agent 才能交叉引用；jadx 在切片上自动生成的别名和整包下就不一样。
+- 名字一律以 asc 为准，而 asc 唯一的名字来源是用户提供的映射文件，主要是 R8 / ProGuard 的 `mapping.txt`
+  （`NameMappings::from_proguard_file`；命令行 `--mapping` 与配置项另行接入）。asc 面向 agent 做分析，不提供改名
+  命令、不持久化改名，也不自动生成反混淆别名；没有映射文件时名字保持 DEX 原样。理由是同一个类在不同切片、
+  不同后端里必须叫同一个名字，agent 才能交叉引用；jadx 在切片上自动生成的别名和整包下就不一样。
+- 映射只作用于反编译出的源码。`findrefs`、smali 等查询输出始终用 DEX 原来的描述符，agent 拿源码里的名字回查时
+  需要自己对照（或不带映射再反编译一次）。
+- mapping.txt 的成员签名用的是原始类型名，asc 解析时按类映射逆向翻译成 DEX 里的类型（R8 给了
+  `residualsignature` 时直接用它，参数被删、类型被改窄的方法只能靠它对上）。R8 内联栈只取最外层帧，带别的类
+  限定名的帧（内联进来或被搬过来的方法）不改名；同一个 DEX 名字映射两次时保留第一个并给出警告。
 - 后端自带的反混淆改名要关掉（jadx 不开 `--deobf`，并把 `--rename-flags` 设为只保留 `valid`；JEB 关掉自动改名），只保留
   “非法标识符转义”。
 - 后端不支持 `mappings` 时，asc 不做源码层的文本替换（容易误伤），而是在结果头部注明“名字未统一”。
@@ -213,6 +226,9 @@ instances = 2
 ## 8. 结果缓存
 
 结果写入 L3，键为 `(ApkKey, 输入指纹, backend.name, backend.version, optionsHash, mappings 哈希, language, nested)`。
+
+- mappings 哈希：`NameMappings::hash`，对 `program/open` 实际下发的（按请求裁剪后的）条目计算，与插入顺序无关；
+  编码改动时提升其中的版本标签（当前 `asc-name-mappings/2`）。
 
 - 输入指纹：切片用切片的 SHA-256。切片输出是规范化的（id 表排序固定），所以同一个类闭包每次得到相同的哈希。
   archive 用 `ApkKey` 加类描述符。
