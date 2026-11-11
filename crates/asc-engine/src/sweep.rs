@@ -64,6 +64,7 @@ struct Shared {
 }
 
 impl DexDedup {
+    /// A dedup with no claims yet, for one sweep.
     pub fn new() -> DexDedup {
         DexDedup::default()
     }
@@ -132,6 +133,10 @@ impl Engine {
 
     /// Keep the batches of a complete search of `query` on this APK in L3
     /// (not when one failed, see [`Engine::cached_refs`]).
+    ///
+    /// # Panics
+    ///
+    /// Never: it returns early unless a disk cache with L3 is in use.
     pub fn store_refs(&self, query: &Query, aggregate: bool, batches: &[RefBatch]) {
         if !self.cache.as_ref().and_then(|c| c.disk.as_deref()).is_some_and(|d| d.uses(Tier::Rendered)) {
             return;
@@ -158,6 +163,10 @@ impl Engine {
     /// [`DexDedup`]: a leading entry is searched and its rows offered to the
     /// entries that follow it; a following one reuses them when its bytes
     /// hash the same.
+    ///
+    /// # Panics
+    ///
+    /// Never: a search of one query yields exactly one batch.
     pub fn search_target_entry_dedup(
         &self,
         target: &SearchTarget,

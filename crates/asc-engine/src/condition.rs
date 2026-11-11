@@ -68,12 +68,22 @@ impl Grammar for Dex {
 
 /// Parse a rule (see the module docs). `@PATH` files are read relative to
 /// `dir` (the current directory when `None`).
+///
+/// # Errors
+///
+/// [`EngineError::Query`] for a syntax error, an invalid value, or a
+/// `@PATH` file that cannot be read or parsed.
 pub fn parse_rule_in(spec: &str, dir: Option<&Path>) -> Result<Query> {
     let rule = Rule::parse::<Dex>(spec).map_err(syntax)?;
     Reader { src: spec, dir }.rule(&rule)
 }
 
 /// Parse one condition (a rule of a single part without `!`).
+///
+/// # Errors
+///
+/// As [`parse_rule_in`], plus [`EngineError::Query`] when `spec` holds several
+/// conditions.
 pub fn parse_condition_in(spec: &str, dir: Option<&Path>) -> Result<Query> {
     match parse_rule_in(spec, dir)? {
         Query::All { .. } => Err(EngineError::Query(format!("{spec:?} is several conditions; give one KIND:VALUE here"))),

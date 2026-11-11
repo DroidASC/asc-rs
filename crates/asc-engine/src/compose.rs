@@ -62,6 +62,13 @@ impl Resolved {
 impl Engine {
     /// The signatures (`Lcls;->name(params)ret`) of the methods whose code
     /// matches each query, all queries in one pass.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] for a class relation query (it matches classes,
+    /// not code) or when some DEX entry could not be searched (a partial set
+    /// would silently drop methods), plus the errors of
+    /// [`Engine::find_refs`].
     pub fn matching_methods(&self, queries: &[Query], cancel: &AtomicBool) -> Result<MatchingMethods> {
         if queries.iter().any(|q| q.relation().is_some()) {
             return Err(EngineError::Query(

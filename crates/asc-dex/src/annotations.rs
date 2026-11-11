@@ -6,6 +6,7 @@ use crate::{DexError, Result, u32_at};
 /// Parsed `annotations_directory_item`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AnnotationsDirectory {
+    /// `class_annotations_off`: offset of the class's `annotation_set_item`, `0` if none.
     pub class_annotations_off: u32,
     /// `(field_idx, annotation_set_off)`
     pub field_annotations: Vec<(u32, u32)>,
@@ -16,6 +17,12 @@ pub struct AnnotationsDirectory {
 }
 
 impl AnnotationsDirectory {
+    /// Parse the `annotations_directory_item` at `off`.
+    ///
+    /// # Errors
+    ///
+    /// `Truncated` when the header or any of the annotation lists runs past
+    /// the end of `buf`.
     pub fn parse(buf: &[u8], off: usize) -> Result<AnnotationsDirectory> {
         let class_annotations_off = u32_at(buf, off)?;
         let fields = u32_at(buf, off + 4)? as usize;
@@ -38,6 +45,10 @@ impl AnnotationsDirectory {
 }
 
 /// Parse an `annotation_set_item`: a list of `annotation_item` offsets.
+///
+/// # Errors
+///
+/// `Truncated` when the size word is out of `buf`, `BadRange` when the entries are.
 pub fn parse_annotation_set(buf: &[u8], off: usize) -> Result<Vec<u32>> {
     let size = u32_at(buf, off)? as usize;
     let start = off + 4;
@@ -46,6 +57,10 @@ pub fn parse_annotation_set(buf: &[u8], off: usize) -> Result<Vec<u32>> {
 }
 
 /// Parse an `annotation_set_ref_list`: a list of `annotation_set_item` offsets.
+///
+/// # Errors
+///
+/// Same as [`parse_annotation_set`]; both lists share one layout.
 pub fn parse_annotation_set_ref_list(buf: &[u8], off: usize) -> Result<Vec<u32>> {
     parse_annotation_set(buf, off)
 }

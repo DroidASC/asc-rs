@@ -16,7 +16,14 @@ fn string_data_bytes(buf: &[u8], str_off: usize) -> Result<&[u8]> {
 }
 
 /// Binary search the type table for `target` (MUTF-8 descriptor bytes,
-/// compared in the table's UTF-16 order).
+/// compared in the table's UTF-16 order). `None` also when `buf` is not a
+/// DEX or has no strings or types.
+///
+/// # Errors
+///
+/// `BadRange` when the id tables or a string offset fall outside `buf`,
+/// `Malformed` when a type names a string past the string table, and the
+/// reader errors (`Truncated`, `UnterminatedString`) for bad string data.
 pub fn find_type_idx(buf: &[u8], target: &[u8]) -> Result<Option<u32>> {
     if buf.len() < HEADER_SIZE || &buf[..3] != b"dex" {
         return Ok(None);
@@ -56,6 +63,11 @@ pub fn find_type_idx(buf: &[u8], target: &[u8]) -> Result<Option<u32>> {
 }
 
 /// Whether any `class_def_item` has `class_idx == type_idx`.
+///
+/// # Errors
+///
+/// `Truncated` when the header is cut off, `BadRange` when the `class_defs`
+/// table does not fit in `buf`.
 pub fn class_defs_contain_type_idx(buf: &[u8], type_idx: u32) -> Result<bool> {
     let size = u32_at(buf, 0x60)? as usize;
     let off = u32_at(buf, 0x64)? as usize;
@@ -73,6 +85,10 @@ pub fn class_defs_contain_type_idx(buf: &[u8], type_idx: u32) -> Result<bool> {
 
 /// Whether the DEX buffer *defines* (not merely references) the class with
 /// descriptor `target`.
+///
+/// # Errors
+///
+/// As [`find_type_idx`] and [`class_defs_contain_type_idx`].
 pub fn dex_defines_class(buf: &[u8], target: &[u8]) -> Result<bool> {
     match find_type_idx(buf, target)? {
         Some(idx) => class_defs_contain_type_idx(buf, idx),

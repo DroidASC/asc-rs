@@ -16,7 +16,9 @@ use crate::value::{self, Findings, Line, Note, Obj};
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ModuleJson {
+    /// The `app` object.
     pub app: App,
+    /// The `module` object.
     pub module: Module,
     /// Fields that were present but wrongly typed, and so skipped.
     pub notes: Vec<Note>,
@@ -52,27 +54,45 @@ impl fmt::Display for ApiVersion {
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct App {
+    /// `bundleName`: the reverse-domain bundle identifier.
     pub bundle_name: Option<String>,
     /// `app`, `atomicService`, `shared`, `appService`…
     pub bundle_type: Option<String>,
+    /// `versionCode`: the integer version compared on upgrade.
     pub version_code: Option<i64>,
+    /// `versionName`: the version shown to users.
     pub version_name: Option<String>,
+    /// `minCompatibleVersionCode`: the oldest version this one can replace across devices.
     pub min_compatible_version_code: Option<i64>,
+    /// `vendor`.
     pub vendor: Option<String>,
+    /// `debug`: whether the bundle was built debuggable.
     pub debug: Option<bool>,
+    /// `minAPIVersion`: the lowest API level the bundle runs on.
     pub min_api_version: Option<ApiVersion>,
+    /// `targetAPIVersion`: the API level the bundle was built against.
     pub target_api_version: Option<ApiVersion>,
+    /// `targetMinorAPIVersion`.
     pub target_minor_api_version: Option<i64>,
+    /// `targetPatchAPIVersion`.
     pub target_patch_api_version: Option<i64>,
+    /// `minMinorAPIVersion`.
     pub min_minor_api_version: Option<i64>,
+    /// `minPatchAPIVersion`.
     pub min_patch_api_version: Option<i64>,
+    /// `apiReleaseType`: the SDK release channel (`Release`, `Beta1`…).
     pub api_release_type: Option<String>,
+    /// `compileSdkType`: `HarmonyOS` or `OpenHarmony`.
     pub compile_sdk_type: Option<String>,
+    /// `compileSdkVersion`: the SDK version string the bundle was compiled with.
     pub compile_sdk_version: Option<String>,
     /// `debug` or `release`.
     pub build_mode: Option<String>,
+    /// `label`: usually a `$string:` resource reference.
     pub label: Option<String>,
+    /// `description`: usually a `$string:` resource reference.
     pub description: Option<String>,
+    /// `appEnvironments`: environment variables set for the app process.
     pub environments: Vec<NameValue>,
     /// `multiAppMode`: whether the bundle may be installed several times.
     pub multi_app_mode: Option<MultiAppMode>,
@@ -86,6 +106,7 @@ pub struct App {
 pub struct MultiAppMode {
     /// `multiAppModeType`: `appClone` or `multiInstance`.
     pub kind: Option<String>,
+    /// `maxCount`: how many clones or instances may exist.
     pub max_count: Option<i64>,
 }
 
@@ -93,7 +114,9 @@ pub struct MultiAppMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NameValue {
+    /// `name`.
     pub name: Option<String>,
+    /// `value`, as text even when written as a number.
     pub value: Option<String>,
 }
 
@@ -101,8 +124,11 @@ pub struct NameValue {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Metadata {
+    /// `name`: the metadata key.
     pub name: Option<String>,
+    /// `value`: a literal value, as text.
     pub value: Option<String>,
+    /// `resource`: a `$profile:` reference to a JSON file under `resources/base/profile`.
     pub resource: Option<String>,
 }
 
@@ -110,6 +136,7 @@ pub struct Metadata {
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Module {
+    /// `name`: the module name, unique within the bundle.
     pub name: Option<String>,
     /// `entry`, `feature`, `har` or `shared`.
     pub kind: Option<String>,
@@ -117,15 +144,25 @@ pub struct Module {
     pub package_name: Option<String>,
     /// Source of the module's `AbilityStage`.
     pub src_entry: Option<String>,
+    /// `mainElement`: the ability or extension that starts first.
     pub main_element: Option<String>,
+    /// `description`: usually a `$string:` resource reference.
     pub description: Option<String>,
+    /// `process`: the process name the module runs in.
     pub process: Option<String>,
+    /// `deviceTypes`: `phone`, `tablet`, `2in1`, `wearable`…
     pub device_types: Vec<String>,
+    /// `virtualMachine`: the runtime the code targets, e.g. `ark12.0.2.0`.
     pub virtual_machine: Option<String>,
+    /// `compileMode`: `esmodule` or `jsbundle`.
     pub compile_mode: Option<String>,
+    /// `installationFree`: whether the module runs without installation (atomic service).
     pub installation_free: Option<bool>,
+    /// `deliveryWithInstall`: whether the module is installed with the app.
     pub delivery_with_install: Option<bool>,
+    /// `compressNativeLibs`: whether the `.so` files are stored compressed.
     pub compress_native_libs: Option<bool>,
+    /// `isolationMode`: whether the module runs in an isolated process.
     pub isolation_mode: Option<String>,
     /// `$profile:` reference to the page list.
     pub pages: Option<String>,
@@ -133,18 +170,29 @@ pub struct Module {
     pub router_map: Option<String>,
     /// `$profile:` reference to the startup task configuration.
     pub app_startup: Option<String>,
+    /// `targetModuleName`: the module an overlay module applies to.
     pub target_module_name: Option<String>,
+    /// `targetPriority`: the overlay's priority over its target.
     pub target_priority: Option<i64>,
+    /// `metadata`: custom key/value entries of the module.
     pub metadata: Vec<Metadata>,
+    /// `dependencies`: shared packages the module links against.
     pub dependencies: Vec<Dependency>,
+    /// `proxyData`: data the module shares through the data-share proxy.
     pub proxy_data: Vec<ProxyData>,
     /// URL schemes the module may probe with `canOpenLink`.
     pub query_schemes: Vec<String>,
+    /// `abilities`: the module's UIAbilities.
     pub abilities: Vec<Ability>,
+    /// `extensionAbilities`: the module's extension abilities.
     pub extension_abilities: Vec<Ability>,
+    /// `requestPermissions`: permissions the module asks for.
     pub request_permissions: Vec<RequestPermission>,
+    /// `definePermissions`: permissions the module declares for others.
     pub define_permissions: Vec<DefinePermission>,
+    /// `testRunner`: the test runner of a test module.
     pub test_runner: Option<TestRunner>,
+    /// `atomicService`: settings of an atomic-service module.
     pub atomic_service: Option<AtomicService>,
 }
 
@@ -152,8 +200,11 @@ pub struct Module {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Dependency {
+    /// `bundleName` of the shared package; `None` for one in the same bundle.
     pub bundle_name: Option<String>,
+    /// `moduleName` of the shared package.
     pub module_name: Option<String>,
+    /// `versionCode` the dependency requires.
     pub version_code: Option<i64>,
 }
 
@@ -161,9 +212,13 @@ pub struct Dependency {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProxyData {
+    /// `uri`: the `datashareproxy://` URI the data is published under.
     pub uri: Option<String>,
+    /// `requiredReadPermission`: permission a reader must hold.
     pub required_read_permission: Option<String>,
+    /// `requiredWritePermission`: permission a writer must hold.
     pub required_write_permission: Option<String>,
+    /// `metadata`: the entry's single metadata object.
     pub metadata: Option<Metadata>,
 }
 
@@ -192,7 +247,9 @@ impl AbilityKind {
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Ability {
+    /// Which array the entry comes from.
     pub kind: AbilityKind,
+    /// `name`: the class name of the ability.
     pub name: Option<String>,
     /// Source file relative to the module (`./ets/entryability/EntryAbility.ets`);
     /// see [`ModuleJson::record_names`].
@@ -203,20 +260,33 @@ pub struct Ability {
     pub exported: Option<bool>,
     /// Permissions a caller must hold.
     pub permissions: Vec<String>,
+    /// `skills`: the implicit wants the ability accepts.
     pub skills: Vec<Skill>,
+    /// `launchType`: `singleton`, `multiton`, `specified` or `standard`.
     pub launch_type: Option<String>,
+    /// `process`: the process name the ability runs in.
     pub process: Option<String>,
+    /// `label`: usually a `$string:` resource reference.
     pub label: Option<String>,
+    /// `description`: usually a `$string:` resource reference.
     pub description: Option<String>,
+    /// `backgroundModes`: long-running task types the ability may start.
     pub background_modes: Vec<String>,
+    /// `continuable`: whether the ability may migrate to another device.
     pub continuable: Option<bool>,
+    /// `metadata`: custom key/value entries of the ability.
     pub metadata: Vec<Metadata>,
     /// Data URI served by a data extension.
     pub uri: Option<String>,
+    /// `readPermission`: permission a caller needs to read from `uri`.
     pub read_permission: Option<String>,
+    /// `writePermission`: permission a caller needs to write to `uri`.
     pub write_permission: Option<String>,
+    /// `extensionProcessMode`: `instance`, `type` or `bundle`.
     pub extension_process_mode: Option<String>,
+    /// `dataGroupIds`: data groups the extension may share files with.
     pub data_group_ids: Vec<String>,
+    /// `removeMissionAfterTerminate`: whether the mission is dropped from recents when the ability ends.
     pub remove_mission_after_terminate: Option<bool>,
     /// The entry as written, for fields not modelled here.
     pub raw: Value,
@@ -276,9 +346,13 @@ impl Ability {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Skill {
+    /// `actions`: want actions the skill matches.
     pub actions: Vec<String>,
+    /// `entities`: want entities the skill matches.
     pub entities: Vec<String>,
+    /// `uris`: URI patterns the skill matches.
     pub uris: Vec<SkillUri>,
+    /// `permissions`: permissions a caller must hold to use the skill.
     pub permissions: Vec<String>,
     /// App Linking: the `https` hosts are verified against the bundle.
     pub domain_verify: Option<bool>,
@@ -288,17 +362,25 @@ pub struct Skill {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SkillUri {
+    /// `scheme`, e.g. `https` or an app-private scheme.
     pub scheme: Option<String>,
+    /// `host`.
     pub host: Option<String>,
+    /// `port`, as text even when written as a number.
     pub port: Option<String>,
+    /// `path`: an exact path.
     pub path: Option<String>,
+    /// `pathStartWith`: a path prefix.
     pub path_start_with: Option<String>,
+    /// `pathRegex`: a path regular expression.
     pub path_regex: Option<String>,
     /// MIME type of the data.
     pub mime_type: Option<String>,
     /// Uniform type descriptor of the data.
     pub utd: Option<String>,
+    /// `maxFileSupported`: how many files of this type the ability accepts at once.
     pub max_file_supported: Option<i64>,
+    /// `linkFeature`: the app-linking feature the URI serves (`Login`, `Pay`…).
     pub link_feature: Option<String>,
 }
 
@@ -355,7 +437,9 @@ impl SkillUri {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RequestPermission {
+    /// `name`: the permission requested.
     pub name: Option<String>,
+    /// `reason`: usually a `$string:` resource reference shown to the user.
     pub reason: Option<String>,
     /// `usedScene.abilities`.
     pub used_abilities: Vec<String>,
@@ -367,14 +451,19 @@ pub struct RequestPermission {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DefinePermission {
+    /// `name`: the permission declared.
     pub name: Option<String>,
     /// `system_grant` or `user_grant`.
     pub grant_mode: Option<String>,
     /// `normal`, `system_basic` or `system_core`.
     pub available_level: Option<String>,
+    /// `provisionEnable`: whether the permission may be granted through the provision profile.
     pub provision_enable: Option<bool>,
+    /// `distributedSceneEnable`: whether the permission applies in distributed scenarios.
     pub distributed_scene_enable: Option<bool>,
+    /// `label`: usually a `$string:` resource reference.
     pub label: Option<String>,
+    /// `description`: usually a `$string:` resource reference.
     pub description: Option<String>,
 }
 
@@ -382,7 +471,9 @@ pub struct DefinePermission {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TestRunner {
+    /// `name`: the test runner's name.
     pub name: Option<String>,
+    /// `srcPath`: source of the test runner.
     pub src_path: Option<String>,
 }
 

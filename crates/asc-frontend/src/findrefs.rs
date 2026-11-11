@@ -11,7 +11,12 @@ use std::path::Path;
 #[non_exhaustive]
 pub enum Target<'a> {
     /// Strings: a regex, or (`literal`) a substring.
-    String { value: &'a str, literal: bool },
+    String {
+        /// The pattern.
+        value: &'a str,
+        /// `value` is a plain substring, not a regex.
+        literal: bool,
+    },
     /// Type references by a fuzzy descriptor or name.
     Type(&'a str),
     /// Direct subclasses of a class.
@@ -21,7 +26,12 @@ pub enum Target<'a> {
     /// Calls of methods.
     Method(Member<'a>),
     /// Field accesses, or only reads or writes.
-    Field { member: Member<'a>, access: Option<FieldAccess> },
+    Field {
+        /// The field searched for.
+        member: Member<'a>,
+        /// Only reads or only writes; `None` for both.
+        access: Option<FieldAccess>,
+    },
 }
 
 /// A method or field as a search names it.
@@ -30,6 +40,7 @@ pub enum Target<'a> {
 pub struct Member<'a> {
     /// The class: exact (`Lc;`, `c.B`), or a pattern with `fuzzy_class`.
     pub class: Option<&'a str>,
+    /// `class` is a pattern matched against class names, not an exact class.
     pub fuzzy_class: bool,
     /// A name regex / substring, or the whole target (`Lc;->m(I)V`,
     /// `c.B.m`, `B#m`).
@@ -109,6 +120,9 @@ fn is_condition(target: &str) -> bool {
 ///
 /// # Errors
 /// `all` is empty: exclusions only remove methods.
+///
+/// # Panics
+/// Never: the single query is popped only when `all` has exactly one.
 pub fn compound(mut all: Vec<Query>, none: Vec<Query>) -> Result<Query, EngineError> {
     match (all.len(), none.is_empty()) {
         (0, _) => Err(EngineError::Query("a rule needs a condition without `!` (`!` only removes methods)".into())),

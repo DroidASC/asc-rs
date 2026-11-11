@@ -21,15 +21,20 @@ pub trait ModuleEntry: Sized {
 /// `ldexternalmodulevar N` reads entry `N` of this section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegularImport {
+    /// String offset of the local binding name.
     pub local_name_off: u32,
+    /// String offset of the name imported from the requested module.
     pub import_name_off: u32,
+    /// Index into [`ModuleRecord::requests`] of the module imported from.
     pub module_request_idx: u16,
 }
 
 /// `import * as local_name from <request>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamespaceImport {
+    /// String offset of the local binding name.
     pub local_name_off: u32,
+    /// Index into [`ModuleRecord::requests`] of the module imported from.
     pub module_request_idx: u16,
 }
 
@@ -37,21 +42,27 @@ pub struct NamespaceImport {
 /// `ldlocalmodulevar N` / `stmodulevar N` use entry `N` of this section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalExport {
+    /// String offset of the local binding name.
     pub local_name_off: u32,
+    /// String offset of the exported name.
     pub export_name_off: u32,
 }
 
 /// `export { import_name as export_name } from <request>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndirectExport {
+    /// String offset of the exported name.
     pub export_name_off: u32,
+    /// String offset of the name imported from the requested module.
     pub import_name_off: u32,
+    /// Index into [`ModuleRecord::requests`] of the module imported from.
     pub module_request_idx: u16,
 }
 
 /// `export * from <request>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StarExport {
+    /// Index into [`ModuleRecord::requests`] of the module imported from.
     pub module_request_idx: u16,
 }
 
@@ -117,11 +128,13 @@ impl<'a, T: ModuleEntry + 'a> Section<'a, T> {
         Ok(Section { bytes: r.take(len, what)?, entry: PhantomData })
     }
 
+    /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
         self.bytes.len() / T::SIZE
     }
 
+    /// Whether the section has no entries.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
@@ -133,6 +146,7 @@ impl<'a, T: ModuleEntry + 'a> Section<'a, T> {
         self.bytes.get(start..start.checked_add(T::SIZE)?).and_then(T::decode)
     }
 
+    /// The entries in section order.
     pub fn iter(&self) -> impl Iterator<Item = T> + 'a + use<'a, T> {
         self.bytes.chunks_exact(T::SIZE).filter_map(T::decode)
     }
@@ -148,10 +162,15 @@ pub struct ModuleRecord<'a> {
     /// Offsets of the module request strings (`@ohos:net.http`,
     /// `@normalized:N&&&entry/src/main/ets/pages/Index&` …).
     pub requests: OffsetTable<'a>,
+    /// `import { a as b } from ...` entries.
     pub regular_imports: Section<'a, RegularImport>,
+    /// `import * as ns from ...` entries.
     pub namespace_imports: Section<'a, NamespaceImport>,
+    /// `export { a as b }` entries.
     pub local_exports: Section<'a, LocalExport>,
+    /// `export { a as b } from ...` entries.
     pub indirect_exports: Section<'a, IndirectExport>,
+    /// `export * from ...` entries.
     pub star_exports: Section<'a, StarExport>,
 }
 
@@ -173,6 +192,7 @@ impl<'a> ModuleRecord<'a> {
         })
     }
 
+    /// File offset of the module record.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off

@@ -19,18 +19,23 @@ use std::rc::Rc;
 
 pub use format::{escape_string, field_signature, method_signature, proto_descriptor};
 
+/// Why a class or method could not be disassembled.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SmaliError {
+    /// The DEX is malformed where the listing needs it.
     #[error(transparent)]
     Dex(#[from] asc_dex::DexError),
+    /// No class definition with this descriptor in the DEX.
     #[error("class {0} not found")]
     ClassNotFound(String),
+    /// A method signature (as given) without its name, parentheses or return type.
     #[error("method signature must include the name, parameter descriptor and return type")]
     BadMethodSignature(String),
+    /// The method (its signature) is not defined by the class or DEX.
     #[error("method not found or signature is not defined in the target DEX: {0}")]
     MethodNotFound(String),
-    /// The listing grew past [`listing_limit`] of the DEX: items shared by
+    /// The listing grew past 64 times the DEX plus 1 MiB: items shared by
     /// many methods (code, annotations, a long string named over and over)
     /// would make a small file expand without bound.
     #[error("listing exceeds {0} bytes, far more than the DEX could hold")]
@@ -48,6 +53,7 @@ pub(crate) fn check_size(out: &str, limit: usize) -> Result<()> {
     if out.len() > limit { Err(SmaliError::TooLarge(limit)) } else { Ok(()) }
 }
 
+/// The result of the disassembly functions.
 pub type Result<T> = std::result::Result<T, SmaliError>;
 
 /// Rendering options.
@@ -87,6 +93,10 @@ impl Options {
 }
 
 /// Disassemble the class with the given descriptor.
+///
+/// # Errors
+///
+/// See [`disassemble_class_method`].
 pub fn disassemble_class(dex: &Dex<'_>, descriptor: &str, opts: Options) -> Result<String> {
     disassemble_class_method(dex, descriptor, opts, None)
 }
@@ -96,6 +106,14 @@ pub fn disassemble_class(dex: &Dex<'_>, descriptor: &str, opts: Options) -> Resu
 /// then, like the Python `disassemble --method`). The signature is
 /// normalised with [`normalize_method_signature`]; a class that defines no
 /// such method is an error.
+///
+/// # Errors
+///
+/// [`SmaliError::BadMethodSignature`] for a `method` that does not
+/// normalise, [`SmaliError::ClassNotFound`] / [`SmaliError::MethodNotFound`]
+/// when the DEX does not define the class or method,
+/// [`SmaliError::TooLarge`] for a runaway listing, and
+/// [`SmaliError::Dex`] for a malformed DEX.
 pub fn disassemble_class_method(dex: &Dex<'_>, descriptor: &str, opts: Options, method: Option<&str>) -> Result<String> {
     let filter = method.map(normalize_method_signature).transpose()?;
     let (index, _) =
@@ -120,6 +138,11 @@ pub fn disassemble_class_method(dex: &Dex<'_>, descriptor: &str, opts: Options, 
 }
 
 /// Disassemble class definition number `index`.
+///
+/// # Errors
+///
+/// [`SmaliError::Dex`] for an `index` out of range or a malformed DEX,
+/// [`SmaliError::TooLarge`] for a runaway listing.
 pub fn disassemble_class_def(dex: &Dex<'_>, index: u32, opts: Options) -> Result<String> {
     let def = dex.class_def(index)?;
     let mut w = Writer { names: Names::new(dex), out: String::with_capacity(16 * 1024), opts, method: None, marks: None };
@@ -132,6 +155,7 @@ pub fn disassemble_class_def(dex: &Dex<'_>, index: u32, opts: Options) -> Result
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MethodListing {
+    /// The smali, from `.method` to `.end method` and its newline.
     pub text: String,
     /// `(pc, line)` per instruction in pc order: `pc` in code units from the
     /// start of the method's code, `line` a 0-based index into `text.lines()`.
@@ -157,6 +181,12 @@ impl MethodListing {
 
 /// Render method `method_idx` of `dex` (it must be defined by a class of
 /// this DEX), annotations and parameters included, as in a class listing.
+///
+/// # Errors
+///
+/// [`SmaliError::MethodNotFound`] when no class of this DEX defines the
+/// method, [`SmaliError::TooLarge`] for a runaway listing, and
+/// [`SmaliError::Dex`] for an index out of range or a malformed DEX.
 pub fn disassemble_method(dex: &Dex<'_>, method_idx: u32, opts: Options) -> Result<MethodListing> {
     let id = dex.method_id(method_idx)?;
     let not_found = || SmaliError::MethodNotFound(method_signature(dex, method_idx).unwrap_or_else(|_| format!("method@{method_idx}")));
@@ -192,6 +222,10 @@ pub fn disassemble_method(dex: &Dex<'_>, method_idx: u32, opts: Options) -> Resu
 /// Normalise a `--method` signature such as `run(I)V` or `put(I, Ljava/lang/String;) V`:
 /// whitespace is dropped from the parameter and return descriptors. The name,
 /// both parentheses and a return type are required; a bare name is rejected.
+///
+/// # Errors
+///
+/// [`SmaliError::BadMethodSignature`] when one of those is missing.
 pub fn normalize_method_signature(signature: &str) -> Result<String> {
     let bad = || SmaliError::BadMethodSignature(signature.to_string());
     let (name, rest) = signature.split_once('(').ok_or_else(bad)?;

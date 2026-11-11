@@ -31,7 +31,7 @@
 //! assert_eq!(method.resolve(0).unwrap(), file.layout.string("hello"));
 //! ```
 
-mod annotations;
+pub mod annotations;
 mod asm;
 mod calls;
 mod classes;

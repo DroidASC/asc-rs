@@ -7,17 +7,25 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum QualifierKey {
+    /// Language, `zh` or `en`: key 0.
     Language,
+    /// Region, `CN` or `US`: key 1.
     Region,
     /// Screen density (`sdpi` .. `xxxldpi`), stored as dots per inch.
     Density,
+    /// `vertical` or `horizontal`: key 3.
     Orientation,
+    /// Device type, `phone` or `tablet`: key 4.
     Device,
+    /// Script, `Hans` or `Latn`: key 5.
     Script,
     /// `dark` / `light`.
     ColorMode,
+    /// Mobile country code: key 7.
     Mcc,
+    /// Mobile network code: key 8.
     Mnc,
+    /// `pointingdevice`: key 10.
     InputDevice,
     /// A key this crate has no name for.
     Other(u32),
@@ -64,6 +72,7 @@ impl fmt::Display for QualifierKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Qualifier {
+    /// What the qualifier restricts.
     pub key: QualifierKey,
     /// The stored number: packed letters for language, script and region,
     /// dots per inch for density, an enumerator for the rest.

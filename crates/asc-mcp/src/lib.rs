@@ -23,7 +23,7 @@
 //! `content`, and the same data as `structuredContent`.
 //!
 //! `findrefs` and `listclass` also take many APKs at once
-//! (`apks` or `dir`, see [`multi`]): the reply has one section per APK, cut
+//! (`apks` or `dir`): the reply has one section per APK, cut
 //! to a byte budget, with a `cursor` to page through the rest.
 //!
 //! The class graphs and resource tables of the open APKs count against the
@@ -33,7 +33,7 @@
 //!
 //! A HarmonyOS program (`.hap` / `.hsp` / `.app` / `.abc`) opens the same way
 //! and gets an `apk_id` of the same series; the tools that carry over answer
-//! it from its own engine, the others say what does ([`harmony`]).
+//! it from its own engine, the others say what does.
 
 mod harmony;
 mod lenient;
@@ -80,7 +80,9 @@ const PACKAGE_DEPTH: usize = 3;
 /// Server settings.
 #[non_exhaustive]
 pub struct Options {
+    /// Worker threads of each engine's queries.
     pub threads: Threads,
+    /// Log each query's timings and cache decisions to stderr.
     pub debug: bool,
     /// Shared by every opened APK.
     pub cache: CacheConfig,
@@ -92,6 +94,7 @@ pub struct Options {
     pub spill_dir: Option<PathBuf>,
     /// Disk budget of `spill_dir`.
     pub spill_bytes: u64,
+    /// How much of each result goes into `structuredContent`.
     pub structured: Structured,
 }
 
@@ -115,6 +118,16 @@ impl Options {
 }
 
 /// Serve MCP requests from `input` until it closes, writing responses to `output`.
+///
+/// # Errors
+///
+/// An I/O error reading `input`, or the first failed write to `output`
+/// (reported once `input` ends; the server keeps reading until then).
+///
+/// # Panics
+///
+/// When a thread panicked while holding `output`: tool panics are caught
+/// before the reply is written, so only a panicking writer can cause this.
 pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> io::Result<()> {
     let server = Server::new(opts);
     let output = Mutex::new(output);
@@ -356,6 +369,7 @@ pub(crate) struct SweepStats {
 }
 
 impl Server {
+    /// A server with no APK open yet; nothing is read until a call names one.
     pub fn new(opts: Options) -> Server {
         Server {
             threads: opts.threads,

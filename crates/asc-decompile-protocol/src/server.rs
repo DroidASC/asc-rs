@@ -28,10 +28,12 @@ impl<W> Clone for Outgoing<W> {
 }
 
 impl<W: Write> Outgoing<W> {
+    /// Frames messages onto `writer` with the protocol size limit.
     pub fn new(writer: W) -> Self {
         Self::from_writer(FrameWriter::new(writer))
     }
 
+    /// Shares an already configured frame writer, e.g. one with another limit.
     pub fn from_writer(writer: FrameWriter<W>) -> Self {
         Self { writer: Arc::new(Mutex::new(writer)) }
     }
@@ -41,6 +43,10 @@ impl<W: Write> Outgoing<W> {
     /// # Errors
     ///
     /// See [`FrameWriter::write_message`].
+    ///
+    /// # Panics
+    ///
+    /// When another thread panicked while writing, poisoning the writer.
     pub fn send(&self, message: impl Into<Message>) -> Result<(), FrameError> {
         self.writer.lock().expect("outgoing writer mutex poisoned").write_message(&message.into())
     }
@@ -82,6 +88,7 @@ pub struct Cancellations {
 }
 
 impl Cancellations {
+    /// An empty set; clones share it.
     pub fn new() -> Self {
         Self::default()
     }
@@ -91,6 +98,7 @@ impl Cancellations {
         self.lock().insert(id);
     }
 
+    /// Whether the client cancelled `id` and it has not finished yet.
     pub fn is_cancelled(&self, id: &RequestId) -> bool {
         self.lock().contains(id)
     }

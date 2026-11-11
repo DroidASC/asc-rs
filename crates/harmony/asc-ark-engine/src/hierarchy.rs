@@ -74,6 +74,7 @@ pub enum Lineage {
 }
 
 impl Lineage {
+    /// The word for the walk: `subclasses` or `supers`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Lineage::Subclasses => "subclasses",
@@ -114,6 +115,7 @@ pub struct HierarchyQuery {
     pub class: String,
     /// Look for the class in this ABC entry only.
     pub entry: Option<String>,
+    /// Which way to walk.
     pub direction: Lineage,
     /// Levels to walk (1 = direct subclasses / the parent).
     pub depth: usize,
@@ -189,6 +191,7 @@ pub struct DefinedMethod {
     pub function: String,
     /// Readable name, e.g. `EntryAbility.onCreate`.
     pub restored: String,
+    /// Whether it is a static method.
     pub is_static: bool,
 }
 
@@ -207,6 +210,7 @@ pub struct ClassRow {
     pub depth: usize,
     /// Index of the parent row (`None` for a root).
     pub parent: Option<usize>,
+    /// What the row shows.
     pub node: ClassNode,
     /// Shown again: what is below this node is listed at another row of it.
     pub repeated: bool,
@@ -252,8 +256,11 @@ impl ClassRow {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HierarchyTree {
+    /// The direction the tree was walked in.
     pub direction: Lineage,
+    /// The depth the query asked for.
     pub depth: usize,
+    /// The rows in depth-first order; a row's `parent` indexes this list.
     pub rows: Vec<ClassRow>,
     /// Distinct classes among the rows.
     pub classes: usize,
@@ -426,9 +433,11 @@ pub enum ParentKind {
 }
 
 impl ParentKind {
+    /// Every kind, in declaration order.
     pub const ALL: [ParentKind; 5] =
         [ParentKind::None, ParentKind::SameRecord, ParentKind::OtherRecord, ParentKind::External, ParentKind::Unresolved];
 
+    /// How the kind is named in summaries.
     pub const fn label(self) -> &'static str {
         match self {
             ParentKind::None => "none",
@@ -450,7 +459,9 @@ pub struct ClassDefinition {
     pub definer: String,
     /// Offset of the instruction in the code of `definer`.
     pub pc: u32,
+    /// The class is a `callruntime.definesendableclass` one.
     pub sendable: bool,
+    /// Where the parent comes from.
     pub kind: ParentKind,
     /// The parent; `None` for [`ParentKind::None`].
     pub parent: Option<ClassNode>,

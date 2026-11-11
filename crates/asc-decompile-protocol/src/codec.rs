@@ -12,12 +12,19 @@ pub const MAX_MESSAGE_BYTES: usize = 64 << 20;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FrameError {
+    /// The underlying reader or writer failed.
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
+    /// A line (or a serialized message) is longer than the configured limit.
     #[error("message exceeds {limit} bytes")]
-    TooLarge { limit: usize },
+    TooLarge {
+        /// The limit in bytes, newline excluded.
+        limit: usize,
+    },
+    /// The stream ended after part of a line, before its newline.
     #[error("stream ended in the middle of a message")]
     Truncated,
+    /// A line is not valid JSON-RPC, or a message failed to serialize.
     #[error("invalid message: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -31,10 +38,12 @@ pub struct FrameReader<R> {
 }
 
 impl<R: BufRead> FrameReader<R> {
+    /// Wraps `inner` with the protocol limit, [`MAX_MESSAGE_BYTES`].
     pub fn new(inner: R) -> Self {
         Self::with_limit(inner, MAX_MESSAGE_BYTES)
     }
 
+    /// Wraps `inner`, rejecting lines longer than `limit` bytes.
     pub fn with_limit(inner: R, limit: usize) -> Self {
         Self { inner, limit, line: Vec::new() }
     }
@@ -94,6 +103,7 @@ impl<R: BufRead> FrameReader<R> {
         }
     }
 
+    /// Unwraps the underlying reader; bytes it has buffered stay in it.
     pub fn into_inner(self) -> R {
         self.inner
     }
@@ -108,10 +118,12 @@ pub struct FrameWriter<W> {
 }
 
 impl<W: Write> FrameWriter<W> {
+    /// Wraps `inner` with the protocol limit, [`MAX_MESSAGE_BYTES`].
     pub fn new(inner: W) -> Self {
         Self::with_limit(inner, MAX_MESSAGE_BYTES)
     }
 
+    /// Wraps `inner`, refusing to write messages longer than `limit` bytes.
     pub fn with_limit(inner: W, limit: usize) -> Self {
         Self { inner, limit, buf: Vec::new() }
     }
@@ -135,10 +147,12 @@ impl<W: Write> FrameWriter<W> {
         Ok(())
     }
 
+    /// The underlying writer; writing to it directly can break the framing.
     pub fn get_mut(&mut self) -> &mut W {
         &mut self.inner
     }
 
+    /// Unwraps the underlying writer.
     pub fn into_inner(self) -> W {
         self.inner
     }

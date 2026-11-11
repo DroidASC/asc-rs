@@ -59,15 +59,19 @@ pub use asc_axml::{
     TYPE_REFERENCE, TYPE_STRING,
 };
 
+/// Why a resource table could not be indexed at all.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ArscError {
+    /// The data does not start with a `RES_TABLE_TYPE` chunk header.
     #[error("not a resource table")]
     NotArsc,
+    /// The table header is present but unusable; the message says why.
     #[error("malformed resource table: {0}")]
     Malformed(String),
 }
 
+/// `Result` with [`ArscError`].
 pub type Result<T> = std::result::Result<T, ArscError>;
 
 #[inline]
@@ -237,28 +241,39 @@ struct TypeGroup {
 /// the package id it was built against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Library {
+    /// The package id the library was assigned at build time.
     pub package_id: u32,
+    /// The library's package name.
     pub name: String,
 }
 
 /// An `<overlayable>` declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Overlayable {
+    /// The `name` attribute of `<overlayable>`.
     pub name: String,
+    /// The `actor` attribute: the URI of the overlay actor, empty for none.
     pub actor: String,
+    /// One entry per `ResTable_overlayable_policy_header` chunk.
     pub policies: Vec<OverlayablePolicy>,
 }
 
+/// A `<policy>` of an `<overlayable>`: which overlays may replace which
+/// resources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayablePolicy {
+    /// `PolicyFlags` bitmask (`PUBLIC`, `SYSTEM_PARTITION`, `SIGNATURE`, ...).
     pub flags: u32,
+    /// Resource ids the policy applies to.
     pub ids: Vec<u32>,
 }
 
 /// A staged resource id and the id it was finalized to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StagedAlias {
+    /// The id used while the API was staged.
     pub staged: u32,
+    /// The id assigned when the API was finalized.
     pub finalized: u32,
 }
 
@@ -266,7 +281,10 @@ pub struct StagedAlias {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Package {
+    /// Package id: the top byte of its resource ids (`0x7f` for apps,
+    /// `0x01` for the framework).
     pub id: u8,
+    /// Package name.
     pub name: String,
     type_names: PoolLayout,
     keys: PoolLayout,
@@ -274,8 +292,11 @@ pub struct Package {
     /// Indexed by type id (1..=255); grown to the highest id seen, so a
     /// package with few types does not pay for all 255.
     groups: Vec<TypeGroup>,
+    /// Shared libraries from the `RES_TABLE_LIBRARY_TYPE` chunk.
     pub libraries: Vec<Library>,
+    /// `<overlayable>` declarations.
     pub overlayables: Vec<Overlayable>,
+    /// Staged-to-finalized id aliases from `RES_TABLE_STAGED_ALIAS_TYPE`.
     pub staged_aliases: Vec<StagedAlias>,
 }
 
@@ -307,11 +328,14 @@ impl Package {
 /// A typed value (`Res_value`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value {
+    /// `dataType`: one of the `TYPE_*` constants.
     pub kind: u8,
+    /// `data`, interpreted according to `kind`.
     pub data: u32,
 }
 
 impl Value {
+    /// Whether this is a non-null (dynamic) reference to another resource.
     pub fn is_reference(&self) -> bool {
         matches!(self.kind, TYPE_REFERENCE | TYPE_DYNAMIC_REFERENCE) && self.data != 0
     }
@@ -320,12 +344,15 @@ impl Value {
 /// The value of a resource in one configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EntryValue {
+    /// A single `Res_value`.
     Simple(Value),
     /// A style, attr definition, array or plurals: a parent (0 for none) and
     /// `(key, value)` items. Keys are attr ids, the `ATTR_*`/plurals ids of
     /// [`format::bag_key_name`], or `0x02000000 | index` for arrays.
     Bag {
+        /// Resource id of the parent style, 0 for none.
         parent: u32,
+        /// `(key, value)` items in table order.
         items: Vec<(u32, Value)>,
     },
 }
@@ -334,8 +361,11 @@ pub enum EntryValue {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ConfigValue {
+    /// The configuration the value is defined for.
     pub config: Config,
+    /// `ResTable_entry` flags (`FLAG_COMPLEX`, `FLAG_PUBLIC`, ...).
     pub flags: u16,
+    /// The value itself.
     pub value: EntryValue,
 }
 
@@ -343,8 +373,11 @@ pub struct ConfigValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResName {
+    /// Package name (`android`, `com.example`).
     pub package: String,
+    /// Type name (`string`, `drawable`, ...).
     pub type_name: String,
+    /// Entry key name.
     pub entry: String,
 }
 
@@ -377,13 +410,18 @@ pub struct Resolved {
     pub fallback: bool,
 }
 
+/// Why [`ResTable::resolve`] could not reach a final value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ResolveError {
+    /// The id (requested or reached through a reference) has no value.
     #[error("resource 0x{0:08x} not found")]
     NotFound(u32),
+    /// The chain came back to an id it already visited; the ids in order,
+    /// ending with the repeated one.
     #[error("reference cycle: {}", .0.iter().map(|id| format!("0x{id:08x}")).collect::<Vec<_>>().join(" -> "))]
     Cycle(Vec<u32>),
+    /// The chain is longer than [`MAX_RESOLVE_DEPTH`].
     #[error("reference chain longer than {MAX_RESOLVE_DEPTH}")]
     TooDeep,
 }
@@ -410,6 +448,11 @@ impl ResTable {
     /// Index the table in `data`. Fails only when `data` is not a resource
     /// table at all; damaged parts are skipped and reported in
     /// [`ResTable::warnings`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArscError::NotArsc`] when `data` does not start with a resource
+    /// table header, [`ArscError::Malformed`] when that header is unusable.
     pub fn parse(data: impl AsRef<[u8]> + Send + Sync + 'static) -> Result<ResTable> {
         let data: Box<dyn AsRef<[u8]> + Send + Sync> = Box::new(data);
         let bytes = (*data).as_ref();
@@ -459,6 +502,7 @@ impl ResTable {
         (*self.data).as_ref()
     }
 
+    /// The packages in table order.
     pub fn packages(&self) -> &[Package] {
         &self.packages
     }
@@ -492,6 +536,7 @@ impl ResTable {
         &self.warnings
     }
 
+    /// The package with package id `id` (the top byte of its resource ids).
     pub fn package_by_id(&self, id: u8) -> Option<&Package> {
         match self.by_id[id as usize] {
             0 => None,
@@ -601,6 +646,12 @@ impl ResTable {
     /// Follow `id` through references until a non-reference value (or one
     /// pointing outside this table). At each step the configuration best
     /// matching `req` is used, falling back to the first one defined.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::NotFound`] when an id on the chain has no value,
+    /// [`ResolveError::Cycle`] on a reference loop, and
+    /// [`ResolveError::TooDeep`] past [`MAX_RESOLVE_DEPTH`] steps.
     pub fn resolve(&self, id: u32, req: &Config) -> std::result::Result<Resolved, ResolveError> {
         let mut chain = Vec::new();
         let mut fallback = false;
@@ -629,6 +680,10 @@ impl ResTable {
     }
 
     /// [`ResTable::resolve`] for [`Config::any_device`].
+    ///
+    /// # Errors
+    ///
+    /// As [`ResTable::resolve`].
     pub fn resolve_default(&self, id: u32) -> std::result::Result<Resolved, ResolveError> {
         self.resolve(id, &Config::any_device())
     }

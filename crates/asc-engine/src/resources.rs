@@ -49,6 +49,7 @@ impl AsRef<[u8]> for MappedEntry {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ResourceRow {
+    /// The resource id (`0xPPTTEEEE`).
     pub id: u32,
     /// `type/name` (or `package:type/name` outside the app package).
     pub name: String,
@@ -70,6 +71,7 @@ impl ResourceRow {
         }
     }
 
+    /// The row as a JSON object, the id as `0x` hex text.
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({ "id": format!("0x{:08x}", self.id), "name": self.name, "config": self.config, "value": self.value })
     }
@@ -90,6 +92,11 @@ pub enum ResourceField {
 impl Engine {
     /// The APK's resource table, parsed once per APK version and kept for
     /// later calls. `None` when the APK has no `resources.arsc`.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK or the table cannot be read,
+    /// [`EngineError::Arsc`] when the table is malformed.
     pub fn resources(&self) -> Result<Option<Arc<ResTable>>> {
         let apk = self.open()?;
         let ident = file_ident(&apk);
@@ -140,6 +147,12 @@ impl Engine {
 
     /// Decode a binary XML file of the APK (`res/xml/...`, a layout, the
     /// manifest), naming references and app attributes from the resource table.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] when the APK has no entry `path`, the errors of
+    /// [`Engine::resources`], and [`EngineError::Axml`] when the entry is not
+    /// valid binary XML.
     pub fn xml(&self, path: &str) -> Result<String> {
         let data = match self.open()?.read(path) {
             Ok(d) => d,
@@ -153,12 +166,21 @@ impl Engine {
     }
 
     /// [`Engine::manifest_xml`] with `@7F...` references shown by name.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::xml`].
     pub fn manifest_xml_resolved(&self) -> Result<String> {
         self.xml("AndroidManifest.xml")
     }
 
     /// Call `f` with every value of every resource, in id order (one row per
     /// resource and configuration).
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] when the APK has no `resources.arsc`, and the errors of
+    /// [`Engine::resources`].
     pub fn dump_resources(&self, mut f: impl FnMut(ResourceRow)) -> Result<()> {
         let table = self.resources()?.ok_or_else(|| EngineError::Query("APK has no resources.arsc".into()))?;
         for id in table.ids() {
@@ -172,6 +194,11 @@ impl Engine {
 
     /// Every configuration's value of the resource `query`: an id
     /// (`0x7f0d0001`) or a name (`string/app_name`, `@pkg:type/name`).
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] when the APK has no `resources.arsc` or no resource
+    /// `query`, and the errors of [`Engine::resources`].
     pub fn resource(&self, query: &str) -> Result<Vec<ResourceRow>> {
         let table = self.resources()?.ok_or_else(|| EngineError::Query("APK has no resources.arsc".into()))?;
         let id = parse_id(query)
@@ -192,6 +219,17 @@ impl Engine {
     /// Resolve the reference chain of `query` for a device described by
     /// `config` (default: [`Config::any_device`]). Returns the rendered
     /// chain (`@string/a -> @string/b`) and the final value.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] when the APK has no `resources.arsc`, no resource
+    /// `query`, or a chain that cannot be resolved (no value for the
+    /// configuration, a dangling or cyclic reference), and the errors of
+    /// [`Engine::resources`].
+    ///
+    /// # Panics
+    ///
+    /// Never: a resolved chain always starts with the queried id.
     pub fn resolve_resource(&self, query: &str, config: Option<&Config>) -> Result<(Vec<String>, ResourceRow)> {
         let table = self.resources()?.ok_or_else(|| EngineError::Query("APK has no resources.arsc".into()))?;
         let id = parse_id(query)
@@ -210,6 +248,11 @@ impl Engine {
     /// (a plain substring when `literal`), one row per matching configuration
     /// value (names: one row per configuration). At most `limit` rows; the
     /// second value is the total number of matches.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] for an invalid regex or an APK without
+    /// `resources.arsc`, and the errors of [`Engine::resources`].
     pub fn search_resources(&self, pattern: &str, literal: bool, field: ResourceField, limit: usize) -> Result<(Vec<ResourceRow>, usize)> {
         let source = if literal { regex::escape(pattern) } else { pattern.to_string() };
         let pattern = regex::Regex::new(&source).map_err(|e| EngineError::Query(format!("bad pattern: {e}")))?;

@@ -23,8 +23,11 @@ use crate::{Engine, EngineError, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum CalleeRoot {
+    /// An imported binding or namespace.
     Import,
+    /// A global, or the global object.
     Global,
+    /// The `this` of the calling function.
     This,
     /// A function or class defined in the record, a module-level binding,
     /// the parent class.
@@ -35,7 +38,9 @@ pub enum CalleeRoot {
     CapturedArgument,
     /// A captured variable that is not resolved.
     Lexical,
+    /// A parameter of the calling function.
     Argument,
+    /// What another call returned.
     CallResult,
     /// Anything else computed in the block.
     Other,
@@ -44,6 +49,7 @@ pub enum CalleeRoot {
 }
 
 impl CalleeRoot {
+    /// Every root, in declaration order.
     pub const ALL: [CalleeRoot; 11] = [
         CalleeRoot::Import,
         CalleeRoot::Global,
@@ -90,7 +96,9 @@ impl CalleeRoot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResolvedCapture {
+    /// The ABC entry that holds the call.
     pub entry: String,
+    /// Canonical record name.
     pub record: String,
     /// Raw name of the function that holds the call.
     pub function: String,
@@ -98,7 +106,9 @@ pub struct ResolvedCapture {
     pub call_pc: u32,
     /// Offset of the `ldlexvar` the callee starts at.
     pub load_pc: u32,
+    /// Lexical environment level of the `ldlexvar`: 0 for the innermost.
     pub level: u32,
+    /// Slot index of the `ldlexvar` in that environment.
     pub slot: u32,
     /// The callee path as `call:` prints it.
     pub callee: String,
@@ -121,6 +131,7 @@ pub struct CallResolution {
     pub records: usize,
     /// Records whose captured variables had to be worked out.
     pub scoped_records: usize,
+    /// Call sites looked at.
     pub call_sites: usize,
     /// Call sites per root, captured variables left alone.
     pub before: BTreeMap<CalleeRoot, usize>,
@@ -128,6 +139,7 @@ pub struct CallResolution {
     pub after: BTreeMap<CalleeRoot, usize>,
     /// Callees that start at a captured variable.
     pub captured: usize,
+    /// Callees of [`CallResolution::captured`] that resolved.
     pub captured_resolved: usize,
     /// The others, by reason.
     pub captured_unresolved: BTreeMap<Unresolved, usize>,

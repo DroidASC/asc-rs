@@ -1,3 +1,7 @@
+//! Single-class rebuilds produce valid DEX files: checksum and signature,
+//! remapped operands, payloads, try/catch handlers, debug info,
+//! annotations and static values.
+
 mod common;
 
 use asc_dex::Dex;

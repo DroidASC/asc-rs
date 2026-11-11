@@ -61,6 +61,7 @@ pub struct RouterMap {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Route {
+    /// `name`: the name the route is pushed with.
     pub name: Option<String>,
     /// The source file of the page, relative to the root of the package
     /// that has it: `src/main/ets/pages/Detail.ets`.
@@ -72,7 +73,9 @@ pub struct Route {
     pub ohmurl: Option<String>,
     /// The package that has the page, when it is not the module itself.
     pub package_name: Option<String>,
+    /// `moduleName`: the module that has the page.
     pub module_name: Option<String>,
+    /// `bundleName`: the bundle that has the page.
     pub bundle_name: Option<String>,
 }
 

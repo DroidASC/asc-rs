@@ -39,12 +39,19 @@ use std::fmt::Write as _;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ScopeKind {
+    /// Tag `~`: a class.
     Class,
+    /// Tag `&`: a namespace.
     Namespace,
+    /// Tag `%`: an enum.
     Enum,
+    /// Tag `*`: a function.
     Function,
+    /// Tag `>`: an instance method.
     InstanceMethod,
+    /// Tag `<`: a static method.
     StaticMethod,
+    /// Tag `=`: a constructor.
     Constructor,
 }
 
@@ -67,7 +74,9 @@ impl ScopeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ScopeIdent<'a> {
+    /// Empty name: an anonymous function or class.
     Anonymous,
+    /// The name spelled out in the mangled name.
     Named(&'a str),
     /// `@<hex>`: index into the record's `scopeNames` literal array.
     Indexed(u32),
@@ -77,7 +86,9 @@ pub enum ScopeIdent<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Scope<'a> {
+    /// What the scope is, from its tag character.
     pub kind: ScopeKind,
+    /// The scope's name.
     pub ident: ScopeIdent<'a>,
     /// The `^<hex>` suffix: which of several same-named scopes this is.
     pub duplicate: Option<u32>,
@@ -145,6 +156,7 @@ impl<'a> FunctionName<'a> {
         FunctionName { raw, form }
     }
 
+    /// The name as stored in the file.
     #[inline]
     pub fn raw(&self) -> &'a str {
         self.raw
@@ -267,10 +279,26 @@ pub enum RecordName<'a> {
     /// `&entry/src/main/ets/pages/Index&`, `&@ohos/crypto-js/index&2.0.0`.
     /// `bundle` is empty for the application's own bundle, `version` for
     /// its own modules.
-    Normalized { bundle: &'a str, package: &'a str, path: &'a str, version: &'a str },
+    Normalized {
+        /// Bundle name; empty for the application's own bundle.
+        bundle: &'a str,
+        /// Package (module) name, two segments for a scoped `@scope/name` package.
+        package: &'a str,
+        /// Path of the source inside the package, without extension.
+        path: &'a str,
+        /// Package version; empty for the application's own modules.
+        version: &'a str,
+    },
     /// Bundle form `<bundle>/<module>/<path>`:
     /// `com.hmos.exam5.pkg/entry/ets/pages/Home`.
-    Bundle { bundle: &'a str, module: &'a str, path: &'a str },
+    Bundle {
+        /// Bundle name.
+        bundle: &'a str,
+        /// Module name inside the bundle.
+        module: &'a str,
+        /// Path of the source inside the module, without extension.
+        path: &'a str,
+    },
     /// An annotation interface declared in a module of the normalized
     /// form, `<module record>.<Interface>`:
     /// `&entry/src/main/ets/Marks&.Marked`, `&@ohos/lib/index&1.2.0.Marked`.
@@ -282,7 +310,12 @@ pub enum RecordName<'a> {
     /// module of version `1.0.0-beta.rc` or the interface `rc` of version
     /// `1.0.0-beta`, and is read as the interface. [`crate::Class::is_annotation`]
     /// says which it is for a record of the file.
-    Annotation { module: &'a str, interface: &'a str },
+    Annotation {
+        /// Record name of the declaring module.
+        module: &'a str,
+        /// Name of the annotation interface.
+        interface: &'a str,
+    },
     /// See [`RecordKind::Service`].
     Service(&'a str),
     /// See [`RecordKind::SystemModule`].
@@ -320,6 +353,7 @@ impl<'a> RecordName<'a> {
         }
     }
 
+    /// What kind of record a name of this form denotes.
     pub fn kind(&self) -> RecordKind {
         match self {
             RecordName::Normalized { .. } | RecordName::Bundle { .. } | RecordName::Other(_) => RecordKind::Module,

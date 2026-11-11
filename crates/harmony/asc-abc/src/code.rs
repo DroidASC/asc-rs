@@ -12,6 +12,7 @@ pub struct Code<'a> {
     off: u32,
     /// Number of registers, not counting arguments.
     pub num_vregs: u32,
+    /// `num_args`: number of argument registers, which follow the `num_vregs` locals.
     pub num_args: u32,
     /// Number of try blocks.
     pub tries_size: u32,
@@ -28,6 +29,7 @@ impl<'a> Code<'a> {
         Ok(Code { buf, off, num_vregs, num_args, tries_size, insns, insns_pos })
     }
 
+    /// File offset of the code item.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off
@@ -75,9 +77,11 @@ impl<'a> Iterator for TryBlocks<'a> {
 /// handlers.
 #[derive(Debug, Clone, Copy)]
 pub struct TryBlock<'a> {
+    /// `start_pc`: byte offset of the first covered instruction.
     pub start_pc: u32,
     /// Length of the covered range in bytes.
     pub length: u32,
+    /// `num_catches`: number of catch blocks.
     pub num_catches: u32,
     catches: Reader<'a>,
 }
@@ -107,6 +111,7 @@ pub struct CatchBlock {
     /// Index of the exception type in the region's class table; `None`
     /// catches everything (the file stores the index plus one).
     pub type_idx: Option<u32>,
+    /// `handler_pc`: byte offset of the handler's first instruction.
     pub handler_pc: u32,
     /// Size of the handler in bytes.
     pub code_size: u32,

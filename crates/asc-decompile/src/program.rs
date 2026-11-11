@@ -19,6 +19,7 @@ use crate::spec::CallOptions;
 pub struct DecompileRequest {
     /// Type descriptors, e.g. `Lbin/mt/json/JSONObject;`.
     pub classes: Vec<String>,
+    /// Output language; the backend must have declared it.
     pub language: Language,
     /// Fold inner and anonymous classes into their outer class.
     pub nested: bool,
@@ -65,6 +66,7 @@ impl Program {
         Ok(program)
     }
 
+    /// The parameters the program is (re)opened with on each process.
     pub fn params(&self) -> &ProgramOpenParams {
         &self.params
     }

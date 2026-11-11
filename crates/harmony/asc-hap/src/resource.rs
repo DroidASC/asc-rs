@@ -35,22 +35,63 @@ pub enum ResourceIndexError {
         /// The version text of the header, read lossily.
         version: String,
     },
+    /// A structure runs past the end of the file.
     #[error("{what} at {offset:#x} needs {needed} bytes, {available} are left")]
-    Truncated { what: &'static str, offset: usize, needed: usize, available: usize },
+    Truncated {
+        /// The structure being read.
+        what: &'static str,
+        /// Where it starts.
+        offset: usize,
+        /// Bytes it needs.
+        needed: usize,
+        /// Bytes left from `offset` to the end of the file.
+        available: usize,
+    },
+    /// An offset stored in the file points past its end.
     #[error("{what} offset {offset:#x} is outside the index of {len:#x} bytes")]
-    OutOfBounds { what: &'static str, offset: u32, len: usize },
+    OutOfBounds {
+        /// The structure the offset points at.
+        what: &'static str,
+        /// The offset as stored.
+        offset: u32,
+        /// Length of the file in bytes.
+        len: usize,
+    },
+    /// A block does not start with the four-byte tag its kind requires.
     #[error("expected the tag {expected:?} at {offset:#x}, found {found:?}")]
-    BadTag { expected: &'static str, offset: usize, found: [u8; 4] },
+    BadTag {
+        /// The tag the block should start with.
+        expected: &'static str,
+        /// Where the block starts.
+        offset: usize,
+        /// The four bytes found there.
+        found: [u8; 4],
+    },
     /// A table row and the block it points at name different resources.
     #[error("the table lists resource {listed:#010x} at {offset:#x}, where {found:#010x} is stored")]
-    IdMismatch { listed: u32, found: u32, offset: usize },
+    IdMismatch {
+        /// The resource id in the table row.
+        listed: u32,
+        /// The resource id in the block.
+        found: u32,
+        /// Where the block starts.
+        offset: usize,
+    },
     /// A value names a qualifier set the header does not define.
     #[error("resource {id:#010x} has a value for qualifier set {config}, which the index does not define")]
-    UnknownQualifiers { id: u32, config: u32 },
+    UnknownQualifiers {
+        /// The resource id.
+        id: u32,
+        /// The qualifier set index the value names.
+        config: u32,
+    },
     /// Tables that share or repeat blocks describe more values than a
     /// well-formed index of this size can.
     #[error("the tables describe more than {limit} values, more than an index of this size holds")]
-    TooManyValues { limit: usize },
+    TooManyValues {
+        /// The most values an index of this size can hold.
+        limit: usize,
+    },
 }
 
 type Result<T> = std::result::Result<T, ResourceIndexError>;
@@ -179,6 +220,7 @@ impl<'a> ResourceIndex<'a> {
         &self.version
     }
 
+    /// Which of the two layouts the file uses.
     pub fn format(&self) -> IndexFormat {
         self.format
     }
@@ -193,6 +235,7 @@ impl<'a> ResourceIndex<'a> {
         self.entries.len()
     }
 
+    /// Whether the index holds no values at all.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -308,10 +351,12 @@ pub struct Resource<'r> {
 }
 
 impl<'r> Resource<'r> {
+    /// The resource id, `0x01000000` and up; shared by every value of the resource.
     pub fn id(&self) -> u32 {
         self.entry.id
     }
 
+    /// The resource type: `string`, `media`, `color`…
     pub fn kind(&self) -> ResourceType {
         self.entry.kind
     }
@@ -322,6 +367,7 @@ impl<'r> Resource<'r> {
         String::from_utf8_lossy(self.entry.name)
     }
 
+    /// The qualifier set this value is for.
     pub fn qualifiers(&self) -> &'r Qualifiers {
         &self.index.qualifiers[self.entry.qualifiers]
     }
@@ -331,6 +377,7 @@ impl<'r> Resource<'r> {
         self.entry.value
     }
 
+    /// The value decoded according to [`Resource::kind`].
     pub fn value(&self) -> ResourceValue<'r> {
         ResourceValue::decode(self.entry.kind, self.entry.value, self.index.format.terminates_values())
     }

@@ -100,7 +100,9 @@ pub(crate) enum NameUse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Access {
+    /// Reads the property or global.
     Read,
+    /// Assigns the property or global.
     Write,
     /// Defines an own property: object literal members, class fields.
     Define,
@@ -109,6 +111,7 @@ pub enum Access {
 }
 
 impl Access {
+    /// Every access, in declaration order.
     pub const ALL: [Access; 4] = [Access::Read, Access::Write, Access::Define, Access::Call];
 
     /// The label result rows carry: `read`, `write`, `define`, `call`.

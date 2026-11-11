@@ -3,34 +3,46 @@
 use crate::leb128::{read_sleb128, read_uleb128};
 use crate::{DexError, Result, u16_at, u32_at};
 
+/// One `try_item` of a `code_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TryItem {
+    /// `start_addr`: first covered instruction, in 16-bit code units from the start of `insns`.
     pub start_addr: u32,
+    /// `insn_count`: number of 16-bit code units covered.
     pub insn_count: u16,
     /// Byte offset of the handler inside the `encoded_catch_handler_list`.
     pub handler_off: u16,
 }
 
+/// One `encoded_catch_handler` of a `code_item`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatchHandler {
     /// Byte offset of this handler inside the `encoded_catch_handler_list`.
     pub offset: u16,
     /// `(type_idx, handler_addr)` pairs.
     pub catches: Vec<(u32, u32)>,
+    /// `catch_all_addr`: catch-all handler address in code units, if the handler has one.
     pub catch_all_addr: Option<u32>,
 }
 
 /// Parsed `code_item`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeItem<'a> {
+    /// File offset of the item.
     pub offset: usize,
+    /// `registers_size`: number of registers the method uses.
     pub registers_size: u16,
+    /// `ins_size`: words of incoming arguments.
     pub ins_size: u16,
+    /// `outs_size`: words of outgoing argument space needed for invocations.
     pub outs_size: u16,
+    /// `tries_size`: number of `try_item`s.
     pub tries_size: u16,
+    /// `debug_info_off`: offset of the `debug_info_item`, `0` if none.
     pub debug_info_off: u32,
     /// Instruction bytes (`insns_size * 2`).
     pub insns: &'a [u8],
+    /// The `try_item` table.
     pub tries: Vec<TryItem>,
     /// The handlers a try item can name, by ascending offset: those past
     /// the first 64 KiB of the list are parsed over but not kept.
@@ -43,8 +55,15 @@ pub struct CodeItem<'a> {
 const MAX_RESERVE: usize = 4096;
 
 impl<'a> CodeItem<'a> {
+    /// Size of the fixed `code_item` header (before `insns`) in bytes.
     pub const HEADER_SIZE: usize = 16;
 
+    /// Parse the `code_item` at `off`, including its tries and handlers.
+    ///
+    /// # Errors
+    ///
+    /// `Truncated` when a header field or handler runs past the end of `buf`,
+    /// `BadRange` when the instructions or the try table do not fit.
     pub fn parse(buf: &'a [u8], off: usize) -> Result<CodeItem<'a>> {
         let registers_size = u16_at(buf, off)?;
         let ins_size = u16_at(buf, off + 2)?;

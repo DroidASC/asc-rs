@@ -106,6 +106,7 @@ impl<'a> MapList<'a> {
         self.items.len() / MapItem::SIZE
     }
 
+    /// Whether the map list has no entries.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()

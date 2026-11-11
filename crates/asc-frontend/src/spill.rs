@@ -20,6 +20,8 @@ pub struct SpillDir {
 }
 
 impl SpillDir {
+    /// Spills into `dir` (created on first write), keeping it under `budget`
+    /// bytes. Nothing touches the disk yet.
     pub fn new(dir: PathBuf, budget: u64) -> SpillDir {
         SpillDir { dir, budget, lock: Mutex::new(()) }
     }
@@ -37,12 +39,17 @@ impl SpillDir {
         std::env::temp_dir().join(format!("asc-{user}")).join("out")
     }
 
+    /// The directory spilled files are written to.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
     /// Write `text` (or find it already written: files are named by content)
     /// and return its path.
+    ///
+    /// # Errors
+    /// I/O errors creating the directory or writing the file; pruning old
+    /// files never fails the write.
     pub fn write(&self, text: &str) -> io::Result<PathBuf> {
         // Guards no data: a panic under it poisons nothing.
         let _guard = self.lock.lock_or_default();

@@ -9,43 +9,66 @@ use std::ops::Range;
 /// `proto_id_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtoId {
+    /// `shorty_idx`: the short-form descriptor, as an index into `string_ids`.
     pub shorty_idx: u32,
+    /// `return_type_idx`: the return type, as an index into `type_ids`.
     pub return_type_idx: u32,
+    /// `parameters_off`: offset of the parameter `type_list`, `0` for no parameters.
     pub parameters_off: u32,
 }
 
 /// `field_id_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldId {
+    /// `class_idx`: the defining class, as an index into `type_ids`.
     pub class_idx: u16,
+    /// `type_idx`: the field type, as an index into `type_ids`.
     pub type_idx: u16,
+    /// `name_idx`: the field name, as an index into `string_ids`.
     pub name_idx: u32,
 }
 
 /// `method_id_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodId {
+    /// `class_idx`: the defining class, as an index into `type_ids`.
     pub class_idx: u16,
+    /// `proto_idx`: the prototype, as an index into `proto_ids`.
     pub proto_idx: u16,
+    /// `name_idx`: the method name, as an index into `string_ids`.
     pub name_idx: u32,
 }
 
 /// `class_def_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassDef {
+    /// `class_idx`: the class, as an index into `type_ids`.
     pub class_idx: u32,
+    /// `access_flags`: [`crate::access`] bits.
     pub access_flags: u32,
+    /// `superclass_idx`: the superclass, as an index into `type_ids`, or [`crate::NO_INDEX`].
     pub superclass_idx: u32,
+    /// `interfaces_off`: offset of the interfaces `type_list`, `0` if none.
     pub interfaces_off: u32,
+    /// `source_file_idx`: the source file name, as an index into `string_ids`, or [`crate::NO_INDEX`].
     pub source_file_idx: u32,
+    /// `annotations_off`: offset of the `annotations_directory_item`, `0` if none.
     pub annotations_off: u32,
+    /// `class_data_off`: offset of the `class_data_item`, `0` if the class has no data.
     pub class_data_off: u32,
+    /// `static_values_off`: offset of the `encoded_array_item` of static field initial values, `0` if none.
     pub static_values_off: u32,
 }
 
 impl ClassDef {
+    /// Size of a `class_def_item` in bytes.
     pub const SIZE: usize = 32;
 
+    /// Parse the `class_def_item` at `off`.
+    ///
+    /// # Errors
+    ///
+    /// `Truncated` when the item lies outside `buf`.
     pub fn parse(buf: &[u8], off: usize) -> Result<ClassDef> {
         Ok(ClassDef {
             class_idx: u32_at(buf, off)?,
@@ -66,7 +89,9 @@ impl ClassDef {
 pub struct StringItem<'a> {
     /// Offset of the item (the uleb128 length prefix) inside the DEX buffer.
     pub data_off: u32,
+    /// `utf16_size`: declared length in UTF-16 code units (not always accurate).
     pub utf16_len: u32,
+    /// MUTF-8 payload, without the terminating NUL.
     pub bytes: &'a [u8],
 }
 
@@ -83,11 +108,19 @@ pub struct Dex<'a> {
 
 impl<'a> Dex<'a> {
     /// Parse the header of `buf`. Nothing else is read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Header::parse`].
     pub fn parse(buf: &'a [u8]) -> Result<Self> {
         Self::with_name(buf, "")
     }
 
     /// Parse the header of `buf` and remember a display name for it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Header::parse`].
     pub fn with_name(buf: &'a [u8], name: impl Into<String>) -> Result<Self> {
         let header = Header::parse(buf)?;
         // A DEX ends with its map list (or zero padding): this stops at once.
@@ -95,41 +128,50 @@ impl<'a> Dex<'a> {
         Ok(Dex { buf, header, name: name.into(), last_nul })
     }
 
+    /// The whole underlying buffer (for a 041 container, all of it).
     #[inline]
     pub fn buf(&self) -> &'a [u8] {
         self.buf
     }
 
+    /// The parsed `header_item`.
     #[inline]
     pub fn header(&self) -> &Header {
         &self.header
     }
 
+    /// Display name given to [`Self::with_name`], empty for [`Self::parse`].
     #[inline]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Number of `string_ids` entries.
     #[inline]
     pub fn string_count(&self) -> u32 {
         self.header.string_ids.size
     }
+    /// Number of `type_ids` entries.
     #[inline]
     pub fn type_count(&self) -> u32 {
         self.header.type_ids.size
     }
+    /// Number of `proto_ids` entries.
     #[inline]
     pub fn proto_count(&self) -> u32 {
         self.header.proto_ids.size
     }
+    /// Number of `field_ids` entries.
     #[inline]
     pub fn field_count(&self) -> u32 {
         self.header.field_ids.size
     }
+    /// Number of `method_ids` entries.
     #[inline]
     pub fn method_count(&self) -> u32 {
         self.header.method_ids.size
     }
+    /// Number of `class_defs` entries.
     #[inline]
     pub fn class_def_count(&self) -> u32 {
         self.header.class_defs.size
@@ -143,6 +185,11 @@ impl<'a> Dex<'a> {
     // ---- strings ---------------------------------------------------------
 
     /// Offset of the `string_data_item` for string `idx`.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` when `idx` is past the table, `Truncated` when the
+    /// entry lies outside the buffer.
     #[inline]
     pub fn string_data_off(&self, idx: u32) -> Result<u32> {
         self.check_idx("string", idx, self.header.string_ids.size)?;
@@ -157,6 +204,11 @@ impl<'a> Dex<'a> {
     /// holds no NUL the search continues up to the last NUL of the buffer;
     /// an item that starts past it is reported as unterminated at once, so a
     /// NUL-free tail costs nothing however many ids point into it.
+    ///
+    /// # Errors
+    ///
+    /// `Truncated` when the length prefix is cut off, `UnterminatedString` when
+    /// no NUL ends the payload.
     pub fn string_item_at(&self, data_off: u32) -> Result<StringItem<'a>> {
         let (utf16_len, n) = leb128::read_uleb128(self.buf, data_off as usize)?;
         let start = data_off as usize + n;
@@ -174,18 +226,30 @@ impl<'a> Dex<'a> {
     }
 
     /// Raw MUTF-8 view of string `idx`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::string_data_off`] and [`Self::string_item_at`].
     #[inline]
     pub fn string_item(&self, idx: u32) -> Result<StringItem<'a>> {
         self.string_item_at(self.string_data_off(idx)?)
     }
 
     /// Raw MUTF-8 bytes of string `idx` (no terminator).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::string_data_off`] and [`Self::string_item_at`].
     #[inline]
     pub fn string_bytes(&self, idx: u32) -> Result<&'a [u8]> {
         Ok(self.string_item(idx)?.bytes)
     }
 
     /// Decoded string `idx`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::string_data_off`] and [`Self::string_item_at`].
     #[inline]
     pub fn string(&self, idx: u32) -> Result<String> {
         Ok(mutf8::decode(self.string_bytes(idx)?))
@@ -194,6 +258,10 @@ impl<'a> Dex<'a> {
     /// Binary search the sorted string table for `s` (MUTF-8 bytes, compared
     /// by UTF-16 code units like the table is sorted, see
     /// [`mutf8::cmp_utf16`]).
+    ///
+    /// # Errors
+    ///
+    /// When a probed string cannot be read (see [`Self::string_bytes`]).
     pub fn find_string_idx(&self, s: &[u8]) -> Result<Option<u32>> {
         binary_search(self.header.string_ids.size, |mid| Ok(mutf8::cmp_utf16(self.string_bytes(mid)?, s)))
     }
@@ -201,6 +269,11 @@ impl<'a> Dex<'a> {
     // ---- types -----------------------------------------------------------
 
     /// `descriptor_idx` of type `idx`.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` when `idx` is past the table, `Truncated` when the
+    /// entry lies outside the buffer.
     #[inline]
     pub fn type_string_idx(&self, idx: u32) -> Result<u32> {
         self.check_idx("type", idx, self.header.type_ids.size)?;
@@ -208,12 +281,20 @@ impl<'a> Dex<'a> {
     }
 
     /// Raw descriptor bytes of type `idx`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::type_string_idx`] and [`Self::string_bytes`].
     #[inline]
     pub fn type_bytes(&self, idx: u32) -> Result<&'a [u8]> {
         self.string_bytes(self.type_string_idx(idx)?)
     }
 
     /// Decoded descriptor of type `idx`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::type_string_idx`] and [`Self::string`].
     #[inline]
     pub fn type_descriptor(&self, idx: u32) -> Result<String> {
         self.string(self.type_string_idx(idx)?)
@@ -225,6 +306,10 @@ impl<'a> Dex<'a> {
     /// sorted by UTF-16 code units, which MUTF-8 byte order follows except
     /// for `U+0000` ([`mutf8::cmp_utf16`] handles that), while UTF-8 byte
     /// order diverges once a supplementary character is involved.
+    ///
+    /// # Errors
+    ///
+    /// When a probed descriptor cannot be read (see [`Self::type_bytes`]).
     pub fn find_type_idx(&self, descriptor: &[u8]) -> Result<Option<u32>> {
         binary_search(self.header.type_ids.size, |mid| Ok(mutf8::cmp_utf16(self.type_bytes(mid)?, descriptor)))
     }
@@ -235,6 +320,11 @@ impl<'a> Dex<'a> {
     /// They form one run, and as `$` sorts below `;` the run ends shortly
     /// before `type_idx`; galloping back from there finds an empty run in two
     /// comparisons. Empty for a descriptor that does not end in `;`.
+    ///
+    /// # Errors
+    ///
+    /// When `type_idx` or a probed descriptor cannot be read (see
+    /// [`Self::type_bytes`]).
     pub fn nested_type_idx_range(&self, type_idx: u32) -> Result<Range<u32>> {
         let Some(name) = self.type_bytes(type_idx)?.strip_suffix(b";") else {
             return Ok(type_idx..type_idx);
@@ -248,6 +338,12 @@ impl<'a> Dex<'a> {
 
     // ---- protos ----------------------------------------------------------
 
+    /// The `proto_id_item` at index `idx`.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` when `idx` is past the table, `Truncated` when the
+    /// entry lies outside the buffer.
     #[inline]
     pub fn proto_id(&self, idx: u32) -> Result<ProtoId> {
         self.check_idx("proto", idx, self.header.proto_ids.size)?;
@@ -260,6 +356,11 @@ impl<'a> Dex<'a> {
     }
 
     /// Parse a `type_list` at `off` (an offset of 0 yields an empty list).
+    ///
+    /// # Errors
+    ///
+    /// `Truncated` when the size word is out of the buffer, `BadRange` when the
+    /// entries are.
     pub fn type_list(&self, off: u32) -> Result<Vec<u16>> {
         if off == 0 {
             return Ok(Vec::new());
@@ -271,6 +372,10 @@ impl<'a> Dex<'a> {
     }
 
     /// Parameter type indexes of proto `idx`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::proto_id`] and [`Self::type_list`].
     #[inline]
     pub fn proto_params(&self, idx: u32) -> Result<Vec<u16>> {
         self.type_list(self.proto_id(idx)?.parameters_off)
@@ -278,6 +383,12 @@ impl<'a> Dex<'a> {
 
     // ---- fields / methods ------------------------------------------------
 
+    /// The `field_id_item` at index `idx`.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` when `idx` is past the table, `Truncated` when the
+    /// entry lies outside the buffer.
     #[inline]
     pub fn field_id(&self, idx: u32) -> Result<FieldId> {
         self.check_idx("field", idx, self.header.field_ids.size)?;
@@ -285,6 +396,12 @@ impl<'a> Dex<'a> {
         Ok(FieldId { class_idx: u16_at(self.buf, off)?, type_idx: u16_at(self.buf, off + 2)?, name_idx: u32_at(self.buf, off + 4)? })
     }
 
+    /// The `method_id_item` at index `idx`.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` when `idx` is past the table, `Truncated` when the
+    /// entry lies outside the buffer.
     #[inline]
     pub fn method_id(&self, idx: u32) -> Result<MethodId> {
         self.check_idx("method", idx, self.header.method_ids.size)?;
@@ -293,12 +410,20 @@ impl<'a> Dex<'a> {
     }
 
     /// `Lpkg/Cls;->name` for a method index.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::method_id`], [`Self::type_descriptor`] and [`Self::string`].
     pub fn method_display(&self, idx: u32) -> Result<String> {
         let m = self.method_id(idx)?;
         Ok(format!("{}->{}", self.type_descriptor(m.class_idx as u32)?, self.string(m.name_idx)?))
     }
 
     /// `Lpkg/Cls;->name` for a field index.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::field_id`], [`Self::type_descriptor`] and [`Self::string`].
     pub fn field_display(&self, idx: u32) -> Result<String> {
         let f = self.field_id(idx)?;
         Ok(format!("{}->{}", self.type_descriptor(f.class_idx as u32)?, self.string(f.name_idx)?))
@@ -306,11 +431,18 @@ impl<'a> Dex<'a> {
 
     // ---- classes ---------------------------------------------------------
 
+    /// File offset of `class_def_item` `i`. Not bounds checked.
     #[inline]
     pub fn class_def_off(&self, i: u32) -> usize {
         self.header.class_defs.off as usize + (i as usize) * ClassDef::SIZE
     }
 
+    /// The `class_def_item` at index `i`.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` when `i` is past the table, `Truncated` when the
+    /// entry lies outside the buffer.
     #[inline]
     pub fn class_def(&self, i: u32) -> Result<ClassDef> {
         self.check_idx("class_def", i, self.header.class_defs.size)?;
@@ -319,6 +451,10 @@ impl<'a> Dex<'a> {
 
     /// Locate the class definition for a descriptor such as `Lcom/poc/Main;`.
     /// Returns the class_def index and the parsed definition.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::find_type_idx`] and [`Self::find_class_def_by_type`].
     pub fn find_class_def(&self, descriptor: &[u8]) -> Result<Option<(u32, ClassDef)>> {
         let Some(type_idx) = self.find_type_idx(descriptor)? else {
             return Ok(None);
@@ -327,6 +463,10 @@ impl<'a> Dex<'a> {
     }
 
     /// Locate the class definition whose `class_idx` equals `type_idx`.
+    ///
+    /// # Errors
+    ///
+    /// `BadRange` when the `class_defs` table does not fit in the buffer.
     pub fn find_class_def_by_type(&self, type_idx: u32) -> Result<Option<(u32, ClassDef)>> {
         let size = self.header.class_defs.size;
         let base = self.header.class_defs.off as usize;
@@ -346,6 +486,10 @@ impl<'a> Dex<'a> {
     /// The class definitions whose `class_idx` lies in `types`, with their
     /// class_def index, in class_def order. Only the `class_idx` of the other
     /// definitions is read.
+    ///
+    /// # Errors
+    ///
+    /// `BadRange` when the `class_defs` table does not fit in the buffer.
     pub fn find_class_defs_by_type_range(&self, types: Range<u32>) -> Result<Vec<(u32, ClassDef)>> {
         let mut found = Vec::new();
         if types.is_empty() {
@@ -372,12 +516,20 @@ impl<'a> Dex<'a> {
     }
 
     /// Parse the `class_data_item` at `off` (0 yields an empty class data).
+    ///
+    /// # Errors
+    ///
+    /// As [`ClassData::parse`].
     #[inline]
     pub fn class_data(&self, off: u32) -> Result<ClassData> {
         ClassData::parse(self.buf, off as usize)
     }
 
     /// Parse the `code_item` at `off`.
+    ///
+    /// # Errors
+    ///
+    /// As [`CodeItem::parse`].
     #[inline]
     pub fn code_item(&self, off: u32) -> Result<CodeItem<'a>> {
         CodeItem::parse(self.buf, off as usize)

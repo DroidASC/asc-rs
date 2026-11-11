@@ -3,45 +3,95 @@
 use crate::leb128::{read_sleb128, read_uleb128, read_uleb128p1, write_sleb128, write_uleb128, write_uleb128p1};
 use crate::{DexError, Result};
 
+/// Ends the state machine program.
 pub const DBG_END_SEQUENCE: u8 = 0x00;
+/// Advances the address register by a uleb128 amount (code units).
 pub const DBG_ADVANCE_PC: u8 = 0x01;
+/// Advances the line register by an sleb128 amount.
 pub const DBG_ADVANCE_LINE: u8 = 0x02;
+/// Introduces a local variable (register, name, type).
 pub const DBG_START_LOCAL: u8 = 0x03;
+/// Introduces a local variable with a generic signature.
 pub const DBG_START_LOCAL_EXTENDED: u8 = 0x04;
+/// Marks a local variable as out of scope.
 pub const DBG_END_LOCAL: u8 = 0x05;
+/// Re-introduces a previously ended local variable.
 pub const DBG_RESTART_LOCAL: u8 = 0x06;
+/// Marks the end of the method prologue.
 pub const DBG_SET_PROLOGUE_END: u8 = 0x07;
+/// Marks the start of the method epilogue.
 pub const DBG_SET_EPILOGUE_BEGIN: u8 = 0x08;
+/// Switches the source file name for subsequent entries.
 pub const DBG_SET_FILE: u8 = 0x09;
+/// First special opcode: higher opcodes advance both line and address and emit a position entry.
 pub const DBG_FIRST_SPECIAL: u8 = 0x0a;
+/// Smallest line adjustment a special opcode can encode.
 pub const DBG_LINE_BASE: i32 = -4;
+/// Number of distinct line adjustments a special opcode can encode.
 pub const DBG_LINE_RANGE: u32 = 15;
 
+/// One decoded instruction of the debug info state machine. String and type
+/// operands are indexes into `string_ids` / `type_ids`, `None` for `NO_INDEX`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DebugOp {
+    /// `DBG_END_SEQUENCE`.
     EndSequence,
+    /// `DBG_ADVANCE_PC`: address delta in code units.
     AdvancePc(u32),
+    /// `DBG_ADVANCE_LINE`: line delta.
     AdvanceLine(i32),
-    StartLocal { reg: u32, name: Option<u32>, type_: Option<u32> },
-    StartLocalExtended { reg: u32, name: Option<u32>, type_: Option<u32>, sig: Option<u32> },
+    /// `DBG_START_LOCAL`.
+    StartLocal {
+        /// Register holding the local.
+        reg: u32,
+        /// Name, as a string index.
+        name: Option<u32>,
+        /// Type, as a type index.
+        type_: Option<u32>,
+    },
+    /// `DBG_START_LOCAL_EXTENDED`.
+    StartLocalExtended {
+        /// Register holding the local.
+        reg: u32,
+        /// Name, as a string index.
+        name: Option<u32>,
+        /// Type, as a type index.
+        type_: Option<u32>,
+        /// Generic signature, as a string index.
+        sig: Option<u32>,
+    },
+    /// `DBG_END_LOCAL`: the register whose local ends.
     EndLocal(u32),
+    /// `DBG_RESTART_LOCAL`: the register whose local restarts.
     RestartLocal(u32),
+    /// `DBG_SET_PROLOGUE_END`.
     SetPrologueEnd,
+    /// `DBG_SET_EPILOGUE_BEGIN`.
     SetEpilogueBegin,
+    /// `DBG_SET_FILE`: source file name, as a string index.
     SetFile(Option<u32>),
+    /// A special opcode (`>= DBG_FIRST_SPECIAL`), kept raw.
     Special(u8),
 }
 
 /// Parsed `debug_info_item`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DebugInfo {
+    /// `line_start`: initial value of the line register.
     pub line_start: u32,
     /// Parameter name string indexes (`None` for unnamed parameters).
     pub parameter_names: Vec<Option<u32>>,
+    /// The state machine program, ending with [`DebugOp::EndSequence`].
     pub ops: Vec<DebugOp>,
 }
 
 impl DebugInfo {
+    /// Parse the `debug_info_item` at `off`. Returns the item and its length in bytes.
+    ///
+    /// # Errors
+    ///
+    /// `Truncated` when the item runs past the end of `buf` before
+    /// `DBG_END_SEQUENCE`.
     pub fn parse(buf: &[u8], off: usize) -> Result<(DebugInfo, usize)> {
         let (line_start, n) = read_uleb128(buf, off)?;
         let mut p = off + n;

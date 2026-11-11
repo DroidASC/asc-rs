@@ -7,6 +7,7 @@
 use crate::{HEADER_SIZE, u32_at};
 use std::borrow::Cow;
 
+/// Magic of a version 041 DEX (and thus of a multi-DEX container).
 pub const DEX041_MAGIC: &[u8; 8] = b"dex\n041\0";
 
 /// Whether `data` starts with a version 041 container header.

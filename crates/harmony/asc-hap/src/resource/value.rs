@@ -11,19 +11,33 @@ use super::reader::Reader;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ResourceType {
+    /// `integer`: code 8.
     Integer,
+    /// `string`: code 9.
     String,
+    /// `strarray`: an array of strings, code 10.
     StrArray,
+    /// `intarray`: an array of integers, code 11.
     IntArray,
+    /// `boolean`: code 12.
     Boolean,
+    /// `color`: code 14.
     Color,
+    /// `id`: code 15.
     Id,
+    /// `theme`: a set of attributes, code 16.
     Theme,
+    /// `plural`: one string per quantity, code 17.
     Plural,
+    /// `float`: code 18.
     Float,
+    /// `media`: an image or other file, code 19.
     Media,
+    /// `profile`: a JSON file under `resources/base/profile`, code 20.
     Profile,
+    /// `pattern`: a set of style attributes, code 22.
     Pattern,
+    /// `symbol`: a symbol glyph, code 23.
     Symbol,
     /// A type number this crate has no name for.
     Other(u32),
@@ -129,6 +143,7 @@ impl FromStr for ResourceType {
 /// it (`$string:app_name`) or as source code does (`app.string.app_name`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceRef<'s> {
+    /// The resource type.
     pub kind: ResourceType,
     /// The resource name. Values inside the index refer by decimal id
     /// instead (`$color:16777245`); [`ResourceIndex::resolve`] takes both.
@@ -165,7 +180,9 @@ impl fmt::Display for ResourceRef<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Attr<'a> {
+    /// The plural quantity (`one`, `other`) or the attribute name.
     pub name: Cow<'a, str>,
+    /// The text for that quantity or attribute, as stored.
     pub value: Cow<'a, str>,
 }
 
@@ -188,6 +205,7 @@ pub enum ResourceValue<'a> {
     Map {
         /// The theme or pattern this one extends, as a reference.
         parent: Option<Cow<'a, str>>,
+        /// The attributes in file order.
         attrs: Vec<Attr<'a>>,
     },
     /// The bytes of a value of an unnamed type, or of a list that does

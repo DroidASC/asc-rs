@@ -15,10 +15,20 @@ use crate::{Opcode, Operand, OperandKind, Prefix, flag, opcode, prefixed_opcode}
 #[non_exhaustive]
 pub enum DecodeError {
     /// Undefined opcode byte, or undefined sub-opcode `sub` of the prefix byte `opcode`.
-    Undefined { pc: usize, opcode: u8, sub: Option<u8> },
+    Undefined {
+        /// Offset of the instruction.
+        pc: usize,
+        /// The opcode byte, or the prefix byte when `sub` is set.
+        opcode: u8,
+        /// The undefined sub-opcode byte after a prefix.
+        sub: Option<u8>,
+    },
     /// The instruction at `pc` extends past the end of the code (also when
     /// `pc` itself is at or past the end).
-    Truncated { pc: usize },
+    Truncated {
+        /// Offset of the instruction.
+        pc: usize,
+    },
 }
 
 impl DecodeError {
@@ -47,22 +57,30 @@ impl std::error::Error for DecodeError {}
 /// A decoded operand.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
+    /// Register number.
     Reg(u16),
     /// Signed or unsigned immediate, extended as the opcode says.
     Imm(i64),
+    /// IEEE-754 double immediate.
     Float(f64),
+    /// Inline-cache slot number.
     IcSlot(u16),
     /// Branch offset relative to the instruction; [`Instruction::jump_target`] resolves it.
     JumpOffset(i32),
+    /// String id: an index into the method's region index (a file offset for some `deprecated.*` opcodes).
     StringId(u32),
+    /// Method id; indexed like [`Value::StringId`].
     MethodId(u32),
+    /// Literal-array id; indexed like [`Value::StringId`].
     LiteralArrayId(u32),
 }
 
 /// Consecutive registers read by a range instruction (`callrange`, `newobjrange`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegRange {
+    /// First register of the run.
     pub first: u16,
+    /// Number of registers in the run.
     pub count: u32,
 }
 
@@ -72,6 +90,7 @@ pub struct RegRange {
 pub struct Instruction<'a> {
     /// Offset of the instruction in the code it was decoded from.
     pub pc: usize,
+    /// Table row of the opcode.
     pub opcode: &'static Opcode,
     /// Exactly `opcode.len` bytes.
     bytes: &'a [u8],

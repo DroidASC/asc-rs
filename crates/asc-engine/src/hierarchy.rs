@@ -44,6 +44,7 @@ pub enum Lineage {
 }
 
 impl Lineage {
+    /// `subclasses` or `supers`, as in the query syntax and output.
     pub fn as_str(self) -> &'static str {
         match self {
             Lineage::Subclasses => "subclasses",
@@ -67,6 +68,7 @@ impl Lineage {
 pub struct HierarchyQuery {
     /// Dalvik descriptor (`Lcom/poc/Base;`).
     pub class: String,
+    /// Whether to walk down to subclasses or up to supertypes.
     pub direction: Lineage,
     /// Levels to walk (1 = direct subclasses / supertypes).
     pub depth: usize,
@@ -113,6 +115,7 @@ pub struct HierarchyRow {
     pub depth: usize,
     /// Index of the parent row (`None` for the root).
     pub parent: Option<usize>,
+    /// The class descriptor.
     pub class: String,
     /// How the row relates to its parent row (`extends` / `implements`, from
     /// the subclass's side).
@@ -129,8 +132,11 @@ pub struct HierarchyRow {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HierarchyTree {
+    /// The direction walked.
     pub direction: Lineage,
+    /// The depth asked for.
     pub depth: usize,
+    /// The tree, one row per line in depth-first order.
     pub rows: Vec<HierarchyRow>,
     /// Distinct classes discovered (the root included).
     pub classes: usize,
@@ -188,6 +194,7 @@ impl HierarchyTree {
         out
     }
 
+    /// Footer comment summarising the walk.
     pub fn footer(&self) -> String {
         let mut s =
             format!("# {} rows, {} distinct classes ({}, depth {})", self.rows.len(), self.classes, self.direction.as_str(), self.depth);
@@ -542,12 +549,22 @@ impl Engine {
 
     /// Transitive subclasses / implementers (or supertypes) of a class, as a
     /// tree, with the classes defining `method` marked.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] when no DEX defines or references the class,
+    /// [`EngineError::Smali`] for a malformed method signature, and
+    /// [`EngineError::Apk`] when the APK cannot be opened.
     pub fn hierarchy(&self, q: &HierarchyQuery) -> Result<HierarchyTree> {
         self.hierarchy_cancellable(q, &NOT_CANCELLED)
     }
 
     /// [`Engine::hierarchy`] that stops, with `ApkError::Cancelled`, once
     /// `cancel` is raised.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::hierarchy`], plus the cancellation.
     pub fn hierarchy_cancellable(&self, q: &HierarchyQuery, cancel: &AtomicBool) -> Result<HierarchyTree> {
         let method = q.method.as_deref().map(split_method).transpose()?;
         let (views, mut errors) = self.load_views(None, cancel)?;

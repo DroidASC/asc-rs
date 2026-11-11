@@ -11,7 +11,9 @@ use std::time::Instant;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ClassListing {
+    /// The class descriptor (`Lcom/poc/Main;`).
     pub descriptor: String,
+    /// The (logical) DEX that defines it.
     pub dex_name: String,
 }
 
@@ -19,7 +21,9 @@ pub struct ClassListing {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DexClasses {
+    /// The (logical) DEX name.
     pub dex_name: String,
+    /// Descriptors of the classes it defines (those matching the prefix).
     pub descriptors: Vec<String>,
     /// Why the DEX could not be enumerated at all (`descriptors` is empty).
     pub error: Option<DexError>,
@@ -31,6 +35,11 @@ pub struct DexClasses {
 
 impl DexClasses {
     /// The first problem as an error, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::BadDex`] naming [`DexClasses::error`] or, failing that,
+    /// [`DexClasses::first_bad_class_def`].
     pub fn check(&self) -> Result<()> {
         if let Some(e) = &self.error {
             return Err(EngineError::BadDex { dex: self.dex_name.clone(), reason: e.to_string() });
@@ -46,7 +55,9 @@ impl DexClasses {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct EntryClasses {
+    /// The APK entry name.
     pub entry_name: String,
+    /// Its logical DEXes, or the error loading the entry.
     pub result: Result<Vec<DexClasses>>,
 }
 
@@ -130,6 +141,10 @@ impl Engine {
     /// keep their file order. `progress(done, total)` runs after each entry.
     /// Problems are reported per entry / DEX, never as a failure of the call;
     /// only an unreadable APK fails it.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK cannot be opened.
     pub fn scan_classes(&self, prefix: Option<&str>, progress: impl Fn(usize, usize) + Sync) -> Result<Vec<EntryClasses>> {
         self.scan(prefix, false, progress)
     }
@@ -186,6 +201,12 @@ impl Engine {
     /// Every class of the APK, optionally restricted to a package / class
     /// prefix (`com.poc`, `com/poc` or `Lcom/poc`), in DEX order. Strict: the
     /// first unreadable entry, unparsable DEX or bad `class_def` fails the call.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] for an empty prefix, the error of the first
+    /// entry that cannot be read, and [`EngineError::BadDex`] for the first
+    /// bad DEX or `class_def` ([`DexClasses::check`]).
     pub fn list_classes(&self, prefix: Option<&str>) -> Result<Vec<ClassListing>> {
         let prefix = prefix.map(names::class_prefix).transpose()?;
         let mut out = Vec::new();

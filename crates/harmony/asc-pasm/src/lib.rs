@@ -166,7 +166,9 @@ impl SourceLines<'_> {
 }
 
 impl Options<'_> {
+    /// Default [`Options::literal_limit`]: literal-array items shown inline.
     pub const DEFAULT_LITERAL_LIMIT: usize = 256;
+    /// Default [`Options::string_limit`]: bytes of a string shown.
     pub const DEFAULT_STRING_LIMIT: usize = 2048;
 }
 

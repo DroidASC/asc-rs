@@ -1,3 +1,5 @@
+//! End-to-end tests of the engine against generated fixture APKs.
+
 use asc_engine::{Engine, Matched, names};
 use asc_findrefs::Query;
 use asc_fixture::{make_apk, make_dex};

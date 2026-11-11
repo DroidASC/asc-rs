@@ -15,6 +15,7 @@ pub struct Units<'a> {
 }
 
 impl<'a> Units<'a> {
+    /// Iterate over the code units of `bytes` (no terminating NUL expected).
     #[inline]
     pub fn new(bytes: &'a [u8]) -> Units<'a> {
         Units { bytes, i: 0, pending: None }

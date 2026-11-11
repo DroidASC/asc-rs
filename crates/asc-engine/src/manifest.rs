@@ -24,18 +24,29 @@ const SDK_PROVIDER_PRIVATE: i64 = 17;
 const SDK_CLEARTEXT_OFF: i64 = 28;
 const FILE_PROVIDER_PATHS: &str = "android.support.FILE_PROVIDER_PATHS";
 
+/// What [`Engine::manifest_summary`] extracts from `AndroidManifest.xml`.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct ManifestSummary {
+    /// The `package` attribute.
     pub package: String,
+    /// `android:versionCode`, as written.
     pub version_code: Option<String>,
+    /// `android:versionName`.
     pub version_name: Option<String>,
+    /// `<uses-sdk android:minSdkVersion>`.
     pub min_sdk: Option<i64>,
+    /// `<uses-sdk android:targetSdkVersion>`.
     pub target_sdk: Option<i64>,
+    /// `android:sharedUserId`.
     pub shared_user_id: Option<String>,
+    /// The `<application>` element.
     pub application: Application,
+    /// Names of the `<uses-permission>` elements.
     pub uses_permissions: Vec<String>,
+    /// Permissions the app declares (`<permission>`).
     pub permissions: Vec<Permission>,
+    /// Activities, aliases, services, receivers and providers, in manifest order.
     pub components: Vec<Component>,
     /// Decoded `networkSecurityConfig`, one record per line.
     pub network_security: Vec<String>,
@@ -43,30 +54,43 @@ pub struct ManifestSummary {
     pub warnings: Vec<String>,
 }
 
+/// The `<application>` element, with Android's defaults applied.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Application {
+    /// The `Application` subclass, fully qualified.
     pub class: Option<String>,
+    /// `android:debuggable` (default false).
     pub debuggable: bool,
+    /// `android:allowBackup` (default true).
     pub allow_backup: bool,
+    /// `android:testOnly` (default false).
     pub test_only: bool,
+    /// `android:usesCleartextTraffic`, when set.
     pub uses_cleartext_traffic: Option<bool>,
     /// Whether cleartext HTTP is allowed by default, and what decided it.
     pub cleartext_effective: (bool, &'static str),
     /// Path of the network security config XML (`res/xml/...`).
     pub network_security_config: Option<String>,
+    /// `android:permission` guarding every component without its own.
     pub permission: Option<String>,
+    /// `android:fullBackupContent`: the XML path, or the raw value.
     pub full_backup_content: Option<String>,
+    /// `android:dataExtractionRules`: the XML path, or the raw value.
     pub data_extraction_rules: Option<String>,
 }
 
+/// A `<permission>` the app declares.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Permission {
+    /// The permission name.
     pub name: String,
+    /// `|`-joined level and flags, e.g. `signature|privileged`.
     pub protection_level: String,
 }
 
+/// An activity, activity alias, service, receiver or provider.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Component {
@@ -76,43 +100,62 @@ pub struct Component {
     pub class: String,
     /// `targetActivity` of an alias, fully qualified.
     pub target: Option<String>,
+    /// Whether other apps can reach it, after Android's defaults.
     pub exported: bool,
     /// `explicit`, `intent-filter` (implicit, targetSdk < 31), `provider-default`
     /// (targetSdk < 17) or `default`, plus `@ref` variants when the value differs
     /// between configurations.
     pub exported_reason: String,
+    /// `android:enabled` (default true).
     pub enabled: bool,
     /// Own permission, or the application's when the component sets none.
     pub permission: Option<String>,
+    /// `permission` was inherited from the application.
     pub permission_from_app: bool,
+    /// `android:process`.
     pub process: Option<String>,
+    /// Provider authorities (split on `;`).
     pub authorities: Vec<String>,
+    /// Provider `android:grantUriPermissions` (default false).
     pub grant_uri_permissions: bool,
+    /// Provider `android:readPermission`.
     pub read_permission: Option<String>,
+    /// Provider `android:writePermission`.
     pub write_permission: Option<String>,
+    /// The component's `<intent-filter>`s.
     pub intent_filters: Vec<IntentFilter>,
+    /// `<meta-data>` as `(name, value or resource)`.
     pub meta_data: Vec<(String, String)>,
     /// FileProvider path entries (`files-path name=x path=y`).
     pub provider_paths: Vec<String>,
 }
 
+/// An `<intent-filter>`.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct IntentFilter {
+    /// `<action>` names.
     pub actions: Vec<String>,
+    /// `<category>` names.
     pub categories: Vec<String>,
+    /// `<data>` elements.
     pub data: Vec<DataSpec>,
 }
 
+/// A `<data>` element of an intent filter.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct DataSpec {
+    /// `android:scheme`.
     pub scheme: Option<String>,
+    /// `android:host`.
     pub host: Option<String>,
+    /// `android:port`.
     pub port: Option<String>,
     /// `path`, `pathPrefix`, `pathPattern`, `pathAdvancedPattern` or
     /// `pathSuffix`, with its value.
     pub path: Option<(String, String)>,
+    /// `android:mimeType`.
     pub mime_type: Option<String>,
 }
 
@@ -350,6 +393,15 @@ fn class_name(package: &str, name: &str) -> String {
 impl Engine {
     /// Parse `AndroidManifest.xml` (and the XML resources it points at) into
     /// a [`ManifestSummary`].
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`](crate::EngineError::Apk) when the APK or manifest
+    /// cannot be read, [`EngineError::Arsc`](crate::EngineError::Arsc) when
+    /// `resources.arsc` is malformed, and
+    /// [`EngineError::Axml`](crate::EngineError::Axml) when the manifest is not
+    /// valid binary XML. Referenced XML resources that fail are
+    /// [`ManifestSummary::warnings`] instead.
     pub fn manifest_summary(&self) -> Result<ManifestSummary> {
         let apk = self.open()?;
         let data = apk.read("AndroidManifest.xml")?;
@@ -597,6 +649,7 @@ impl Component {
         self.authorities.iter().map(|a| value(a)).collect::<Vec<_>>().join(";")
     }
 
+    /// The component as a JSON object (snake_case keys).
     pub fn json(&self) -> Json {
         json!({
             "kind": self.kind,
@@ -619,6 +672,7 @@ impl Component {
         })
     }
 
+    /// [`IntentFilter::deep_links`] of every filter, deduplicated.
     pub fn deep_links(&self) -> Vec<String> {
         let mut v: Vec<String> = self.intent_filters.iter().flat_map(IntentFilter::deep_links).collect();
         v.dedup();
@@ -681,6 +735,7 @@ impl ManifestSummary {
         out
     }
 
+    /// The summary as a JSON object (snake_case keys).
     pub fn json(&self) -> Json {
         let a = &self.application;
         json!({

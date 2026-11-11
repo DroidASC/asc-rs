@@ -183,8 +183,11 @@ pub fn vreg_h(code: &[u8], pc: usize, op: &Opcode) -> Option<u16> {
 /// Kind of data payload found at a `nop` with a pseudo-opcode identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadKind {
+    /// `packed-switch-payload` ([`PACKED_SWITCH_PAYLOAD`]).
     PackedSwitch,
+    /// `sparse-switch-payload` ([`SPARSE_SWITCH_PAYLOAD`]).
     SparseSwitch,
+    /// `fill-array-data-payload` ([`FILL_ARRAY_DATA_PAYLOAD`]).
     FillArrayData,
 }
 
@@ -192,16 +195,23 @@ pub enum PayloadKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Instruction {
+    /// Byte offset of the instruction within the method's code.
     pub pc: usize,
+    /// Opcode row; payloads report the `nop` row.
     pub opcode: &'static Opcode,
+    /// `A` operand as decoded by [`vreg_a`] (0 for payloads).
     pub a: i64,
+    /// `B` operand as decoded by [`vreg_b`] (0 when absent).
     pub b: i64,
+    /// `C` operand as decoded by [`vreg_c`] (0 when absent).
     pub c: i64,
+    /// `H` operand (`proto@HHHH` of `invoke-polymorphic`; 0 otherwise).
     pub h: u16,
     /// Argument registers of `35c`/`45cc` formats.
     pub regs: Vec<u16>,
     /// Length in code units (payloads report their full size).
     pub units: usize,
+    /// Payload kind when this is a data pseudo-instruction, `None` for real ones.
     pub payload: Option<PayloadKind>,
 }
 
@@ -270,6 +280,7 @@ impl Instruction {
     }
 
     #[inline]
+    /// Length in bytes, payload bodies included.
     pub fn byte_len(&self) -> usize {
         self.units * 2
     }

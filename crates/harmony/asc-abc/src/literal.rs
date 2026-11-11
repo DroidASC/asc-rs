@@ -20,6 +20,7 @@ impl<'a> LiteralArray<'a> {
         Ok(LiteralArray { buf, off, num })
     }
 
+    /// File offset of the literal array.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off
@@ -31,6 +32,7 @@ impl<'a> LiteralArray<'a> {
         self.num.div_ceil(2)
     }
 
+    /// Whether the array has no items.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.num == 0
@@ -94,25 +96,45 @@ impl Iterator for Literals<'_> {
 
 /// Tag byte values (`LiteralTag`).
 pub mod tag {
+    /// One-byte tag value (`INTEGER_8`).
     pub const TAGVALUE: u8 = 0x00;
+    /// Boolean, one byte.
     pub const BOOL: u8 = 0x01;
+    /// Integer, a `u32` read as `i32`.
     pub const INTEGER: u8 = 0x02;
+    /// Single-precision float, 4 bytes.
     pub const FLOAT: u8 = 0x03;
+    /// Double-precision float, 8 bytes.
     pub const DOUBLE: u8 = 0x04;
+    /// Offset of a string.
     pub const STRING: u8 = 0x05;
+    /// Offset of a method.
     pub const METHOD: u8 = 0x06;
+    /// Offset of a generator method.
     pub const GENERATORMETHOD: u8 = 0x07;
+    /// Accessor marker, one byte.
     pub const ACCESSOR: u8 = 0x08;
+    /// `u16` formal parameter count of the preceding method.
     pub const METHODAFFILIATE: u8 = 0x09;
+    /// First typed-array tag (`u1` elements).
     pub const ARRAY_U1: u8 = 0x0a;
+    /// Last typed-array tag (string elements).
     pub const ARRAY_STRING: u8 = 0x15;
+    /// Offset of an async generator method.
     pub const ASYNCGENERATORMETHOD: u8 = 0x16;
+    /// `u32` literal buffer index.
     pub const LITERALBUFFERINDEX: u8 = 0x17;
+    /// Offset of a nested literal array.
     pub const LITERALARRAY: u8 = 0x18;
+    /// One-byte builtin type index.
     pub const BUILTINTYPEINDEX: u8 = 0x19;
+    /// Offset of a getter method.
     pub const GETTER: u8 = 0x1a;
+    /// Offset of a setter method.
     pub const SETTER: u8 = 0x1b;
+    /// `u32` offset for an ArkTS `implements` entry.
     pub const ETS_IMPLEMENTS: u8 = 0x1c;
+    /// Null, one padding byte.
     pub const NULLVALUE: u8 = 0xff;
 }
 
@@ -122,32 +144,47 @@ pub mod tag {
 pub enum Literal {
     /// Tag `0x00` (`TAGVALUE` / `INTEGER_8`): one byte.
     TagValue(u8),
+    /// Tag `0x01`.
     Bool(bool),
+    /// Tag `0x02`.
     Integer(i32),
+    /// Tag `0x03`.
     Float(f32),
+    /// Tag `0x04`.
     Double(f64),
     /// Offset of a string.
     String(u32),
     /// Offset of a method.
     Method(u32),
+    /// Tag `0x07`: offset of a generator method.
     GeneratorMethod(u32),
+    /// Tag `0x16`: offset of an async generator method.
     AsyncGeneratorMethod(u32),
+    /// Tag `0x1a`: offset of a getter method.
     Getter(u32),
+    /// Tag `0x1b`: offset of a setter method.
     Setter(u32),
+    /// Tag `0x08`: accessor marker byte.
     Accessor(u8),
     /// Follows a method item: its number of formal parameters.
     MethodAffiliate(u16),
+    /// Tag `0x17`: index of a literal buffer.
     LiteralBufferIndex(u32),
     /// Offset of another literal array.
     LiteralArray(u32),
+    /// Tag `0x19`: index of a builtin type.
     BuiltinTypeIndex(u8),
+    /// Tag `0x1c`: offset for an ArkTS `implements` entry.
     EtsImplements(u32),
+    /// Tag `0xff`: null; holds the padding byte.
     Null(u8),
     /// Tags `0x0a`–`0x15`: a typed array of a static language. The elements
     /// start at `data_off` and take up the rest of the literal array;
     /// iteration ends here.
     TypedArray {
+        /// The tag byte, which names the element type.
         tag: u8,
+        /// File offset of the first element.
         data_off: u32,
     },
 }

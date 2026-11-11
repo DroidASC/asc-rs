@@ -1,3 +1,7 @@
+//! Rebuilding a class together with its nested classes: `$`-boundary
+//! selection, per-class remapping of code and metadata, shared annotation
+//! sets, and dropping nested classes that cannot be read.
+
 mod common;
 
 use asc_dex::annotations::{AnnotationsDirectory, parse_annotation_set, parse_annotation_set_ref_list};

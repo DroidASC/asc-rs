@@ -43,6 +43,7 @@ const LISTING_VALUE_BYTES: usize = text::ROW_STRING_BYTES;
 pub struct ResourceRow {
     /// The package whose index has it, as manifest lines name packages.
     pub package: String,
+    /// The resource id, `0x01000000` and up.
     pub id: u32,
     /// `string/app_name`.
     pub name: String,
@@ -72,6 +73,7 @@ impl ResourceRow {
         if with_package { format!("{} | {row}", self.package) } else { row }
     }
 
+    /// The row as a JSON object: `package`, `id` (hex), `name`, `config`, `value`.
     pub fn json(&self) -> Value {
         json!({
             "package": self.package,
@@ -120,7 +122,7 @@ pub enum ChainEnd {
     Unresolved(String),
     /// At a reference back into the chain: the reference.
     Cycle(String),
-    /// After [`MAX_CHAIN`] references.
+    /// After more references than any well-formed index nests.
     TooLong,
 }
 
@@ -128,9 +130,11 @@ pub enum ChainEnd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResolvedResource {
+    /// The package whose index the chain starts in, as manifest lines name packages.
     pub package: String,
     /// `$color:accent`, then what each value named in turn.
     pub chain: Vec<String>,
+    /// Why the chain stopped.
     pub end: ChainEnd,
     /// The last resource of the chain, with the value the chain stopped at.
     pub row: ResourceRow,
@@ -338,6 +342,7 @@ impl<'e> ResourceTables<'e> {
         self.tables.iter().map(|table| table.index.len()).sum()
     }
 
+    /// Whether the indexes hold no values at all.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -431,9 +436,11 @@ impl<'e> ResourceTables<'e> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PackageFile {
+    /// The package that has it, as manifest lines name packages.
     pub package: String,
     /// Its path in the package: `resources/base/profile/main_pages.json`.
     pub path: String,
+    /// The file's contents.
     pub text: String,
 }
 

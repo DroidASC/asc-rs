@@ -11,9 +11,12 @@ pub const MAX_LEN: usize = 5;
 
 /// Read an unsigned LEB128 value. Returns `(value, byte_length)`.
 ///
-/// Errors with `Truncated` when the buffer ends inside the encoding. The
-/// fifth byte always ends the value (as in ART), so no more than
+/// The fifth byte always ends the value (as in ART), so no more than
 /// [`MAX_LEN`] bytes are ever consumed.
+///
+/// # Errors
+///
+/// [`DexError::Truncated`] when the buffer ends inside the encoding.
 #[inline]
 pub fn read_uleb128(buf: &[u8], pos: usize) -> Result<(u32, usize)> {
     let mut result: u32 = 0;
@@ -33,6 +36,10 @@ pub fn read_uleb128(buf: &[u8], pos: usize) -> Result<(u32, usize)> {
 }
 
 /// Length in bytes of the unsigned LEB128 value starting at `pos`.
+///
+/// # Errors
+///
+/// [`DexError::Truncated`] when the buffer ends inside the encoding.
 #[inline]
 pub fn uleb128_len(buf: &[u8], pos: usize) -> Result<usize> {
     let mut p = pos;
@@ -46,6 +53,10 @@ pub fn uleb128_len(buf: &[u8], pos: usize) -> Result<usize> {
 }
 
 /// Read a `uleb128p1` value (value + 1 encoded, so `0` means `-1`/none).
+///
+/// # Errors
+///
+/// See [`read_uleb128`].
 #[inline]
 pub fn read_uleb128p1(buf: &[u8], pos: usize) -> Result<(Option<u32>, usize)> {
     let (v, n) = read_uleb128(buf, pos)?;
@@ -53,6 +64,10 @@ pub fn read_uleb128p1(buf: &[u8], pos: usize) -> Result<(Option<u32>, usize)> {
 }
 
 /// Read a signed LEB128 value. Returns `(value, byte_length)`.
+///
+/// # Errors
+///
+/// [`DexError::Truncated`] when the buffer ends inside the encoding.
 #[inline]
 pub fn read_sleb128(buf: &[u8], pos: usize) -> Result<(i32, usize)> {
     let mut result: i64 = 0;

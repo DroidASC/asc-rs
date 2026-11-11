@@ -22,13 +22,18 @@ pub const CONFIG_ENV: &str = "ASC_CONFIG";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Source {
+    /// The built-in default.
     Default,
+    /// The config file.
     File,
+    /// The setting's environment variable.
     Env,
+    /// A command-line flag.
     Flag,
 }
 
 impl Source {
+    /// `default`, `file`, `env` or `flag`, as shown to the user.
     pub fn name(self) -> &'static str {
         match self {
             Source::Default => "default",
@@ -43,7 +48,9 @@ impl Source {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Count {
+    /// Computed from the machine and the user's busy processes.
     Auto,
+    /// Exactly this many.
     Fixed(usize),
 }
 
@@ -51,8 +58,11 @@ pub enum Count {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Amount {
+    /// Computed from the machine (see the key's help).
     Auto,
+    /// A fixed size in bytes.
     Bytes(u64),
+    /// A percentage (0..=100) of what the key names.
     Percent(u8),
 }
 
@@ -64,7 +74,9 @@ pub struct Bytes(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CacheDir {
+    /// The platform default ([`DiskCache::default_dir`]).
     Default,
+    /// This directory.
     Path(PathBuf),
 }
 
@@ -84,6 +96,7 @@ pub struct Millis(pub Duration);
 pub trait Value: Sized + fmt::Display {
     /// What the text may be, for error messages.
     const EXPECTED: &'static str;
+    /// The value `text` spells, or `None` when it is not one.
     fn parse(text: &str) -> Option<Self>;
     /// Computed from the machine rather than given.
     fn is_auto(&self) -> bool {
@@ -290,7 +303,9 @@ impl Value for Millis {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Setting<T> {
+    /// The resolved value.
     pub value: T,
+    /// The layer it came from.
     pub source: Source,
 }
 
@@ -300,9 +315,11 @@ pub struct Setting<T> {
 pub struct Key {
     /// Name in the config file (`section.name`) and in `--set`.
     pub name: &'static str,
+    /// Environment variable that sets it (`ASC_...`).
     pub env: &'static str,
     /// An older variable read when `env` is unset.
     pub legacy_env: Option<&'static str>,
+    /// One-line description, with what `auto` means where it applies.
     pub help: &'static str,
 }
 
@@ -310,12 +327,36 @@ pub struct Key {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    /// A value that does not parse as its key's type.
     #[error("{origin}: {key} = {text:?}: expected {expected}")]
-    Invalid { origin: String, key: String, text: String, expected: &'static str },
+    Invalid {
+        /// The layer that gave it: `command line`, `$VAR`, or the file path.
+        origin: String,
+        /// The setting's name.
+        key: String,
+        /// The text given.
+        text: String,
+        /// What the text may be ([`Value::EXPECTED`]).
+        expected: &'static str,
+    },
+    /// A setting name not in [`Config::KEYS`].
     #[error("{origin}: unknown setting {key:?}; known: {known}")]
-    UnknownKey { origin: String, key: String, known: String },
+    UnknownKey {
+        /// The layer that gave it.
+        origin: String,
+        /// The unknown name.
+        key: String,
+        /// Every known name, comma-separated.
+        known: String,
+    },
+    /// The config file could not be read or is not valid TOML.
     #[error("{path}: {message}")]
-    File { path: String, message: String },
+    File {
+        /// The config file.
+        path: String,
+        /// What went wrong.
+        message: String,
+    },
 }
 
 /// Declares the settings once: the struct, its key table, defaults and
@@ -326,12 +367,14 @@ macro_rules! settings {
         #[derive(Debug, Clone, PartialEq, Eq)]
         #[non_exhaustive]
         pub struct Config {
-            $(pub $field: Setting<$ty>,)*
+            $(#[doc = concat!("`", $name, "`: ", $help, ".")]
+            pub $field: Setting<$ty>,)*
             /// The config file read, if any.
             pub file: Option<PathBuf>,
         }
 
         impl Config {
+            /// Every setting, in declaration order.
             pub const KEYS: &'static [Key] = &[$(Key { name: $name, env: $env, legacy_env: $legacy, help: $help },)*];
 
             fn defaults() -> Config {
@@ -428,6 +471,11 @@ impl Config {
 
     /// Read the process's environment and config file, then apply `flags`
     /// (`(key, value)` pairs from the command line).
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::File`] when the config file exists but cannot be read,
+    /// and the errors of [`Config::resolve`].
     pub fn load(flags: &[(String, String)]) -> Result<Config, ConfigError> {
         let env = |name: &str| std::env::var(name).ok();
         let file = match Config::file_path(env) {
@@ -442,6 +490,12 @@ impl Config {
     }
 
     /// Defaults, then the file `(path, text)`, then `env`, then `flags`.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::File`] when the file is not valid TOML,
+    /// [`ConfigError::UnknownKey`] for a name not in [`Config::KEYS`], and
+    /// [`ConfigError::Invalid`] for a value that does not parse.
     pub fn resolve(
         file: Option<(&Path, &str)>,
         env: impl Fn(&str) -> Option<String>,
@@ -500,6 +554,7 @@ impl Config {
             .collect()
     }
 
+    /// The `threads` setting as the engine takes it.
     pub fn threads(&self) -> Threads {
         match self.threads.value {
             Count::Auto => Threads::Auto,
@@ -558,6 +613,7 @@ impl Config {
         }
     }
 
+    /// The disk cache budget from `cache.max` and `cache.ceiling`.
     pub fn disk_capacity(&self) -> DiskCapacity {
         let ceiling = self.cache_ceiling.value.0;
         match self.cache_max.value {

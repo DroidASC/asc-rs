@@ -12,10 +12,12 @@ pub struct Device {
     pub total_memory: Option<u64>,
     /// Memory available right now ([`available_memory`]), when known.
     pub available_memory: Option<u64>,
+    /// CPUs this process may run on.
     pub cpus: usize,
 }
 
 impl Device {
+    /// Read the machine's memory and CPUs now.
     pub fn probe() -> Device {
         Device { total_memory: total_memory(), available_memory: available_memory(), cpus: asc_cache::cpus() }
     }
@@ -42,6 +44,7 @@ impl MemoryPolicy {
     pub const FLOOR: usize = 64 << 20;
     /// Bounds of the automatic ceiling ([`MemoryPolicy::auto_ceiling`]).
     pub const CEILING_MIN: usize = 2 << 30;
+    /// Upper bound of the automatic ceiling, in bytes.
     pub const CEILING_MAX: usize = 8 << 30;
 
     /// The default policy for `device`.

@@ -10,18 +10,27 @@ fn array_at<const N: usize>(buf: &[u8], off: usize, what: &'static str) -> Resul
 }
 
 /// Read a little-endian `u16` at `off`.
+///
+/// # Errors
+/// [`AbcError::Truncated`] when fewer than 2 bytes are left at `off`.
 #[inline]
 pub fn read_u16(buf: &[u8], off: usize) -> Result<u16> {
     array_at(buf, off, "u16").map(u16::from_le_bytes)
 }
 
 /// Read a little-endian `u32` at `off`.
+///
+/// # Errors
+/// [`AbcError::Truncated`] when fewer than 4 bytes are left at `off`.
 #[inline]
 pub fn read_u32(buf: &[u8], off: usize) -> Result<u32> {
     array_at(buf, off, "u32").map(u32::from_le_bytes)
 }
 
 /// Read a little-endian `u64` at `off`.
+///
+/// # Errors
+/// [`AbcError::Truncated`] when fewer than 8 bytes are left at `off`.
 #[inline]
 pub fn read_u64(buf: &[u8], off: usize) -> Result<u64> {
     array_at(buf, off, "u64").map(u64::from_le_bytes)

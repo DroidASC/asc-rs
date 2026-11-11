@@ -81,6 +81,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// The word for the walk: `callers` or `callees`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Direction::Callers => "callers",
@@ -136,7 +137,9 @@ impl CallRoots {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CallQuery {
+    /// Where the walk starts.
     pub roots: CallRoots,
+    /// Which way to walk.
     pub direction: Direction,
     /// Levels to expand (1 = direct callers / callees).
     pub depth: usize,
@@ -233,6 +236,7 @@ const DEFAULT_MAX_SUBCLASSES: usize = 512;
 /// What a row of the tree is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CallNode {
+    /// A function of the program.
     Function {
         /// The ABC entry that holds it.
         entry: String,
@@ -261,6 +265,7 @@ pub struct CallRow {
     pub depth: usize,
     /// Index of the parent row (`None` for a root).
     pub parent: Option<usize>,
+    /// What the row shows.
     pub node: CallNode,
     /// How the parent row and this one are linked; `None` for a root. When
     /// several call sites link them, the strongest kind, in the order
@@ -299,8 +304,11 @@ impl CallRow {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CallTree {
+    /// The direction the tree was walked in.
     pub direction: Direction,
+    /// The depth the query asked for.
     pub depth: usize,
+    /// The rows in depth-first order; a row's `parent` indexes this list.
     pub rows: Vec<CallRow>,
     /// Distinct functions among the rows.
     pub functions: usize,
@@ -464,10 +472,13 @@ impl Reached {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CallEdge {
+    /// The function that holds the call site.
     pub from: CallNode,
     /// Offset of the instruction in the code of `from`.
     pub pc: u32,
+    /// How the call site links the two.
     pub kind: EdgeKind,
+    /// What the call site reaches.
     pub to: CallNode,
     /// For an edge through an import: the callee path of the call site.
     pub via: Option<String>,
@@ -477,8 +488,11 @@ pub struct CallEdge {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GraphSize {
+    /// Records whose edges were computed.
     pub records: usize,
+    /// Functions among them.
     pub functions: usize,
+    /// Edges in the graph.
     pub edges: usize,
     /// Bytes the edges take in memory, roughly.
     pub edge_bytes: usize,

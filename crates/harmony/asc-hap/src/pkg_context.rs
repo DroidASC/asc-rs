@@ -36,6 +36,7 @@ pub struct PkgContext {
     pub package_name: String,
     /// Owning bundle; empty for packages compiled into this module.
     pub bundle_name: String,
+    /// `moduleName`: the module that owns the package.
     pub module_name: String,
     /// Empty for the module itself and for native libraries.
     pub version: String,
@@ -44,6 +45,7 @@ pub struct PkgContext {
     pub entry_path: String,
     /// A native library (`libfoo.so`) rather than compiled code.
     pub is_so: bool,
+    /// `dependencyAlias`: the alias the package is declared under as a dependency; empty when none.
     pub dependency_alias: String,
 }
 
@@ -66,6 +68,7 @@ impl PkgContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordOwner<'c, 'r> {
+    /// The entry of the package table the record belongs to.
     pub package: &'c PkgContext,
     /// Text before the first `&`; empty for records of this bundle.
     pub bundle: &'r str,

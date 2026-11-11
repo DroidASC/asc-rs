@@ -68,10 +68,12 @@ impl Backend {
         Self { inner: Inner::new(name.into(), spec, client) }
     }
 
+    /// The backend's configured name, as used by `--decompiler`.
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
+    /// How the backend's processes are started and managed.
     pub fn spec(&self) -> &BackendSpec {
         &self.inner.spec
     }

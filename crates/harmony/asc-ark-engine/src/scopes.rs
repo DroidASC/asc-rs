@@ -100,12 +100,13 @@ pub enum Unresolved {
     UnknownValue,
     /// A store whose target is not identified could write it.
     Tainted,
-    /// It is written from another captured variable, more than
-    /// [`MAX_CHAIN`] times over or in a cycle.
+    /// It is written from another captured variable, in a chain longer
+    /// than the pass follows or in a cycle.
     Chain,
 }
 
 impl Unresolved {
+    /// Every reason, in declaration order.
     pub const ALL: [Unresolved; 8] = [
         Unresolved::NoIdentity,
         Unresolved::Outside,
@@ -117,6 +118,7 @@ impl Unresolved {
         Unresolved::Chain,
     ];
 
+    /// The reason in a few words, as summaries print it.
     pub const fn label(self) -> &'static str {
         match self {
             Unresolved::NoIdentity => "environment not identified",
@@ -151,7 +153,9 @@ pub struct ScopeStats {
     pub environments: usize,
     /// Variables with exactly one writer and a known value.
     pub resolved_slots: usize,
+    /// Variables with more than one writer.
     pub multi_writer_slots: usize,
+    /// Variables with one writer whose value is not known.
     pub unknown_value_slots: usize,
     /// Stores whose target environment is not identified.
     pub unidentified_stores: usize,
@@ -162,6 +166,7 @@ pub struct ScopeStats {
 }
 
 impl ScopeStats {
+    /// Add the counts of `other` to these.
     pub fn add(&mut self, other: &ScopeStats) {
         self.functions += other.functions;
         self.unidentified_functions += other.unidentified_functions;

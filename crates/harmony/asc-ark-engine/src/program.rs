@@ -290,6 +290,7 @@ fn is_zip(zip: &Apk, entry: &asc_apk::Entry) -> bool {
 /// Whether an ABC entry can be queried.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryStatus {
+    /// A plain ABC file that parses.
     Readable,
     /// The header is plain, the body is ciphertext (app-store protection).
     Encrypted,
@@ -303,9 +304,11 @@ pub enum EntryStatus {
 pub struct EntryInfo {
     /// `ets/modules.abc`, `entry.hap/ets/modules.abc`, or a bare file's name.
     pub name: String,
+    /// Size of the file in bytes.
     pub size: u64,
     /// `None` when not even the header could be read.
     pub version: Option<asc_abc::Version>,
+    /// Whether the entry can be queried.
     pub status: EntryStatus,
 }
 

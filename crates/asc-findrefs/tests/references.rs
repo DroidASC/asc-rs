@@ -1,3 +1,7 @@
+//! End-to-end reference search over fixture DEX files: string, class and
+//! member queries, anchoring, method bounds, and robustness against
+//! malformed code items and out-of-range indexes.
+
 use asc_dex::Dex;
 use asc_findrefs::{ClassQuery, CompiledQuery, FindRefs, IdxSet, InsnLocator, MemberQuery, MethodRef, Query, RefKind, StringLocator};
 use asc_fixture::{make_dex, make_field_access_dex, make_static_field_dex};

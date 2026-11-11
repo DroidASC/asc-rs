@@ -11,6 +11,10 @@
 //! [`abc::AbcBuilder`], the [`abc::Asm`] assembler, [`abc::make_abc`]) and
 //! [`hap`] (`.hap` / `.app` archives).
 
+// Test helpers, not published: their items are named for the bytes they
+// build, and they panic on input a test should not give them.
+#![allow(missing_docs, clippy::missing_panics_doc)]
+
 use asc_dex::checksum::seal;
 use asc_dex::debug_info::{DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE, DebugInfo, DebugOp};
 use asc_dex::encoded::{AnnotationItem, EncodedAnnotation, EncodedValue, Identity, write_annotation_item, write_array};

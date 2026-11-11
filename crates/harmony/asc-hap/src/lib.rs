@@ -74,6 +74,7 @@ pub enum HapError {
     /// `serde_json`'s recursion limit.
     #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
+    /// The document parsed but its root is an array, string or other non-object.
     #[error("expected a JSON object at the root, found {found}")]
     NotAnObject {
         /// JSON type of the root value.

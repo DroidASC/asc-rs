@@ -1,9 +1,13 @@
+//! The DEX `header_item`.
+
 use crate::{DexError, HEADER_SIZE, Result, u32_at};
 
 /// An `(offset, size)` pair describing one id table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Section {
+    /// File offset of the first entry.
     pub off: u32,
+    /// Number of entries.
     pub size: u32,
 }
 
@@ -11,28 +15,50 @@ pub struct Section {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Header {
+    /// `magic`: `dex\n` followed by a three-digit version and `\0`.
     pub magic: [u8; 8],
+    /// `checksum`: adler32 of everything after this field (not verified).
     pub checksum: u32,
+    /// `signature`: SHA-1 of everything after this field (not verified).
     pub signature: [u8; 20],
+    /// `file_size`: size of the whole file (or of this DEX within a container), in bytes.
     pub file_size: u32,
+    /// `header_size`: size of the header in bytes (`0x70` for single DEX files).
     pub header_size: u32,
+    /// `endian_tag`: `0x12345678` for little-endian files.
     pub endian_tag: u32,
+    /// `link_size`: size of the link section in bytes, `0` when not statically linked.
     pub link_size: u32,
+    /// `link_off`: file offset of the link section.
     pub link_off: u32,
+    /// `map_off`: file offset of the `map_list`.
     pub map_off: u32,
+    /// `string_ids_size` / `string_ids_off`.
     pub string_ids: Section,
+    /// `type_ids_size` / `type_ids_off`.
     pub type_ids: Section,
+    /// `proto_ids_size` / `proto_ids_off`.
     pub proto_ids: Section,
+    /// `field_ids_size` / `field_ids_off`.
     pub field_ids: Section,
+    /// `method_ids_size` / `method_ids_off`.
     pub method_ids: Section,
+    /// `class_defs_size` / `class_defs_off`.
     pub class_defs: Section,
+    /// `data_size`: size of the data section in bytes.
     pub data_size: u32,
+    /// `data_off`: file offset of the data section.
     pub data_off: u32,
 }
 
 impl Header {
     /// Parse the header at the start of `buf`. Only the magic prefix `dex\n`
     /// is validated; checksums and signatures are never verified.
+    ///
+    /// # Errors
+    ///
+    /// [`DexError::TooSmall`] when `buf` is shorter than the header and
+    /// [`DexError::BadMagic`] when it does not start with `dex\n`.
     pub fn parse(buf: &[u8]) -> Result<Header> {
         if buf.len() < HEADER_SIZE {
             return Err(DexError::TooSmall(buf.len()));

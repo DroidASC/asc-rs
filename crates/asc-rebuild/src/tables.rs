@@ -10,15 +10,25 @@ use std::collections::HashMap;
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Tables {
+    /// Original string indexes, sorted by UTF-16 code units.
     pub strings: Vec<u32>,
+    /// Original string index to new index.
     pub string_map: HashMap<u32, u32>,
+    /// Original type indexes, sorted by descriptor string.
     pub types: Vec<u32>,
+    /// Original type index to new index.
     pub type_map: HashMap<u32, u32>,
+    /// Original proto indexes, sorted by return type, then parameters.
     pub protos: Vec<u32>,
+    /// Original proto index to new index.
     pub proto_map: HashMap<u32, u32>,
+    /// Original field indexes, sorted by class, name, type.
     pub fields: Vec<u32>,
+    /// Original field index to new index.
     pub field_map: HashMap<u32, u32>,
+    /// Original method indexes, sorted by class, name, proto.
     pub methods: Vec<u32>,
+    /// Original method index to new index.
     pub method_map: HashMap<u32, u32>,
 }
 
@@ -100,24 +110,51 @@ impl Tables {
         Ok(t)
     }
 
-    /// New index of original string `idx`; `RebuildError::Internal` when it
-    /// was never collected.
+    /// New index of original string `idx`.
+    ///
+    /// # Errors
+    ///
+    /// [`RebuildError::Internal`] when `idx` was never collected.
     #[inline]
     pub fn map_string(&self, idx: u32) -> Result<u32> {
         lookup(&self.string_map, "string", idx)
     }
+
+    /// New index of original type `idx`.
+    ///
+    /// # Errors
+    ///
+    /// [`RebuildError::Internal`] when `idx` was never collected.
     #[inline]
     pub fn map_type(&self, idx: u32) -> Result<u32> {
         lookup(&self.type_map, "type", idx)
     }
+
+    /// New index of original proto `idx`.
+    ///
+    /// # Errors
+    ///
+    /// [`RebuildError::Internal`] when `idx` was never collected.
     #[inline]
     pub fn map_proto(&self, idx: u32) -> Result<u32> {
         lookup(&self.proto_map, "proto", idx)
     }
+
+    /// New index of original field `idx`.
+    ///
+    /// # Errors
+    ///
+    /// [`RebuildError::Internal`] when `idx` was never collected.
     #[inline]
     pub fn map_field(&self, idx: u32) -> Result<u32> {
         lookup(&self.field_map, "field", idx)
     }
+
+    /// New index of original method `idx`.
+    ///
+    /// # Errors
+    ///
+    /// [`RebuildError::Internal`] when `idx` was never collected.
     #[inline]
     pub fn map_method(&self, idx: u32) -> Result<u32> {
         lookup(&self.method_map, "method", idx)

@@ -1,3 +1,7 @@
+//! Persisted findrefs tables round-trip: loaded state answers like a
+//! fresh build, fills in missing tables on demand, and refuses tables of
+//! another DEX or a damaged file.
+
 use asc_dex::Dex;
 use asc_findrefs::{Backing, ClassQuery, FindRefs, MemberQuery, Query, SearchState};
 use asc_fixture::{make_dex, make_rich_dex, make_unsorted_static_field_dex};

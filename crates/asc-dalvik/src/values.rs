@@ -41,8 +41,11 @@ const MAX_SLOTS: usize = 1 << 22;
 /// handlers' entry, catch-all or typed: one `Catch` per (try, handler) pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Catch {
+    /// First byte of the try range.
     pub start: usize,
+    /// Byte just past the try range.
     pub end: usize,
+    /// Byte offset of the handler's first instruction.
     pub handler: usize,
 }
 
@@ -50,10 +53,13 @@ pub struct Catch {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct MethodCode<'a> {
+    /// Instruction bytes (`insns`, little-endian code units).
     pub insns: &'a [u8],
+    /// Frame size in registers (`registers_size`).
     pub registers: u16,
     /// Parameter registers (`ins_size`), the last ones of the frame.
     pub ins: u16,
+    /// Every (try range, handler) pair of the method.
     pub catches: &'a [Catch],
 }
 
@@ -69,7 +75,9 @@ impl<'a> MethodCode<'a> {
 /// How a field was read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FieldAccess {
+    /// `sget*`.
     Static,
+    /// `iget*`.
     Instance,
 }
 
@@ -89,9 +97,19 @@ pub enum Value {
     Param(u16),
     /// The result of the invoke at `pc` (a method index; `invoke-custom`
     /// results are [`Value::Unknown`]).
-    Ret { pc: usize, method: u32 },
+    Ret {
+        /// Byte offset of the invoke.
+        pc: usize,
+        /// Method index the invoke calls.
+        method: u32,
+    },
     /// A field read (`iget*` / `sget*`): a field index.
-    Field { field: u32, access: FieldAccess },
+    Field {
+        /// Field index read.
+        field: u32,
+        /// Whether the read was static or on an instance.
+        access: FieldAccess,
+    },
     /// A fresh `new-instance` of a type index.
     NewInstance(u32),
     /// Anything else: computed, merged beyond [`MAX_CANDIDATES`], or never
@@ -107,6 +125,7 @@ pub struct Candidates {
 }
 
 impl Candidates {
+    /// The values as a sorted, deduplicated slice.
     pub fn as_slice(&self) -> &[Value] {
         &self.values[..usize::from(self.len)]
     }
@@ -354,6 +373,8 @@ pub struct MethodValues<'a> {
 }
 
 impl Analyzer {
+    /// An analyzer with empty buffers; reuse it across methods so the
+    /// per-method allocations are amortized.
     pub fn new() -> Analyzer {
         Analyzer::default()
     }
@@ -819,6 +840,11 @@ impl MethodValues<'_> {
     }
 
     /// Whether the result of the invoke at `pc` is read on some path.
+    ///
+    /// # Panics
+    ///
+    /// Never: `pc` and the instruction after it are boundaries the walk
+    /// visited, so their opcode bytes are defined.
     pub fn result_use(&mut self, pc: usize) -> ResultUse {
         let code = self.code.insns;
         let an = &mut *self.an;

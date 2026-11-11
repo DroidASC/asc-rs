@@ -3,25 +3,36 @@
 use crate::Result;
 use crate::leb128::{read_uleb128, uleb128_len};
 
+/// One `encoded_field` of a `class_data_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodedField {
+    /// The field, as an index into `field_ids` (the on-disk delta already added up).
     pub field_idx: u32,
+    /// `access_flags`: [`crate::access`] bits.
     pub access_flags: u32,
 }
 
+/// One `encoded_method` of a `class_data_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodedMethod {
+    /// The method, as an index into `method_ids` (the on-disk delta already added up).
     pub method_idx: u32,
+    /// `access_flags`: [`crate::access`] bits.
     pub access_flags: u32,
+    /// `code_off`: offset of the `code_item`, `0` for abstract and native methods.
     pub code_off: u32,
 }
 
 /// Fully decoded `class_data_item` (index deltas already resolved).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClassData {
+    /// `static_fields`, in index order.
     pub static_fields: Vec<EncodedField>,
+    /// `instance_fields`, in index order.
     pub instance_fields: Vec<EncodedField>,
+    /// `direct_methods`: static, private and constructor methods.
     pub direct_methods: Vec<EncodedMethod>,
+    /// `virtual_methods`: everything overridable.
     pub virtual_methods: Vec<EncodedMethod>,
     /// Offset just past the item (start of the next class_data_item when packed).
     pub end: usize,
@@ -29,6 +40,10 @@ pub struct ClassData {
 
 impl ClassData {
     /// Parse the item at `off`. An offset of `0` yields an empty class.
+    ///
+    /// # Errors
+    ///
+    /// `Truncated` when the item runs past the end of `buf`.
     pub fn parse(buf: &[u8], off: usize) -> Result<ClassData> {
         let mut cd = ClassData::default();
         if off == 0 {
@@ -93,6 +108,7 @@ impl ClassData {
         self.direct_methods.iter().chain(self.virtual_methods.iter())
     }
 
+    /// Whether the class declares no fields and no methods.
     pub fn is_empty(&self) -> bool {
         self.static_fields.is_empty()
             && self.instance_fields.is_empty()
@@ -104,6 +120,11 @@ impl ClassData {
 /// Fast walk over the methods of a `class_data_item` without allocating.
 /// Calls `f(method_idx, code_off)` for every direct and virtual method and
 /// returns the offset just past the item.
+///
+/// # Errors
+///
+/// `Truncated` when the item runs past the end of `buf`; `f` may already
+/// have been called for the methods before that point.
 pub fn walk_methods(buf: &[u8], off: usize, mut f: impl FnMut(u32, u32)) -> Result<usize> {
     let mut p = off;
     let (sf, n) = read_uleb128(buf, p)?;

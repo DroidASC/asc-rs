@@ -19,6 +19,7 @@ pub struct Annotation<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AnnotationElement {
+    /// `name_off`: file offset of the element name string.
     pub name_off: u32,
     /// The value itself for types up to 32 bits, otherwise the offset of
     /// the value (string, array, 64-bit number …).
@@ -83,6 +84,7 @@ impl<'a> Annotation<'a> {
         Ok(Annotation { off, class_idx, elements, tags })
     }
 
+    /// File offset of the annotation.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off
@@ -94,11 +96,13 @@ impl<'a> Annotation<'a> {
         self.tags.len()
     }
 
+    /// Whether the annotation has no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.tags.is_empty()
     }
 
+    /// The name-value pairs in file order.
     pub fn elements(&self) -> impl Iterator<Item = AnnotationElement> + 'a + use<'a> {
         self.elements
             .as_chunks::<ELEMENT_SIZE>()

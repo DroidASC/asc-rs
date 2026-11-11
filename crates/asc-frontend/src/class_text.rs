@@ -13,6 +13,7 @@ pub struct MethodBlock<'a> {
 }
 
 impl MethodBlock<'_> {
+    /// The method name: the signature up to its `(`.
     pub fn name(&self) -> &str {
         self.signature.split('(').next().unwrap_or(self.signature)
     }
@@ -30,6 +31,7 @@ pub struct ClassText<'a> {
     pub header: &'a str,
     /// `.field` lines.
     pub fields: Vec<&'a str>,
+    /// The method blocks, in source order.
     pub methods: Vec<MethodBlock<'a>>,
 }
 
@@ -37,6 +39,8 @@ pub struct ClassText<'a> {
 const SECTIONS: &[&str] = &["# static fields", "# instance fields", "# direct methods", "# virtual methods"];
 
 impl<'a> ClassText<'a> {
+    /// Splits the smali of one class, borrowing from it. Never fails: text
+    /// that is not a field or a complete method block is ignored.
     pub fn parse(smali: &'a str) -> ClassText<'a> {
         let mut header_end = None;
         let mut fields = Vec::new();

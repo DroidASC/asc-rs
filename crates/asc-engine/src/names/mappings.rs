@@ -22,14 +22,19 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum MappingError {
+    /// A key that is not a class descriptor.
     #[error("not a class descriptor: {0:?} (want Lpkg/Name;)")]
     Class(String),
+    /// A key that is not a field signature.
     #[error("not a field signature: {0:?} (want Lowner;->name:Type)")]
     Field(String),
+    /// A key that is not a method signature, or names a constructor.
     #[error("not a method signature: {0:?} (want Lowner;->name(args)Ret)")]
     Method(String),
+    /// A new member name that would not read as one identifier.
     #[error("not a usable new name: {0:?}")]
     NewName(String),
+    /// A new class name that is not a usable class descriptor.
     #[error("not a usable new class name: {0:?} (want Lpkg/Name;)")]
     NewClass(String),
 }
@@ -38,14 +43,21 @@ pub enum MappingError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub struct FieldRef<'a> {
+    /// The declaring class descriptor.
     pub class: &'a str,
+    /// The field name.
     pub name: &'a str,
+    /// The field's type descriptor.
     pub ty: &'a str,
 }
 
 impl<'a> FieldRef<'a> {
     /// Parse the canonical form exactly as written (no trimming, no other
     /// spellings), so `parse(s).to_string() == s`.
+    ///
+    /// # Errors
+    ///
+    /// [`MappingError::Field`] when `signature` is not of that form.
     pub fn parse(signature: &'a str) -> Result<FieldRef<'a>, MappingError> {
         let bad = || MappingError::Field(signature.to_string());
         let (class, member) = signature.split_once("->").ok_or_else(bad)?;
@@ -66,13 +78,20 @@ impl fmt::Display for FieldRef<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub struct MethodRef<'a> {
+    /// The declaring class descriptor.
     pub class: &'a str,
+    /// The method name (`<init>` / `<clinit>` included).
     pub name: &'a str,
+    /// `(args)Ret`.
     pub proto: &'a str,
 }
 
 impl<'a> MethodRef<'a> {
     /// Parse the canonical form exactly as written, like [`FieldRef::parse`].
+    ///
+    /// # Errors
+    ///
+    /// [`MappingError::Method`] when `signature` is not of that form.
     pub fn parse(signature: &'a str) -> Result<MethodRef<'a>, MappingError> {
         let bad = || MappingError::Method(signature.to_string());
         let (class, member) = signature.split_once("->").ok_or_else(bad)?;
@@ -152,6 +171,7 @@ pub struct NameMappings {
 pub struct MappingsHash([u8; 32]);
 
 impl MappingsHash {
+    /// The raw digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -165,16 +185,23 @@ impl fmt::Display for MappingsHash {
 }
 
 impl NameMappings {
+    /// No renames: every name stays as it is.
     pub fn new() -> NameMappings {
         NameMappings::default()
     }
 
+    /// Whether there are no renames at all.
     pub fn is_empty(&self) -> bool {
         self.classes.is_empty() && self.fields.is_empty() && self.methods.is_empty()
     }
 
     /// Rename the class `descriptor` to the descriptor `new_descriptor`
     /// (`Lz/c;` → `Lcom/example/Cart;`); returns the name it replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`MappingError::Class`] for a bad `descriptor`,
+    /// [`MappingError::NewClass`] for a bad `new_descriptor`.
     pub fn insert_class(&mut self, descriptor: &str, new_descriptor: &str) -> Result<Option<String>, MappingError> {
         if !is_class_descriptor(descriptor) {
             return Err(MappingError::Class(descriptor.to_string()));
@@ -187,6 +214,11 @@ impl NameMappings {
 
     /// Rename the field `signature` (`Lowner;->name:Type`); returns the name
     /// it replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`MappingError::Field`] for a bad `signature`,
+    /// [`MappingError::NewName`] for a bad `new_name`.
     pub fn insert_field(&mut self, signature: &str, new_name: &str) -> Result<Option<String>, MappingError> {
         FieldRef::parse(signature)?;
         Ok(self.fields.insert(signature.to_string(), checked_new_name(new_name)?))
@@ -195,6 +227,11 @@ impl NameMappings {
     /// Rename the method `signature` (`Lowner;->name(args)Ret`); returns the
     /// name it replaced. Constructors and static initialisers keep their
     /// names, so `<init>` / `<clinit>` are refused.
+    ///
+    /// # Errors
+    ///
+    /// [`MappingError::Method`] for a bad `signature` or a constructor,
+    /// [`MappingError::NewName`] for a bad `new_name`.
     pub fn insert_method(&mut self, signature: &str, new_name: &str) -> Result<Option<String>, MappingError> {
         let method = MethodRef::parse(signature)?;
         if method.name.starts_with('<') {

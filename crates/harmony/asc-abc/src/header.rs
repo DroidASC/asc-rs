@@ -27,19 +27,29 @@ impl fmt::Display for Version {
 pub struct Header {
     /// Adler-32 of everything after the checksum field (from offset 12).
     pub checksum: u32,
+    /// `version`: bytecode version the file was compiled for.
     pub version: Version,
+    /// `file_size`: total file size in bytes.
     pub file_size: u32,
+    /// `foreign_off`: offset of the foreign region; see [`Header::is_foreign`].
     pub foreign_off: u32,
+    /// `foreign_size`: size of the foreign region in bytes.
     pub foreign_size: u32,
+    /// `num_classes`: entries in the class index.
     pub num_classes: u32,
+    /// `class_idx_off`: offset of the class index, an array of `u32` class offsets.
     pub class_idx_off: u32,
+    /// `num_lnps`: entries in the line-number-program index.
     pub num_lnps: u32,
+    /// `lnp_idx_off`: offset of the line-number-program index, an array of `u32` offsets.
     pub lnp_idx_off: u32,
     /// `0xFFFF_FFFF` in files newer than [`Version::LAST_WITH_LITERAL_INDEX`].
     pub num_literalarrays: u32,
     /// `0xFFFF_FFFF` in files newer than [`Version::LAST_WITH_LITERAL_INDEX`].
     pub literalarray_idx_off: u32,
+    /// `num_indexes`: number of [`RegionHeader`] entries in the region index.
     pub num_indexes: u32,
+    /// `index_section_off`: offset of the region index, an array of [`RegionHeader`].
     pub index_section_off: u32,
 }
 
@@ -95,19 +105,30 @@ impl Header {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RegionHeader {
+    /// `start`: first file offset of the region.
     pub start: u32,
+    /// `end`: file offset one past the end of the region.
     pub end: u32,
+    /// `class_idx_size`: entries in the region's class index.
     pub class_idx_size: u32,
+    /// `class_idx_off`: offset of the class index, an array of `u32` type offsets.
     pub class_idx_off: u32,
+    /// `method_idx_size`: entries in the region's method index.
     pub method_idx_size: u32,
+    /// `method_idx_off`: offset of the method index, an array of `u32` method offsets.
     pub method_idx_off: u32,
+    /// `field_idx_size`: entries in the region's field index.
     pub field_idx_size: u32,
+    /// `field_idx_off`: offset of the field index, an array of `u32` field offsets.
     pub field_idx_off: u32,
+    /// `proto_idx_size`: entries in the region's proto index.
     pub proto_idx_size: u32,
+    /// `proto_idx_off`: offset of the proto index, an array of `u32` proto offsets.
     pub proto_idx_off: u32,
 }
 
 impl RegionHeader {
+    /// Encoded size in bytes.
     pub const SIZE: usize = 40;
 
     /// Parse the region header at `off`.
@@ -131,6 +152,7 @@ impl RegionHeader {
         })
     }
 
+    /// Whether file offset `off` lies in `[start, end)`.
     #[inline]
     pub fn contains(&self, off: u32) -> bool {
         self.start <= off && off < self.end

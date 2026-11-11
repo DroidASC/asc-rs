@@ -80,7 +80,10 @@ pub enum RefSite {
     },
     /// A field of the record itself (`scopeNames`, `jsonFileContent`, the
     /// default value of an element of an annotation interface).
-    Field { name: String },
+    Field {
+        /// The field name.
+        name: String,
+    },
     /// An annotation a function carries: no instruction of its code.
     Annotation {
         /// The raw (mangled) function name.
@@ -96,6 +99,7 @@ pub enum RefSite {
 pub struct RefRow {
     /// Canonical name of the record.
     pub record: String,
+    /// Where in the record the reference is.
     pub site: RefSite,
     /// The matched strings, decoded.
     pub matched: Vec<String>,
@@ -144,10 +148,12 @@ impl RefRow {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RefBatch {
+    /// The ABC entry searched.
     pub entry_name: String,
     /// In file order: records as the class index lists them, then functions,
     /// then instructions.
     pub rows: Vec<RefRow>,
+    /// Time the search of this entry took, in microseconds.
     pub search_us: u128,
     /// Records or functions that could not be read: the first reason and
     /// how many there were. The rows of everything else are still there.
@@ -160,7 +166,9 @@ pub struct RefBatch {
 pub struct RefSummary {
     /// Entries searched.
     pub entries: usize,
+    /// Rows found over every entry.
     pub total_results: usize,
+    /// Wall time of the whole run, in microseconds.
     pub total_us: u128,
     /// What the search left out, one line each (encrypted entries).
     pub notes: Vec<String>,

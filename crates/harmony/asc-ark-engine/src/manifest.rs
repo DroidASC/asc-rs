@@ -59,6 +59,7 @@ pub enum Document {
 }
 
 impl Document {
+    /// Every document, in declaration order.
     pub const ALL: [Document; 3] = [Document::Module, Document::Pack, Document::PkgContext];
 
     /// The name of the file in a package.
@@ -118,7 +119,10 @@ pub enum CodeLink {
         callbacks: Vec<String>,
     },
     /// No readable ABC entry of the package has the record; the reason.
-    Missing { reason: String },
+    Missing {
+        /// Why, in a few words.
+        reason: String,
+    },
 }
 
 /// A `srcEntry` of a manifest and the code it names.
@@ -127,6 +131,7 @@ pub enum CodeLink {
 pub struct EntryCode {
     /// As the manifest writes it: `./ets/entryability/EntryAbility.ets`.
     pub src_entry: String,
+    /// Where the code is, or why it is missing.
     pub link: CodeLink,
 }
 
@@ -241,8 +246,11 @@ pub struct PackageManifest {
     /// The package as ABC entry names spell it (`entry.hap`,
     /// `shop.app/entry-default.hap`); the file name for a lone file.
     pub name: String,
+    /// The package's `module.json`, when it has one that reads.
     pub module: Option<ModuleJson>,
+    /// The package's `pack.info`, when it has one that reads.
     pub pack: Option<PackInfo>,
+    /// The package's `pkgContextInfo.json`, when it has one that reads.
     pub pkg_context: Option<PkgContextInfo>,
     /// The code of the module's own `srcEntry` (its ability stage).
     pub module_code: Option<EntryCode>,
@@ -260,6 +268,7 @@ pub struct PackageManifest {
     /// How many modules `ets/sourceMaps.map` of the package maps to their
     /// source, for a package (of a debug build) that has the file.
     pub source_maps: Option<usize>,
+    /// How the package's `pack.info` relates to those of the other packages.
     pub pack_sharing: PackSharing,
     /// Documents that could not be read, one line each.
     pub notes: Vec<String>,
@@ -285,6 +294,7 @@ pub struct PackageManifest {
 pub struct ManifestLine {
     /// [`PackageManifest::name`] of the package the line is about.
     pub package: String,
+    /// The summary line itself, without the package.
     pub text: String,
 }
 
@@ -305,8 +315,11 @@ impl ManifestLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DocumentText {
+    /// [`PackageManifest::name`] of the package the document is in.
     pub package: String,
+    /// Which document it is.
     pub document: Document,
+    /// The document, re-indented.
     pub text: String,
     /// The other packages whose document is byte for byte this one, and
     /// is not listed again (`pack.info` only).
@@ -330,6 +343,7 @@ impl DocumentText {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Manifest {
+    /// One per package that has a metadata document, in program order.
     pub packages: Vec<PackageManifest>,
     /// The bare `.abc` files that are part of no package (a decrypted file
     /// that stands in for a package entry is listed with its package).

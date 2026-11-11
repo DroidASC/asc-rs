@@ -39,6 +39,10 @@ impl Default for Text {
 
 impl TextRows {
     /// Every row, each followed by `\n`.
+    ///
+    /// # Panics
+    ///
+    /// Never: shared bytes are checked to be UTF-8 when the rows are built.
     pub fn as_str(&self) -> &str {
         match &self.text {
             Text::Owned(s) => s,
@@ -52,6 +56,7 @@ impl TextRows {
         self.ends.len()
     }
 
+    /// Whether there are no rows.
     pub fn is_empty(&self) -> bool {
         self.ends.is_empty()
     }

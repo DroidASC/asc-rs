@@ -1,3 +1,6 @@
+//! Smali listings of the fixture DEX files: whole classes, single methods
+//! and the pc-to-line maps of method listings.
+
 use asc_dex::Dex;
 use asc_fixture::{make_dex, make_static_field_dex};
 use asc_smali::{Options, disassemble_class};

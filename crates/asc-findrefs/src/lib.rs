@@ -50,14 +50,20 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FindError {
+    /// The DEX is malformed where the search had to read it (an id table,
+    /// string data or `class_data_item` out of bounds or undecodable).
     #[error(transparent)]
     Dex(#[from] asc_dex::DexError),
+    /// A string, type, class or member-name pattern is not a valid regex.
     #[error("invalid pattern: {0}")]
     Pattern(#[from] regex::Error),
+    /// The query cannot be run on one DEX as it is: a predicate the engine
+    /// has to resolve first, or an ill-formed compound query.
     #[error("invalid query: {0}")]
     Invalid(String),
 }
 
+/// Result of reference search, failing with [`FindError`].
 pub type Result<T> = std::result::Result<T, FindError>;
 
 /// Class part of a member query.
@@ -66,6 +72,7 @@ pub type Result<T> = std::result::Result<T, FindError>;
 pub struct ClassQuery {
     /// Exact Dalvik descriptor when `precise`, otherwise a fuzzy pattern.
     pub pattern: String,
+    /// Match `pattern` as an exact descriptor rather than fuzzily.
     pub precise: bool,
 }
 
@@ -73,6 +80,7 @@ pub struct ClassQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct MemberQuery {
+    /// Declaring class of the member, any class when `None`.
     pub class: Option<ClassQuery>,
     /// Fuzzy member name (regex when `class` is absent or fuzzy, substring
     /// when the class is precise), or the exact name when `exact_name` is set.
@@ -128,7 +136,12 @@ impl MemberQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberSignature {
     /// A method's parameters, and its return type when one is given.
-    Method { params: Vec<TypeMatch>, ret: Option<TypeMatch> },
+    Method {
+        /// Parameter types, in order.
+        params: Vec<TypeMatch>,
+        /// Return type; any when `None`.
+        ret: Option<TypeMatch>,
+    },
     /// A field's type.
     Field(TypeMatch),
 }
@@ -140,7 +153,12 @@ pub enum TypeMatch {
     Descriptor(String),
     /// A class of this simple name in any package, `dims` levels of array
     /// deep (`String[]` written without its package).
-    Simple { name: String, dims: usize },
+    Simple {
+        /// Simple class name, without package or `L`/`;`.
+        name: String,
+        /// Array dimensions (`0` for the class itself).
+        dims: usize,
+    },
 }
 
 impl TypeMatch {
@@ -189,7 +207,9 @@ pub enum Query {
     String(String),
     /// Strings containing a plain substring (no regex syntax).
     StringLiteral(String),
+    /// Type references whose descriptor matches a regex.
     Type(String),
+    /// References to the methods a member query matches.
     Method(MemberQuery),
     /// References to any of these methods: a set read from a file, or the
     /// methods a [`Query::Nested`] condition resolved to.
@@ -208,7 +228,10 @@ pub enum Query {
     /// for every overload) to the classes of `target` it stands for; a hit on
     /// one carries the note `(dispatch LIST)`.
     Virtual {
+        /// The methods whose possible dispatches are searched.
         target: Box<Query>,
+        /// Each added method's signature (or bare `Lcls;->name`) mapped to
+        /// the `target` classes it stands for.
         via: BTreeMap<String, String>,
         /// Most classes of the program that may define a supertype's method
         /// for the calls naming it to be followed (`None`: no limit). A
@@ -216,18 +239,23 @@ pub enum Query {
         /// which one runs.
         fan_out: Option<usize>,
     },
+    /// References (reads and writes) to the fields a member query matches.
     Field(MemberQuery),
     /// Field references restricted to reads (`iget*` / `sget*`) or writes
     /// (`iput*` / `sput*`). [`Query::Field`] keeps both.
     FieldAccess {
+        /// The fields to look for.
         field: MemberQuery,
+        /// Keep only reads or only writes.
         access: FieldAccess,
     },
     /// The calls of a method query (`Method`, `MethodSet` or `Nested`) that
     /// every constraint keeps (`method:X[arg1="id", ret=unused]`); see
     /// [`CallConstraint`]. Its hits carry a note of the values judged.
     Call {
+        /// The method query whose calls are judged.
         target: Box<Query>,
+        /// Every constraint a call must satisfy.
         constraints: Vec<CallConstraint>,
     },
     /// Classes whose superclass is exactly this descriptor (`Lcom/poc/Base;`).
@@ -243,7 +271,9 @@ pub enum Query {
     /// (string / type / method / field queries; at least one in `all`).
     /// A row lists the constants each `all` query matched, in that order.
     All {
+        /// Queries the method's code must all match.
         all: Vec<Query>,
+        /// Queries the method's code must not match.
         none: Vec<Query>,
     },
 }
@@ -298,7 +328,14 @@ pub enum Defined {
     /// Declared in one of `classes` (exact descriptors), and, when set, with
     /// this `name` and `proto` (`(params)ret`). `override:` and `in:{...}`
     /// resolve to this.
-    Members { classes: Vec<String>, name: Option<String>, proto: Option<String> },
+    Members {
+        /// Exact descriptors of the declaring classes.
+        classes: Vec<String>,
+        /// Method name, any when `None`.
+        name: Option<String>,
+        /// Method proto as `(params)ret`, any when `None`.
+        proto: Option<String>,
+    },
     /// `override:TARGET`: methods overriding or implementing it. The engine
     /// resolves it into `Members` over the class hierarchy.
     Override(MemberQuery),
@@ -399,6 +436,7 @@ fn built<'c, T>(cell: &'c OnceLock<T>, lock: &Mutex<()>, build: impl FnOnce() ->
 }
 
 impl SearchState {
+    /// A state with no table built yet.
     pub fn new() -> Self {
         Self::default()
     }
@@ -461,47 +499,87 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
         }
     }
 
+    /// The DEX being searched.
     pub fn dex(&self) -> &'d Dex<'a> {
         self.dex
     }
 
+    /// The string table, built on first use.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when the `string_ids` or string data are out of
+    /// bounds. A failed build is not cached; the next call retries.
     pub fn string_locator(&self) -> Result<&StringLocator> {
         let st = self.state();
         built(&st.strings, &st.building[0], || StringLocator::build(self.dex))
     }
 
+    /// The type table, built on first use.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when the `type_ids` table is out of bounds.
     pub fn type_locator(&self) -> Result<&TypeLocator> {
         let st = self.state();
         built(&st.types, &st.building[1], || TypeLocator::build(self.dex))
     }
 
+    /// The method-id tables, built on first use.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when the `method_ids` table is out of bounds.
     pub fn method_locator(&self) -> Result<&MethodLocator> {
         let st = self.state();
         built(&st.methods, &st.building[2], || MethodLocator::build(self.dex))
     }
 
+    /// The field-id tables, built on first use.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when the `field_ids` table is out of bounds.
     pub fn field_locator(&self) -> Result<&FieldLocator> {
         let st = self.state();
         built(&st.fields, &st.building[3], || FieldLocator::build(self.dex))
     }
 
+    /// The instruction-to-method table, built on first use.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] as for [`InsnLocator::build`].
     pub fn insn_locator(&self) -> Result<&InsnLocator> {
         let st = self.state();
         built(&st.insns, &st.building[4], || Ok(InsnLocator::build(self.dex)?))
     }
 
     /// The DEX's call graph, built on first use (the instruction table too).
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`FindRefs::insn_locator`].
     pub fn call_graph(&self) -> Result<&CallGraph> {
         let st = self.state();
         built(&st.calls, &st.building[5], || Ok(CallGraph::build(self.dex.buf(), self.insn_locator()?)))
     }
 
     /// Resolve the query to constant-pool indexes (compiling its patterns).
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`CompiledQuery::new`] and [`FindRefs::locate_compiled`].
     pub fn locate(&self, query: &Query) -> Result<BTreeSet<u32>> {
         self.locate_compiled(&CompiledQuery::new(query)?)
     }
 
     /// Resolve a pre-compiled query to constant-pool indexes.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when a locator table the query needs cannot be
+    /// built or an id it resolves through is out of bounds.
     pub fn locate_compiled(&self, query: &CompiledQuery) -> Result<BTreeSet<u32>> {
         let buf = self.dex.buf();
         match (query.kind(), query.parts()) {
@@ -531,6 +609,11 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     /// `true` exactly when [`FindRefs::find_ref_compiled`] (or, for a class
     /// relation, [`FindRefs::class_relation`]; for a compound query, its rows)
     /// could only come out empty.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when the type table or another table the judgement
+    /// reads is malformed or missing from the (possibly partial) buffer.
     pub fn cannot_match(&self, query: &CompiledQuery) -> Result<bool> {
         if let Some(c) = query.compound() {
             // Rows need a hit of every `all` part in one method.
@@ -573,6 +656,10 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     }
 
     /// Full search: locate indexes, scan code, resolve owning methods.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`CompiledQuery::new`] and [`FindRefs::find_ref_compiled`].
     pub fn find_ref(&self, query: &Query) -> Result<Vec<Hit>> {
         self.find_ref_compiled(&CompiledQuery::new(query)?)
     }
@@ -583,6 +670,11 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     /// Class relations (`Extends` / `Implements`) reference no code and give
     /// no hits here; [`FindRefs::class_relation`] answers them. Compound
     /// queries give none either: run their parts with [`FindRefs::find_many`].
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when the DEX is malformed where the search reads it
+    /// (locator tables, `class_data_item`s, or the ids a note is built from).
     pub fn find_ref_compiled(&self, query: &CompiledQuery) -> Result<Vec<Hit>> {
         if query.relation().is_some() || query.compound().is_some() || query.defined().is_some() {
             return Ok(Vec::new());
@@ -649,6 +741,11 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     /// each hit is handed to every query whose set holds its index. Gives,
     /// per query, what [`FindRefs::find_ref_compiled`] would (class relations
     /// and compound queries: nothing).
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`FindRefs::find_ref_compiled`], for the first query
+    /// that fails.
     pub fn find_many(&self, queries: &[&CompiledQuery]) -> Result<Vec<Vec<Hit>>> {
         let mut out: Vec<Vec<Hit>> = (0..queries.len()).map(|_| Vec::new()).collect();
         let mut located: Vec<Option<BTreeSet<u32>>> = Vec::with_capacity(queries.len());
@@ -683,6 +780,11 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     /// Answer an `Extends` / `Implements` query: the `class_idx` of every
     /// class definition that extends / implements the target, in
     /// `class_defs` order. `None` for any other query.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`] when a `class_def_item` or its interface list is
+    /// malformed.
     pub fn class_relation(&self, query: &CompiledQuery) -> Result<Option<Vec<u32>>> {
         match query.parts() {
             Parts::Relation(rel, descriptor) => Ok(Some(classdefs::related_classes(self.dex, *rel, descriptor)?)),
@@ -691,6 +793,10 @@ impl<'d, 'a, 's> FindRefs<'d, 'a, 's> {
     }
 
     /// Scan for already-located indexes of `kind`.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`FindRefs::insn_locator`].
     pub fn scan_idxs(&self, kind: RefKind, idxs: &BTreeSet<u32>) -> Result<Vec<Hit>> {
         let buf = self.dex.buf();
         let insn = self.insn_locator()?;

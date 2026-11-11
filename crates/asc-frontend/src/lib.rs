@@ -1,7 +1,7 @@
 //! The layer the `asc` command and the MCP server share above the engines,
 //! so that both read a request and show an answer the same way.
 //!
-//! * [`format`]: which engine answers for a program (DEX or HarmonyOS).
+//! * [`format`](mod@format): which engine answers for a program (DEX or HarmonyOS).
 //! * [`findrefs`]: the arguments of a DEX search as a query.
 //! * [`harmony`]: HarmonyOS function spellings, name patterns, call trees
 //!   as rows and the hints of an empty answer.

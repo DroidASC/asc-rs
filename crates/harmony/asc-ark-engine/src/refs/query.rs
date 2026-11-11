@@ -26,10 +26,12 @@ impl Pattern {
         Ok(Pattern::Regex(Regex::new(pattern)?))
     }
 
+    /// Matches texts that contain `text`.
     pub fn contains(text: impl Into<String>) -> Pattern {
         Pattern::Contains(text.into())
     }
 
+    /// Matches `text` and nothing else.
     pub fn exact(text: impl Into<String>) -> Pattern {
         Pattern::Exact(text.into())
     }
@@ -46,6 +48,8 @@ impl Pattern {
         }
     }
 
+    /// Whether `text` matches: anywhere for a regex (unless it is
+    /// anchored), as a substring, or as the whole text.
     pub fn is_match(&self, text: &str) -> bool {
         match self {
             Pattern::Regex(regex) => regex.is_match(text),
@@ -138,10 +142,20 @@ pub enum Query {
     /// Properties read, written, defined or called by name
     /// (`ldobjbyname`, `stobjbyname`, `definefieldbyname`,
     /// `callthis1withname` …), optionally of one [`Access`] only.
-    Prop { name: Pattern, access: Option<Access> },
+    Prop {
+        /// Matched against the property name.
+        name: Pattern,
+        /// Only this kind of access; `None` for any.
+        access: Option<Access>,
+    },
     /// Global bindings read or written by name (`tryldglobalbyname`,
     /// `stglobalvar` …).
-    Global { name: Pattern, access: Option<Access> },
+    Global {
+        /// Matched against the global's name.
+        name: Pattern,
+        /// [`Access::Read`] or [`Access::Write`] only; `None` for both.
+        access: Option<Access>,
+    },
     /// Imported bindings: the declarations in each record's module record
     /// and the instructions that load them.
     Import {
@@ -247,6 +261,7 @@ impl Query {
         Ok(Query::StringRegex(Regex::new(pattern)?))
     }
 
+    /// Strings that contain `text`.
     pub fn string_literal(text: impl Into<String>) -> Query {
         Query::StringLiteral(text.into())
     }
@@ -279,7 +294,11 @@ impl Query {
     }
 
     /// A method query from its spelling `FUNCTION` or `RECORD->FUNCTION`
-    /// (the location column of a result row without its `+0xPC`).
+    /// (the location column of a result row without its `+0xPC`). `name`
+    /// turns `FUNCTION` into a pattern, e.g. [`Pattern::name`].
+    ///
+    /// # Errors
+    /// Whatever `name` returns for `FUNCTION`.
     pub fn method(spec: &str, name: impl FnOnce(&str) -> Result<Pattern>) -> Result<Query> {
         let (record, function) = match spec.split_once("->") {
             Some((record, function)) => (Some(record.to_owned()), function),
@@ -304,7 +323,8 @@ impl Query {
     }
 
     /// A rule: conditions joined with `&`, `!` before the ones a function
-    /// must not match (see [`super::rule`] for the syntax). `call:{@FILE}`
+    /// must not match, in the syntax of [`asc_query::rule`] with this
+    /// engine's kinds ([`Query::KINDS`]). `call:{@FILE}`
     /// reads `FILE` relative to `dir` (the current directory when `None`).
     ///
     /// # Errors

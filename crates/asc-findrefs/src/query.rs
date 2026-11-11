@@ -115,7 +115,15 @@ pub struct CompiledQuery {
 }
 
 impl CompiledQuery {
-    /// Compile `q`. Fails only when one of its patterns is not a valid regex.
+    /// Compile `q`.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Pattern`] when one of its patterns is not a valid regex;
+    /// [`FindError::Invalid`] for a [`Query::Nested`] or an `override:` /
+    /// `in:` predicate the engine has not resolved yet, and for a compound
+    /// query with an empty `all`, a nested compound, or a class relation
+    /// among its parts.
     pub fn new(q: &Query) -> Result<CompiledQuery> {
         let parts = match q {
             // A syntax-free ASCII word has the same language as a literal
@@ -164,11 +172,13 @@ impl CompiledQuery {
         Ok(CompiledQuery { query: q.clone(), kind: q.kind(), parts })
     }
 
+    /// The index table the query targets (see [`Query::kind`]).
     #[inline]
     pub fn kind(&self) -> RefKind {
         self.kind
     }
 
+    /// The query this was compiled from.
     #[inline]
     pub fn query(&self) -> &Query {
         &self.query

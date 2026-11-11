@@ -20,7 +20,9 @@ use crate::{Instruction, Opcode, opcode};
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Step<'a> {
+    /// Byte offset of the instruction within the code.
     pub pc: usize,
+    /// Opcode row of the instruction.
     pub opcode: &'a Opcode,
 }
 
@@ -30,9 +32,17 @@ pub enum Stop {
     /// Every instruction up to the end of the code was visited.
     End,
     /// Undefined opcode byte at `pc` (odex / quickened / corrupt code).
-    Undefined { pc: usize, opcode: u8 },
+    Undefined {
+        /// Byte offset of the undefined opcode.
+        pc: usize,
+        /// The undefined opcode byte.
+        opcode: u8,
+    },
     /// The instruction or payload at `pc` extends past the end of the code.
-    Truncated { pc: usize },
+    Truncated {
+        /// Byte offset of the truncated instruction or payload.
+        pc: usize,
+    },
 }
 
 /// Result of a walk.
@@ -41,6 +51,7 @@ pub enum Stop {
 pub struct Walk {
     /// Offset just past the last instruction or payload that was visited.
     pub end: usize,
+    /// Why the walk ended.
     pub stop: Stop,
 }
 

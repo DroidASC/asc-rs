@@ -40,36 +40,59 @@ const MAX_EXPANSION: usize = 64;
 const ANDROID_PACKAGE_ID: u32 = 0x01;
 const ANDROID_NS_URI: &str = "http://schemas.android.com/apk/res/android";
 
+/// `Res_value::TYPE_NULL`: no value (`data` 0 undefined, 1 empty).
 pub const TYPE_NULL: u8 = 0x00;
+/// `TYPE_REFERENCE`: `data` is a resource id (`@id`).
 pub const TYPE_REFERENCE: u8 = 0x01;
+/// `TYPE_ATTRIBUTE`: `data` is an attribute resource id (`?id`).
 pub const TYPE_ATTRIBUTE: u8 = 0x02;
+/// `TYPE_STRING`: `data` is an index into the string pool.
 pub const TYPE_STRING: u8 = 0x03;
+/// `TYPE_FLOAT`: `data` is an IEEE 754 single.
 pub const TYPE_FLOAT: u8 = 0x04;
+/// `TYPE_DIMENSION`: `data` is a complex number with a unit (`dp`, `sp`, ...).
 pub const TYPE_DIMENSION: u8 = 0x05;
+/// `TYPE_FRACTION`: `data` is a complex number with a `%` or `%p` unit.
 pub const TYPE_FRACTION: u8 = 0x06;
+/// `TYPE_DYNAMIC_REFERENCE`: a reference whose package id is assigned at run time.
 pub const TYPE_DYNAMIC_REFERENCE: u8 = 0x07;
+/// `TYPE_DYNAMIC_ATTRIBUTE`: an attribute reference whose package id is assigned at run time.
 pub const TYPE_DYNAMIC_ATTRIBUTE: u8 = 0x08;
+/// `TYPE_INT_DEC`: `data` is an integer written in decimal.
 pub const TYPE_INT_DEC: u8 = 0x10;
+/// `TYPE_INT_HEX`: `data` is an integer written in hex.
 pub const TYPE_INT_HEX: u8 = 0x11;
+/// `TYPE_INT_BOOLEAN`: `data` is 0 (false) or non-zero (true).
 pub const TYPE_INT_BOOLEAN: u8 = 0x12;
+/// `TYPE_INT_COLOR_ARGB8`: `data` is a color written `#aarrggbb`.
 pub const TYPE_INT_COLOR_ARGB8: u8 = 0x1c;
+/// `TYPE_INT_COLOR_RGB8`: `data` is a color written `#rrggbb`.
 pub const TYPE_INT_COLOR_RGB8: u8 = 0x1d;
+/// `TYPE_INT_COLOR_ARGB4`: `data` is a color written `#argb`.
 pub const TYPE_INT_COLOR_ARGB4: u8 = 0x1e;
+/// `TYPE_INT_COLOR_RGB4`: `data` is a color written `#rgb`.
 pub const TYPE_INT_COLOR_RGB4: u8 = 0x1f;
 
+/// Why a binary XML document (or string pool) could not be decoded.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AxmlError {
+    /// The data does not start with a `RES_XML_TYPE` chunk header.
     #[error("not a binary XML document")]
     NotAxml,
+    /// A read ran past the end of the data; the byte offset of the read.
     #[error("truncated chunk at offset {0:#x}")]
     Truncated(usize),
+    /// An element or text chunk came before any string pool.
     #[error("string pool missing before first element")]
     NoStringPool,
+    /// A structural problem: inconsistent sizes, nesting or output too large,
+    /// overlapping pool entries, no root element.
     #[error("malformed binary XML: {0}")]
     Malformed(&'static str),
 }
 
+/// `Result` with [`AxmlError`].
 pub type Result<T> = std::result::Result<T, AxmlError>;
 
 #[inline]
@@ -100,6 +123,12 @@ pub struct PoolLayout {
 impl PoolLayout {
     /// Validate the string pool chunk starting at `chunk` and ending
     /// (exclusive) at `chunk_end`, which must already be clamped to `data.len()`.
+    ///
+    /// # Errors
+    ///
+    /// [`AxmlError::Truncated`] when the header runs past `data`,
+    /// [`AxmlError::Malformed`] when its counts or offsets do not fit in the
+    /// chunk.
     pub fn parse(data: &[u8], chunk: usize, chunk_end: usize) -> Result<PoolLayout> {
         let header_size = u16_at(data, chunk + 2)? as usize;
         let count = u32_at(data, chunk + 8)? as usize;
@@ -156,10 +185,12 @@ impl PoolLayout {
         }
     }
 
+    /// Number of strings in the pool (styles not counted).
     pub fn len(&self) -> usize {
         self.count
     }
 
+    /// Whether the pool holds no strings.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -205,15 +236,18 @@ impl StringPool {
         Ok(pool)
     }
 
+    /// String `idx`, `None` past the end.
     pub fn get(&self, idx: u32) -> Option<&str> {
         let slot = *self.entries.get(idx as usize)?;
         self.strings.get(slot as usize).map(String::as_str)
     }
 
+    /// Number of entries (entries sharing an offset each count).
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the pool has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -419,12 +453,24 @@ fn format_value_with(data_type: u8, data: u32, pool: &StringPool, resolver: Opti
 }
 
 /// Decode a binary XML document into pretty-printed text.
+///
+/// # Errors
+///
+/// As [`decode_with`].
 pub fn decode(data: &[u8]) -> Result<String> {
     decode_with(data, None)
 }
 
 /// [`decode`], with resource references (`@7F0C0001`) and app attribute
 /// names taken from `resolver`.
+///
+/// # Errors
+///
+/// [`AxmlError::NotAxml`] when `data` is not binary XML,
+/// [`AxmlError::Truncated`] when a chunk runs past the end,
+/// [`AxmlError::NoStringPool`] when content precedes the string pool, and
+/// [`AxmlError::Malformed`] for inconsistent chunks, nesting deeper than 512
+/// levels, or output out of proportion to the input size.
 pub fn decode_with(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<String> {
     if data.len() < 8 || u16_at(data, 0)? != RES_XML_TYPE {
         return Err(AxmlError::NotAxml);

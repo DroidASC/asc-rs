@@ -31,14 +31,22 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SourceMapError {
+    /// The table itself is not a JSON object, or ends early.
     #[error("not a JSON object of source maps: {expected} expected at byte {at}")]
     Malformed {
         /// What the grammar wants there.
         expected: &'static str,
+        /// Byte offset into the table.
         at: usize,
     },
+    /// One module's value is not a source map.
     #[error("the source map of {key} does not read: {reason}")]
-    Module { key: String, reason: String },
+    Module {
+        /// The table key of the module.
+        key: String,
+        /// What is wrong with the value.
+        reason: String,
+    },
 }
 
 /// One member of the table: its key and where its value lies in the file.
@@ -106,6 +114,7 @@ impl SourceMaps {
         self.slots.len()
     }
 
+    /// Whether the table has no modules.
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }

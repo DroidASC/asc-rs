@@ -35,7 +35,14 @@ repository = "https://github.com/Ylarod/asc-rs"
 rust-version = "1.98"
 
 [workspace.lints.rust]
+missing_docs = "warn"
 unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+undocumented_unsafe_blocks = "warn"
 
 [workspace.dependencies]
 asc-dex = { version = "0.1.1", path = "crates/asc-dex" }

@@ -15,14 +15,19 @@ use crate::jsonrpc::RequestId;
 
 /// A request method: its wire name and the shapes of its params and result.
 pub trait Method {
+    /// The `method` member, e.g. `decompile/classes`.
     const NAME: &'static str;
+    /// The shape of `params`.
     type Params: Serialize + DeserializeOwned;
+    /// The shape of `result` in a successful response.
     type Result: Serialize + DeserializeOwned;
 }
 
 /// A notification method: its wire name and the shape of its params.
 pub trait NotificationMethod {
+    /// The `method` member, e.g. `notifications/progress`.
     const NAME: &'static str;
+    /// The shape of `params`.
     type Params: Serialize + DeserializeOwned;
 }
 
@@ -114,7 +119,9 @@ impl<'de> Deserialize<'de> for Empty {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Implementation {
+    /// `name`, e.g. `asc` or `jeb`; part of the result cache key.
     pub name: String,
+    /// `version`, free-form; part of the result cache key.
     pub version: String,
 }
 
@@ -125,12 +132,14 @@ impl Implementation {
     }
 }
 
+/// Params of [`Initialize`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct InitializeParams {
     /// The highest version the client speaks.
     pub protocol_version: u32,
+    /// `client`: who is asking, normally asc itself.
     pub client: Implementation,
     /// The `options` table of the backend's configuration, passed through uninterpreted.
     #[serde(default)]
@@ -150,12 +159,14 @@ impl InitializeParams {
     }
 }
 
+/// Result of [`Initialize`]: what the backend is and what it can do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct InitializeResult {
     /// The highest version the backend supports that is not above the client's.
     pub protocol_version: u32,
+    /// `backend`: the backend's name and version.
     pub backend: Implementation,
     /// Hash of the effective options and output-affecting configuration; part of the cache key.
     pub options_hash: String,
@@ -233,10 +244,12 @@ impl InitializeResult {
         InitializeResult { platform, ..self }
     }
 
+    /// Whether the backend declared it accepts `kind` in `inputs`.
     pub fn accepts(&self, kind: InputKind) -> bool {
         self.inputs.contains(&kind)
     }
 
+    /// Whether the backend declared it writes `language` in `languages`.
     pub fn supports(&self, language: Language) -> bool {
         self.languages.contains(&language)
     }
@@ -268,18 +281,23 @@ pub enum InputKind {
     Slice,
 }
 
+/// Source language of the decompiled output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum Language {
+    /// `java`.
     Java,
+    /// `kotlin`.
     Kotlin,
 }
 
+/// Params of [`ProgramOpen`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ProgramOpenParams {
+    /// `input`: the program files to load.
     pub input: ProgramInput,
     /// Names asc wants in the output; only sent to backends declaring `mappings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -305,12 +323,21 @@ impl ProgramOpenParams {
 #[non_exhaustive]
 pub enum ProgramInput {
     /// Original program files analysed together as one program.
-    Archive { files: Vec<PathBuf> },
+    Archive {
+        /// `files`: APK, jar or DEX paths.
+        files: Vec<PathBuf>,
+    },
     /// Content-addressed slice files under the asc cache; read-only for the backend.
-    Slice { files: Vec<PathBuf>, manifest: SliceManifest },
+    Slice {
+        /// `files`: the slice's DEX paths.
+        files: Vec<PathBuf>,
+        /// `manifest`: the role of each class in the slice.
+        manifest: SliceManifest,
+    },
 }
 
 impl ProgramInput {
+    /// The `kind` tag of this input.
     pub fn kind(&self) -> InputKind {
         match self {
             Self::Archive { .. } => InputKind::Archive,
@@ -318,6 +345,7 @@ impl ProgramInput {
         }
     }
 
+    /// The program files, whatever the kind.
     pub fn files(&self) -> &[PathBuf] {
         match self {
             Self::Archive { files } | Self::Slice { files, .. } => files,
@@ -356,6 +384,7 @@ pub struct Mappings {
 }
 
 impl Mappings {
+    /// Whether no class, field or method is renamed.
     pub fn is_empty(&self) -> bool {
         self.classes.is_empty() && self.fields.is_empty() && self.methods.is_empty()
     }
@@ -366,10 +395,12 @@ impl Mappings {
 #[serde(transparent)]
 pub struct ProgramId(pub String);
 
+/// Result of [`ProgramOpen`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ProgramOpenResult {
+    /// `programId`: the new session, used by later requests.
     pub program_id: ProgramId,
 }
 
@@ -380,10 +411,12 @@ impl ProgramOpenResult {
     }
 }
 
+/// Params of [`ProgramClose`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ProgramCloseParams {
+    /// `programId`: the session to release.
     pub program_id: ProgramId,
 }
 
@@ -398,7 +431,9 @@ impl ProgramCloseParams {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProgressToken {
+    /// A numeric token.
     Number(i64),
+    /// A string token.
     String(String),
 }
 
@@ -411,17 +446,21 @@ impl From<RequestId> for ProgressToken {
     }
 }
 
+/// Params of [`DecompileClasses`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct DecompileClassesParams {
+    /// `programId`: the open session holding the classes.
     pub program_id: ProgramId,
     /// Type descriptors, e.g. `Lbin/mt/json/JSONObject;`.
     pub classes: Vec<String>,
+    /// `language`: one of the backend's declared `languages`.
     pub language: Language,
     /// Fold inner and anonymous classes into their outer class.
     #[serde(default = "yes")]
     pub nested: bool,
+    /// `progressToken`: when present, the backend may send `notifications/progress` under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_token: Option<ProgressToken>,
 }
@@ -450,9 +489,11 @@ fn yes() -> bool {
     true
 }
 
+/// Result of [`DecompileClasses`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DecompileClassesResult {
+    /// `units`: one per requested class.
     pub units: Vec<ClassUnit>,
 }
 
@@ -469,11 +510,13 @@ impl DecompileClassesResult {
 pub struct ClassUnit {
     /// Type descriptor of the class.
     pub class: String,
+    /// `status` with `path` and `text`, or `reason`, flattened into the unit.
     #[serde(flatten)]
     pub outcome: UnitOutcome,
     /// Per-method status; every failed method must be listed, stubs included.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub methods: Vec<MethodReport>,
+    /// `diagnostics`: backend messages about the class or its methods.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<Diagnostic>,
     /// Source line → (method, dex pc) correspondence, when the backend has it.
@@ -506,6 +549,7 @@ impl ClassUnit {
         ClassUnit { lines, ..self }
     }
 
+    /// The `status` member of this unit.
     pub fn status(&self) -> UnitStatus {
         match self.outcome {
             UnitOutcome::Ok { .. } => UnitStatus::Ok,
@@ -528,19 +572,25 @@ impl ClassUnit {
 #[serde(tag = "status", rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum UnitOutcome {
+    /// `ok`: every method decompiled.
     Ok {
         /// Suggested relative path; for display only, never used to write files.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// The source text.
         text: String,
     },
     /// Some methods failed; they are listed in [`ClassUnit::methods`].
     Partial {
+        /// Suggested relative path; for display only, never used to write files.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// The source text, failed methods included as stubs.
         text: String,
     },
+    /// `failed`: no text for the class.
     Failed {
+        /// Why the class failed.
         reason: String,
     },
 }
@@ -550,17 +600,23 @@ pub enum UnitOutcome {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum UnitStatus {
+    /// `ok`.
     Ok,
+    /// `partial`.
     Partial,
+    /// `failed`.
     Failed,
 }
 
+/// An entry of `methods`: how one method of a class came out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MethodReport {
     /// `name(Args)Ret`, without the owner.
     pub signature: String,
+    /// `status`: whether the method decompiled.
     pub status: MethodStatus,
+    /// `reason`: why the method failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -578,19 +634,26 @@ impl MethodReport {
     }
 }
 
+/// Outcome of one method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum MethodStatus {
+    /// `ok`.
     Ok,
+    /// `failed`: the text holds a stub, or nothing, for this method.
     Failed,
 }
 
+/// An entry of `diagnostics`: a backend message about a class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Diagnostic {
+    /// `severity`.
     pub severity: Severity,
+    /// `message`: human-readable text.
     pub message: String,
+    /// `method`: `name(Args)Ret` of the method concerned; absent for the whole class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
 }
@@ -608,15 +671,20 @@ impl Diagnostic {
     }
 }
 
+/// How serious a [`Diagnostic`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum Severity {
+    /// `error`.
     Error,
+    /// `warning`.
     Warning,
+    /// `info`.
     Info,
 }
 
+/// An entry of `lines`: where a source line comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct LineMapping {
@@ -624,6 +692,7 @@ pub struct LineMapping {
     pub line: u32,
     /// `name(Args)Ret` of the method the line belongs to.
     pub method: String,
+    /// `pc`: dex pc in the method's code, in 16-bit code units.
     pub pc: u32,
 }
 
@@ -634,11 +703,14 @@ impl LineMapping {
     }
 }
 
+/// Params of [`Cancelled`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct CancelledParams {
+    /// `requestId`: the request to abort.
     pub request_id: RequestId,
+    /// `reason`: why, for logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -656,14 +728,19 @@ impl CancelledParams {
     }
 }
 
+/// Params of [`Progress`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ProgressParams {
+    /// `progressToken`: the token of the request making progress.
     pub progress_token: ProgressToken,
+    /// `progress`: work done so far, in the same unit as `total`.
     pub progress: f64,
+    /// `total`: the amount of work, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<f64>,
+    /// `message`: a short status to show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

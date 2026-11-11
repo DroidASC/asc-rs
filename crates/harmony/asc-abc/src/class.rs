@@ -9,7 +9,9 @@ use crate::{Abc, AbcError, Code, DebugInfo, FunctionName, LiteralArray, ModuleRe
 
 /// Access flag bits shared by classes, fields and methods (`modifiers.h`).
 pub mod access {
+    /// `ACC_PUBLIC`.
     pub const PUBLIC: u32 = 0x0001;
+    /// `ACC_STATIC`: static field or method.
     pub const STATIC: u32 = 0x0008;
     /// Class flag: the record is an annotation interface.
     pub const ANNOTATION: u32 = 0x2000;
@@ -23,8 +25,11 @@ pub mod record_field {
     pub const SCOPE_NAMES: &[u8] = b"scopeNames";
     /// The package name is the rest of the field name: `pkgName@entry`.
     pub const PKG_NAME_PREFIX: &[u8] = b"pkgName@";
+    /// `u8`: nonzero when the module is CommonJS rather than an ES module.
     pub const IS_COMMONJS: &[u8] = b"isCommonjs";
+    /// `u8`: nonzero when the module uses top-level `await`.
     pub const HAS_TOP_LEVEL_AWAIT: &[u8] = b"hasTopLevelAwait";
+    /// `u8`: nonzero for a shared module (`"use shared"`).
     pub const IS_SHARED_MODULE: &[u8] = b"isSharedModule";
     /// `u32`: offset of a string holding the content of a JSON module.
     pub const JSON_FILE_CONTENT: &[u8] = b"jsonFileContent";
@@ -51,10 +56,15 @@ pub mod unmerged {
 pub struct SourceLang(pub u8);
 
 impl SourceLang {
+    /// `ECMASCRIPT`: the dynamic language every `es2abc` output uses.
     pub const ECMASCRIPT: SourceLang = SourceLang(0);
+    /// `PANDA_ASSEMBLY`: the static Panda assembly language.
     pub const PANDA_ASSEMBLY: SourceLang = SourceLang(1);
+    /// `JAVASCRIPT`.
     pub const JAVASCRIPT: SourceLang = SourceLang(2);
+    /// `TYPESCRIPT`.
     pub const TYPESCRIPT: SourceLang = SourceLang(3);
+    /// `ARKTS`.
     pub const ARKTS: SourceLang = SourceLang(4);
 }
 
@@ -115,16 +125,19 @@ pub struct IndexList<'a> {
 }
 
 impl<'a> IndexList<'a> {
+    /// Number of indexes.
     #[inline]
     pub fn len(&self) -> usize {
         self.bytes.len() / 2
     }
 
+    /// Whether the list has no indexes.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
+    /// The indexes in list order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = u16> + 'a + use<'a> {
         self.bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c))
     }
@@ -135,11 +148,15 @@ impl<'a> IndexList<'a> {
 pub enum ClassTag<'a> {
     /// Indexes into the region's class table.
     Interfaces(IndexList<'a>),
+    /// `SOURCE_LANG` (0x02): source language of the class.
     SourceLang(SourceLang),
-    /// Offset of an annotation.
+    /// `RUNTIME_ANNOTATION` (0x03): offset of an annotation visible at run time.
     RuntimeAnnotation(u32),
+    /// `ANNOTATION` (0x04): offset of a build-time annotation.
     Annotation(u32),
+    /// `RUNTIME_TYPE_ANNOTATION` (0x05): offset of a run-time type annotation.
     RuntimeTypeAnnotation(u32),
+    /// `TYPE_ANNOTATION` (0x06): offset of a build-time type annotation.
     TypeAnnotation(u32),
     /// Offset of the source file name string.
     SourceFile(u32),
@@ -174,9 +191,13 @@ pub enum FieldTag {
     /// Four raw bytes; their meaning depends on the field type, see
     /// [`FieldValue::Raw`].
     Value(u32),
+    /// `RUNTIME_ANNOTATION` (0x03): offset of an annotation visible at run time.
     RuntimeAnnotation(u32),
+    /// `ANNOTATION` (0x04): offset of a build-time annotation.
     Annotation(u32),
+    /// `RUNTIME_TYPE_ANNOTATION` (0x05): offset of a run-time type annotation.
     RuntimeTypeAnnotation(u32),
+    /// `TYPE_ANNOTATION` (0x06): offset of a build-time type annotation.
     TypeAnnotation(u32),
 }
 
@@ -201,14 +222,21 @@ impl<'a> TagValue<'a> for FieldTag {
 pub enum MethodTag {
     /// Offset of the code item.
     Code(u32),
+    /// `SOURCE_LANG` (0x02): source language of the method.
     SourceLang(SourceLang),
+    /// `RUNTIME_ANNOTATION` (0x03): offset of an annotation visible at run time.
     RuntimeAnnotation(u32),
+    /// `RUNTIME_PARAM_ANNOTATION` (0x04): offset of run-time parameter annotations.
     RuntimeParamAnnotation(u32),
     /// Offset of the debug info item.
     DebugInfo(u32),
+    /// `ANNOTATION` (0x06): offset of a build-time annotation.
     Annotation(u32),
+    /// `PARAM_ANNOTATION` (0x07): offset of build-time parameter annotations.
     ParamAnnotation(u32),
+    /// `TYPE_ANNOTATION` (0x08): offset of a build-time type annotation.
     TypeAnnotation(u32),
+    /// `RUNTIME_TYPE_ANNOTATION` (0x09): offset of a run-time type annotation.
     RuntimeTypeAnnotation(u32),
 }
 
@@ -241,6 +269,7 @@ pub enum ClassEntry<'a> {
 }
 
 impl<'a> ClassEntry<'a> {
+    /// File offset of the class entity.
     #[inline]
     pub fn offset(&self) -> u32 {
         match self {
@@ -264,6 +293,7 @@ impl<'a> ClassEntry<'a> {
         record_name(self.descriptor().bytes)
     }
 
+    /// The class when it is defined in this file.
     #[inline]
     pub fn local(self) -> Option<Class<'a>> {
         match self {
@@ -281,7 +311,9 @@ fn record_name(descriptor: &[u8]) -> &[u8] {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ForeignClass<'a> {
+    /// File offset of the foreign class entity.
     pub off: u32,
+    /// `name`: the type descriptor, `L<record name>;`.
     pub descriptor: StringData<'a>,
 }
 
@@ -293,9 +325,13 @@ pub struct Class<'a> {
     abc: Abc<'a>,
     off: u32,
     descriptor: StringData<'a>,
+    /// `super_class_off`: offset of the super class, 0 when there is none.
     pub super_class_off: u32,
+    /// `access_flags`: [`access`] bits.
     pub access_flags: u32,
+    /// `num_fields`: number of fields stored after the tagged values.
     pub num_fields: u32,
+    /// `num_methods`: number of methods stored after the fields.
     pub num_methods: u32,
     /// Position of the tagged value list.
     tags_pos: usize,
@@ -316,6 +352,7 @@ impl<'a> Class<'a> {
         })
     }
 
+    /// File offset of the class.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off
@@ -587,16 +624,27 @@ impl<'a> Iterator for Methods<'a> {
 /// Type of a field: an entry of the region's class table (`FieldType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
+    /// Encoding `0x00`, `u1`: boolean.
     U1,
+    /// Encoding `0x01`, `i8`.
     I8,
+    /// Encoding `0x02`, `u8`.
     U8,
+    /// Encoding `0x03`, `i16`.
     I16,
+    /// Encoding `0x04`, `u16`.
     U16,
+    /// Encoding `0x05`, `i32`.
     I32,
+    /// Encoding `0x06`, `u32`.
     U32,
+    /// Encoding `0x07`, `f32`.
     F32,
+    /// Encoding `0x08`, `f64`.
     F64,
+    /// Encoding `0x09`, `i64`.
     I64,
+    /// Encoding `0x0a`, `u64`.
     U64,
     /// Encoding `0x0b`: a reference without a class.
     Reference,
@@ -656,6 +704,7 @@ pub struct Field<'a> {
     pub class_idx: u16,
     /// Index of the field type in the region's class table.
     pub type_idx: u16,
+    /// `name_off`: file offset of the field name string.
     pub name_off: u32,
     /// Zero for foreign fields, which store none.
     pub access_flags: u32,
@@ -695,27 +744,34 @@ impl<'a> Field<'a> {
         Ok(Field { abc, off: file_off(pos), class_idx, type_idx, name_off, access_flags, value, tags_pos: Some(tags_pos), end })
     }
 
+    /// File offset of the entity.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off
     }
 
+    /// Whether the entity lies in the foreign region (declared here, defined elsewhere).
     #[inline]
     pub fn is_foreign(&self) -> bool {
         self.tags_pos.is_none()
     }
 
+    /// Whether [`access::STATIC`] is set.
     #[inline]
     pub fn is_static(&self) -> bool {
         self.access_flags & access::STATIC != 0
     }
 
+    /// The field name.
+    ///
     /// # Errors
     /// A bad name offset or string.
     pub fn name(&self) -> Result<StringData<'a>> {
         self.abc.string(self.name_off)
     }
 
+    /// The field type, resolved through the region of the field.
+    ///
     /// # Errors
     /// `NoRegion` or a `type_idx` outside the region's class table.
     pub fn field_type(&self) -> Result<FieldType> {
@@ -760,13 +816,21 @@ impl<'a> Field<'a> {
 pub struct FunctionKind(pub u8);
 
 impl FunctionKind {
+    /// Not a function of the dynamic language (or no kind recorded).
     pub const NONE: u8 = 0x0;
+    /// Ordinary function, callable and constructible.
     pub const FUNCTION: u8 = 0x1;
+    /// Non-constructor function: arrow function or method.
     pub const NC_FUNCTION: u8 = 0x2;
+    /// `function*`.
     pub const GENERATOR_FUNCTION: u8 = 0x3;
+    /// `async function`.
     pub const ASYNC_FUNCTION: u8 = 0x4;
+    /// `async function*`.
     pub const ASYNC_GENERATOR_FUNCTION: u8 = 0x5;
+    /// Async non-constructor function: async arrow function or method.
     pub const ASYNC_NC_FUNCTION: u8 = 0x6;
+    /// Function marked `"use concurrent"`, runnable on a task pool.
     pub const CONCURRENT_FUNCTION: u8 = 0x7;
     /// Bit or-ed into the kinds above for sendable functions.
     pub const SENDABLE: u8 = 0x8;
@@ -777,6 +841,7 @@ impl FunctionKind {
         self.0 & !Self::SENDABLE
     }
 
+    /// Whether the [`FunctionKind::SENDABLE`] bit is set.
     #[inline]
     pub fn is_sendable(&self) -> bool {
         self.0 & Self::SENDABLE != 0
@@ -794,6 +859,7 @@ pub struct Method<'a> {
     pub class_idx: u16,
     /// Index of the prototype in the region's proto table.
     pub proto_idx: u16,
+    /// `name_off`: file offset of the method name string.
     pub name_off: u32,
     /// Bits 0–7 flags, 8–15 [`FunctionKind`], 16–31 the region number the
     /// writer assigned (see [`Method::region`]).
@@ -862,16 +928,19 @@ impl<'a> Method<'a> {
         })
     }
 
+    /// File offset of the entity.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off
     }
 
+    /// Whether the entity lies in the foreign region (declared here, defined elsewhere).
     #[inline]
     pub fn is_foreign(&self) -> bool {
         self.tags_pos.is_none()
     }
 
+    /// Whether [`access::STATIC`] is set.
     #[inline]
     pub fn is_static(&self) -> bool {
         self.access_flags & access::STATIC != 0
@@ -879,38 +948,48 @@ impl<'a> Method<'a> {
 
     /// The raw (mangled) name; see [`crate::FunctionName`] to take it apart.
     ///
+    /// The field name.
+    ///
     /// # Errors
     /// A bad name offset or string.
     pub fn name(&self) -> Result<StringData<'a>> {
         self.abc.string(self.name_off)
     }
 
+    /// The [`FunctionKind`] in bits 8–15 of the access flags.
     #[inline]
     pub fn function_kind(&self) -> FunctionKind {
         FunctionKind(self.access_flags.to_le_bytes()[1])
     }
 
+    /// Language of the `SOURCE_LANG` tag, if present.
     #[inline]
     pub fn source_lang(&self) -> Option<SourceLang> {
         self.source_lang
     }
 
+    /// Offset of the code item (`CODE` tag); `None` for foreign methods and methods without code.
     #[inline]
     pub fn code_off(&self) -> Option<u32> {
         self.code_off
     }
 
+    /// The code item at [`Method::code_off`].
+    ///
     /// # Errors
     /// A bad code offset or a malformed code header.
     pub fn code(&self) -> Result<Option<Code<'a>>> {
         self.code_off.map(|off| self.abc.code(off)).transpose()
     }
 
+    /// Offset of the debug info item (`DEBUG_INFO` tag), if present.
     #[inline]
     pub fn debug_info_off(&self) -> Option<u32> {
         self.debug_info_off
     }
 
+    /// The debug info item at [`Method::debug_info_off`].
+    ///
     /// # Errors
     /// A bad debug info offset or a malformed item.
     pub fn debug_info(&self) -> Result<Option<DebugInfo<'a>>> {

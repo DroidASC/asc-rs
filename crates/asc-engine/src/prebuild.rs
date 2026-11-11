@@ -93,6 +93,7 @@ pub struct PrebuildReport {
     pub skipped: usize,
     /// Stopped by [`Engine::cancel_prebuild`] (or already running).
     pub cancelled: bool,
+    /// Wall-clock microseconds of the run.
     pub elapsed_us: u128,
 }
 
@@ -101,6 +102,16 @@ impl Engine {
     /// caches hold, so the first query of each kind skips its table builds.
     /// Blocks until done; meant for a background thread after a warm open.
     /// Does nothing without a memory cache (the tables would be dropped).
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`](crate::EngineError::Apk) when the APK cannot be
+    /// opened. A DEX that fails to parse or build tables is skipped (its
+    /// queries report the error later).
+    ///
+    /// # Panics
+    ///
+    /// When a worker thread panics (a bug); the panic is propagated.
     pub fn prebuild(&self) -> Result<PrebuildReport> {
         let t0 = Instant::now();
         let mut report = PrebuildReport::default();
@@ -184,6 +195,11 @@ impl Engine {
 
     /// Stop a running [`Engine::prebuild`] (and any later one) and wait for
     /// its workers to finish the table they are on.
+    ///
+    /// # Panics
+    ///
+    /// When the prebuild's state mutex is poisoned (a prebuild thread
+    /// panicked while holding it).
     pub fn cancel_prebuild(&self) {
         self.prebuild.cancel();
         let mut running = self.prebuild.running.lock_or_default();

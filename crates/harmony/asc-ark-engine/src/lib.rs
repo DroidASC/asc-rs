@@ -169,6 +169,7 @@ pub struct ClassSource {
     pub record: String,
     /// Raw name of the function, when one was asked for.
     pub function: Option<String>,
+    /// The disassembly listing.
     pub text: String,
 }
 

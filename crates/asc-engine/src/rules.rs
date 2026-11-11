@@ -154,6 +154,11 @@ pub(crate) fn rule_rows(fr: &FindRefs<'_, '_, '_>, rules: &[&CompiledQuery], opt
 }
 
 /// Compile every rule; the first invalid one fails them all.
+///
+/// # Errors
+///
+/// [`EngineError::Find`](crate::EngineError::Find) for the first rule that
+/// does not compile (an invalid regex, ...).
 pub fn compile_rules(rules: &[Query]) -> Result<Vec<CompiledQuery>> {
     Ok(rules.iter().map(CompiledQuery::new).collect::<std::result::Result<_, _>>()?)
 }
@@ -166,6 +171,14 @@ impl Engine {
     /// Each rule shares L3 with [`Engine::find_refs_opts`]: rules an earlier
     /// run left there are replayed, only the others are searched, and each of
     /// those is kept under its own key.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::find_refs`], for the first invalid rule.
+    ///
+    /// # Panics
+    ///
+    /// Never: results are only recorded for L3 when a disk cache is in use.
     pub fn find_refs_rules(
         &self,
         rules: &[Query],

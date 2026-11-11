@@ -28,31 +28,65 @@ const KEYSHIDDEN_SOFT: u8 = 3;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Config {
+    /// `mcc`: mobile country code, `0` for any.
     pub mcc: u16,
+    /// `mnc`: mobile network code, `0` for any.
     pub mnc: u16,
+    /// `language`: two ASCII letters, or a packed three-letter code when the
+    /// high bit of the first byte is set (see [`Config::language`]).
     pub language: [u8; 2],
+    /// `country`: two ASCII letters, or a packed three-digit UN M.49 code
+    /// when the high bit of the first byte is set (see [`Config::region`]).
     pub country: [u8; 2],
+    /// `orientation`: `ACONFIGURATION_ORIENTATION_*` (1 port, 2 land).
     pub orientation: u8,
+    /// `touchscreen`: `ACONFIGURATION_TOUCHSCREEN_*` (1 notouch, 3 finger).
     pub touchscreen: u8,
+    /// `density`: dpi, or `0xfffe` (`anydpi`) / `0xffff` (`nodpi`).
     pub density: u16,
+    /// `keyboard`: `ACONFIGURATION_KEYBOARD_*` (1 nokeys, 2 qwerty, 3 12key).
     pub keyboard: u8,
+    /// `navigation`: `ACONFIGURATION_NAVIGATION_*` (1 nonav, 2 dpad, 3
+    /// trackball, 4 wheel).
     pub navigation: u8,
+    /// `inputFlags`: keyboard-hidden state in bits 0-1, navigation-hidden
+    /// state in bits 2-3.
     pub input_flags: u8,
+    /// `grammaticalInflection`: grammatical gender in bits 0-1 (1 neuter,
+    /// 2 feminine, 3 masculine).
     pub grammatical_inflection: u8,
+    /// `screenWidth`: screen width in pixels, `0` for any.
     pub screen_width: u16,
+    /// `screenHeight`: screen height in pixels, `0` for any.
     pub screen_height: u16,
+    /// `sdkVersion`: the `-vNN` API level, `0` for any.
     pub sdk_version: u16,
+    /// `minorVersion`: always `0` in practice.
     pub minor_version: u16,
+    /// `screenLayout`: size class in bits 0-3, long/notlong in bits 4-5,
+    /// layout direction in bits 6-7.
     pub screen_layout: u8,
+    /// `uiMode`: UI mode type in bits 0-3, night mode in bits 4-5.
     pub ui_mode: u8,
+    /// `smallestScreenWidthDp`: the `-swNNNdp` qualifier, `0` for any.
     pub smallest_screen_width_dp: u16,
+    /// `screenWidthDp`: the `-wNNNdp` qualifier, `0` for any.
     pub screen_width_dp: u16,
+    /// `screenHeightDp`: the `-hNNNdp` qualifier, `0` for any.
     pub screen_height_dp: u16,
+    /// `localeScript`: four-letter ISO 15924 script code, NUL for none.
     pub locale_script: [u8; 4],
+    /// `localeVariant`: BCP 47 variant subtag, NUL-padded.
     pub locale_variant: [u8; 8],
+    /// `screenLayout2`: round/notround in bits 0-1.
     pub screen_layout2: u8,
+    /// `colorMode`: wide color gamut in bits 0-1, HDR in bits 2-3.
     pub color_mode: u8,
+    /// `localeScriptWasComputed`: the script was derived from the language
+    /// rather than written in the qualifier, so it does not take part in
+    /// matching.
     pub locale_script_was_computed: bool,
+    /// `localeNumberingSystem`: the `-u-nu-` extension value, NUL-padded.
     pub locale_numbering_system: [u8; 8],
 }
 
@@ -106,6 +140,8 @@ impl Config {
         Config { sdk_version: u16::MAX, ..Config::default() }
     }
 
+    /// Whether every qualifier is "any", i.e. the unqualified `values/`
+    /// configuration.
     pub fn is_default(&self) -> bool {
         *self == Config::default()
     }

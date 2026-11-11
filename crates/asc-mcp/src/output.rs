@@ -384,7 +384,7 @@ fn raw_name(header: &str) -> &str {
 pub enum Structured {
     /// Everything the tool produced.
     Full,
-    /// Without values longer than [`COMPACT_VALUE_BYTES`] when serialized:
+    /// Without top-level values longer than 256 bytes when serialized:
     /// clients such as Grok Build show the model the text *and* the JSON,
     /// so the bulk (rows, smali) would be sent twice.
     Compact,
@@ -394,6 +394,8 @@ pub enum Structured {
 const COMPACT_VALUE_BYTES: usize = 256;
 
 impl Structured {
+    /// Trims a tool's structured result `v` to this level; a `Compact`
+    /// result lists the keys it dropped under `omitted`.
     pub fn apply(self, mut v: Value) -> Value {
         if self == Structured::Full {
             return v;

@@ -34,12 +34,21 @@ pub use tables::Tables;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RebuildError {
+    /// The input DEX is malformed where the rebuild had to read it.
     #[error(transparent)]
     Dex(#[from] asc_dex::DexError),
+    /// No `class_def_item` defines the requested descriptor.
     #[error("class {0} not found in DEX")]
     ClassNotFound(String),
+    /// A rebuilt id table that 16-bit operands index would hold more than
+    /// 65 535 entries.
     #[error("rebuilt DEX would exceed 16-bit index limits ({what}: {count})")]
-    TooManyItems { what: &'static str, count: usize },
+    TooManyItems {
+        /// The table that overflowed (`types`, `protos`, `fields`, `methods`).
+        what: &'static str,
+        /// Number of entries it would need.
+        count: usize,
+    },
     /// The class uses a DEX feature the rebuild cannot reproduce faithfully
     /// (currently `call_site_ids` / `method_handles`: `invoke-custom`,
     /// `const-method-handle` and `VALUE_METHOD_HANDLE` annotation values).
@@ -48,7 +57,14 @@ pub enum RebuildError {
     /// A method body could not be walked to its end (undefined / quickened
     /// opcode or an instruction running past the code item).
     #[error("malformed bytecode in method {method_idx} at {pc:#x}: {reason}")]
-    Bytecode { method_idx: u32, pc: usize, reason: String },
+    Bytecode {
+        /// `method_ids` index of the method.
+        method_idx: u32,
+        /// Byte offset of the offending instruction within the method's code.
+        pc: usize,
+        /// Why the walk stopped.
+        reason: String,
+    },
     /// An index the writer needed was never collected; this is a bug in the
     /// rebuild pipeline, not in the input DEX.
     #[error("internal inconsistency while rebuilding: {0}")]
@@ -64,19 +80,25 @@ impl RebuildError {
     }
 }
 
+/// Result of the rebuild pipeline, failing with [`RebuildError`].
 pub type Result<T> = std::result::Result<T, RebuildError>;
 
 /// Per-phase timings in microseconds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Timings {
+    /// Extracting the classes from the input (phase 1).
     pub hollow_us: u128,
+    /// Collecting and closing the referenced ids (phase 2).
     pub collect_us: u128,
+    /// Building the sorted id tables (phase 3).
     pub map_us: u128,
+    /// Writing the output DEX (phase 4).
     pub build_us: u128,
 }
 
 impl Timings {
+    /// Sum of the four phases.
     pub fn total_us(&self) -> u128 {
         self.hollow_us + self.collect_us + self.map_us + self.build_us
     }
@@ -86,12 +108,19 @@ impl Timings {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
+    /// Entries in `string_ids`.
     pub strings: usize,
+    /// Entries in `type_ids`.
     pub types: usize,
+    /// Entries in `proto_ids`.
     pub protos: usize,
+    /// Entries in `field_ids`.
     pub fields: usize,
+    /// Entries in `method_ids`.
     pub methods: usize,
+    /// Methods of the defined classes written with a `code_item`.
     pub methods_with_code: usize,
+    /// Size of the output DEX in bytes.
     pub size: usize,
 }
 
@@ -121,8 +150,11 @@ impl fmt::Display for DroppedClass {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Rebuilt {
+    /// The rebuilt DEX file, checksum and signature filled in.
     pub bytes: Vec<u8>,
+    /// Table sizes of `bytes`.
     pub stats: Stats,
+    /// Time spent in each phase.
     pub timings: Timings,
     /// Nested classes that could not be rebuilt and are not defined in
     /// `bytes`, in input order. Other classes may still reference their types.
@@ -140,6 +172,16 @@ pub struct Rebuilt {
 /// in [`Rebuilt::dropped`]. When the classes only fail together (16-bit index
 /// limits, ...), the requested class is rebuilt alone and every nested class
 /// is listed.
+///
+/// # Errors
+///
+/// [`RebuildError::ClassNotFound`] when `dex` defines no such class,
+/// [`RebuildError::Dex`] when the DEX is malformed where the class or what
+/// it references is read, and for the requested class itself
+/// [`RebuildError::Bytecode`], [`RebuildError::Unsupported`] or
+/// [`RebuildError::TooManyItems`] when it cannot be rebuilt faithfully (see
+/// [`RebuildError::is_input_limitation`]). [`RebuildError::Internal`] means
+/// a bug in the pipeline.
 pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt> {
     let mut timings = Timings::default();
     let mut sel = timed(&mut timings.hollow_us, || hollow::Selection::extract(dex, descriptor))?;
@@ -192,7 +234,12 @@ fn timed<T>(slot: &mut u128, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Convenience wrapper over raw bytes.
+/// [`rebuild_class`] over raw DEX bytes, parsing them first.
+///
+/// # Errors
+///
+/// [`RebuildError::Dex`] when `buf` does not parse as a DEX, then the
+/// errors of [`rebuild_class`].
 pub fn rebuild_class_bytes(buf: &[u8], descriptor: &str) -> Result<Rebuilt> {
     let dex = Dex::parse(buf)?;
     rebuild_class(&dex, descriptor)

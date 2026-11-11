@@ -10,8 +10,11 @@ use super::*;
 pub struct Element {
     /// Namespace URI (empty for none).
     pub ns: String,
+    /// Local name, without a prefix.
     pub name: String,
+    /// Attributes in document order.
     pub attrs: Vec<Attribute>,
+    /// Child elements in document order.
     pub children: Vec<Element>,
     /// Character data directly inside the element, trimmed and joined.
     pub text: String,
@@ -24,10 +27,13 @@ pub struct Attribute {
     /// Namespace URI (empty for none). Framework attributes identified by
     /// resource id get [`ANDROID_NS`] even when the namespace was stripped.
     pub ns: String,
+    /// Local name, without a prefix.
     pub name: String,
     /// Resource id from the resource map, if any.
     pub res_id: Option<u32>,
+    /// `Res_value` `dataType`: one of the `TYPE_*` constants.
     pub kind: u8,
+    /// `Res_value` `data`, interpreted according to `kind`.
     pub data: u32,
     /// Rendered value: the raw string, or the formatted typed value.
     pub value: String,
@@ -37,6 +43,7 @@ pub struct Attribute {
 pub const ANDROID_NS: &str = ANDROID_NS_URI;
 
 impl Attribute {
+    /// Whether the attribute is in the `android:` namespace.
     pub fn is_android(&self) -> bool {
         self.ns == ANDROID_NS_URI
     }
@@ -77,6 +84,7 @@ impl Element {
         self.attrs.iter().find(|a| a.ns.is_empty() && a.name == name)
     }
 
+    /// Direct children with local name `name`.
     pub fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> + 'a {
         self.children.iter().filter(move |c| c.name == name)
     }
@@ -84,6 +92,16 @@ impl Element {
 
 /// Parse a binary XML document and return its root element. `resolver`
 /// names app attributes and references as in [`decode_with`].
+///
+/// # Errors
+///
+/// As [`decode_with`]; [`AxmlError::Malformed`] also when the document has
+/// no element.
+///
+/// # Panics
+///
+/// Never: the element stack always keeps its synthetic document node below
+/// the open elements.
 pub fn parse_tree(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Element> {
     if data.len() < 8 || u16_at(data, 0)? != RES_XML_TYPE {
         return Err(AxmlError::NotAxml);

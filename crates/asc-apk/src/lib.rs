@@ -39,48 +39,107 @@ const INITIAL_CAPACITY: usize = 64 << 20;
 /// Real DEX files inflate well under this ratio.
 const TYPICAL_RATIO: usize = 16;
 
+/// Zip compression method 0: the entry is stored uncompressed.
 pub const METHOD_STORED: u16 = 0;
+/// Zip compression method 8: the entry is Deflate-compressed.
 pub const METHOD_DEFLATE: u16 = 8;
 
+/// Why an archive could not be opened or an entry read.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ApkError {
+    /// Opening, mapping or reading the metadata of a file failed.
     #[error("io error on {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        /// The file or directory.
+        path: PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
+    },
+    /// No end-of-central-directory record: not a zip, or truncated.
     #[error("end of central directory not found")]
     NoEocd,
+    /// The central directory lies outside the file.
     #[error("central directory out of range")]
     BadCentralDirectory,
+    /// The local header of the named entry is missing or its payload runs
+    /// past the end of the file.
     #[error("bad local header signature for entry {0}")]
     BadLocalHeader(String),
+    /// A compression method other than stored or Deflate.
     #[error("unsupported compression method {0}")]
     UnsupportedMethod(u16),
+    /// The Deflate stream of an entry is corrupt.
     #[error("inflate failed for entry {name}: {source}")]
-    Inflate { name: String, source: std::io::Error },
+    Inflate {
+        /// The entry name.
+        name: String,
+        /// The decoder's error.
+        source: std::io::Error,
+    },
+    /// An entry's data is not as long as the central directory says.
     #[error("size mismatch for entry {name}: expected {expected}, got {actual}")]
-    SizeMismatch { name: String, expected: usize, actual: usize },
+    SizeMismatch {
+        /// The entry name.
+        name: String,
+        /// Uncompressed size in bytes from the central directory.
+        expected: usize,
+        /// Bytes actually read or inflated.
+        actual: usize,
+    },
+    /// No entry of that name.
     #[error("entry {0} not found")]
     NotFound(String),
+    /// An entry declares (or inflates to) more than Deflate can produce from
+    /// its compressed size: a corrupt or hostile central directory.
     #[error("entry {name} declares an implausible size (compressed {comp_size}, uncompressed {uncomp_size})")]
-    ImplausibleSize { name: String, comp_size: u64, uncomp_size: u64 },
+    ImplausibleSize {
+        /// The entry name.
+        name: String,
+        /// Compressed size in bytes.
+        comp_size: u64,
+        /// Declared uncompressed size in bytes.
+        uncomp_size: u64,
+    },
+    /// An entry, or the DEX entries together, exceed the configured
+    /// [`Limits`].
     #[error("entry {name} exceeds the inflate limit: {reason}")]
-    LimitExceeded { name: String, reason: String },
+    LimitExceeded {
+        /// The entry name (`classes*.dex` for the DEX total).
+        name: String,
+        /// Which limit, and by how much.
+        reason: String,
+    },
+    /// The caller's cancellation flag was raised.
     #[error("cancelled")]
     Cancelled,
+    /// A program path where no archive has root DEX entries.
     #[error("no archive of {} has classes*.dex ({})", path.display(), notes.join("; "))]
-    NoCode { path: PathBuf, notes: Vec<String> },
+    NoCode {
+        /// The path as given to [`Apk::open`].
+        path: PathBuf,
+        /// Why each archive was left out, one line each.
+        notes: Vec<String>,
+    },
 }
 
+/// `Result` with [`ApkError`].
 pub type Result<T> = std::result::Result<T, ApkError>;
 
 /// One central-directory entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Entry {
+    /// Name inside the archive; in a program, prefixed with the archive's
+    /// label (`services.jar/classes.dex`).
     pub name: String,
+    /// Compression method ([`METHOD_STORED`], [`METHOD_DEFLATE`], ...).
     pub method: u16,
+    /// Compressed size in bytes (zip64 sizes resolved).
     pub comp_size: u64,
+    /// Uncompressed size in bytes as declared; 0 may mean unknown.
     pub uncomp_size: u64,
+    /// Offset of the entry's local file header in its archive.
     pub local_header_off: u64,
     /// CRC-32 of the uncompressed data, as the central directory records it.
     pub crc32: u32,
@@ -158,6 +217,7 @@ pub struct Apk {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ArchiveId<'a> {
+    /// The archive's file.
     pub path: &'a Path,
     /// What its entry names start with in a program ([`archive_of`]); empty
     /// for a lone archive.
@@ -418,6 +478,12 @@ impl Apk {
     /// that do not open, are left out and named in [`Apk::notes`]; a program
     /// none of whose archives has code is an error. A program that comes
     /// down to one archive is that archive alone.
+    ///
+    /// # Errors
+    ///
+    /// [`ApkError::Io`] when a path cannot be read or a lone archive cannot
+    /// be mapped, [`ApkError::NoCode`] for a directory without archives or a
+    /// program none of whose archives has code.
     pub fn open(path: impl AsRef<Path>) -> Result<Apk> {
         let path = path.as_ref().to_path_buf();
         let sources = program::sources(&path)?;
@@ -465,6 +531,11 @@ impl Apk {
     /// sizes and modification times: equal to an open [`Apk::version`]
     /// when opening again would read the same files. Costs a directory walk
     /// and a `stat` per archive, not a mapping.
+    ///
+    /// # Errors
+    ///
+    /// [`ApkError::Io`] when a path cannot be read, [`ApkError::NoCode`] for
+    /// a directory without archives.
     pub fn version_of(path: impl AsRef<Path>) -> Result<Version> {
         Ok(Version::of_sources(&program::sources(path.as_ref())?))
     }
@@ -523,6 +594,11 @@ impl Apk {
 
     /// What identifies each archive's version, in program order. A cache key
     /// hashes them.
+    ///
+    /// # Errors
+    ///
+    /// [`ApkError::NoEocd`] or [`ApkError::BadCentralDirectory`] when an
+    /// archive's central directory cannot be located.
     pub fn directories(&self) -> Result<Vec<ArchiveId<'_>>> {
         self.archives.iter().map(|a| Ok(ArchiveId { path: &a.path, label: &a.label, directory: a.directory()? })).collect()
     }
@@ -540,6 +616,10 @@ impl Apk {
     /// `(size, modification time)` of the file; for a program, its sizes and
     /// times hashed into one number and the latest time, so rewriting any
     /// archive changes it.
+    ///
+    /// # Errors
+    ///
+    /// [`ApkError::Io`] when a file's metadata cannot be read.
     pub fn stamp(&self) -> Result<(u64, Option<SystemTime>)> {
         let meta = |a: &Archive| std::fs::metadata(&a.path).map_err(|source| ApkError::Io { path: a.path.clone(), source });
         if let [lone] = &self.archives[..] {
@@ -562,6 +642,10 @@ impl Apk {
     /// Walk the central directories. `keep` filters entries by their name
     /// inside their archive early, so the full name list is never
     /// materialised for large archives.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::directories`].
     pub fn entries_filtered(&self, mut keep: impl FnMut(&[u8]) -> bool) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         for (i, a) in self.archives.iter().enumerate() {
@@ -571,6 +655,10 @@ impl Apk {
     }
 
     /// Every entry of the archive.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::directories`].
     pub fn entries(&self) -> Result<Vec<Entry>> {
         self.entries_filtered(|_| true)
     }
@@ -578,6 +666,11 @@ impl Apk {
     /// Root-level DEX entries sorted by compressed size (smallest first, so a
     /// parallel scan finishes the cheap ones early). Duplicate names keep the
     /// last occurrence, like [`Apk::find_entry`] (and `zipfile`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::directories`], and [`ApkError::LimitExceeded`] when the
+    /// entries together declare more than [`Limits::max_dex_total_bytes`].
     pub fn dex_entries(&self) -> Result<Vec<Entry>> {
         let mut entries = self.dex_entries_in_order()?;
         self.check_dex_total(&entries)?;
@@ -586,7 +679,11 @@ impl Apk {
     }
 
     /// The entries of [`Apk::dex_entries`] in central-directory order, archive
-    /// by archive.
+    /// by archive. Unlike [`Apk::dex_entries`], the total size is not checked.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::directories`].
     pub fn dex_entries_in_order(&self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         for (i, a) in self.archives.iter().enumerate() {
@@ -609,6 +706,10 @@ impl Apk {
     /// Find an entry by exact name. In a program, a name without an
     /// archive's prefix (`AndroidManifest.xml`) is looked up archive by
     /// archive, the first that has it winning.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::directories`].
     pub fn find_entry(&self, name: &str) -> Result<Option<Entry>> {
         let owner = self.archives.iter().enumerate().find_map(|(i, a)| Some((i, a.inner_name(name)?)));
         let candidates: Vec<(usize, &str)> = match owner {
@@ -625,6 +726,11 @@ impl Apk {
     }
 
     /// Compressed payload of `entry` inside the mapping.
+    ///
+    /// # Errors
+    ///
+    /// [`ApkError::BadLocalHeader`] when the local header is missing or the
+    /// payload runs past the end of the archive.
     pub fn raw_payload(&self, entry: &Entry) -> Result<&[u8]> {
         let range = self.payload_range(entry)?;
         Ok(&self.archive(entry).map[range])
@@ -671,6 +777,10 @@ impl Apk {
     /// entry is read in place; a Deflate entry is inflated into memory and
     /// kept there for as long as the returned [`Apk`] lives. Its entry names
     /// are the names inside it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::read_entry`].
     pub fn open_nested(&self, entry: &Entry) -> Result<Apk> {
         let map = match entry.method {
             METHOD_STORED => {
@@ -693,12 +803,25 @@ impl Apk {
 
     /// Extract `entry`: stored entries are borrowed straight from the mapping,
     /// Deflate entries are inflated into a fresh buffer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::read_entry_cancellable`], except [`ApkError::Cancelled`].
     pub fn read_entry(&self, entry: &Entry) -> Result<Cow<'_, [u8]>> {
         self.read_entry_cancellable(entry, None)
     }
 
     /// Extract `entry`, polling `cancel` between input chunks. Returns
     /// `Err(ApkError::Cancelled)` when the flag is raised mid-way.
+    ///
+    /// # Errors
+    ///
+    /// [`ApkError::Cancelled`]; [`ApkError::BadLocalHeader`] when the payload
+    /// cannot be located; [`ApkError::ImplausibleSize`] or
+    /// [`ApkError::LimitExceeded`] when the declared or inflated size is out of
+    /// bounds; [`ApkError::Inflate`] for a corrupt stream;
+    /// [`ApkError::UnsupportedMethod`]; [`ApkError::SizeMismatch`] when the
+    /// data is not the declared size.
     pub fn read_entry_cancellable(&self, entry: &Entry, cancel: Option<&AtomicBool>) -> Result<Cow<'_, [u8]>> {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(ApkError::Cancelled);
@@ -802,6 +925,11 @@ impl Apk {
     }
 
     /// Convenience: extract a named entry.
+    ///
+    /// # Errors
+    ///
+    /// [`ApkError::NotFound`] when there is no such entry, otherwise as
+    /// [`Apk::find_entry`] and [`Apk::read_entry`].
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         let entry = self.find_entry(name)?.ok_or_else(|| ApkError::NotFound(name.to_string()))?;
         Ok(self.read_entry(&entry)?.into_owned())
@@ -833,6 +961,11 @@ impl Apk {
     /// Inflate a Deflate entry incrementally, letting `decide` inspect the
     /// leading bytes after every chunk to say how much of the entry is
     /// actually needed. Stored entries are returned whole.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::read_entry`]: a payload that cannot be located, a size out
+    /// of bounds, or a corrupt stream.
     pub fn inflate_until(&self, entry: &Entry, mut decide: impl FnMut(&[u8]) -> PrefixStep) -> Result<Prefix> {
         // Small first chunks so a quick "not useful" costs little; then up to CHUNK.
         const FIRST_CHUNK: usize = 1 << 14;

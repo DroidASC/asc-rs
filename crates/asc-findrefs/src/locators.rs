@@ -23,6 +23,12 @@ pub struct StringLocator {
 }
 
 impl StringLocator {
+    /// Index every `string_ids` entry by its string data offset.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`](crate::FindError::Dex) when a `string_ids` entry or
+    /// the last string's data is out of bounds.
     pub fn build(dex: &Dex<'_>) -> Result<StringLocator> {
         let buf = dex.buf();
         let count = dex.string_count();
@@ -44,6 +50,7 @@ impl StringLocator {
         Ok(StringLocator { offsets: offsets.into(), strdata_start, strdata_end })
     }
 
+    /// Number of strings indexed (`string_ids_size`).
     pub fn string_count(&self) -> usize {
         self.offsets.len()
     }
@@ -181,6 +188,11 @@ impl StringLocator {
 
     /// All string indexes whose data matches `pattern` (a regex compiled on
     /// the spot; an empty pattern matches nothing).
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Pattern`](crate::FindError::Pattern) when `pattern` is
+    /// not a valid regex.
     pub fn locate_pattern(&self, buf: &[u8], pattern: &str) -> Result<BTreeSet<u32>> {
         if pattern.is_empty() {
             return Ok(BTreeSet::new());
@@ -260,6 +272,12 @@ pub struct TypeLocator {
 }
 
 impl TypeLocator {
+    /// Index every `type_ids` entry by its descriptor's string index.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`](crate::FindError::Dex) when the `type_ids` table
+    /// is out of bounds.
     pub fn build(dex: &Dex<'_>) -> Result<TypeLocator> {
         let count = dex.type_count();
         let mut by_string = Vec::with_capacity((count as usize).min(dex.buf().len() / 4));
@@ -291,6 +309,11 @@ impl TypeLocator {
     }
 
     /// Fuzzy descriptor match with a pattern compiled on the spot.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Pattern`](crate::FindError::Pattern) when `pattern` is
+    /// not a valid regex.
     pub fn locate_pattern(&self, buf: &[u8], strings: &StringLocator, pattern: &str) -> Result<BTreeSet<u32>> {
         if pattern.is_empty() {
             return Ok(BTreeSet::new());
@@ -514,6 +537,13 @@ fn retain_ok(ids: BTreeSet<u32>, mut keep: impl FnMut(u32) -> Result<bool>) -> R
 pub struct MethodLocator(pub(crate) MemberLocator);
 
 impl MethodLocator {
+    /// Index every `method_ids` entry by name (and by class when the table
+    /// is not sorted by class).
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`](crate::FindError::Dex) when the `method_ids` table
+    /// is out of bounds.
     pub fn build(dex: &Dex<'_>) -> Result<MethodLocator> {
         Ok(MethodLocator(MemberLocator::build(dex, dex.method_count(), dex.header().method_ids.off)?))
     }
@@ -524,12 +554,22 @@ impl MethodLocator {
     }
 
     /// Resolve a member query, compiling its patterns on the spot.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Pattern`](crate::FindError::Pattern) when a pattern of
+    /// `query` is not a valid regex, and the errors of [`Self::locate_compiled`].
     pub fn locate(&self, dex: &Dex<'_>, strings: &StringLocator, types: &TypeLocator, query: &MemberQuery) -> Result<BTreeSet<u32>> {
         let compiled = CompiledQuery::new(&crate::Query::Method(query.clone()))?;
         self.locate_compiled(dex, strings, types, &compiled)
     }
 
     /// Resolve a pre-compiled method query (an empty set for other kinds).
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`](crate::FindError::Dex) when a member, type or
+    /// proto id the match reads is out of bounds.
     pub fn locate_compiled(
         &self,
         dex: &Dex<'_>,
@@ -563,6 +603,13 @@ impl MethodLocator {
 pub struct FieldLocator(pub(crate) MemberLocator);
 
 impl FieldLocator {
+    /// Index every `field_ids` entry by name (and by class when the table is
+    /// not sorted by class).
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`](crate::FindError::Dex) when the `field_ids` table
+    /// is out of bounds.
     pub fn build(dex: &Dex<'_>) -> Result<FieldLocator> {
         Ok(FieldLocator(MemberLocator::build(dex, dex.field_count(), dex.header().field_ids.off)?))
     }
@@ -573,12 +620,22 @@ impl FieldLocator {
     }
 
     /// Resolve a member query, compiling its patterns on the spot.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Pattern`](crate::FindError::Pattern) when a pattern of
+    /// `query` is not a valid regex, and the errors of [`Self::locate_compiled`].
     pub fn locate(&self, dex: &Dex<'_>, strings: &StringLocator, types: &TypeLocator, query: &MemberQuery) -> Result<BTreeSet<u32>> {
         let compiled = CompiledQuery::new(&crate::Query::Field(query.clone()))?;
         self.locate_compiled(dex, strings, types, &compiled)
     }
 
     /// Resolve a pre-compiled field query (an empty set for other kinds).
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Dex`](crate::FindError::Dex) when a member, type or
+    /// proto id the match reads is out of bounds.
     pub fn locate_compiled(
         &self,
         dex: &Dex<'_>,

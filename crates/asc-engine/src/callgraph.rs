@@ -30,6 +30,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// `callers` or `callees`, as in the query syntax and output.
     pub fn as_str(self) -> &'static str {
         match self {
             Direction::Callers => "callers",
@@ -64,7 +65,9 @@ pub enum CallRoots {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CallQuery {
+    /// Where the walk starts.
     pub roots: CallRoots,
+    /// Whether to walk callers or callees.
     pub direction: Direction,
     /// Levels to expand (1 = direct callers / callees).
     pub depth: usize,
@@ -120,6 +123,7 @@ impl CallQuery {
         CallQuery::new(CallRoots::Method { class: class.into(), method: method.into() }, direction)
     }
 
+    /// A walk from `roots`: 2 levels, at most 500 methods, static calls only.
     pub fn new(roots: CallRoots, direction: Direction) -> CallQuery {
         CallQuery { roots, direction, depth: 2, max_nodes: 500, virtual_calls: false, from: None, unless: Vec::new() }
     }
@@ -150,8 +154,11 @@ pub struct CallRow {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CallTree {
+    /// The direction walked.
     pub direction: Direction,
+    /// The depth asked for.
     pub depth: usize,
+    /// The tree, one row per line in depth-first order.
     pub rows: Vec<CallRow>,
     /// Distinct methods discovered (roots included).
     pub methods: usize,
@@ -293,12 +300,22 @@ impl Engine {
     /// exact signature) that some DEX references; an unknown method is an
     /// error. Each method is expanded once, at its shallowest occurrence;
     /// other occurrences are marked `repeated`.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] for an inconsistent query (`from` on a callees
+    /// walk), a root method no DEX references or a condition no method
+    /// matches; [`EngineError::Apk`] when the APK cannot be opened.
     pub fn call_graph(&self, q: &CallQuery) -> Result<CallTree> {
         self.call_graph_cancellable(q, &NOT_CANCELLED)
     }
 
     /// [`Engine::call_graph`] that stops, with `ApkError::Cancelled`, once
     /// `cancel` is raised.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::call_graph`], plus the cancellation.
     pub fn call_graph_cancellable(&self, q: &CallQuery, cancel: &AtomicBool) -> Result<CallTree> {
         if q.from.is_some() && q.direction == Direction::Callees {
             return Err(EngineError::Query("`from` keeps paths of a callers walk: walk the callers of the target instead".into()));

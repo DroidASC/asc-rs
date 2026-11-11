@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 pub struct BackendSpec {
     /// Executable; looked up on `PATH` when it has no `/`.
     pub command: PathBuf,
+    /// Arguments passed to `command`.
     pub args: Vec<OsString>,
     /// Added to the inherited environment.
     pub env: BTreeMap<OsString, OsString>,
@@ -32,6 +33,7 @@ pub struct BackendSpec {
     pub startup_timeout: Duration,
     /// Passed through as `initialize`'s `options`.
     pub options: Map<String, Value>,
+    /// Grace periods and restart policy.
     pub lifecycle: Lifecycle,
 }
 
@@ -92,6 +94,8 @@ impl BackendSpec {
 }
 
 impl BackendSpec {
+    /// Runs `command` without arguments: one instance, 10 min idle, 60 s
+    /// request timeout, 30 s startup timeout, no options.
     pub fn new(command: impl Into<PathBuf>) -> Self {
         Self {
             command: command.into(),
@@ -120,6 +124,7 @@ pub struct Lifecycle {
     pub shutdown_grace: Duration,
     /// First restart delay; doubled per consecutive failure.
     pub backoff_initial: Duration,
+    /// Upper bound of the restart delay.
     pub backoff_max: Duration,
     /// Consecutive failed startups after which the backend is disabled.
     pub max_startup_failures: u32,
@@ -202,14 +207,17 @@ pub enum Priority {
 pub struct CancelToken(Arc<AtomicBool>);
 
 impl CancelToken {
+    /// A token not yet cancelled; clones share its state.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Cancels every request holding this token or a clone of it; cannot be undone.
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
 
+    /// Whether [`cancel`](Self::cancel) has been called on this token or a clone.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
@@ -222,8 +230,11 @@ pub type ProgressSink = Arc<dyn Fn(&ProgressParams) + Send + Sync>;
 #[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct CallOptions {
+    /// Queue lane while waiting for a process.
     pub priority: Priority,
+    /// Aborts the call while queued or running; the call then fails with `Error::Cancelled`.
     pub cancel: Option<CancelToken>,
+    /// Receives the backend's progress for the call; asks the backend for progress when set.
     pub progress: Option<ProgressSink>,
     /// Overrides [`BackendSpec::timeout`].
     pub timeout: Option<Duration>,

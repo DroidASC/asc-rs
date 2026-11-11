@@ -46,6 +46,7 @@ impl NameFilter {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ListOptions {
+    /// Which record names to list; `None` lists every one.
     pub filter: Option<NameFilter>,
     /// Also list pseudo records (the compiler's `_ES…` annotation records
     /// and system module placeholders such as `@ohos.app`) and records the
@@ -85,7 +86,9 @@ pub struct RecordListing {
     pub entry: String,
     /// Canonical name, as stored (without the `L…;` wrapper).
     pub name: String,
+    /// What sort of record it is.
     pub kind: RecordKind,
+    /// The source file the record was compiled from, as the class states it; `None` when it names none.
     pub source_file: Option<String>,
     /// Number of functions (methods of the record).
     pub functions: u32,

@@ -33,6 +33,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
+    /// Every prefix, in prefix-byte order.
     pub const ALL: [Self; 4] = [Self::CallRuntime, Self::Deprecated, Self::Wide, Self::Throw];
 
     /// The prefix byte.
@@ -46,6 +47,7 @@ impl Prefix {
         }
     }
 
+    /// The prefix whose byte is `byte`, or `None` for a plain opcode byte.
     #[inline]
     pub const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
@@ -87,13 +89,16 @@ pub enum OperandKind {
     /// Index into the string / method / literal-array index of the method's region.
     /// The 32-bit ids of some `deprecated.*` opcodes are file offsets instead.
     StringId,
+    /// Method id; indexed like [`OperandKind::StringId`].
     MethodId,
+    /// Literal-array id; indexed like [`OperandKind::StringId`].
     LiteralArrayId,
 }
 
 /// One operand field of an opcode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Operand {
+    /// What the field holds.
     pub kind: OperandKind,
     /// Bit offset from the start of the instruction (opcode bytes included);
     /// fields are little-endian, least significant bit first.
@@ -121,6 +126,7 @@ pub(crate) mod flag {
 /// One row of the opcode table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opcode {
+    /// Prefix byte of a two-byte opcode; `None` for a one-byte opcode.
     pub prefix: Option<Prefix>,
     /// The opcode byte, or the sub-opcode byte when `prefix` is set.
     pub value: u8,
@@ -176,6 +182,7 @@ impl Opcode {
         self.has(flag::CONDITIONAL)
     }
 
+    /// Whether this is a `return` / `returnundefined`.
     #[inline]
     pub const fn is_return(&self) -> bool {
         self.has(flag::RETURN)

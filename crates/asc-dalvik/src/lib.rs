@@ -22,60 +22,100 @@ pub const WORD: usize = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(non_camel_case_types)]
 pub enum Format {
+    /// `op`: no operands (`nop`, `return-void`, payload pseudo-instructions).
     K10x,
+    /// `op vA, vB`: two 4-bit registers.
     K12x,
+    /// `op vA, #+B`: 4-bit register and signed 4-bit literal.
     K11n,
+    /// `op vAA`: one 8-bit register.
     K11x,
+    /// `op +AA`: signed 8-bit branch offset.
     K10t,
+    /// `op +AAAA`: signed 16-bit branch offset.
     K20t,
+    /// `op vAA, vBBBB`: 8-bit and 16-bit registers.
     K22x,
+    /// `op vAA, +BBBB`: register and signed 16-bit branch offset.
     K21t,
+    /// `op vAA, #+BBBB`: register and signed 16-bit literal.
     K21s,
+    /// `op vAA, #+BBBB0000[00000000]`: register and the high 16 bits of a literal.
     K21h,
+    /// `op vAA, kind@BBBB`: register and 16-bit constant-pool index.
     K21c,
+    /// `op vAA, vBB, vCC`: three 8-bit registers.
     K23x,
+    /// `op vAA, vBB, #+CC`: two registers and signed 8-bit literal.
     K22b,
+    /// `op vA, vB, +CCCC`: two 4-bit registers and signed 16-bit branch offset.
     K22t,
+    /// `op vA, vB, #+CCCC`: two 4-bit registers and signed 16-bit literal.
     K22s,
+    /// `op vA, vB, kind@CCCC`: two 4-bit registers and 16-bit constant-pool index.
     K22c,
+    /// `op vAAAA, vBBBB`: two 16-bit registers.
     K32x,
+    /// `op +AAAAAAAA`: signed 32-bit branch offset.
     K30t,
+    /// `op vAA, +BBBBBBBB`: register and signed 32-bit offset (branch or payload).
     K31t,
+    /// `op vAA, #+BBBBBBBB`: register and 32-bit literal.
     K31i,
+    /// `op vAA, string@BBBBBBBB`: register and 32-bit string index (`const-string/jumbo`).
     K31c,
+    /// `op {vC, vD, vE, vF, vG}, kind@BBBB`: up to five 4-bit argument registers.
     K35c,
+    /// `op {vCCCC .. vNNNN}, kind@BBBB`: register range of `AA` arguments.
     K3rc,
+    /// `op vAA, #+BBBBBBBBBBBBBBBB`: register and 64-bit literal.
     K51l,
+    /// `op {vC, vD, vE, vF, vG}, meth@BBBB, proto@HHHH` (`invoke-polymorphic`).
     K45cc,
+    /// `op {vCCCC .. vNNNN}, meth@BBBB, proto@HHHH` (`invoke-polymorphic/range`).
     K4rcc,
 }
 
 /// Kind of constant-pool index carried by an instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IndexKind {
+    /// No constant-pool index.
     None,
+    /// Index into `string_ids`.
     StringRef,
+    /// Index into `type_ids`.
     TypeRef,
     /// Never produced by the table; kept because downstream renderers
     /// (`asc-smali`) match on it.
     Unknown,
+    /// Index into `field_ids`.
     FieldRef,
+    /// Index into `method_ids`.
     MethodRef,
+    /// `method_ids` index in `B` plus `proto_ids` index in `H` (`invoke-polymorphic`).
     MethodAndProtoRef,
+    /// Index into `call_site_ids` (`invoke-custom`).
     CallSiteRef,
+    /// Index into `method_handles` (`const-method-handle`).
     MethodHandleRef,
+    /// Index into `proto_ids` (`const-method-type`).
     ProtoRef,
 }
 
 /// One row of the opcode table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opcode {
+    /// Opcode byte (low byte of the first code unit).
     pub value: u8,
+    /// Mnemonic as spelled in the Dalvik bytecode spec, e.g. `const-string`.
     pub name: &'static str,
     /// Length in 16-bit code units.
     pub len: u8,
+    /// Operand layout.
     pub format: Format,
+    /// Kind of constant-pool index the instruction carries.
     pub index: IndexKind,
+    /// Bitset of [`verify`] `VERIFY_*` flags, combined as in ART's table.
     pub verify: u32,
 }
 
@@ -111,9 +151,12 @@ pub fn opcodes() -> impl Iterator<Item = &'static Opcode> {
     OPCODES.iter().filter_map(|o| o.as_ref())
 }
 
-/// Pseudo-opcode identifiers stored in the second byte of a payload `nop`.
+/// Identifier of a `packed-switch-payload`: the payload's first code unit,
+/// a `nop` whose high byte names the payload kind.
 pub const PACKED_SWITCH_PAYLOAD: u16 = 0x0100;
+/// Identifier of a `sparse-switch-payload` (see [`PACKED_SWITCH_PAYLOAD`]).
 pub const SPARSE_SWITCH_PAYLOAD: u16 = 0x0200;
+/// Identifier of a `fill-array-data-payload` (see [`PACKED_SWITCH_PAYLOAD`]).
 pub const FILL_ARRAY_DATA_PAYLOAD: u16 = 0x0300;
 
 /// Byte length of every opcode (`0` = undefined), derived from the table at

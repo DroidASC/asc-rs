@@ -31,7 +31,7 @@ const TURN_POLL: Duration = Duration::from_millis(10);
 
 /// Worker threads of a search whose caller fixed none: this machine's CPUs
 /// split between this process and the user's other busy registered ones
-/// ([`auto_threads_for`]). Re-read at most once per [`THREADS_EVERY`], so
+/// ([`auto_threads_for`]). Re-read at most every 100 ms, so
 /// a sweep follows the others starting and finishing their scans
 /// ([`Threads::wait_turn`]). A process that does not register itself (a
 /// one-shot command) still gives way to the resident hosts.
@@ -55,7 +55,7 @@ pub fn cpus() -> usize {
     std::thread::available_parallelism().map_or(8, |n| n.get())
 }
 
-/// [`OVERSUBSCRIBE`] x `cpus` workers split evenly between this process and
+/// 4 x `cpus` workers split evenly between this process and
 /// `busy_others`, at most `cpus` and at least 2 (where there are 2): a scan
 /// on one thread gives up its overlap of inflating one entry while searching
 /// another. Up to 4 busy processes each keep every CPU.
@@ -69,6 +69,7 @@ pub enum Threads {
     /// [`auto_threads`], read again by every search.
     #[default]
     Auto,
+    /// Exactly this many workers (0 counts as 1).
     Fixed(usize),
 }
 

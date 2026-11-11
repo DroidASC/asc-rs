@@ -39,11 +39,13 @@ impl<'a> Abc<'a> {
         Ok(Abc { buf, header: Header::parse(buf)?, sorted_classes: false })
     }
 
+    /// The whole file buffer.
     #[inline]
     pub fn bytes(&self) -> &'a [u8] {
         self.buf
     }
 
+    /// The parsed file header.
     #[inline]
     pub fn header(&self) -> &Header {
         &self.header
@@ -383,16 +385,19 @@ impl<'a> OffsetTable<'a> {
         u32::try_from(self.bytes.len() / 4).unwrap_or(u32::MAX)
     }
 
+    /// Whether the table has no entries.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
+    /// Entry `i` (a file offset), or `None` past the end.
     #[inline]
     pub fn get(&self, i: u32) -> Option<u32> {
         read_u32(self.bytes, (i as usize).checked_mul(4)?).ok()
     }
 
+    /// The entries in table order.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = u32> + DoubleEndedIterator + 'a + use<'a> {
         self.bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
     }
@@ -412,11 +417,13 @@ pub struct Regions<'a> {
 }
 
 impl<'a> Regions<'a> {
+    /// Number of regions.
     #[inline]
     pub fn len(&self) -> u32 {
         u32::try_from(self.table.len() / RegionHeader::SIZE).unwrap_or(u32::MAX)
     }
 
+    /// Whether the file has no regions.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.table.is_empty()
@@ -429,6 +436,7 @@ impl<'a> Regions<'a> {
         Some(Region { buf: self.buf, index, header, header_pos: self.table_pos + rel })
     }
 
+    /// Every region in index order; entries whose header is truncated are skipped.
     pub fn iter(&self) -> impl Iterator<Item = Region<'a>> + 'a + use<'a> {
         let regions = *self;
         (0..self.len()).filter_map(move |i| regions.get(i))
@@ -457,11 +465,13 @@ impl<'a> Region<'a> {
         self.index
     }
 
+    /// The region's header entry.
     #[inline]
     pub fn header(&self) -> &RegionHeader {
         &self.header
     }
 
+    /// Whether file offset `off` lies in this region.
     #[inline]
     pub fn contains(&self, off: u32) -> bool {
         self.header.contains(off)

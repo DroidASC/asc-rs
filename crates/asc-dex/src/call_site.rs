@@ -12,14 +12,23 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum MethodHandleKind {
+    /// `0x00`: static field setter.
     StaticPut,
+    /// `0x01`: static field getter.
     StaticGet,
+    /// `0x02`: instance field setter.
     InstancePut,
+    /// `0x03`: instance field getter.
     InstanceGet,
+    /// `0x04`: static method invoker.
     InvokeStatic,
+    /// `0x05`: instance method invoker.
     InvokeInstance,
+    /// `0x06`: constructor invoker.
     InvokeConstructor,
+    /// `0x07`: direct method invoker.
     InvokeDirect,
+    /// `0x08`: interface method invoker.
     InvokeInterface,
 }
 
@@ -78,6 +87,7 @@ impl fmt::Display for MethodHandleKind {
 /// `method_handle_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MethodHandle {
+    /// `method_handle_type`.
     pub kind: MethodHandleKind,
     /// Field index when [`MethodHandleKind::is_field_accessor`], method
     /// index otherwise.

@@ -21,6 +21,7 @@ pub(crate) const RUNTIME_DIR_ENV: &str = "ASC_RUNTIME_DIR";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProcessUsage {
+    /// Its process id.
     pub pid: u32,
     /// Bytes its memory cache held at its last update.
     pub bytes: u64,
@@ -72,12 +73,17 @@ impl ProcessRegistry {
         Some(reg)
     }
 
+    /// The registry directory this process registered in.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
     /// Publish the bytes this process's memory cache holds now, and whether
     /// it is serving a request.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error writing or renaming this process's entry file.
     pub fn update(&self, bytes: u64, busy: bool) -> std::io::Result<()> {
         let path = self.dir.join(self.pid.to_string());
         let tmp = self.dir.join(format!(".{}.tmp", self.pid));

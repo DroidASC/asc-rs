@@ -3,23 +3,41 @@
 use crate::leb128::{read_uleb128, write_uleb128};
 use crate::{DexError, Result};
 
+/// Signed one-byte integer.
 pub const VALUE_BYTE: u8 = 0x00;
+/// Signed two-byte integer, sign-extended.
 pub const VALUE_SHORT: u8 = 0x02;
+/// Unsigned two-byte integer, zero-extended.
 pub const VALUE_CHAR: u8 = 0x03;
+/// Signed four-byte integer, sign-extended.
 pub const VALUE_INT: u8 = 0x04;
+/// Signed eight-byte integer, sign-extended.
 pub const VALUE_LONG: u8 = 0x06;
+/// Four-byte IEEE754 float, zero-extended to the right.
 pub const VALUE_FLOAT: u8 = 0x10;
+/// Eight-byte IEEE754 double, zero-extended to the right.
 pub const VALUE_DOUBLE: u8 = 0x11;
+/// Index into `proto_ids`.
 pub const VALUE_METHOD_TYPE: u8 = 0x15;
+/// Index into the `method_handles` table.
 pub const VALUE_METHOD_HANDLE: u8 = 0x16;
+/// Index into `string_ids`.
 pub const VALUE_STRING: u8 = 0x17;
+/// Index into `type_ids`.
 pub const VALUE_TYPE: u8 = 0x18;
+/// Index into `field_ids`.
 pub const VALUE_FIELD: u8 = 0x19;
+/// Index into `method_ids`.
 pub const VALUE_METHOD: u8 = 0x1a;
+/// Enum constant, as an index into `field_ids`.
 pub const VALUE_ENUM: u8 = 0x1b;
+/// Nested `encoded_array` (no value bytes in the header).
 pub const VALUE_ARRAY: u8 = 0x1c;
+/// Nested `encoded_annotation` (no value bytes in the header).
 pub const VALUE_ANNOTATION: u8 = 0x1d;
+/// `null` reference (no value bytes).
 pub const VALUE_NULL: u8 = 0x1e;
+/// One-bit boolean stored in `value_arg` (no value bytes).
 pub const VALUE_BOOLEAN: u8 = 0x1f;
 
 /// Decoded `encoded_value`.
@@ -29,25 +47,39 @@ pub enum EncodedValue {
     /// Numeric primitive kept in its raw little-endian form (`kind` is the
     /// value type, `raw` has `value_arg + 1` bytes).
     Primitive {
+        /// One of the numeric `VALUE_*` codes.
         kind: u8,
+        /// Little-endian value bytes as stored.
         raw: Vec<u8>,
     },
+    /// `VALUE_METHOD_TYPE`: index into `proto_ids`.
     MethodType(u32),
+    /// `VALUE_METHOD_HANDLE`: index into the `method_handles` table.
     MethodHandle(u32),
+    /// `VALUE_STRING`: index into `string_ids`.
     String(u32),
+    /// `VALUE_TYPE`: index into `type_ids`.
     Type(u32),
+    /// `VALUE_FIELD`: index into `field_ids`.
     Field(u32),
+    /// `VALUE_METHOD`: index into `method_ids`.
     Method(u32),
+    /// `VALUE_ENUM`: the enum constant, as an index into `field_ids`.
     Enum(u32),
+    /// `VALUE_ARRAY`: the nested `encoded_array`.
     Array(Vec<EncodedValue>),
+    /// `VALUE_ANNOTATION`: the nested `encoded_annotation`.
     Annotation(EncodedAnnotation),
+    /// `VALUE_NULL`.
     Null,
+    /// `VALUE_BOOLEAN`.
     Boolean(bool),
 }
 
 /// Decoded `encoded_annotation`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodedAnnotation {
+    /// `type_idx`: the annotation type, as an index into `type_ids`.
     pub type_idx: u32,
     /// `(name string idx, value)` pairs.
     pub elements: Vec<(u32, EncodedValue)>,
@@ -56,12 +88,17 @@ pub struct EncodedAnnotation {
 /// `annotation_item`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotationItem {
+    /// `visibility`: one of the `VISIBILITY_*` codes.
     pub visibility: u8,
+    /// `annotation`: the annotation contents.
     pub annotation: EncodedAnnotation,
 }
 
+/// Visible only at build time.
 pub const VISIBILITY_BUILD: u8 = 0;
+/// Visible at runtime.
 pub const VISIBILITY_RUNTIME: u8 = 1;
+/// Visible at runtime, but only to the system.
 pub const VISIBILITY_SYSTEM: u8 = 2;
 
 impl EncodedValue {
@@ -116,6 +153,7 @@ impl EncodedValue {
         }
     }
 
+    /// `f32` value of a `VALUE_FLOAT` primitive; `None` for anything else.
     pub fn as_f32(&self) -> Option<f32> {
         match self {
             EncodedValue::Primitive { kind, .. } if *kind == VALUE_FLOAT => self.as_f64().map(|v| v as f32),
@@ -148,6 +186,11 @@ impl EncodedValue {
 pub const MAX_NESTING: usize = 64;
 
 /// Parse one `encoded_value` at `pos`. Returns `(value, bytes consumed)`.
+///
+/// # Errors
+///
+/// `Truncated` when the value runs past the end of `buf`, `Malformed` when
+/// arrays or annotations nest deeper than [`MAX_NESTING`].
 pub fn parse_value(buf: &[u8], pos: usize) -> Result<(EncodedValue, usize)> {
     parse_value_at(buf, pos, 0)
 }
@@ -198,6 +241,10 @@ fn parse_value_at(buf: &[u8], pos: usize, depth: usize) -> Result<(EncodedValue,
 }
 
 /// Parse an `encoded_array` (uleb128 size followed by values).
+///
+/// # Errors
+///
+/// As [`parse_value`].
 pub fn parse_array(buf: &[u8], pos: usize) -> Result<(Vec<EncodedValue>, usize)> {
     parse_array_at(buf, pos, 0)
 }
@@ -223,6 +270,10 @@ fn parse_array_at(buf: &[u8], pos: usize, depth: usize) -> Result<(Vec<EncodedVa
 }
 
 /// Parse an `encoded_annotation`.
+///
+/// # Errors
+///
+/// As [`parse_value`].
 pub fn parse_annotation(buf: &[u8], pos: usize) -> Result<(EncodedAnnotation, usize)> {
     parse_annotation_at(buf, pos, 0)
 }
@@ -245,6 +296,10 @@ fn parse_annotation_at(buf: &[u8], pos: usize, depth: usize) -> Result<(EncodedA
 }
 
 /// Parse an `annotation_item` at `off`.
+///
+/// # Errors
+///
+/// As [`parse_value`].
 pub fn parse_annotation_item(buf: &[u8], off: usize) -> Result<(AnnotationItem, usize)> {
     let visibility = *buf.get(off).ok_or(DexError::Truncated { what: "annotation_item", offset: off })?;
     let (annotation, n) = parse_annotation(buf, off + 1)?;
@@ -253,13 +308,19 @@ pub fn parse_annotation_item(buf: &[u8], off: usize) -> Result<(AnnotationItem, 
 
 /// Index remapping used when serialising encoded values into a new DEX.
 pub trait IndexRemap {
+    /// New index of string `idx`.
     fn string(&self, idx: u32) -> u32;
+    /// New index of type `idx`.
     fn type_(&self, idx: u32) -> u32;
+    /// New index of field `idx` (also used for enum constants).
     fn field(&self, idx: u32) -> u32;
+    /// New index of method `idx`.
     fn method(&self, idx: u32) -> u32;
+    /// New index of proto `idx`; unchanged by default.
     fn proto(&self, idx: u32) -> u32 {
         idx
     }
+    /// New index of method handle `idx`; unchanged by default.
     fn method_handle(&self, idx: u32) -> u32 {
         idx
     }
@@ -376,11 +437,17 @@ pub fn visit_annotation_refs(ann: &EncodedAnnotation, visitor: &mut dyn FnMut(Re
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RefKind {
+    /// Index into `string_ids`.
     String,
+    /// Index into `type_ids`.
     Type,
+    /// Index into `proto_ids`.
     Proto,
+    /// Index into `field_ids`.
     Field,
+    /// Index into `method_ids`.
     Method,
+    /// Index into the `method_handles` table.
     MethodHandle,
 }
 

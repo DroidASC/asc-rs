@@ -15,6 +15,7 @@ use crate::HapError;
 pub struct Note {
     /// JSON path of the field (`module.abilities[0].exported`).
     pub path: String,
+    /// What was wrong: `expected string, found number`.
     pub message: String,
 }
 

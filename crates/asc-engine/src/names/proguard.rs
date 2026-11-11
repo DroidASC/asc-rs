@@ -20,12 +20,25 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProguardError {
+    /// Reading the mapping from a reader failed (or it is not UTF-8).
     #[error("reading mapping file: {0}")]
     Io(#[from] io::Error),
+    /// The mapping file could not be read (or is not UTF-8).
     #[error("reading mapping file {}: {source}", path.display())]
-    File { path: PathBuf, source: io::Error },
+    File {
+        /// The file.
+        path: PathBuf,
+        /// The read error.
+        source: io::Error,
+    },
+    /// A line that is not mapping syntax at all.
     #[error("mapping file line {line}: {reason}")]
-    Syntax { line: usize, reason: &'static str },
+    Syntax {
+        /// 1-based line in the mapping file.
+        line: usize,
+        /// What was expected.
+        reason: &'static str,
+    },
 }
 
 /// An entry of a mapping file that was read but not used.
@@ -34,19 +47,36 @@ pub enum ProguardError {
 pub struct ProguardWarning {
     /// 1-based line in the mapping file.
     pub line: usize,
+    /// What was wrong with it.
     pub kind: WarningKind,
 }
 
+/// Why a mapping file entry was skipped.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum WarningKind {
     /// The same DEX name was given a second, different name; the first wins.
     #[error("{key} mapped again to {ignored}; keeping {kept}")]
-    Conflict { key: String, kept: String, ignored: String },
+    Conflict {
+        /// The DEX name.
+        key: String,
+        /// The name it keeps.
+        kept: String,
+        /// The name dropped.
+        ignored: String,
+    },
     /// Two DEX classes claim one original name; member types written with it
     /// translate to the first.
     #[error("original class {original} mapped again from {ignored}; keeping {kept}")]
-    DuplicateOriginal { original: String, kept: String, ignored: String },
+    DuplicateOriginal {
+        /// The original class name.
+        original: String,
+        /// The DEX class it keeps translating to.
+        kept: String,
+        /// The DEX class dropped.
+        ignored: String,
+    },
+    /// A name [`NameMappings`] refuses.
     #[error(transparent)]
     Rejected(#[from] MappingError),
 }
@@ -61,7 +91,9 @@ impl fmt::Display for ProguardWarning {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProguardMapping {
+    /// The renames read.
     pub mappings: NameMappings,
+    /// Entries skipped, in file order.
     pub warnings: Vec<ProguardWarning>,
 }
 
@@ -75,6 +107,10 @@ impl NameMappings {
     /// class, identity entries and removed classes are skipped silently.
     /// Duplicates and unusable names become warnings; only lines that are
     /// not mapping syntax at all fail the parse.
+    ///
+    /// # Errors
+    ///
+    /// [`ProguardError::Syntax`] for the first line that is not mapping syntax.
     pub fn from_proguard(text: &str) -> Result<ProguardMapping, ProguardError> {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut parser = Parser::default();
@@ -84,6 +120,11 @@ impl NameMappings {
     }
 
     /// [`NameMappings::from_proguard`] on everything `reader` yields (UTF-8).
+    ///
+    /// # Errors
+    ///
+    /// [`ProguardError::Io`] when reading fails or the text is not UTF-8,
+    /// plus the errors of [`NameMappings::from_proguard`].
     pub fn from_proguard_reader(mut reader: impl Read) -> Result<ProguardMapping, ProguardError> {
         let mut text = String::new();
         reader.read_to_string(&mut text)?;
@@ -91,6 +132,11 @@ impl NameMappings {
     }
 
     /// [`NameMappings::from_proguard`] on the file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`ProguardError::File`] when the file cannot be read or is not UTF-8,
+    /// plus the errors of [`NameMappings::from_proguard`].
     pub fn from_proguard_file(path: impl AsRef<Path>) -> Result<ProguardMapping, ProguardError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|source| ProguardError::File { path: path.to_path_buf(), source })?;

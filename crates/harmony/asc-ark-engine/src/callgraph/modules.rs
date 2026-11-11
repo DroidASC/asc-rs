@@ -76,6 +76,7 @@ pub enum RequestForm {
 }
 
 impl RequestForm {
+    /// How the form is named in summaries: the prefix it starts with, or a word.
     pub const fn label(self) -> &'static str {
         match self {
             RequestForm::Normalized => "@normalized:N",
@@ -96,6 +97,7 @@ impl RequestForm {
 pub struct FormCount {
     /// Requests, counted once per requesting record.
     pub requests: usize,
+    /// Requests that name a record of the program.
     pub resolved: usize,
 }
 

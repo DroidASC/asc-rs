@@ -29,12 +29,14 @@ use asc_dex::{Dex, Result, class_data, map_type};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MethodRef {
+    /// The one method (`method_ids` index) owning the `code_item`.
     Single(u32),
     /// Several methods share the same `code_item` (R8 deduplication).
     Shared(Vec<u32>),
 }
 
 impl MethodRef {
+    /// The owning `method_ids` indexes, one or several.
     pub fn ids(&self) -> &[u32] {
         match self {
             MethodRef::Single(m) => std::slice::from_ref(m),
@@ -95,6 +97,12 @@ impl InsnLocator {
     ///
     /// Malformed `code_off` / `insns_size` values are skipped, so the table
     /// never covers more than the buffer (`table_len() <= buf.len() / 16 + 1`).
+    ///
+    /// # Errors
+    ///
+    /// [`DexError`](asc_dex::DexError) when the map lacks a usable
+    /// `class_data` section and a class definition or its `class_data_item`
+    /// cannot be read.
     pub fn build(dex: &Dex<'_>) -> Result<InsnLocator> {
         let buf = dex.buf();
         // Every method_id is 8 bytes: the header count cannot exceed that.
@@ -188,10 +196,13 @@ impl InsnLocator {
         self.shared_ids.get(a as usize..b as usize).unwrap_or(&[])
     }
 
+    /// First byte of the bucket-aligned range covering every method's
+    /// instructions (`0` when the DEX has no code).
     pub fn code_item_start(&self) -> usize {
         self.code_item_start
     }
 
+    /// Byte just past that range, rounded up to a 16-byte bucket.
     pub fn code_item_end(&self) -> usize {
         self.code_item_end
     }

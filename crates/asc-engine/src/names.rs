@@ -13,6 +13,10 @@ pub use proguard::{ProguardError, ProguardMapping, ProguardWarning, WarningKind}
 /// Turn `com.poc.Main` / `com/poc/Main` / `Lcom/poc/Main;` into a Dalvik descriptor.
 /// Array descriptors (`[Ljava/lang/Object;`, whose methods such as `clone`
 /// are referenced like any class's) are kept as they are.
+///
+/// # Errors
+///
+/// [`EngineError::Query`] for an empty name.
 pub fn format_class_name(name: &str) -> Result<String> {
     if name.is_empty() {
         return Err(EngineError::Query("Class name cannot be empty".into()));
@@ -152,16 +156,23 @@ fn simple_class_pattern(name: &str) -> Option<String> {
 /// matches the member name as a whole instead of as a substring / regex.
 ///
 /// Lenient about where the class is written: `name` may carry it
-/// ([`MemberTarget::parse`] forms, used when `class` is not given), `class`
+/// (`Lcom/a/B;->name`, `com.a.B->name`, `com.a.B#name`, `B.name`, ...; used
+/// when `class` is not given), `class`
 /// may carry `->name`, and a `name` that is only a class becomes the class.
 /// A signature after the name (`run(I)V`, `f:I`) makes the name exact; the
 /// rows show each overload's signature. In the class, `~` in front means
 /// fuzzy; in the name, `=` in front means exact. A class without package
 /// (`WebView`) matches that simple name in any package.
 ///
-/// A signature after the name also narrows the query to it
-/// ([`parse_signature`]): `run(I)V` is that overload, `run(I)` any return
-/// type, `f:I` the field of that type.
+/// A signature after the name also narrows the query to it: `run(I)V` is
+/// that overload, `run(I)` any return type, `f:I` the field of that type.
+/// Types are Dalvik descriptors run together or comma-separated Java types
+/// (`(int, java.lang.String) void`).
+///
+/// # Errors
+///
+/// [`EngineError::Query`] when neither a class nor a name is given, the
+/// class is empty, or the signature is malformed.
 pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Option<&str>, exact_name: bool) -> Result<MemberQuery> {
     let mut class = class.map(str::trim).filter(|c| !c.is_empty());
     let mut name = name.map(str::trim).filter(|n| !n.is_empty());
@@ -217,6 +228,10 @@ pub const KINDS: &[&str] = &["string", "literal", "type", "method", "field", "ex
 /// The canonical kind for what an agent wrote: case and plurals do not
 /// matter (`Methods`), nor common synonyms (`implements`, `class`, `call`).
 /// Unknown kinds fail with the valid ones and the closest of them.
+///
+/// # Errors
+///
+/// [`EngineError::Query`] for an unknown kind.
 pub fn parse_kind(kind: &str) -> Result<&'static str> {
     let k = kind.trim().to_ascii_lowercase();
     let alias = |k: &str| -> Option<&'static str> {
@@ -418,7 +433,8 @@ pub(crate) fn exact_method(signature: &str) -> Result<MemberQuery> {
 /// options take them:
 ///
 /// - `string:REGEX`, `literal:TEXT`, `type:PATTERN`
-/// - `method:TARGET`, `field:TARGET`: any [`MemberTarget::parse`] form, e.g.
+/// - `method:TARGET`, `field:TARGET`: any member target form (as in
+///   [`member_query`]), e.g.
 ///   `android.webkit.WebView->loadUrl`; the class is exact unless prefixed
 ///   `~` (fuzzy) or written without package, the name a regex / substring
 ///   unless prefixed `=` or followed by a signature (exact)
@@ -428,6 +444,11 @@ pub(crate) fn exact_method(signature: &str) -> Result<MemberQuery> {
 ///
 /// The kind is read by [`parse_kind`] (`methods:`, `Method:` work too); the
 /// grammar is [`crate::condition`]'s.
+///
+/// # Errors
+///
+/// [`EngineError::Query`] for a syntax error, an unknown kind, an invalid
+/// value, or a rule of several conditions.
 pub fn parse_condition(spec: &str) -> Result<Query> {
     crate::condition::parse_condition_in(spec, None)
 }
@@ -435,6 +456,11 @@ pub fn parse_condition(spec: &str) -> Result<Query> {
 /// One rule of a rule set: a [`parse_condition`] condition, or several
 /// joined with `&` (a compound: every part must match in one method, none
 /// of the `!` parts).
+///
+/// # Errors
+///
+/// [`EngineError::Query`] for a syntax error, an unknown kind or an invalid
+/// value.
 pub fn parse_rule(spec: &str) -> Result<Query> {
     crate::condition::parse_rule_in(spec, None)
 }

@@ -17,7 +17,9 @@ pub const JSONRPC_VERSION: &str = "2.0";
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
+    /// A numeric id, the form asc sends.
     Number(i64),
+    /// A string id, echoed back verbatim.
     String(String),
 }
 
@@ -51,10 +53,15 @@ impl fmt::Display for RequestId {
 pub struct ErrorCode(pub i32);
 
 impl ErrorCode {
+    /// A line is not valid JSON.
     pub const PARSE_ERROR: Self = Self(-32700);
+    /// The JSON is not a valid JSON-RPC message.
     pub const INVALID_REQUEST: Self = Self(-32600);
+    /// The method is unknown to the receiver.
     pub const METHOD_NOT_FOUND: Self = Self(-32601);
+    /// `params` does not match the method's schema.
     pub const INVALID_PARAMS: Self = Self(-32602);
+    /// The receiver failed while handling a valid request.
     pub const INTERNAL_ERROR: Self = Self(-32603);
     /// The request was aborted after `notifications/cancelled`.
     pub const REQUEST_CANCELLED: Self = Self(-32800);
@@ -96,13 +103,17 @@ impl fmt::Display for ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 #[error("{message} [{code}]")]
 pub struct ErrorObject {
+    /// `code`: what kind of failure this is.
     pub code: ErrorCode,
+    /// `message`: a short human-readable description.
     pub message: String,
+    /// `data`: optional backend-defined details.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
 
 impl ErrorObject {
+    /// An error object without `data`.
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self { code, message: message.into(), data: None }
     }
@@ -111,7 +122,9 @@ impl ErrorObject {
 /// A call that expects a [`Response`] with the same id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
+    /// `id`: echoed back in the response.
     pub id: RequestId,
+    /// `method`: the method name, e.g. `program/open`.
     pub method: String,
     /// `Value::Null` when the message has no `params`.
     pub params: Value,
@@ -140,6 +153,7 @@ impl Request {
 /// A message that expects no response.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notification {
+    /// `method`: the method name, e.g. `notifications/cancelled`.
     pub method: String,
     /// `Value::Null` when the message has no `params`.
     pub params: Value,
@@ -178,6 +192,7 @@ fn decode_params<P: DeserializeOwned>(params: &Value) -> Result<P, ErrorObject> 
 pub struct Response {
     /// `None` only when the request could not be parsed far enough to read its id.
     pub id: Option<RequestId>,
+    /// The `result` member on success, the `error` member on failure.
     pub outcome: Result<Value, ErrorObject>,
 }
 
@@ -191,6 +206,7 @@ impl Response {
         Ok(Self { id: Some(id), outcome: Ok(serde_json::to_value(result)?) })
     }
 
+    /// A failed response carrying `error`.
     pub fn error(id: Option<RequestId>, error: ErrorObject) -> Self {
         Self { id, outcome: Err(error) }
     }
@@ -199,8 +215,11 @@ impl Response {
 /// Any message on the wire.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
+    /// Has `method` and `id`.
     Request(Request),
+    /// Has `method` but no `id`.
     Notification(Notification),
+    /// Has `result` or `error`.
     Response(Response),
 }
 

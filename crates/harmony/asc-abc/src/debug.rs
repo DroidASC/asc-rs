@@ -14,6 +14,7 @@ pub struct DebugInfo<'a> {
     /// Initial value of the line register: the source line of the method's
     /// first instruction.
     pub line_start: u32,
+    /// `num_params`: number of entries in [`DebugInfo::params`].
     pub num_params: u32,
     params_pos: usize,
     constant_pool: &'a [u8],
@@ -38,6 +39,7 @@ impl<'a> DebugInfo<'a> {
         Ok(DebugInfo { abc, off, line_start, num_params, params_pos, constant_pool, constant_pool_pos, line_program_idx })
     }
 
+    /// File offset of the debug info item.
     #[inline]
     pub fn offset(&self) -> u32 {
         self.off
@@ -166,8 +168,9 @@ pub struct LocalVar {
     /// The register; `-1` is the accumulator. Registers at or above the
     /// code item's `num_vregs` are arguments.
     pub reg: i32,
-    /// String offsets of the name and the type.
+    /// String offset of the name.
     pub name_off: u32,
+    /// String offset of the type descriptor.
     pub type_off: u32,
     /// String offset of the type signature, when the variable was started
     /// with one (`START_LOCAL_EXTENDED`).
@@ -183,28 +186,44 @@ pub struct LocalVar {
 /// arguments already fetched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineOp {
+    /// `ADVANCE_PC` (0x01): add the argument to the pc register.
     AdvancePc(u32),
+    /// `ADVANCE_LINE` (0x02): add the argument to the line register.
     AdvanceLine(i32),
     /// A local variable comes into scope in register `reg` (`-1`: the
     /// accumulator); name and type are string offsets.
     StartLocal {
+        /// Register; `-1` is the accumulator.
         reg: i32,
+        /// String offset of the variable name.
         name_off: u32,
+        /// String offset of the type descriptor.
         type_off: u32,
     },
+    /// `START_LOCAL_EXTENDED` (0x04): [`LineOp::StartLocal`] with a type signature.
     StartLocalExtended {
+        /// Register; `-1` is the accumulator.
         reg: i32,
+        /// String offset of the variable name.
         name_off: u32,
+        /// String offset of the type descriptor.
         type_off: u32,
+        /// String offset of the type signature.
         signature_off: u32,
     },
+    /// `END_LOCAL` (0x05): the variable in `reg` goes out of scope.
     EndLocal {
+        /// Register; `-1` is the accumulator.
         reg: i32,
     },
+    /// `RESTART_LOCAL` (0x06): the variable last ended in `reg` comes back into scope.
     RestartLocal {
+        /// Register; `-1` is the accumulator.
         reg: i32,
     },
+    /// `SET_PROLOGUE_END` (0x07): the next row is where the method body starts.
     SetPrologueEnd,
+    /// `SET_EPILOGUE_BEGIN` (0x08): the next row is where the epilogue starts.
     SetEpilogueBegin,
     /// String offset of the source file name, or 0.
     SetFile(u32),
@@ -215,7 +234,9 @@ pub enum LineOp {
     SetColumn(u32),
     /// A special opcode: advance pc and line, then emit a row.
     Special {
+        /// Added to the pc register, in bytes.
         pc_delta: u32,
+        /// Added to the line register.
         line_delta: i32,
     },
 }
@@ -281,7 +302,9 @@ impl Iterator for LineOps<'_> {
 /// A row of the line table: instructions from `pc` on belong to `line`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRow {
+    /// Code offset of the first instruction of the row.
     pub pc: u32,
+    /// Source line, as the line register holds it.
     pub line: u32,
     /// The last column set before this row; 0 when the program sets none.
     pub column: u32,

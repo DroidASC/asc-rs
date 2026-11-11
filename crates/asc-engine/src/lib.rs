@@ -74,34 +74,59 @@ pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
 pub use tiers::Busy;
 
+/// Every error an [`Engine`] query can return.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineError {
+    /// The APK (zip container) could not be opened or an entry not read.
     #[error(transparent)]
     Apk(#[from] asc_apk::ApkError),
+    /// A DEX entry is malformed.
     #[error(transparent)]
     Dex(#[from] asc_dex::DexError),
+    /// The reference search rejected the query or failed on a DEX.
     #[error(transparent)]
     Find(#[from] asc_findrefs::FindError),
+    /// The minimal DEX of a class could not be rebuilt.
     #[error(transparent)]
     Rebuild(#[from] asc_rebuild::RebuildError),
+    /// A class could not be disassembled to smali.
     #[error(transparent)]
     Smali(#[from] asc_smali::SmaliError),
+    /// A binary XML document (such as the manifest) could not be decoded.
     #[error(transparent)]
     Axml(#[from] asc_axml::AxmlError),
+    /// `resources.arsc` could not be decoded.
     #[error(transparent)]
     Arsc(#[from] asc_arsc::ArscError),
+    /// No DEX of the APK defines the class.
+    ///
     /// `hint` (empty, or starting with `:` / `;`) says why and what to try.
     #[error("class {class} not found in APK{hint}")]
-    ClassNotFound { class: String, hint: String },
+    ClassNotFound {
+        /// The class descriptor that was looked up.
+        class: String,
+        /// Appended to the message as is.
+        hint: String,
+    },
+    /// The query is invalid or names something the APK does not have; the
+    /// message is meant for the user.
     #[error("{0}")]
     Query(String),
+    /// A DEX entry is malformed in a way only noticed past its header.
     #[error("{dex}: {reason}")]
-    BadDex { dex: String, reason: String },
+    BadDex {
+        /// The entry (or logical DEX) name.
+        dex: String,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// A worker thread panicked; the payload names what it was processing.
     #[error("worker panicked while processing {0}")]
     WorkerPanic(String),
 }
 
+/// The result type of the engine's fallible operations.
 pub type Result<T> = std::result::Result<T, EngineError>;
 
 /// Shared inflated bytes of a DEX (possibly one logical DEX of a container).
@@ -111,7 +136,9 @@ pub type DexBytes = Arc<DexData>;
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct ClassHit {
+    /// The DEX entry name (`classes2.dex`, or a logical DEX of a container).
     pub dex_name: String,
+    /// Its inflated bytes.
     pub dex: DexBytes,
     /// In a program, the DEX files of other archives that define the class
     /// too (the hit is the first archive's, in program order).
@@ -122,7 +149,9 @@ pub struct ClassHit {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct ClassSource {
+    /// The DEX entry that defines the class.
     pub dex_name: String,
+    /// The class rendered as smali.
     pub source: String,
     /// The minimal DEX containing the class and its `$` nested classes,
     /// or `None` when the class could not be
@@ -146,7 +175,9 @@ pub struct ClassSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RefResult {
+    /// The DEX entry the row comes from.
     pub dex_name: String,
+    /// The method's index in that DEX's method_ids table.
     pub method_idx: u32,
     /// `Lcls;->name`
     pub method: String,
@@ -196,6 +227,7 @@ pub enum RefContext {
 pub struct FindOptions {
     /// One row per method (with every matched constant) instead of one per instruction.
     pub aggregate: bool,
+    /// How much code to return with each row.
     pub context: RefContext,
 }
 
@@ -228,7 +260,12 @@ pub enum Matched {
     /// A type descriptor, `Lcls;->name(params)ret` or `Lcls;->name:type`.
     Symbol(String),
     /// A field symbol and how its instruction uses it.
-    Field { symbol: String, access: FieldAccess },
+    Field {
+        /// `Lcls;->name:type`.
+        symbol: String,
+        /// Whether the instruction reads or writes it.
+        access: FieldAccess,
+    },
 }
 
 impl Matched {
@@ -286,15 +323,21 @@ impl RefResult {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RefBatch {
+    /// The APK entry searched.
     pub entry_name: String,
+    /// The rows found in it.
     pub results: Vec<RefResult>,
     /// The rows as text instead, for [`Engine::find_refs_text`] (`results`
     /// is then empty).
     pub text: Option<TextRows>,
+    /// Microseconds spent getting the DEX bytes (inflating or loading them).
     pub inflate_us: u128,
+    /// Microseconds spent searching them.
     pub search_us: u128,
     /// Where the bytes came from: `inflate`, `memory`, `disk` or `stored`.
     pub source: &'static str,
+    /// Why (part of) the entry could not be searched; `;`-separated for the
+    /// logical DEX files of a container.
     pub error: Option<String>,
 }
 
@@ -321,8 +364,11 @@ impl RefBatch {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RefSummary {
+    /// DEX entries searched.
     pub entries: usize,
+    /// Rows over all entries.
     pub total_results: usize,
+    /// Wall-clock microseconds of the whole run.
     pub total_us: u128,
     /// What the search left out on purpose, e.g. a supertype method a
     /// dispatch set did not follow; one line each, for `#` lines or hints.
@@ -341,7 +387,8 @@ pub struct CacheConfig {
     /// runs ([`MemoryPolicy::share`]), instead of a fixed capacity.
     pub memory_auto: Option<MemoryPolicy>,
     /// Heap queued disk writes may hold before new ones are deferred
-    /// ([`WriteJob::defer`]); a memory cache's budget lowers it further.
+    /// (an L1 entry is inflated again when its turn comes, L2 tables are
+    /// dropped); a memory cache's budget lowers it further.
     pub write_queue_bytes: usize,
     /// Disk writer threads (`None`: [`CacheConfig::auto_writers`]).
     pub writers: Option<usize>,
@@ -472,8 +519,11 @@ impl Drop for SharedCache {
 /// bytes are remapped from the disk cache (same bytes, so still valid).
 #[non_exhaustive]
 pub struct LogicalDex {
+    /// The entry name, or `entry!classesN.dex` for a container's logical DEX.
     pub name: String,
+    /// Its bytes (the entry's own when it is not a container).
     pub data: DexBytes,
+    /// Locator tables built for it on first search.
     pub state: Arc<SearchState>,
     persisted: Arc<tiers::Persisted>,
 }
@@ -481,7 +531,9 @@ pub struct LogicalDex {
 /// A cached inflated entry.
 #[non_exhaustive]
 pub struct CachedEntry {
+    /// The APK entry name.
     pub name: String,
+    /// The inflated entry.
     pub data: DexBytes,
     logical: OnceLock<Vec<LogicalDex>>,
 }
@@ -970,11 +1022,14 @@ impl Drop for InflightGuard<'_> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CacheStats {
+    /// Entries served from the in-memory LRU.
     pub memory_hits: u64,
+    /// Entries mapped from the disk cache (L1) instead of inflated.
     pub disk_hits: u64,
     /// Derived indexes mapped from L2: the locator tables of a logical DEX,
     /// and the class graph.
     pub derived_hits: u64,
+    /// Entries inflated from the APK.
     pub inflates: u64,
     /// Deflate entries a search left out: a streamed prefix showed it could
     /// not match them, so they were never inflated whole.
@@ -1121,11 +1176,13 @@ impl Engine {
         self
     }
 
+    /// Use `threads` worker threads per search (or pick them automatically).
     pub fn with_threads(mut self, threads: impl Into<Threads>) -> Engine {
         self.threads = threads.into();
         self
     }
 
+    /// Log timings and cache decisions of each query through the logger.
     pub fn with_debug(mut self, debug: bool) -> Engine {
         self.debug = debug;
         self
@@ -1178,6 +1235,7 @@ impl Engine {
         self
     }
 
+    /// The APK (or program) this engine queries.
     pub fn apk_path(&self) -> &Path {
         &self.apk_path
     }
@@ -1187,6 +1245,7 @@ impl Engine {
         self.threads.count()
     }
 
+    /// Cache activity of this engine so far.
     pub fn cache_stats(&self) -> CacheStats {
         CacheStats {
             memory_hits: self.stats.memory_hits.load(Ordering::Relaxed) as u64,
@@ -1265,6 +1324,11 @@ impl Engine {
 
     /// Open the APK, or reuse the one opened last while [`Apk::version_of`]
     /// finds the same files, sizes and times.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK cannot be opened or its central
+    /// directory read.
     pub fn open(&self) -> Result<Apk> {
         let mut opened = self.opened.lock_or_default();
         // Nothing to compare with on the first open: opening reads the
@@ -1299,7 +1363,13 @@ impl Engine {
         self.open().map(|apk| apk.notes().to_vec()).unwrap_or_default()
     }
 
-    /// Open the APK for [`Engine::search_target`].
+    /// Open the APK and list its DEX entries for
+    /// [`Engine::search_target_entry`].
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK cannot be opened or its central
+    /// directory read.
     pub fn search_target(&self) -> Result<SearchTarget> {
         let apk = self.open()?;
         let entries = apk.dex_entries()?;
@@ -1332,6 +1402,11 @@ impl Engine {
     }
 
     /// Root-level DEX entries, smallest compressed first.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK cannot be opened or its central
+    /// directory read.
     pub fn dex_entries(&self) -> Result<Vec<Entry>> {
         Ok(self.open()?.dex_entries()?)
     }
@@ -1354,6 +1429,11 @@ impl Engine {
 
     /// Inflated bytes of `entry`, through the caches when enabled. Stored
     /// entries are copied only when an in-memory cache wants to keep them.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the entry cannot be read or inflated, or
+    /// inflates past the [`InflateLimits`].
     pub fn entry_bytes(&self, apk: &Apk, key: Option<&ApkKey>, entry: &Entry) -> Result<DexBytes> {
         Ok(match load_entry(apk, key, entry, self.cache.as_deref(), &self.stats, None)?.0 {
             Loaded::Borrowed(c) => Arc::new(DexData::Owned(c.into_owned())),
@@ -1369,16 +1449,27 @@ impl Engine {
     ///
     /// A class several DEX files define resolves as a class loader would:
     /// the first archive of a program, then `classes.dex`, `classes2.dex`,
-    /// ... ([`load_ranks`]). Once a DEX defines it, DEX files after it are no
+    /// and so on. Once a DEX defines it, DEX files after it are no
     /// longer read; workers still inflating one at that moment finish on
     /// their own in the background. A program reads every archive, to name
     /// the others that define the class too ([`ClassHit::also_defined_in`]).
+    ///
+    /// A class no DEX defines is `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK cannot be opened, and the error of a
+    /// DEX that failed to read or parse when no other DEX defines the class.
     pub fn get_class_dex(&self, descriptor: &str) -> Result<Option<ClassHit>> {
         self.get_class_dex_cancellable(descriptor, &NOT_CANCELLED)
     }
 
     /// [`Engine::get_class_dex`] that stops, with `ApkError::Cancelled`, once
     /// `cancel` is raised.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::get_class_dex`], plus the cancellation.
     pub fn get_class_dex_cancellable(&self, descriptor: &str, cancel: &AtomicBool) -> Result<Option<ClassHit>> {
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled());
@@ -1552,10 +1643,23 @@ impl Engine {
     }
 
     /// Locate, rebuild and disassemble a class.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::ClassNotFound`] when no DEX defines it, the errors of
+    /// [`Engine::get_class_dex`], and [`EngineError::Rebuild`] /
+    /// [`EngineError::Smali`] when the class cannot be rendered at all (a class
+    /// the rebuild cannot represent is disassembled from the original DEX
+    /// instead, with a [`ClassSource::warning`]).
     pub fn get_class(&self, descriptor: &str) -> Result<ClassSource> {
         self.get_class_with(descriptor, SmaliOptions::default())
     }
 
+    /// [`Engine::get_class`] with smali rendering options.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::get_class`].
     pub fn get_class_with(&self, descriptor: &str, opts: SmaliOptions) -> Result<ClassSource> {
         self.get_class_method(descriptor, opts, None)
     }
@@ -1564,12 +1668,21 @@ impl Engine {
     /// `name(params)ret` is `method` (no fields) when one is given. A malformed
     /// signature is rejected before the APK is read; a class without such a
     /// method is an error. The rebuilt DEX still holds the whole class.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::get_class`], plus [`EngineError::Smali`] for a malformed
+    /// `method` or one the class does not have.
     pub fn get_class_method(&self, descriptor: &str, opts: SmaliOptions, method: Option<&str>) -> Result<ClassSource> {
         self.get_class_method_cancellable(descriptor, opts, method, &NOT_CANCELLED)
     }
 
     /// [`Engine::get_class_method`] that stops looking for the class, with
     /// `ApkError::Cancelled`, once `cancel` is raised.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::get_class_method`], plus the cancellation.
     pub fn get_class_method_cancellable(
         &self,
         descriptor: &str,
@@ -1624,12 +1737,23 @@ impl Engine {
 
     /// Search every DEX entry for references. `sink` receives one batch per
     /// entry in completion order. Returns a summary once all entries finish.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Query`] / [`EngineError::Find`] for an invalid query,
+    /// and [`EngineError::Apk`] when the APK cannot be opened. A DEX entry that
+    /// fails to load or search does not fail the run: its batch carries the
+    /// error in [`RefBatch::error`].
     pub fn find_refs(&self, query: &Query, mut sink: impl FnMut(RefBatch)) -> Result<RefSummary> {
         self.find_refs_with(query, true, &AtomicBool::new(false), &mut sink)
     }
 
     /// `find_refs` with control over aggregation and cancellation. An invalid
     /// pattern is reported once, up front, instead of once per DEX.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::find_refs`].
     pub fn find_refs_with(
         &self,
         query: &Query,
@@ -1641,6 +1765,10 @@ impl Engine {
     }
 
     /// `find_refs` with every option: aggregation, context, cancellation.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::find_refs`].
     pub fn find_refs_opts(
         &self,
         query: &Query,
@@ -1655,6 +1783,10 @@ impl Engine {
     /// text: each batch holds them in [`RefBatch::text`], exactly the
     /// [`RefResult::line`]s `find_refs` would give, with no structured rows.
     /// A broad query renders and replays much faster this way.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::find_refs`].
     pub fn find_refs_text(&self, query: &Query, cancel: &AtomicBool, sink: &mut dyn FnMut(RefBatch)) -> Result<RefSummary> {
         self.find_refs_shaped(query, FindOptions::default(), Shape::Text, cancel, sink)
     }
@@ -1762,6 +1894,11 @@ impl Engine {
     /// Fill the context of rows an earlier [`Engine::find_refs`] returned
     /// (typically one page of them): only their DEX files are loaded, from
     /// the cache when it holds them. Returns the entries that failed to load.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK cannot be opened or its central
+    /// directory read.
     pub fn fill_context(&self, rows: &mut [RefResult], ctx: RefContext) -> Result<Vec<String>> {
         if ctx == RefContext::None || rows.is_empty() {
             return Ok(Vec::new());
@@ -1884,6 +2021,11 @@ impl Engine {
     }
 
     /// Decode `AndroidManifest.xml`.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Apk`] when the APK or the manifest entry cannot be read,
+    /// [`EngineError::Axml`] when the manifest is not valid binary XML.
     pub fn manifest_xml(&self) -> Result<String> {
         let apk = self.open()?;
         let data = apk.read("AndroidManifest.xml")?;
@@ -2266,11 +2408,20 @@ impl RefResult {
 }
 
 /// Run a reference search over one DEX buffer and return structured results.
+///
+/// # Errors
+///
+/// [`EngineError::Dex`] when `buf` is not a valid DEX,
+/// [`EngineError::Find`] for an invalid query.
 pub fn find_refs_in_dex(dex_name: &str, buf: &[u8], query: &Query, aggregate: bool) -> Result<Vec<RefResult>> {
     find_refs_in_dex_opts(dex_name, buf, query, FindOptions { aggregate, context: RefContext::None })
 }
 
 /// [`find_refs_in_dex`] with a context.
+///
+/// # Errors
+///
+/// As [`find_refs_in_dex`].
 pub fn find_refs_in_dex_opts(dex_name: &str, buf: &[u8], query: &Query, opts: FindOptions) -> Result<Vec<RefResult>> {
     find_refs_in_dex_compiled(dex_name, buf, &CompiledQuery::new(query)?, opts)
 }
@@ -2473,16 +2624,31 @@ fn render_context(listing: &asc_smali::MethodListing, sites: &[RefSite], ctx: Re
 }
 
 /// Python `AscHandler.findrefs` equivalent: formatted lines for one DEX.
+///
+/// # Errors
+///
+/// As [`find_refs_in_dex`].
 pub fn find_refs_lines(dex_name: &str, buf: &[u8], query: &Query, aggregate: bool) -> Result<Vec<String>> {
     Ok(find_refs_in_dex(dex_name, buf, query, aggregate)?.iter().map(RefResult::line).collect())
 }
 
 /// Rebuild `descriptor` out of `buf` and disassemble it.
+///
+/// # Errors
+///
+/// [`EngineError::Dex`] when `buf` is not a valid DEX,
+/// [`EngineError::Rebuild`] when the class is missing or cannot be rebuilt,
+/// [`EngineError::Smali`] when it cannot be disassembled.
 pub fn decompile_dex_class(buf: &[u8], descriptor: &str, opts: SmaliOptions) -> Result<(Rebuilt, String)> {
     decompile_dex_class_method(buf, descriptor, opts, None)
 }
 
 /// [`decompile_dex_class`] rendering only `method` (`name(params)ret`) when given.
+///
+/// # Errors
+///
+/// As [`decompile_dex_class`], plus [`EngineError::Smali`] for a malformed
+/// `method` or one the class does not have.
 pub fn decompile_dex_class_method(buf: &[u8], descriptor: &str, opts: SmaliOptions, method: Option<&str>) -> Result<(Rebuilt, String)> {
     let dex = Dex::parse(buf)?;
     let rebuilt = asc_rebuild::rebuild_class(&dex, descriptor)?;

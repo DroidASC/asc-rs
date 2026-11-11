@@ -69,7 +69,9 @@ pub enum Want {
 /// Whether the call's result has to be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultWant {
+    /// `[ret=used]`: some path reads the result.
     Used,
+    /// `[ret=unused]`: no path reads the result.
     Unused,
 }
 
@@ -77,9 +79,21 @@ pub enum ResultWant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallConstraint {
     /// `[argN=VALUE]`, `[this=VALUE]`.
-    Value { slot: Slot, want: Want, certainty: Certainty },
+    Value {
+        /// The argument register judged.
+        slot: Slot,
+        /// The value it has to hold.
+        want: Want,
+        /// What an undetermined site does to the constraint.
+        certainty: Certainty,
+    },
     /// `[ret=used]`, `[ret=unused]`.
-    Result { want: ResultWant, certainty: Certainty },
+    Result {
+        /// Whether the result has to be read or ignored.
+        want: ResultWant,
+        /// What an undetermined site does to the constraint.
+        certainty: Certainty,
+    },
 }
 
 /// A [`Want`] ready to run.

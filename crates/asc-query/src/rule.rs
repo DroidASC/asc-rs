@@ -53,9 +53,11 @@ pub trait Grammar {
 pub enum Shape {
     /// TEXT only.
     Text,
-    /// A set (`{RULE}`, `{@PATH}`) or TEXT; `bare_file`: `@PATH` without
-    /// braces is a set too, not TEXT.
-    Set { bare_file: bool },
+    /// A set (`{RULE}`, `{@PATH}`) or TEXT.
+    Set {
+        /// `@PATH` without braces is a set too, not TEXT.
+        bare_file: bool,
+    },
 }
 
 /// What a `=` or `*` in front of a set asks for.
@@ -73,6 +75,7 @@ pub enum Mode {
 /// it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Text<'a> {
+    /// The trimmed text, borrowed from the rule.
     pub text: &'a str,
     /// Byte offset in the rule.
     pub at: usize,
@@ -81,6 +84,7 @@ pub struct Text<'a> {
 /// A parsed rule: its parts in the order written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule<'a, K> {
+    /// The parts joined by `&`; a parsed rule has at least one.
     pub parts: Vec<Part<'a, K>>,
 }
 
@@ -91,16 +95,22 @@ pub struct Part<'a, K> {
     pub at: usize,
     /// Written with `!`.
     pub negated: bool,
+    /// The kind named before the `:`.
     pub kind: K,
+    /// What follows the `:`.
     pub value: Value<'a, K>,
 }
 
 /// The value of a part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value<'a, K> {
+    /// TEXT, for the engine to read in the kind's own syntax.
     Text(Text<'a>),
+    /// A set, with what is written around it.
     Set {
+        /// The `=` or `*` in front, if any.
         mode: Mode,
+        /// The set's members.
         set: Set<'a, K>,
         /// What follows the set up to the end of the part (empty when nothing).
         tail: Text<'a>,
@@ -119,6 +129,7 @@ pub enum Set<'a, K> {
 /// The file of `{@PATH}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetFile<'a> {
+    /// The PATH after the `@`, as written.
     pub path: Text<'a>,
 }
 
@@ -154,6 +165,7 @@ impl SyntaxError {
         self.at + 1
     }
 
+    /// What is wrong, without the rule and column.
     pub fn message(&self) -> &str {
         &self.message
     }

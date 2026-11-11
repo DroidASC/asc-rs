@@ -23,10 +23,13 @@ pub struct PackInfo {
     raw: Value,
 }
 
+/// `summary.app`: bundle-wide facts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PackApp {
+    /// `bundleName`.
     pub bundle_name: Option<String>,
+    /// `bundleType`: `app`, `atomicService`, `shared`…
     pub bundle_type: Option<String>,
     /// `version.code`.
     pub version_code: Option<i64>,
@@ -34,6 +37,7 @@ pub struct PackApp {
     pub version_name: Option<String>,
 }
 
+/// An entry of `summary.modules`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PackModule {
@@ -41,9 +45,13 @@ pub struct PackModule {
     pub name: Option<String>,
     /// `distro.moduleType`.
     pub kind: Option<String>,
+    /// `distro.installationFree`: whether the module runs without installation.
     pub installation_free: Option<bool>,
+    /// `distro.deliveryWithInstall`: whether the module is installed with the app.
     pub delivery_with_install: Option<bool>,
+    /// `mainAbility`: the ability that starts first.
     pub main_ability: Option<String>,
+    /// `deviceType`: `phone`, `tablet`, `2in1`…
     pub device_types: Vec<String>,
     /// `apiVersion.compatible`: the minimum API level.
     pub api_compatible: Option<i64>,
@@ -51,46 +59,63 @@ pub struct PackModule {
     pub api_target: Option<i64>,
     /// `apiVersion.releaseType`.
     pub api_release_type: Option<String>,
+    /// `abilities`.
     pub abilities: Vec<PackAbility>,
+    /// `extensionAbilities`.
     pub extension_abilities: Vec<PackExtension>,
 }
 
+/// An entry of a module's `abilities`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PackAbility {
+    /// `name`.
     pub name: Option<String>,
+    /// `label`: usually a `$string:` resource reference.
     pub label: Option<String>,
 }
 
+/// An entry of a module's `extensionAbilities`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PackExtension {
+    /// `name`.
     pub name: Option<String>,
     /// Service widgets (cards) a form extension offers.
     pub forms: Vec<PackForm>,
 }
 
+/// An entry of an extension's `forms`: one service widget.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PackForm {
+    /// `name`.
     pub name: Option<String>,
     /// `type`: `JS` or `eTS`.
     pub kind: Option<String>,
+    /// `updateEnabled`: whether the widget refreshes periodically.
     pub update_enabled: Option<bool>,
+    /// `updateDuration`: the refresh period, in units of 30 minutes.
     pub update_duration: Option<i64>,
     /// `scheduledUpdateTime`: the time of day of the daily update, `10:30`.
     pub scheduled_update_time: Option<String>,
+    /// `defaultDimension`: the default size, e.g. `2*2`.
     pub default_dimension: Option<String>,
+    /// `supportDimensions`: every size offered.
     pub support_dimensions: Vec<String>,
 }
 
+/// An entry of `packages`: one HAP/HSP file of the bundle.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PackPackage {
     /// File stem of the package inside the bundle (`entry-default`).
     pub name: Option<String>,
+    /// `moduleType`: `entry`, `feature` or `shared`.
     pub module_type: Option<String>,
+    /// `deviceType`.
     pub device_types: Vec<String>,
+    /// `deliveryWithInstall`: whether the package is installed with the app.
     pub delivery_with_install: Option<bool>,
 }
 

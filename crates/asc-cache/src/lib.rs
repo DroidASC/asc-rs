@@ -34,8 +34,8 @@
 //!   keeps readers from seeing half a file while the system runs; what a
 //!   crash can leave is a file whose pages never reached the disk. Every
 //!   file carries a CRC-32 of its contents, checked when a file last
-//!   written before the current boot is first read ([`predates_boot`]):
-//!   a damaged one is deleted and read as a miss. L3 files are small and
+//!   written before the current boot (or at an unknown or future time) is
+//!   first read: a damaged one is deleted and read as a miss. L3 files are small and
 //!   always checked.
 //! * [`MemoryCache`] is a byte-bounded LRU of inflated entries for hosts that
 //!   stay alive between queries (MCP servers, the daemon).
@@ -125,6 +125,11 @@ impl ApkKey {
     /// directory (so a rewritten archive with the same size is not confused
     /// with the old one); for a program of several archives, from those of
     /// each and its path, in order.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`asc_apk::Apk::directories`], and
+    /// [`asc_apk::ApkError::Io`] when an archive's metadata cannot be read.
     pub fn for_apk(apk: &asc_apk::Apk) -> asc_apk::Result<ApkKey> {
         let ids = apk.directories()?;
         let mut key = 0u64;
@@ -157,6 +162,8 @@ impl ApkKey {
         ApkKey { id, archives: Arc::new([]) }
     }
 
+    /// The key as text: `<sanitised stem>-<16 hex digits>`, also the name of
+    /// the APK's cache directories.
     pub fn as_str(&self) -> &str {
         &self.id
     }
@@ -194,7 +201,9 @@ fn fnv64(bytes: &[u8]) -> u64 {
 /// Inflated bytes of one entry, either owned or mapped from the disk cache.
 #[non_exhaustive]
 pub enum DexData {
+    /// Inflated into memory.
     Owned(Vec<u8>),
+    /// Mapped read-only from a cache file or an uncompressed APK entry.
     Mapped(memmap2::Mmap),
 }
 
@@ -214,6 +223,11 @@ impl DexData {
     /// APK stores uncompressed, so a host keeping them gets file pages the
     /// OS can share and reclaim instead of a heap copy. The file must not
     /// change while mapped, the same contract as mapping the APK itself.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error opening or mapping the file, or
+    /// [`std::io::ErrorKind::UnexpectedEof`] when the region runs past its end.
     pub fn map_region(path: &Path, offset: u64, len: usize) -> std::io::Result<DexData> {
         let file = fs::File::open(path)?;
         if file.metadata()?.len() < offset.saturating_add(len as u64) {
@@ -232,15 +246,36 @@ impl AsRef<[u8]> for DexData {
     }
 }
 
+/// Why a disk cache operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CacheError {
+    /// A file system operation failed.
     #[error("cache io error at {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        /// The file or directory operated on.
+        path: PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
+    },
+    /// The directory exists but holds no cache marker, so it may hold
+    /// someone else's files.
     #[error("{path} is not a asc cache directory (no {tag} marker); refusing to touch it")]
-    NotACacheDir { path: PathBuf, tag: &'static str },
+    NotACacheDir {
+        /// The cache directory.
+        path: PathBuf,
+        /// The marker file name, [`CACHEDIR_TAG`].
+        tag: &'static str,
+    },
+    /// Writing would eat into the free space the automatic budget reserves
+    /// for the file system ([`auto_disk_reserve`]).
     #[error("{path}: too little free disk space left to cache {bytes} bytes")]
-    LowDiskSpace { path: PathBuf, bytes: u64 },
+    LowDiskSpace {
+        /// The cache directory.
+        path: PathBuf,
+        /// Size of the write that was refused.
+        bytes: u64,
+    },
 }
 
 fn io_err(path: &Path) -> impl Fn(std::io::Error) -> CacheError + '_ {
@@ -275,6 +310,7 @@ pub enum Tier {
 }
 
 impl Tier {
+    /// Every tier, L1 first.
     pub const ALL: [Tier; 3] = [Tier::Dex, Tier::Derived, Tier::Rendered];
 
     /// Name in a tier list (`dex,derived,rendered`).
@@ -286,6 +322,7 @@ impl Tier {
         }
     }
 
+    /// Name for reports, with its level (`L1 dex`).
     pub fn label(self) -> &'static str {
         match self {
             Tier::Dex => "L1 dex",
@@ -308,6 +345,7 @@ pub const SPILL_DIR: &str = "out";
 /// Absolute cap of L3, which also never takes more than
 /// 1/[`RENDERED_BUDGET_DIVISOR`] of the total budget.
 pub const RENDERED_MAX: u64 = 128 << 20;
+/// L3 never takes more than 1/`RENDERED_BUDGET_DIVISOR` of the total budget.
 pub const RENDERED_BUDGET_DIVISOR: u64 = 8;
 /// L2 never takes more than 1/[`DERIVED_BUDGET_DIVISOR`] of the total budget.
 pub const DERIVED_BUDGET_DIVISOR: u64 = 2;
@@ -374,7 +412,9 @@ impl AsRef<[u8]> for Derived {
 pub struct TierStats {
     /// APK keys with data in the tier.
     pub apks: usize,
+    /// Files in the tier.
     pub files: usize,
+    /// Bytes those files take.
     pub bytes: u64,
 }
 
@@ -410,6 +450,8 @@ pub const AUTO_DISK_UNKNOWN: u64 = 4 << 30;
 /// Smallest free space the automatic budget leaves on the file system; the
 /// reserve is the larger of this and [`AUTO_DISK_RESERVE_PERCENT`] of it.
 pub const AUTO_DISK_RESERVE_MIN: u64 = 1 << 30;
+/// Share of the file system's size, in percent, the automatic budget leaves
+/// free (at least [`AUTO_DISK_RESERVE_MIN`]).
 pub const AUTO_DISK_RESERVE_PERCENT: u64 = 5;
 
 /// Free space the automatic budget never writes into on a file system of
@@ -501,6 +543,7 @@ fn fs_space(_path: &Path) -> Option<(u64, u64)> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DiskBudget {
+    /// How the cache is bounded.
     pub capacity: DiskCapacity,
     /// Bytes the cache may hold right now.
     pub cap_bytes: u64,
@@ -569,6 +612,7 @@ impl DiskCache {
         self
     }
 
+    /// Whether `tier` is read and written ([`DiskCache::with_tiers`]).
     pub fn uses(&self, tier: Tier) -> bool {
         self.tiers[tier as usize]
     }
@@ -586,6 +630,8 @@ impl DiskCache {
         self.min_dex_bytes
     }
 
+    /// Whether an inflated entry of `len` bytes is worth an L1 file
+    /// ([`DiskCache::min_dex_bytes`]).
     pub fn admits_dex(&self, len: u64) -> bool {
         len >= self.min_dex_bytes
     }
@@ -613,15 +659,18 @@ impl DiskCache {
         self.with_capacity_mode(DiskCapacity::Fixed(cap_bytes))
     }
 
+    /// Bound the cache by `cap`.
     pub fn with_capacity_mode(mut self, cap: DiskCapacity) -> DiskCache {
         self.cap = cap;
         self
     }
 
+    /// How the cache is bounded.
     pub fn capacity_mode(&self) -> DiskCapacity {
         self.cap
     }
 
+    /// The cache directory.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -677,6 +726,10 @@ impl DiskCache {
     /// Map a cached entry if present and of the expected size (0: any).
     /// A file from before the current boot is checked against its CRC-32
     /// first; a damaged one is deleted.
+    ///
+    /// # Panics
+    ///
+    /// Never: the CRC is read from a trailer of fixed size.
     pub fn get(&self, key: &ApkKey, entry_name: &str, expected_len: u64) -> Option<DexData> {
         if !self.uses(Tier::Dex) {
             return None;
@@ -711,6 +764,12 @@ impl DiskCache {
     /// Store an inflated entry (atomic rename; concurrent writers are
     /// harmless). Does not evict: call [`DiskCache::evict`] after a batch of
     /// puts.
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::NotACacheDir`] when the directory is not this cache's,
+    /// [`CacheError::LowDiskSpace`] when the write would eat into the free
+    /// space reserve, [`CacheError::Io`] when writing fails.
     pub fn put(&self, key: &ApkKey, entry_name: &str, bytes: &[u8]) -> Result<(), CacheError> {
         if !self.uses(Tier::Dex) {
             return Ok(());
@@ -725,6 +784,10 @@ impl DiskCache {
     /// producer's format `version`, as [`DiskCache::put_derived`] stored it.
     /// A file of another version, a damaged header or a truncated payload
     /// is a miss.
+    ///
+    /// # Panics
+    ///
+    /// Never: the header fields are read from a slice of the full header size.
     pub fn get_derived(&self, key: &ApkKey, name: &str, kind: &str, version: u32) -> Option<Derived> {
         if !self.uses(Tier::Derived) {
             return None;
@@ -753,6 +816,10 @@ impl DiskCache {
     /// Store an L2 index (see [`DiskCache::get_derived`]). `build_cost` is
     /// what rebuilding it takes: eviction keeps the indexes that save the
     /// most time per byte.
+    ///
+    /// # Errors
+    ///
+    /// As [`DiskCache::put`].
     pub fn put_derived(
         &self,
         key: &ApkKey,
@@ -807,6 +874,10 @@ impl DiskCache {
     }
 
     /// Store an L3 result (see [`DiskCache::get_rendered`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`DiskCache::put`].
     pub fn put_rendered(&self, key: &ApkKey, query: &str, payload: &[u8]) -> Result<(), CacheError> {
         if !self.uses(Tier::Rendered) {
             return Ok(());
@@ -826,6 +897,10 @@ impl DiskCache {
     /// of an APK deleted or replaced since (evicted first) from live ones.
     /// Cheap to repeat; hosts call it once per APK. A program's archives are
     /// recorded one by one, each under its own key.
+    ///
+    /// # Errors
+    ///
+    /// As [`DiskCache::put`].
     pub fn note_source(&self, key: &ApkKey, apk_path: &Path) -> Result<(), CacheError> {
         if !key.archives.is_empty() {
             return key.archives.iter().try_for_each(|a| self.note_source(&a.key, &a.path));
@@ -896,6 +971,11 @@ impl DiskCache {
     /// Delete every cached entry of every tier (and nothing else). Returns
     /// the number of bytes freed. Refuses to run on a directory that is not
     /// a cache directory (see [`CACHEDIR_TAG`]).
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::NotACacheDir`] for a foreign directory, and
+    /// [`CacheError::Io`] when a file or directory cannot be removed.
     pub fn clear(&self) -> Result<u64, CacheError> {
         if !self.dir.exists() {
             return Ok(0);
@@ -921,6 +1001,11 @@ impl DiskCache {
     /// [`CACHEDIR_TAG`]), [`CacheError::NotACacheDir`] otherwise. Hosts call
     /// this up front: [`DiskCache::put`] refuses such a directory too, but its
     /// errors are usually swallowed by a background writer.
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::NotACacheDir`] when the directory exists without the
+    /// marker.
     pub fn check_usable(&self) -> Result<(), CacheError> {
         if self.is_cache_dir() { Ok(()) } else { Err(self.not_a_cache_dir()) }
     }
@@ -1133,10 +1218,10 @@ impl DiskCache {
 
 impl DiskCache {
     /// [`DiskCache::evict`], skipped when another walk happened less than
-    /// [`EVICT_INTERVAL`] ago and this handle has written less than
-    /// 1/[`EVICT_WRITE_DIVISOR`] of the budget since its own last walk. For
-    /// hosts that evict after every burst of writes: a process per query
-    /// would otherwise walk the whole cache thousands of times over a batch.
+    /// 5 s ago and this handle has written less than 1/16 of the budget
+    /// since its own last walk. For hosts that evict after every burst of
+    /// writes: a process per query would otherwise walk the whole cache
+    /// thousands of times over a batch.
     pub fn evict_lazily(&self) {
         if !self.recently_evicted() {
             self.evict();
@@ -1324,6 +1409,7 @@ pub struct MemoryCache<T> {
 }
 
 impl<T> MemoryCache<T> {
+    /// An empty cache holding at most `cap_bytes` bytes of entries.
     pub fn new(cap_bytes: usize) -> Self {
         MemoryCache { cap_bytes, used: 0, reserved: 0, clock: 0, map: HashMap::new() }
     }
@@ -1333,6 +1419,7 @@ impl<T> MemoryCache<T> {
         self.clock
     }
 
+    /// The entry cached under `entry_name`, marked most recently used.
     pub fn get(&mut self, key: &ApkKey, entry_name: &str) -> Option<Arc<T>> {
         let tick = self.tick();
         let slot = self.map.get_mut(key)?.get_mut(entry_name)?;
@@ -1340,6 +1427,9 @@ impl<T> MemoryCache<T> {
         Some(Arc::clone(&slot.value))
     }
 
+    /// Cache `value` under `entry_name`, charged at `size` bytes, replacing
+    /// any previous entry and evicting least recently used ones past the
+    /// capacity.
     pub fn insert(&mut self, key: &ApkKey, entry_name: &str, value: Arc<T>, size: usize) {
         let tick = self.tick();
         let per_apk = self.map.entry(key.clone()).or_default();
@@ -1405,10 +1495,12 @@ impl<T> MemoryCache<T> {
             .map(|(_, k, n)| (k.clone(), n.clone()))
     }
 
+    /// Bytes charged for the cached entries (the reserve not included).
     pub fn used_bytes(&self) -> usize {
         self.used
     }
 
+    /// Bytes the entries and the reserve may take together.
     pub fn capacity_bytes(&self) -> usize {
         self.cap_bytes
     }
@@ -1443,10 +1535,12 @@ impl<T> MemoryCache<T> {
         self.map.values().flat_map(|per| per.values().map(|s| &s.value))
     }
 
+    /// Number of cached entries, over every APK.
     pub fn len(&self) -> usize {
         self.map.values().map(HashMap::len).sum()
     }
 
+    /// Whether no entry is cached.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -1458,6 +1552,7 @@ impl<T> MemoryCache<T> {
         freed
     }
 
+    /// Drop every entry (the reserve is kept).
     pub fn clear(&mut self) {
         self.map.clear();
         self.used = 0;

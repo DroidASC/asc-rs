@@ -5,16 +5,22 @@ use crate::insn_locator::InsnLocator;
 /// Which index table a query targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefKind {
+    /// `string_ids` (`const-string[/jumbo]`).
     String,
+    /// `type_ids` (`const-class`, `check-cast`, `new-instance`, ...).
     Type,
+    /// `method_ids` (`invoke-*`).
     Method,
+    /// `field_ids` (`iget*` / `iput*` / `sget*` / `sput*`).
     Field,
 }
 
 /// How a Dalvik field instruction uses its referenced field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FieldAccess {
+    /// `iget*` / `sget*`.
     Read,
+    /// `iput*` / `sput*`.
     Write,
 }
 
@@ -29,6 +35,7 @@ impl FieldAccess {
         }
     }
 
+    /// Lower-case name used in query syntax and output (`read` / `write`).
     pub const fn as_str(self) -> &'static str {
         match self {
             FieldAccess::Read => "read",
@@ -38,6 +45,7 @@ impl FieldAccess {
 }
 
 impl RefKind {
+    /// Lower-case name used in output (`string`, `type`, `method`, `field`).
     pub fn as_str(self) -> &'static str {
         match self {
             RefKind::String => "string",
@@ -55,6 +63,7 @@ pub struct IdxSet {
 }
 
 impl IdxSet {
+    /// Add `idx`, growing the bitset to cover it.
     pub fn insert(&mut self, idx: u32) {
         let word = (idx >> 6) as usize;
         if word >= self.bits.len() {
@@ -63,6 +72,7 @@ impl IdxSet {
         self.bits[word] |= 1u64 << (idx & 63);
     }
 
+    /// Whether `idx` is in the set.
     #[inline]
     pub fn contains(&self, idx: u32) -> bool {
         match self.bits.get((idx >> 6) as usize) {
@@ -71,6 +81,7 @@ impl IdxSet {
         }
     }
 
+    /// Whether no index is set.
     pub fn is_empty(&self) -> bool {
         self.bits.iter().all(|&w| w == 0)
     }
@@ -126,6 +137,7 @@ pub struct CodeScanner<'l> {
 }
 
 impl<'l> CodeScanner<'l> {
+    /// A scanner over the code region `insn` was built for.
     pub fn new(insn: &'l InsnLocator) -> Self {
         CodeScanner { insn }
     }

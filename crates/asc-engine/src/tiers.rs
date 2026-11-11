@@ -481,6 +481,12 @@ static REGISTRATION: Mutex<Registration> = Mutex::new(Registration { caches: 0, 
 pub struct Busy(());
 
 impl Busy {
+    /// Mark the process busy until the guard is dropped.
+    ///
+    /// # Panics
+    ///
+    /// When the process registration mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn enter() -> Busy {
         let mut reg = REGISTRATION.lock().expect("process registration mutex poisoned");
         reg.requests += 1;
