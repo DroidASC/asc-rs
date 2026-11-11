@@ -198,16 +198,16 @@ pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Op
     }
     let class = match class {
         Some(c) => Some(match c.strip_prefix('~') {
-            Some(f) => ClassQuery { pattern: normalize_class_query(f, true)?, precise: false },
-            None if fuzzy_class => ClassQuery { pattern: normalize_class_query(c, true)?, precise: false },
+            Some(f) => ClassQuery::fuzzy(normalize_class_query(f, true)?),
+            None if fuzzy_class => ClassQuery::fuzzy(normalize_class_query(c, true)?),
             None => match simple_class_pattern(c) {
-                Some(pattern) => ClassQuery { pattern, precise: false },
-                None => ClassQuery { pattern: format_class_name(c)?, precise: true },
+                Some(pattern) => ClassQuery::fuzzy(pattern),
+                None => ClassQuery::exact(format_class_name(c)?),
             },
         }),
         None => None,
     };
-    Ok(MemberQuery { class, name: name.map(String::from), exact_name, signature })
+    Ok(MemberQuery::default().with_class(class).with_name(name.map(String::from)).with_exact_name(exact_name).with_signature(signature))
 }
 
 /// The findrefs kinds, as conditions spell them (`literal` is a string
@@ -407,12 +407,11 @@ pub(crate) fn exact_method(signature: &str) -> Result<MemberQuery> {
     let bad = || EngineError::Query(format!("not a method signature: {signature:?} (want Lcls;->name(params)ret)"));
     let (class, member) = signature.trim().split_once("->").ok_or_else(bad)?;
     let p = member.find('(').ok_or_else(bad)?;
-    Ok(MemberQuery {
-        class: Some(ClassQuery { pattern: class.to_string(), precise: true }),
-        name: Some(member[..p].to_string()),
-        exact_name: true,
-        signature: Some(parse_signature(&member[p..], true)?),
-    })
+    Ok(MemberQuery::default()
+        .with_class(Some(ClassQuery::exact(class.to_string())))
+        .with_name(Some(member[..p].to_string()))
+        .with_exact_name(true)
+        .with_signature(Some(parse_signature(&member[p..], true)?)))
 }
 
 /// Parse a one-word findrefs condition, as the CLI's compound and rule
@@ -461,12 +460,12 @@ mod tests {
         assert!(member_query("method", None, false, None, false).is_err());
         let q = member_query("method", Some("com.poc.Main"), false, Some("on"), false).unwrap();
         assert!(!q.exact_name);
-        assert_eq!(q.class.unwrap(), ClassQuery { pattern: "Lcom/poc/Main;".into(), precise: true });
+        assert_eq!(q.class.unwrap(), ClassQuery::exact("Lcom/poc/Main;"));
         assert!(member_query("field", None, false, Some("f"), true).unwrap().exact_name);
     }
 
     fn precise(c: &str) -> Option<ClassQuery> {
-        Some(ClassQuery { pattern: c.into(), precise: true })
+        Some(ClassQuery::exact(c))
     }
 
     #[test]
@@ -493,8 +492,7 @@ mod tests {
 
     #[test]
     fn member_queries_from_any_spelling_agree() {
-        let want =
-            MemberQuery { class: precise("Landroid/webkit/WebView;"), name: Some("loadUrl".into()), exact_name: false, signature: None };
+        let want = MemberQuery::default().with_class(precise("Landroid/webkit/WebView;")).with_name(Some("loadUrl".into()));
         for spec in [
             "Landroid/webkit/WebView;->loadUrl",
             "android.webkit.WebView.loadUrl",
@@ -507,7 +505,7 @@ mod tests {
         assert_eq!(member_query("method", Some("Landroid/webkit/WebView;->loadUrl"), false, None, false).unwrap(), want);
         assert_eq!(member_query("method", Some("android.webkit.WebView"), false, Some("loadUrl"), false).unwrap(), want);
         let class_only = member_query("method", None, false, Some("android.webkit.WebView"), false).unwrap();
-        assert_eq!(class_only, MemberQuery { class: precise("Landroid/webkit/WebView;"), name: None, exact_name: false, signature: None });
+        assert_eq!(class_only, MemberQuery::default().with_class(precise("Landroid/webkit/WebView;")));
         // A signature or `=` makes the name exact; an explicit class wins.
         let q = member_query("method", None, false, Some("Lc;->run(I)V"), false).unwrap();
         assert_eq!((q.name.as_deref(), q.exact_name), (Some("run"), true));
@@ -516,16 +514,11 @@ mod tests {
         let q = member_query("method", None, false, Some("~Foo->=bar"), false).unwrap();
         assert_eq!(
             q,
-            MemberQuery {
-                class: Some(ClassQuery { pattern: "Foo".into(), precise: false }),
-                name: Some("bar".into()),
-                exact_name: true,
-                signature: None
-            }
+            MemberQuery::default().with_class(Some(ClassQuery::fuzzy("Foo"))).with_name(Some("bar".into())).with_exact_name(true)
         );
         // Without a package: that simple name in any package.
         let q = member_query("method", None, false, Some("WebView.loadUrl"), false).unwrap();
-        assert_eq!(q.class, Some(ClassQuery { pattern: "[/L]WebView;\\x00".into(), precise: false }));
+        assert_eq!(q.class, Some(ClassQuery::fuzzy("[/L]WebView;\\x00")));
         let e = member_query("method", None, false, Some(" "), false).unwrap_err().to_string();
         assert!(e.contains("needs a class or a method name"), "{e}");
     }

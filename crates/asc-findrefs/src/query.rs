@@ -93,6 +93,7 @@ pub(crate) enum Parts {
 }
 
 /// The compiled parts of a [`Query::All`].
+#[non_exhaustive]
 pub struct Compound {
     /// Every one must match in a method.
     pub all: Vec<CompiledQuery>,

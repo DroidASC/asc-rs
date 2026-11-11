@@ -16,7 +16,7 @@ pub fn run(data: &[u8]) {
         let _ = asc_smali::disassemble_class_def(&dex, index, Options::default());
         let Ok(class) = dex.class_def(index) else { continue };
         let Ok(descriptor) = dex.type_descriptor(class.class_idx) else { continue };
-        let _ = asc_smali::disassemble_class(&dex, &descriptor, Options { line_numbers: false, param_names: false });
+        let _ = asc_smali::disassemble_class(&dex, &descriptor, Options::debug_info(false));
         if let Ok(data) = dex.class_data(class.class_data_off) {
             for method in data.methods().take(crate::MAX_ITEMS as usize) {
                 if let Ok(listing) = asc_smali::disassemble_method(&dex, method.method_idx, Options::default()) {

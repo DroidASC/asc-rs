@@ -8,11 +8,9 @@ use asc_findrefs::{
 use asc_fixture::mutate::mutants;
 
 fn member(class: Option<&str>, name: Option<&str>) -> MemberQuery {
-    MemberQuery {
-        class: class.map(|pattern| ClassQuery { pattern: pattern.into(), precise: pattern.ends_with(';') }),
-        name: name.map(Into::into),
-        ..MemberQuery::default()
-    }
+    MemberQuery::default()
+        .with_class(class.map(|pattern| if pattern.ends_with(';') { ClassQuery::exact(pattern) } else { ClassQuery::fuzzy(pattern) }))
+        .with_name(name.map(Into::into))
 }
 
 fn queries() -> Vec<CompiledQuery> {

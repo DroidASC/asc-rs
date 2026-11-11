@@ -20,6 +20,7 @@ use std::rc::Rc;
 pub use format::{escape_string, field_signature, method_signature, proto_descriptor};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SmaliError {
     #[error(transparent)]
     Dex(#[from] asc_dex::DexError),
@@ -51,6 +52,7 @@ pub type Result<T> = std::result::Result<T, SmaliError>;
 
 /// Rendering options.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Options {
     /// Emit `.line` directives from debug info.
     pub line_numbers: bool,
@@ -61,6 +63,26 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options { line_numbers: true, param_names: true }
+    }
+}
+
+impl Options {
+    /// Both kinds of debug info (`on`) or neither, as a front end's one
+    /// debug-info switch asks.
+    pub fn debug_info(on: bool) -> Options {
+        Options { line_numbers: on, param_names: on }
+    }
+
+    /// These options with `.line` directives on or off.
+    #[must_use]
+    pub fn line_numbers(self, line_numbers: bool) -> Options {
+        Options { line_numbers, ..self }
+    }
+
+    /// These options with `.param` names on or off.
+    #[must_use]
+    pub fn param_names(self, param_names: bool) -> Options {
+        Options { param_names, ..self }
     }
 }
 
@@ -108,6 +130,7 @@ pub fn disassemble_class_def(dex: &Dex<'_>, index: u32, opts: Options) -> Result
 /// One method rendered on its own (`.method` .. `.end method`), with the line
 /// each instruction starts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MethodListing {
     pub text: String,
     /// `(pc, line)` per instruction in pc order: `pc` in code units from the

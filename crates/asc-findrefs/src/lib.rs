@@ -48,6 +48,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// Errors from reference search.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FindError {
     #[error(transparent)]
     Dex(#[from] asc_dex::DexError),
@@ -61,6 +62,7 @@ pub type Result<T> = std::result::Result<T, FindError>;
 
 /// Class part of a member query.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClassQuery {
     /// Exact Dalvik descriptor when `precise`, otherwise a fuzzy pattern.
     pub pattern: String,
@@ -69,6 +71,7 @@ pub struct ClassQuery {
 
 /// Method or field query: at least one of `class` / `name` must be set.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct MemberQuery {
     pub class: Option<ClassQuery>,
     /// Fuzzy member name (regex when `class` is absent or fuzzy, substring
@@ -81,6 +84,44 @@ pub struct MemberQuery {
     /// field of one type. Checked against the id tables, before any code is
     /// scanned.
     pub signature: Option<MemberSignature>,
+}
+
+impl ClassQuery {
+    /// The class of exactly this Dalvik descriptor (`Lcom/example/Main;`).
+    pub fn exact(descriptor: impl Into<String>) -> ClassQuery {
+        ClassQuery { pattern: descriptor.into(), precise: true }
+    }
+
+    /// The classes whose descriptor matches this fuzzy pattern.
+    pub fn fuzzy(pattern: impl Into<String>) -> ClassQuery {
+        ClassQuery { pattern: pattern.into(), precise: false }
+    }
+}
+
+impl MemberQuery {
+    /// This query with the class constraint `class`.
+    #[must_use]
+    pub fn with_class(self, class: Option<ClassQuery>) -> MemberQuery {
+        MemberQuery { class, ..self }
+    }
+
+    /// This query with the member name `name` (see [`MemberQuery::name`](#structfield.name)).
+    #[must_use]
+    pub fn with_name(self, name: Option<String>) -> MemberQuery {
+        MemberQuery { name, ..self }
+    }
+
+    /// This query matching the name exactly (`true`) or as a pattern.
+    #[must_use]
+    pub fn with_exact_name(self, exact_name: bool) -> MemberQuery {
+        MemberQuery { exact_name, ..self }
+    }
+
+    /// This query restricted to members of `signature`.
+    #[must_use]
+    pub fn with_signature(self, signature: Option<MemberSignature>) -> MemberQuery {
+        MemberQuery { signature, ..self }
+    }
 }
 
 /// The signature constraint of a [`MemberQuery`].
@@ -301,6 +342,7 @@ impl ClassRelation {
 
 /// One instruction that references a located index.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Hit {
     /// Absolute byte offset of the instruction in the DEX.
     pub offset: u32,

@@ -19,6 +19,7 @@ pub(crate) const RUNTIME_DIR_ENV: &str = "ASC_RUNTIME_DIR";
 
 /// Another registered process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProcessUsage {
     pub pid: u32,
     /// Bytes its memory cache held at its last update.
@@ -28,6 +29,14 @@ pub struct ProcessUsage {
     /// Whether it is serving a request; `None` from versions that did not
     /// say (only the update's age tells).
     pub busy: Option<bool>,
+}
+
+impl ProcessUsage {
+    /// Process `pid` holding `bytes`, last updated `idle` ago, `busy` as it
+    /// said. For hosts that weigh processes (and their tests).
+    pub fn new(pid: u32, bytes: u64, idle: Duration, busy: Option<bool>) -> ProcessUsage {
+        ProcessUsage { pid, bytes, idle, busy }
+    }
 }
 
 /// This process's entry in a registry directory; removed on drop.

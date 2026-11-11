@@ -31,12 +31,7 @@ fn search(engine: &Engine, q: &Query) -> (Vec<String>, u64) {
 /// Queries, and whether the id tables and strings alone rule each out.
 fn queries() -> Vec<(Query, bool)> {
     let method = |class: Option<&str>, name: &str| {
-        Query::Method(MemberQuery {
-            class: class.map(|c| ClassQuery { pattern: c.into(), precise: true }),
-            name: Some(name.into()),
-            exact_name: false,
-            signature: None,
-        })
+        Query::Method(MemberQuery::default().with_class(class.map(ClassQuery::exact)).with_name(Some(name.into())))
     };
     vec![
         (Query::String("tok".into()), false),

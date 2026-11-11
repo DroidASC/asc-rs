@@ -45,7 +45,7 @@ pub fn run(data: &[u8]) {
     }
 
     let mut analyzer = Analyzer::new();
-    let method = MethodCode { insns: code, registers: u16::from(*registers), ins: u16::from(*ins), catches: &catches };
+    let method = MethodCode::new(code, u16::from(*registers), u16::from(*ins), &catches);
     if let Some(mut values) = analyzer.analyze(method) {
         for &pc in &pcs {
             let _ = values.args(pc);

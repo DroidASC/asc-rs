@@ -44,6 +44,8 @@ impl RefSet {
                 self.methods.insert(idx);
             }
             RefKind::MethodHandle => self.method_handles = true,
+            // An id kind this crate does not copy yet: as unsupported as a method handle.
+            _ => self.method_handles = true,
         }
     }
 

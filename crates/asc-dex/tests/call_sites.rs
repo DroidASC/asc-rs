@@ -30,7 +30,7 @@ fn lambda_call_sites_bootstrap_through_lambda_metafactory() {
     let metafactory = (MethodHandleKind::InvokeStatic, "Ljava/lang/invoke/LambdaMetafactory;->metafactory".to_string());
 
     // `(a, b) -> a * b + x` captured as an IntBinaryOperator.
-    let CallSite { bootstrap, method_name, method_type, extra_args } = dex.call_site(0).unwrap();
+    let CallSite { bootstrap, method_name, method_type, extra_args, .. } = dex.call_site(0).unwrap();
     assert_eq!(handle(&dex, bootstrap), metafactory);
     assert_eq!(dex.string(method_name).unwrap(), "applyAsInt");
     assert_eq!(proto(&dex, method_type), "(I)Ljava/util/function/IntBinaryOperator;");

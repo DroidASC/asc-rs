@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn share_splits_between_processes_unless_told_not_to() {
-        let other = |bytes| ProcessUsage { pid: 1, bytes, idle: Duration::ZERO, busy: None };
+        let other = |bytes| ProcessUsage::new(1, bytes, Duration::ZERO, None);
         let p = MemoryPolicy { ceiling: 8 << 30, ..MemoryPolicy::default() };
         assert_eq!(p.share(Some(3 * GIB), GIB, &[]), GIB as usize);
         let others = vec![other(GIB / 8); 7];

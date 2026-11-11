@@ -1077,7 +1077,7 @@ fn without_path(err: &EngineError) -> String {
 }
 
 fn open_archive(path: &Path) -> Result<Apk> {
-    let limits = Limits { max_entry_bytes: MAX_INFLATED_BYTES, ..Limits::default() };
+    let limits = Limits::default().max_entry_bytes(MAX_INFLATED_BYTES);
     Ok(Apk::open(path)?.with_limits(limits))
 }
 

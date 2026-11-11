@@ -27,6 +27,7 @@ use asc_dex::{Dex, Result, class_data, map_type};
 
 /// Method(s) owning an instruction offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MethodRef {
     Single(u32),
     /// Several methods share the same `code_item` (R8 deduplication).

@@ -24,6 +24,7 @@ pub const VALUE_BOOLEAN: u8 = 0x1f;
 
 /// Decoded `encoded_value`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum EncodedValue {
     /// Numeric primitive kept in its raw little-endian form (`kind` is the
     /// value type, `raw` has `value_arg + 1` bytes).
@@ -373,6 +374,7 @@ pub fn visit_annotation_refs(ann: &EncodedAnnotation, visitor: &mut dyn FnMut(Re
 
 /// Kinds of index references found in encoded values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RefKind {
     String,
     Type,

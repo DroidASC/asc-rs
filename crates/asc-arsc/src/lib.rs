@@ -60,6 +60,7 @@ pub use asc_axml::{
 };
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ArscError {
     #[error("not a resource table")]
     NotArsc,
@@ -263,6 +264,7 @@ pub struct StagedAlias {
 
 /// One `ResTable_package`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Package {
     pub id: u8,
     pub name: String,
@@ -330,6 +332,7 @@ pub enum EntryValue {
 
 /// One configuration's value of a resource.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ConfigValue {
     pub config: Config,
     pub flags: u16,
@@ -338,6 +341,7 @@ pub struct ConfigValue {
 
 /// `package:type/entry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResName {
     pub package: String,
     pub type_name: String,
@@ -359,6 +363,7 @@ impl fmt::Display for ResName {
 
 /// Result of following a resource's reference chain.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Resolved {
     /// Every id visited, starting with the requested one.
     pub chain: Vec<u32>,
@@ -373,6 +378,7 @@ pub struct Resolved {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ResolveError {
     #[error("resource 0x{0:08x} not found")]
     NotFound(u32),

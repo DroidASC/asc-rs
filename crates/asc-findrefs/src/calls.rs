@@ -35,6 +35,7 @@ pub enum Slot {
 
 /// What an undetermined site does to a constraint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Certainty {
     /// `=`: kept, marked `?`.
     May,
@@ -197,9 +198,10 @@ impl FindRefs<'_, '_, '_> {
                 let Some(start) = start.filter(|&s| s != u32::MAX) else { continue };
                 let code = start.checked_sub(16).and_then(|off| dex.code_item(off).ok());
                 let catches = code.as_ref().and_then(catches_of);
-                let mut values = code.as_ref().zip(catches.as_deref()).and_then(|(c, catches)| {
-                    an.analyze(MethodCode { insns: c.insns, registers: c.registers_size, ins: c.ins_size, catches })
-                });
+                let mut values = code
+                    .as_ref()
+                    .zip(catches.as_deref())
+                    .and_then(|(c, catches)| an.analyze(MethodCode::new(c.insns, c.registers_size, c.ins_size, catches)));
                 for hit in group {
                     let pc = (hit.offset - start) as usize;
                     if let Some(note) = judge(dex, call, &located, values.as_mut(), hit, pc)? {

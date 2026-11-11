@@ -32,6 +32,7 @@ pub use tables::Tables;
 
 /// Errors from the rebuild pipeline.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RebuildError {
     #[error(transparent)]
     Dex(#[from] asc_dex::DexError),
@@ -67,6 +68,7 @@ pub type Result<T> = std::result::Result<T, RebuildError>;
 
 /// Per-phase timings in microseconds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Timings {
     pub hollow_us: u128,
     pub collect_us: u128,
@@ -82,6 +84,7 @@ impl Timings {
 
 /// Table sizes of the rebuilt DEX.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stats {
     pub strings: usize,
     pub types: usize,
@@ -94,6 +97,7 @@ pub struct Stats {
 
 /// A nested class left out of a rebuilt DEX.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DroppedClass {
     /// Descriptor such as `Lcom/poc/Main$1;`.
     pub descriptor: String,
@@ -115,6 +119,7 @@ impl fmt::Display for DroppedClass {
 
 /// Result of a rebuild.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Rebuilt {
     pub bytes: Vec<u8>,
     pub stats: Stats,

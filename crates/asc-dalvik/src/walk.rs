@@ -18,6 +18,7 @@ use crate::{Instruction, Opcode, opcode};
 
 /// One visited instruction. Payload pseudo-instructions are never reported.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Step<'a> {
     pub pc: usize,
     pub opcode: &'a Opcode,
@@ -36,6 +37,7 @@ pub enum Stop {
 
 /// Result of a walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Walk {
     /// Offset just past the last instruction or payload that was visited.
     pub end: usize,

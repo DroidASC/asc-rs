@@ -190,6 +190,7 @@ pub enum PayloadKind {
 
 /// Decoded instruction with all operands materialised.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Instruction {
     pub pc: usize,
     pub opcode: &'static Opcode,

@@ -26,6 +26,7 @@ const KEYSHIDDEN_SOFT: u8 = 3;
 /// One `ResTable_config`. Fields missing from a short (older) on-disk
 /// config read as zero, i.e. "any".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Config {
     pub mcc: u16,
     pub mnc: u16,

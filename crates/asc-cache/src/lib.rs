@@ -192,6 +192,7 @@ fn fnv64(bytes: &[u8]) -> u64 {
 }
 
 /// Inflated bytes of one entry, either owned or mapped from the disk cache.
+#[non_exhaustive]
 pub enum DexData {
     Owned(Vec<u8>),
     Mapped(memmap2::Mmap),
@@ -232,6 +233,7 @@ impl AsRef<[u8]> for DexData {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CacheError {
     #[error("cache io error at {path}: {source}")]
     Io { path: PathBuf, source: std::io::Error },
@@ -262,6 +264,7 @@ pub struct DiskCache {
 
 /// The tiers of a [`DiskCache`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Tier {
     /// L1: inflated DEX entries, `<dir>/<apk key>/<entry>`.
     Dex,
@@ -332,6 +335,7 @@ const L1_TRAILER: u64 = 8;
 
 /// A derived index mapped from L2: the payload [`DiskCache::put_derived`]
 /// stored, 64-byte aligned.
+#[non_exhaustive]
 pub struct Derived {
     map: memmap2::Mmap,
     /// Rebuild cost recorded by the writer.
@@ -366,6 +370,7 @@ impl AsRef<[u8]> for Derived {
 
 /// Per-tier usage reported by [`DiskCache::tier_stats`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TierStats {
     /// APK keys with data in the tier.
     pub apks: usize,
@@ -417,6 +422,7 @@ pub fn auto_disk_reserve(total: u64) -> u64 {
 /// own bytes plus the free space), at most a ceiling, and never more than
 /// leaves [`auto_disk_reserve`] free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AutoDisk {
     /// Share of (free space + the cache's own bytes), in percent.
     pub percent: u8,
@@ -430,6 +436,11 @@ impl AutoDisk {
     /// Default ceiling: large enough for the inflated DEX of a phone's worth
     /// of APKs (416 system and store APKs: 8.6 GB).
     pub const CEILING: u64 = 32 << 30;
+
+    /// `percent` of the room, at most `ceiling` bytes.
+    pub fn new(percent: u8, ceiling: u64) -> AutoDisk {
+        AutoDisk { percent, ceiling }
+    }
 
     /// The budget for a cache holding `used` bytes on a file system with
     /// `(free, total)` bytes (`None`: unknown, e.g. on Windows, giving
@@ -488,6 +499,7 @@ fn fs_space(_path: &Path) -> Option<(u64, u64)> {
 
 /// What [`DiskCache::budget`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DiskBudget {
     pub capacity: DiskCapacity,
     /// Bytes the cache may hold right now.

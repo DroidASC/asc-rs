@@ -553,8 +553,8 @@ impl Config {
     pub fn disk_capacity(&self) -> DiskCapacity {
         let ceiling = self.cache_ceiling.value.0;
         match self.cache_max.value {
-            Amount::Auto => DiskCapacity::Auto(AutoDisk { percent: AutoDisk::PERCENT, ceiling }),
-            Amount::Percent(percent) => DiskCapacity::Auto(AutoDisk { percent, ceiling }),
+            Amount::Auto => DiskCapacity::Auto(AutoDisk::new(AutoDisk::PERCENT, ceiling)),
+            Amount::Percent(percent) => DiskCapacity::Auto(AutoDisk::new(percent, ceiling)),
             Amount::Bytes(b) => DiskCapacity::Fixed(b),
         }
     }
@@ -702,7 +702,7 @@ mod tests {
         let c = Config::resolve(None, env(&[]), &flags(&[("memory.max", "1G")])).unwrap();
         assert_eq!((c.memory_bytes(&big), c.memory_policy(&big)), (GIB as usize, None));
         let c = Config::resolve(None, env(&[]), &flags(&[("cache.max", "10%"), ("cache.ceiling", "5G")])).unwrap();
-        assert_eq!(c.disk_capacity(), DiskCapacity::Auto(AutoDisk { percent: 10, ceiling: 5 * GIB }));
+        assert_eq!(c.disk_capacity(), DiskCapacity::Auto(AutoDisk::new(10, 5 * GIB)));
         let off = Config::resolve(None, env(&[("ASC_CACHE", "off")]), &[]).unwrap();
         assert!(off.disk_cache().is_none() && off.cache_dir().is_none());
         let fixed = Config::resolve(None, env(&[]), &flags(&[("threads", "4"), ("cache.writers", "2"), ("cache.dir", "/tmp/c")])).unwrap();

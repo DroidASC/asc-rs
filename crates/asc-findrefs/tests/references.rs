@@ -126,7 +126,7 @@ fn method_sets_are_the_union_of_their_members() {
     let data = make_dex();
     let dex = Dex::parse(&data).unwrap();
     let fr = FindRefs::new(&dex);
-    let member = |name: &str| MemberQuery { name: Some(name.into()), exact_name: true, ..Default::default() };
+    let member = |name: &str| MemberQuery::default().with_name(Some(name.into())).with_exact_name(true);
     let one = |name: &str| fr.locate(&Query::Method(member(name))).unwrap();
     let all: BTreeSet<u32> = ["first", "second"].iter().flat_map(|n| one(n)).collect();
     let set = Query::MethodSet(vec![member("first"), member("second"), member("absent")]);
@@ -199,35 +199,20 @@ fn member_queries() {
     let dex = Dex::parse(&data).unwrap();
     let fr = FindRefs::new(&dex);
     let precise = |name: Option<&str>| {
-        Query::Method(MemberQuery {
-            class: Some(ClassQuery { pattern: "Lexample/Test;".into(), precise: true }),
-            name: name.map(String::from),
-            exact_name: false,
-            signature: None,
-        })
+        Query::Method(MemberQuery::default().with_class(Some(ClassQuery::exact("Lexample/Test;"))).with_name(name.map(String::from)))
     };
     assert_eq!(fr.locate(&precise(None)).unwrap(), [0, 1].into_iter().collect());
     assert_eq!(fr.locate(&precise(Some("sec"))).unwrap(), [1].into_iter().collect());
-    let fuzzy = Query::Method(MemberQuery {
-        class: Some(ClassQuery { pattern: "example".into(), precise: false }),
-        name: Some("first".into()),
-        exact_name: false,
-        signature: None,
-    });
+    let fuzzy = Query::Method(MemberQuery::default().with_class(Some(ClassQuery::fuzzy("example"))).with_name(Some("first".into())));
     assert_eq!(fr.locate(&fuzzy).unwrap(), [0].into_iter().collect());
-    let by_name = Query::Method(MemberQuery { class: None, name: Some("(first|second)".into()), exact_name: false, signature: None });
+    let by_name = Query::Method(MemberQuery::default().with_name(Some("(first|second)".into())));
     assert_eq!(fr.locate(&by_name).unwrap(), [0, 1].into_iter().collect());
     let set: IdxSet = [1u32, 70].into_iter().collect();
     assert!(set.contains(70) && !set.contains(2));
     // Nothing to match on: empty result, no error.
-    let none = Query::Method(MemberQuery { class: None, name: None, exact_name: false, signature: None });
+    let none = Query::Method(MemberQuery::default());
     assert!(fr.locate(&none).unwrap().is_empty());
-    let empty_class = Query::Method(MemberQuery {
-        class: Some(ClassQuery { pattern: String::new(), precise: true }),
-        name: None,
-        exact_name: false,
-        signature: None,
-    });
+    let empty_class = Query::Method(MemberQuery::default().with_class(Some(ClassQuery::exact(String::new()))));
     assert!(fr.locate(&empty_class).unwrap().is_empty());
     // Invalid regex surfaces as a pattern error.
     assert!(fr.locate(&Query::String("(".into())).is_err());
@@ -244,39 +229,14 @@ fn compiled_queries_match_plain_queries() {
         Query::Type("example".into()),
         Query::Type("Ljava/lang/Object;".into()),
         Query::Type("nothing-here".into()),
-        Query::Method(MemberQuery {
-            class: Some(ClassQuery { pattern: "Lexample/Test;".into(), precise: true }),
-            name: None,
-            exact_name: false,
-            signature: None,
-        }),
-        Query::Method(MemberQuery {
-            class: Some(ClassQuery { pattern: "Lexample/Test;".into(), precise: true }),
-            name: Some("sec".into()),
-            exact_name: false,
-            signature: None,
-        }),
-        Query::Method(MemberQuery {
-            class: Some(ClassQuery { pattern: "example".into(), precise: false }),
-            name: Some("first".into()),
-            exact_name: false,
-            signature: None,
-        }),
-        Query::Method(MemberQuery { class: None, name: Some("(first|second)".into()), exact_name: false, signature: None }),
-        Query::Method(MemberQuery { class: None, name: None, exact_name: false, signature: None }),
-        Query::Field(MemberQuery { class: None, name: Some("SECOND".into()), exact_name: false, signature: None }),
-        Query::Field(MemberQuery {
-            class: Some(ClassQuery { pattern: "Lexample/Statics;".into(), precise: true }),
-            name: Some("FIR".into()),
-            exact_name: false,
-            signature: None,
-        }),
-        Query::Field(MemberQuery {
-            class: Some(ClassQuery { pattern: "Statics".into(), precise: false }),
-            name: None,
-            exact_name: false,
-            signature: None,
-        }),
+        Query::Method(MemberQuery::default().with_class(Some(ClassQuery::exact("Lexample/Test;")))),
+        Query::Method(MemberQuery::default().with_class(Some(ClassQuery::exact("Lexample/Test;"))).with_name(Some("sec".into()))),
+        Query::Method(MemberQuery::default().with_class(Some(ClassQuery::fuzzy("example"))).with_name(Some("first".into()))),
+        Query::Method(MemberQuery::default().with_name(Some("(first|second)".into()))),
+        Query::Method(MemberQuery::default()),
+        Query::Field(MemberQuery::default().with_name(Some("SECOND".into()))),
+        Query::Field(MemberQuery::default().with_class(Some(ClassQuery::exact("Lexample/Statics;"))).with_name(Some("FIR".into()))),
+        Query::Field(MemberQuery::default().with_class(Some(ClassQuery::fuzzy("Statics")))),
     ];
     for data in [make_dex(), make_static_field_dex()] {
         let dex = Dex::parse(&data).unwrap();
@@ -290,9 +250,7 @@ fn compiled_queries_match_plain_queries() {
         }
     }
     // The compiled query is reusable across DEX files and threads.
-    let compiled =
-        CompiledQuery::new(&Query::Field(MemberQuery { class: None, name: Some("SECOND".into()), exact_name: false, signature: None }))
-            .unwrap();
+    let compiled = CompiledQuery::new(&Query::Field(MemberQuery::default().with_name(Some("SECOND".into())))).unwrap();
     let data = make_static_field_dex();
     std::thread::scope(|s| {
         for _ in 0..2 {
@@ -333,7 +291,7 @@ fn search_state_reports_its_table_bytes() {
     assert!(strings > 0);
     assert_eq!(state.heap_bytes(), strings);
     // A method query adds the type and method tables on top.
-    fr.find_ref(&Query::Method(MemberQuery { class: None, name: Some("run".into()), exact_name: false, signature: None })).unwrap();
+    fr.find_ref(&Query::Method(MemberQuery::default().with_name(Some("run".into())))).unwrap();
     let grown = state.heap_bytes();
     assert_eq!(grown, strings + fr.type_locator().unwrap().heap_bytes() + fr.method_locator().unwrap().heap_bytes());
     assert!(grown > strings);
@@ -468,12 +426,10 @@ fn exact_name_dex() -> Vec<u8> {
 }
 
 fn exact(class: Option<(&str, bool)>, name: &str) -> MemberQuery {
-    MemberQuery {
-        class: class.map(|(pattern, precise)| ClassQuery { pattern: pattern.into(), precise }),
-        name: Some(name.into()),
-        exact_name: true,
-        signature: None,
-    }
+    MemberQuery::default()
+        .with_class(class.map(|(pattern, precise)| if precise { ClassQuery::exact(pattern) } else { ClassQuery::fuzzy(pattern) }))
+        .with_name(Some(name.into()))
+        .with_exact_name(true)
 }
 
 #[test]
@@ -520,7 +476,7 @@ fn exact_member_names() {
         }
     }
     // The non-exact modes do match the longer names.
-    let loose = |class, name: &str| MemberQuery { exact_name: false, ..exact(class, name) };
+    let loose = |class, name: &str| exact(class, name).with_exact_name(false);
     assert_eq!(methods(&loose(a, "first")).len(), 3);
     assert_eq!(methods(&loose(None, "first")).len(), 5);
     assert_eq!(fields(&loose(fuzzy, "f")).len(), 4);
@@ -531,7 +487,7 @@ fn exact_member_names() {
         assert!(methods(&exact(class, "x")).is_empty());
     }
     // An absent or empty name with a class still means "every member".
-    assert_eq!(fields(&MemberQuery { name: None, ..exact(a, "") }).len(), 2);
+    assert_eq!(fields(&exact(a, "").with_name(None)).len(), 2);
     assert_eq!(fields(&exact(a, "")).len(), 2);
 }
 
@@ -553,7 +509,7 @@ fn exact_member_queries_compile_like_plain_ones() {
 fn find_many_matches_one_search_per_query() {
     let data = asc_fixture::make_rich_dex();
     let dex = Dex::with_name(&data, "rich.dex").unwrap();
-    let member = |name: &str| MemberQuery { class: None, name: Some(name.into()), exact_name: false, signature: None };
+    let member = |name: &str| MemberQuery::default().with_name(Some(name.into()));
     let queries = [
         Query::String("l".into()),
         Query::StringLiteral("wörld".into()),
@@ -583,11 +539,8 @@ fn field_access_is_reported_and_filters_each_site() {
     let data = make_field_access_dex();
     let dex = Dex::with_name(&data, "fields.dex").unwrap();
     let fr = FindRefs::new(&dex);
-    let member = |name: &str| MemberQuery {
-        class: Some(ClassQuery { pattern: "Lexample/Fields;".into(), precise: true }),
-        name: Some(name.into()),
-        exact_name: true,
-        signature: None,
+    let member = |name: &str| {
+        MemberQuery::default().with_class(Some(ClassQuery::exact("Lexample/Fields;"))).with_name(Some(name.into())).with_exact_name(true)
     };
     let check = |name: &str| {
         let field = member(name);
@@ -620,7 +573,7 @@ fn field_access_is_reported_and_filters_each_site() {
 #[test]
 fn cannot_match_agrees_with_the_search_and_never_guesses_on_a_short_prefix() {
     let data = asc_fixture::make_rich_dex();
-    let member = |name: &str| MemberQuery { class: None, name: Some(name.into()), exact_name: false, signature: None };
+    let member = |name: &str| MemberQuery::default().with_name(Some(name.into()));
     let queries = [
         Query::String("l".into()),
         Query::String("no such string".into()),
@@ -681,7 +634,7 @@ fn signatures_pick_one_overload() {
     let desc = |d: &str| TypeMatch::Descriptor(d.into());
     let simple = |n: &str, dims| TypeMatch::Simple { name: n.into(), dims };
     let protos = |params: Vec<TypeMatch>, ret: Option<TypeMatch>| -> Vec<String> {
-        let q = MemberQuery { signature: Some(MemberSignature::Method { params, ret }), ..exact(Some((a, true)), "m") };
+        let q = (exact(Some((a, true)), "m")).with_signature(Some(MemberSignature::Method { params, ret }));
         let ids = fr.locate(&Query::Method(q)).unwrap();
         ids.into_iter()
             .map(|i| {
@@ -707,13 +660,11 @@ fn signatures_pick_one_overload() {
     assert_eq!(fr.locate(&Query::Method(exact(Some((a, true)), "m"))).unwrap().len(), 7);
 
     // Fields: by type, across classes.
-    let fields = |t: TypeMatch| {
-        fr.locate(&Query::Field(MemberQuery { signature: Some(MemberSignature::Field(t)), ..exact(None, "f") })).unwrap().len()
-    };
+    let fields = |t: TypeMatch| fr.locate(&Query::Field((exact(None, "f")).with_signature(Some(MemberSignature::Field(t))))).unwrap().len();
     assert_eq!(fields(desc("I")), 1);
     assert_eq!(fields(simple("String", 0)), 1);
     assert_eq!(fields(desc("J")), 0);
     // A method signature on a field query (and the reverse) is a query error.
-    let wrong = MemberQuery { signature: Some(MemberSignature::Field(desc("I"))), ..exact(None, "m") };
+    let wrong = (exact(None, "m")).with_signature(Some(MemberSignature::Field(desc("I"))));
     assert!(CompiledQuery::new(&Query::Method(wrong)).is_err());
 }

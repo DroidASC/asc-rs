@@ -19,12 +19,8 @@ fn backing(bytes: &[u8]) -> Backing {
 }
 
 fn queries() -> Vec<Query> {
-    let member = |class: Option<&str>, name: &str| MemberQuery {
-        class: class.map(|c| ClassQuery { pattern: c.into(), precise: true }),
-        name: Some(name.into()),
-        exact_name: false,
-        signature: None,
-    };
+    let member =
+        |class: Option<&str>, name: &str| MemberQuery::default().with_class(class.map(ClassQuery::exact)).with_name(Some(name.into()));
     vec![
         Query::String("token".into()),
         Query::String(".".into()),

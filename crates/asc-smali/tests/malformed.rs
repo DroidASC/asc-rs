@@ -13,8 +13,7 @@ fn exercise(data: &[u8]) {
         let Ok(class) = dex.class_def(index) else { continue };
         let Ok(data) = dex.class_data(class.class_data_off) else { continue };
         for method in data.methods().take(64) {
-            if let Ok(listing) = asc_smali::disassemble_method(&dex, method.method_idx, Options { line_numbers: true, param_names: false })
-            {
+            if let Ok(listing) = asc_smali::disassemble_method(&dex, method.method_idx, Options::default().param_names(false)) {
                 let _ = listing.source_line(0);
             }
         }

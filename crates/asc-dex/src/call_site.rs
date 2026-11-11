@@ -10,6 +10,7 @@ use std::fmt;
 
 /// `method_handle_type` of a `method_handle_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MethodHandleKind {
     StaticPut,
     StaticGet,
@@ -108,6 +109,7 @@ impl MethodHandle {
 /// A call site: the `encoded_array_item` a `call_site_id_item` points to,
 /// with its three mandatory leading elements decoded.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct CallSite {
     /// Method handle index of the bootstrap linker method.
     pub bootstrap: u32,

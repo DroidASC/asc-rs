@@ -58,6 +58,7 @@ pub const TYPE_INT_COLOR_ARGB4: u8 = 0x1e;
 pub const TYPE_INT_COLOR_RGB4: u8 = 0x1f;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AxmlError {
     #[error("not a binary XML document")]
     NotAxml,

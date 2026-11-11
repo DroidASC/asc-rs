@@ -799,7 +799,7 @@ impl Server {
         // turned them off in 259 of 292 getclass calls of the Grok replay.
         let debug_info = bool_arg(args, "debug_info")?.unwrap_or(false);
         let descriptor = names::format_class_name(class)?;
-        let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
+        let opts = SmaliOptions::debug_info(debug_info);
         let mut src = apk.engine.get_class_method_cancellable(&descriptor, opts, None, &call.cancel)?;
         if bool_arg(args, "resource_names")?.unwrap_or(true) {
             src.source = apk.engine.annotate_resource_ids(&src.source);

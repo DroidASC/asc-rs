@@ -272,10 +272,10 @@ fn method_filter_keeps_one_exact_signature() {
 
 #[test]
 fn options_disable_lines_and_param_names() {
-    let text = rebuilt_rich(Options { line_numbers: false, param_names: true });
+    let text = rebuilt_rich(Options::default().line_numbers(false));
     assert!(!text.contains(".line"), "{text}");
     assert!(text.contains(".param v2, \"a\"    # I\n"), "{text}");
-    let text = rebuilt_rich(Options { line_numbers: true, param_names: false });
+    let text = rebuilt_rich(Options::default().param_names(false));
     assert!(text.contains("    .line 10\n"), "{text}");
     assert!(!text.contains(".param v2"), "{text}");
     // the annotated parameter of the abstract method is still emitted

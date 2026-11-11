@@ -443,9 +443,8 @@ impl<'g> Hierarchy<'g> {
                         continue;
                     }
                 }
-                let (_, stands_for) = aliases.entry(k).or_insert_with(|| {
-                    (MemberQuery { class: Some(ClassQuery { pattern: on, precise: true }), ..m.clone() }, BTreeSet::new())
-                });
+                let (_, stands_for) =
+                    aliases.entry(k).or_insert_with(|| (m.clone().with_class(Some(ClassQuery::exact(on))), BTreeSet::new()));
                 stands_for.insert(class);
             }
         }

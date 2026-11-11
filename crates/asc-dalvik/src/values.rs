@@ -48,12 +48,22 @@ pub struct Catch {
 
 /// The parts of a `code_item` the analysis reads.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct MethodCode<'a> {
     pub insns: &'a [u8],
     pub registers: u16,
     /// Parameter registers (`ins_size`), the last ones of the frame.
     pub ins: u16,
     pub catches: &'a [Catch],
+}
+
+impl<'a> MethodCode<'a> {
+    /// The code of a method: `insns` (the instruction bytes), its frame of
+    /// `registers` of which the last `ins` hold the parameters, and its
+    /// `catches`.
+    pub fn new(insns: &'a [u8], registers: u16, ins: u16, catches: &'a [Catch]) -> MethodCode<'a> {
+        MethodCode { insns, registers, ins, catches }
+    }
 }
 
 /// How a field was read.

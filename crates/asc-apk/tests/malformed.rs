@@ -5,7 +5,7 @@
 use asc_apk::{Apk, Limits, PrefixStep};
 use asc_fixture::mutate::mutants;
 
-const LIMITS: Limits = Limits { max_entry_bytes: 16 << 20, max_ratio: 100, max_dex_total_bytes: 64 << 20 };
+const LIMITS: Limits = Limits::new().max_entry_bytes(16 << 20).max_ratio(100).max_dex_total_bytes(64 << 20);
 
 fn exercise(data: &[u8]) {
     let apk = Apk::from_bytes("mutant.apk", data.to_vec()).with_limits(LIMITS);

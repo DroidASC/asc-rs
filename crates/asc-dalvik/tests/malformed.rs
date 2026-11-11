@@ -41,7 +41,7 @@ fn exercise(code: &[u8], registers: u16, ins: u16, catches: &[Catch]) {
         let _ = verify_range(code, pc, code.len());
     }
     let mut analyzer = Analyzer::new();
-    if let Some(mut values) = analyzer.analyze(MethodCode { insns: code, registers, ins, catches }) {
+    if let Some(mut values) = analyzer.analyze(MethodCode::new(code, registers, ins, catches)) {
         for &pc in pcs.iter().chain(&[1, code.len()]) {
             let _ = (values.args(pc), values.result_use(pc));
         }

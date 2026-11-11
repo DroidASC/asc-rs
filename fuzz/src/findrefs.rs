@@ -12,11 +12,7 @@ use asc_findrefs::{
 use asc_findrefs::{Defined, MemberSignature, TypeMatch};
 
 fn member(class: Option<(&str, bool)>, name: Option<&str>) -> MemberQuery {
-    MemberQuery {
-        class: class.map(|(pattern, precise)| ClassQuery { pattern: pattern.into(), precise }),
-        name: name.map(Into::into),
-        ..MemberQuery::default()
-    }
+    MemberQuery::default().with_class(class.map(|(pattern, precise)| if precise { ClassQuery::exact(pattern) } else { ClassQuery::fuzzy(pattern) })).with_name(name.map(Into::into))
 }
 
 fn queries() -> Vec<Query> {
@@ -28,10 +24,7 @@ fn queries() -> Vec<Query> {
         Query::Type("example".into()),
         method.clone(),
         Query::Method(member(None, Some("."))),
-        Query::Method(MemberQuery {
-            signature: Some(MemberSignature::Method { params: vec![TypeMatch::Simple { name: "String".into(), dims: 0 }], ret: None }),
-            ..member(Some(("example", false)), None)
-        }),
+        Query::Method((member(Some(("example", false)), None)).with_signature(Some(MemberSignature::Method { params: vec![TypeMatch::Simple { name: "String".into(), dims: 0 }], ret: None }))),
         Query::MethodSet(vec![member(Some(("Ljava/lang/Object;", true)), Some("<init>")), member(None, Some("second"))]),
         Query::Field(member(Some(("Lexample/Test;", true)), None)),
         Query::FieldAccess { field: member(None, Some(".")), access: FieldAccess::Read },

@@ -175,6 +175,8 @@ pub(crate) fn value_indented(dex: &Dex<'_>, v: &EncodedValue, depth: usize) -> R
             s.push_str(".end subannotation");
             s
         }
+        // A value kind newer than this renderer.
+        _ => "<unknown value>".into(),
     })
 }
 

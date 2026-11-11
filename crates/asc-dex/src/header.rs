@@ -9,6 +9,7 @@ pub struct Section {
 
 /// Parsed `header_item`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Header {
     pub magic: [u8; 8],
     pub checksum: u32,

@@ -2,6 +2,7 @@ use thiserror::Error;
 
 /// Errors produced while reading DEX structures.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DexError {
     #[error("buffer too small for DEX header ({0} bytes)")]
     TooSmall(usize),

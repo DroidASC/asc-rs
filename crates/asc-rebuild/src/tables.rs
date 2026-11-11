@@ -8,6 +8,7 @@ use std::collections::HashMap;
 /// New id tables. Each `Vec` lists original indexes in new-index order and
 /// each map goes from original index to new index.
 #[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct Tables {
     pub strings: Vec<u32>,
     pub string_map: HashMap<u32, u32>,

@@ -43,6 +43,7 @@ pub const METHOD_STORED: u16 = 0;
 pub const METHOD_DEFLATE: u16 = 8;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ApkError {
     #[error("io error on {path}: {source}")]
     Io { path: PathBuf, source: std::io::Error },
@@ -74,6 +75,7 @@ pub type Result<T> = std::result::Result<T, ApkError>;
 
 /// One central-directory entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Entry {
     pub name: String,
     pub method: u16,
@@ -90,6 +92,7 @@ pub struct Entry {
 /// only rejects what Deflate cannot produce; [`Limits::guarded`] is for
 /// sweeping untrusted APKs in bulk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Limits {
     /// Most bytes one entry may inflate to.
     pub max_entry_bytes: u64,
@@ -101,14 +104,40 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { max_entry_bytes: u64::MAX, max_ratio: MAX_DEFLATE_RATIO, max_dex_total_bytes: u64::MAX }
+        Limits::new()
     }
 }
 
 impl Limits {
+    /// The default: only what Deflate cannot produce is rejected. A
+    /// `const fn`, so that with the setters below limits can be constants.
+    pub const fn new() -> Limits {
+        Limits { max_entry_bytes: u64::MAX, max_ratio: MAX_DEFLATE_RATIO, max_dex_total_bytes: u64::MAX }
+    }
+
     /// Real DEX files are at most a few hundred MiB and compress 2-5:1.
-    pub fn guarded() -> Limits {
+    pub const fn guarded() -> Limits {
         Limits { max_entry_bytes: 1 << 30, max_ratio: 100, max_dex_total_bytes: 4 << 30 }
+    }
+
+    /// These limits with at most `bytes` inflated per entry.
+    #[must_use]
+    pub const fn max_entry_bytes(self, bytes: u64) -> Limits {
+        Limits { max_entry_bytes: bytes, ..self }
+    }
+
+    /// These limits with an entry expanding at most `ratio` times its
+    /// compressed payload.
+    #[must_use]
+    pub const fn max_ratio(self, ratio: u64) -> Limits {
+        Limits { max_ratio: ratio, ..self }
+    }
+
+    /// These limits with at most `bytes` declared by all root DEX entries
+    /// together.
+    #[must_use]
+    pub const fn max_dex_total_bytes(self, bytes: u64) -> Limits {
+        Limits { max_dex_total_bytes: bytes, ..self }
     }
 }
 
@@ -127,6 +156,7 @@ pub struct Apk {
 
 /// One archive of an [`Apk`] as a cache key sees it ([`Apk::directories`]).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ArchiveId<'a> {
     pub path: &'a Path,
     /// What its entry names start with in a program ([`archive_of`]); empty

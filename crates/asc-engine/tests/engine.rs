@@ -491,7 +491,7 @@ fn locator_tables_are_mapped_from_l2_by_the_next_process() {
     assert!(second.memory_cache_mapped_table_bytes() > 0);
     // A method query needs tables the files lack: built, written again, and
     // the resident copy is swapped for a view of the new files.
-    let m = Query::Method(asc_findrefs::MemberQuery { name: Some("first".into()), ..Default::default() });
+    let m = Query::Method(asc_findrefs::MemberQuery::default().with_name(Some("first".into())));
     let expected = rows_of(&Engine::new(apk.path()), &m).1;
     assert_eq!(rows_of(&second, &m).1, expected);
     second.flush_cache_writes();
@@ -547,7 +547,7 @@ fn a_query_during_a_prebuild_gets_the_same_rows() {
     let apk = temp_apk(true);
     let queries = [
         Query::String("token".into()),
-        Query::Method(asc_findrefs::MemberQuery { name: Some("first".into()), ..Default::default() }),
+        Query::Method(asc_findrefs::MemberQuery::default().with_name(Some("first".into()))),
         Query::Type("Lexample/".into()),
     ];
     let expected: Vec<_> = queries.iter().map(|q| rows_of(&Engine::new(apk.path()), q).1).collect();

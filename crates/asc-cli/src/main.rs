@@ -1310,7 +1310,7 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant)
     }
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = io.engine(common, &args.apk_path);
-    let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
+    let opts = asc_engine::SmaliOptions::debug_info(args.debug_info);
     let mut src = class_methods(&engine, &descriptor, opts, args.method_signature.as_deref(), io.cancel)?;
     if args.res_names {
         src.source = engine.annotate_resource_ids(&src.source);

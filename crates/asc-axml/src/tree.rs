@@ -6,6 +6,7 @@ use super::*;
 
 /// One element of a parsed binary XML document.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Element {
     /// Namespace URI (empty for none).
     pub ns: String,
@@ -18,6 +19,7 @@ pub struct Element {
 
 /// One attribute: its typed value plus the text [`decode`] would print.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Attribute {
     /// Namespace URI (empty for none). Framework attributes identified by
     /// resource id get [`ANDROID_NS`] even when the namespace was stripped.

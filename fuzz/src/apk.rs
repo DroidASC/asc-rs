@@ -6,7 +6,7 @@ use asc_apk::{Apk, Limits, PrefixStep};
 
 /// Small enough that a hostile entry hits the limits within the fuzzer's
 /// memory budget, as the guarded limits do at real sizes.
-const LIMITS: Limits = Limits { max_entry_bytes: 64 << 20, max_ratio: 100, max_dex_total_bytes: 256 << 20 };
+const LIMITS: Limits = Limits::new().max_entry_bytes(64 << 20).max_ratio(100).max_dex_total_bytes(256 << 20);
 
 pub fn run(data: &[u8]) {
     let apk = Apk::from_bytes("fuzz.apk", data.to_vec()).with_limits(LIMITS);
