@@ -1,0 +1,12 @@
+# `cargo release <level> --execute` bumps the shared version, commits, tags
+# `v<version>` and pushes; the Release workflow then builds the binaries,
+# publishes the crates to crates.io and creates the GitHub release.
+shared-version = true
+consolidate-commits = true
+pre-release-commit-message = "release: {{version}}"
+publish = false
+# One tag for the whole workspace, created by asc-cli (see its manifest).
+tag = false
+tag-name = "v{{version}}"
+tag-message = "release: {{version}}"
+allow-branch = ["main"]

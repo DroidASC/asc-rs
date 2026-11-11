@@ -33,3 +33,6 @@ tempfile.workspace = true
 pkg-url = "{ repo }/releases/download/v{ version }/asc-v{ version }-{ target }.tar.gz"
 bin-dir = "asc-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
+
+[package.metadata.release]
+tag = true
