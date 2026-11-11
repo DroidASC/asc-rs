@@ -43,27 +43,6 @@ pub fn bag_key_name(type_name: &str, key: u32) -> Option<String> {
     Some(s.to_string())
 }
 
-/// Quote a string value the way JSON does: `"..."` with `\\`, `\"`, `\n`,
-/// `\t`, `\r` and every other control character (`\u001b`) escaped, so a
-/// value always stays on one line and reads back with any JSON parser.
-pub fn quote(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            // Beyond JSON's own set: DEL and the C1 controls hide text just as
-            // well. Every control character is in the BMP, so one `\u` does.
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
 /// Names binary XML references and app attributes from this table; ids it
 /// does not define keep their numeric rendering.
 impl asc_axml::Resolver for ResTable {
@@ -126,7 +105,7 @@ impl ResTable {
             TYPE_ATTRIBUTE | TYPE_DYNAMIC_ATTRIBUTE => write!(out, "?{}", self.ref_name(d)),
             TYPE_STRING => {
                 match self.string(d) {
-                    Some(s) => quote(&s, out),
+                    Some(s) => asc_query::text::quote_into(out, &s),
                     None => out.push_str("\"\""),
                 }
                 Ok(())

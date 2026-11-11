@@ -17,7 +17,7 @@ mod config;
 mod format;
 
 pub use config::Config;
-pub use format::{bag_key_name, complex_to_float, quote};
+pub use format::{bag_key_name, complex_to_float};
 
 use asc_axml::PoolLayout;
 use std::borrow::Cow;

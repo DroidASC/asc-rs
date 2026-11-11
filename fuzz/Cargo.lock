@@ -54,6 +54,7 @@ name = "asc-arsc"
 version = "0.1.1"
 dependencies = [
  "asc-axml",
+ "asc-query",
  "thiserror",
 ]
 
@@ -124,6 +125,7 @@ dependencies = [
 name = "asc-hap"
 version = "0.1.1"
 dependencies = [
+ "asc-query",
  "serde_json",
  "thiserror",
 ]
@@ -134,8 +136,13 @@ version = "0.1.1"
 dependencies = [
  "asc-abc",
  "asc-arkisa",
+ "asc-query",
  "thiserror",
 ]
+
+[[package]]
+name = "asc-query"
+version = "0.1.1"
 
 [[package]]
 name = "asc-rebuild"
@@ -152,6 +159,7 @@ version = "0.1.1"
 dependencies = [
  "asc-dalvik",
  "asc-dex",
+ "asc-query",
  "thiserror",
 ]
 

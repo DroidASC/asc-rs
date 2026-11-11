@@ -242,7 +242,7 @@ impl Engine {
                     total += 1;
                     if rows.len() < limit {
                         let mut value = String::new();
-                        asc_arsc::quote(text, &mut value);
+                        asc_query::text::quote_into(&mut value, text);
                         rows.push(ResourceRow { id, name: table.ref_name(id), config: config.to_string(), value });
                     }
                 }

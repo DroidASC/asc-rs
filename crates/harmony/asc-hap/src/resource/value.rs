@@ -263,25 +263,12 @@ fn pairs(items: Vec<Cow<'_, str>>) -> Vec<Attr<'_>> {
     std::iter::from_fn(|| Some(Attr { name: items.next()?, value: items.next()? })).collect()
 }
 
-/// A string in JSON quotes on one line: `\"`, `\\`, `\n`, `\t`, `\r`
-/// escaped and every other control character as `\u001b`.
+/// A string in JSON quotes on one line ([`asc_query::text::quoted`]).
 struct Quoted<'s>(&'s str);
 
 impl fmt::Display for Quoted<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("\"")?;
-        for c in self.0.chars() {
-            match c {
-                '"' => f.write_str("\\\"")?,
-                '\\' => f.write_str("\\\\")?,
-                '\n' => f.write_str("\\n")?,
-                '\t' => f.write_str("\\t")?,
-                '\r' => f.write_str("\\r")?,
-                c if c.is_control() => write!(f, "\\u{:04x}", u32::from(c))?,
-                c => write!(f, "{c}")?,
-            }
-        }
-        f.write_str("\"")
+        f.write_str(&asc_query::text::quoted(self.0))
     }
 }
 

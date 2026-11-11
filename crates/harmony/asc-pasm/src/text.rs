@@ -13,8 +13,9 @@ pub(crate) fn write_error<W: Write>(out: &mut W, error: impl Display) -> fmt::Re
     write!(out, "<error: {error}>")
 }
 
-/// Write `text` with control characters escaped, so that it stays on one
-/// line. `quoted` text also escapes `"` and `\`.
+/// Write `text` with control characters (and the others
+/// [`asc_query::text::must_escape`] names) escaped, so that it stays on one
+/// line and shows what it holds. `quoted` text also escapes `"` and `\`.
 fn write_escaped<W: Write>(out: &mut W, text: &str, quoted: bool) -> fmt::Result {
     // Runs of ordinary characters are written in one piece.
     let mut plain_from = 0;
@@ -25,13 +26,17 @@ fn write_escaped<W: Write>(out: &mut W, text: &str, quoted: bool) -> fmt::Result
             '\n' => "\\n",
             '\r' => "\\r",
             '\t' => "\\t",
-            // The line and paragraph separators break lines in many viewers.
-            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => "",
+            // Also the line and paragraph separators, which break lines in
+            // many viewers, and the characters that hide or reorder text.
+            c if asc_query::text::must_escape(c) => "",
             _ => continue,
         };
         out.write_str(&text[plain_from..at])?;
         if escape.is_empty() {
-            write!(out, "\\u{:04x}", u32::from(c))?;
+            // One escape per UTF-16 unit, as JSON writes a character beyond the BMP.
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                write!(out, "\\u{unit:04x}")?;
+            }
         } else {
             out.write_str(escape)?;
         }

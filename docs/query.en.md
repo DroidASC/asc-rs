@@ -13,6 +13,11 @@ classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Pa
 classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/asc/Store;->count:I [write]
 ```
 
+- Strings of the program are in JSON quotes on one line. Control characters, the line and paragraph separators,
+  the bidirectional controls (`\u202e`, `\u2066`), zero-width and other invisible format characters (`\u200b`,
+  `\ufeff`, tag characters) are written as `\uXXXX` escapes, so a row shows exactly what the string holds; smali
+  string literals and HarmonyOS listings escape the same characters. (New in this version: before, only control
+  characters were escaped.)
 - Classes are `rs.asc.B` or `Lrs/asc/B;`.
 - Members are written the same way in the CLI, MCP and rules: `Lrs/asc/B;->name(I)V`, `rs.asc.B->name`,
   `rs.asc.B#name`, `rs.asc.B.name`, `B.name` (a class without a package matches any package). A bare name is a

@@ -13,6 +13,9 @@ classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Pa
 classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/asc/Store;->count:I [write]
 ```
 
+- 程序里的字符串用 JSON 引号写在一行内。控制字符、行 / 段分隔符、双向控制符（`\u202e`、`\u2066`）、零宽及其他不可见
+  格式字符（`\u200b`、`\ufeff`、tag 字符）都写成 `\uXXXX` 转义，行里显示的就是字符串实际的内容；smali 字符串字面量和
+  HarmonyOS 反汇编转义同样的字符。（本版本新增：以前只转义控制字符。）
 - 类名可写 `rs.asc.B` 或 `Lrs/asc/B;`。
 - 成员在 CLI、MCP 和规则里写法统一：`Lrs/asc/B;->name(I)V`、`rs.asc.B->name`、`rs.asc.B#name`、`rs.asc.B.name`、
   `B.name`（不带包名的类匹配任意包）。只写名字是 regex / 子串，`=name` 精确匹配。

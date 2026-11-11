@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "Pandasm-style disassembly of ArkCompiler ABC records and functions for asc-rs."
 
 [dependencies]
+asc-query.workspace = true
 asc-abc.workspace = true
 asc-arkisa.workspace = true
 thiserror.workspace = true

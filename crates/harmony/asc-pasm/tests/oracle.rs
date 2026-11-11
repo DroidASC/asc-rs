@@ -187,7 +187,11 @@ fn listed_name(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => write!(out, "\\u{:04x}", u32::from(c)).unwrap(),
+            c if asc_query::text::must_escape(c) => {
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    write!(out, "\\u{unit:04x}").unwrap();
+                }
+            }
             c => out.push(c),
         }
     }

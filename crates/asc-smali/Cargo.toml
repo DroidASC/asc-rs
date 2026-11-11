@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "baksmali-style disassembler for a single class of a DEX (the built-in decompile backend of asc-rs)."
 
 [dependencies]
+asc-query.workspace = true
 asc-dex.workspace = true
 asc-dalvik.workspace = true
 thiserror.workspace = true

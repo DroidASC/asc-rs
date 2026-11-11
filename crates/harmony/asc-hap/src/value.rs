@@ -188,12 +188,12 @@ impl<'v, 'f> Obj<'v, 'f> {
 }
 
 /// A value as one whitespace-free token: verbatim when it already is one,
-/// otherwise as a JSON string literal.
+/// otherwise as a JSON string literal ([`asc_query::text::quoted`]).
 pub(crate) fn token(text: &str) -> Cow<'_, str> {
-    if !text.is_empty() && !text.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"') {
+    if !text.is_empty() && !text.chars().any(|c| c.is_whitespace() || asc_query::text::must_escape(c) || c == '"') {
         return Cow::Borrowed(text);
     }
-    Cow::Owned(Value::from(text).to_string())
+    Cow::Owned(asc_query::text::quoted(text))
 }
 
 /// `key=value` fragments of a summary line; absent values print as `-`.

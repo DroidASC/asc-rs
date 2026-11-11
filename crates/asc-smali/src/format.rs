@@ -4,7 +4,9 @@ use crate::Result;
 use asc_dex::Dex;
 use asc_dex::encoded::{EncodedValue, VALUE_BYTE, VALUE_CHAR, VALUE_DOUBLE, VALUE_FLOAT, VALUE_INT, VALUE_LONG, VALUE_SHORT};
 
-/// Escape a string for a smali string literal.
+/// Escape a string for a smali string literal: control characters and
+/// whatever else could disguise the line ([`asc_query::text::must_escape`])
+/// as `\uXXXX`.
 pub fn escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
@@ -14,9 +16,7 @@ pub fn escape_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
+            c if asc_query::text::must_escape(c) => asc_query::text::push_unicode_escape(&mut out, c),
             c => out.push(c),
         }
     }
@@ -176,4 +176,16 @@ pub fn value_indented(dex: &Dex<'_>, v: &EncodedValue, depth: usize) -> Result<S
             s
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_literals_show_what_could_disguise_them() {
+        assert_eq!(escape_string("a\"b\\\n\u{1b}é"), "a\\\"b\\\\\\n\\u001bé");
+        // A right-to-left override, a zero-width space, a tag character.
+        assert_eq!(escape_string("x\u{202e}y\u{200b}\u{e0041}"), "x\\u202ey\\u200b\\udb40\\udc41");
+    }
 }

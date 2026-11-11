@@ -128,6 +128,7 @@ version = "0.1.1"
 dependencies = [
  "asc-axml",
  "asc-fixture",
+ "asc-query",
  "thiserror",
 ]
 
@@ -255,6 +256,7 @@ name = "asc-hap"
 version = "0.1.1"
 dependencies = [
  "asc-fixture",
+ "asc-query",
  "serde_json",
  "thiserror",
  "zip",
@@ -281,6 +283,7 @@ dependencies = [
  "asc-abc",
  "asc-arkisa",
  "asc-fixture",
+ "asc-query",
  "thiserror",
  "zip",
 ]
@@ -288,6 +291,9 @@ dependencies = [
 [[package]]
 name = "asc-query"
 version = "0.1.1"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "asc-rebuild"
@@ -306,6 +312,7 @@ dependencies = [
  "asc-dalvik",
  "asc-dex",
  "asc-fixture",
+ "asc-query",
  "asc-rebuild",
  "thiserror",
 ]

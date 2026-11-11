@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "Lazy, bounds-checked resources.arsc reader used by asc-rs: names, per-config values, reference resolution."
 
 [dependencies]
+asc-query.workspace = true
 asc-axml.workspace = true
 thiserror.workspace = true
 

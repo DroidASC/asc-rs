@@ -112,6 +112,9 @@ much is known:
   the first unmatched `}` (`call:{string:a}b}` is an error, it was the regex `a}b`); `call:={RULE}` means
   `call:{RULE}`, `call:*{RULE}` is an error (dispatch is DEX-only); an unknown kind or an empty value is reported
   as `bad rule "RULE": WHAT at column N` like every other error of a rule.
+- Strings in rows, listings and resource values escape the bidirectional controls, zero-width and other invisible
+  format characters like control characters (`\u202e`, `\u200b`; new in this version, as on the DEX side:
+  [query.en.md](query.en.md)).
 
 Limits: a HarmonyOS program is served by the same daemon as APKs (the analyses stay resident), but has no
 disk cache (it opens in milliseconds); `super()` / inherited methods whose parent is outside the

@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "HarmonyOS package metadata for asc-rs: module.json, pack.info, pkgContextInfo.json and resources.index."
 
 [dependencies]
+asc-query.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
