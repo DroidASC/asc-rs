@@ -343,3 +343,22 @@ fn find_type_chunk(data: &[u8]) -> usize {
     let hs = (8 + 12 + 64u16).to_le_bytes();
     (0..data.len() - 4).find(|&i| data[i..i + 2] == kind && data[i + 2..i + 4] == hs).unwrap()
 }
+
+/// Offset of the package chunk (by its type and header-size bytes).
+fn find_package_chunk(data: &[u8]) -> usize {
+    let header = [RES_TABLE_PACKAGE_TYPE.to_le_bytes(), (PACKAGE_HEADER_SIZE as u16).to_le_bytes()].concat();
+    (0..data.len() - 4).find(|&i| data[i..i + 4] == header[..]).unwrap()
+}
+
+/// Found by `cargo fuzz run arsc`: a `typeIdOffset` of `u32::MAX` made
+/// `1 + offset` overflow when naming a type.
+#[test]
+fn type_id_offset_at_the_limit_names_no_type() {
+    let mut data = sample();
+    let at = find_package_chunk(&data) + 284;
+    data[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let t = ResTable::parse(data).unwrap();
+    assert_eq!(t.type_name(&t.packages()[0], 1), None);
+    assert_eq!(t.name(APP_NAME), None);
+    exercise(&t);
+}

@@ -497,7 +497,8 @@ impl ResTable {
 
     /// Name of type `type_id` in `pkg`.
     pub fn type_name(&self, pkg: &Package, type_id: u8) -> Option<Cow<'_, str>> {
-        let idx = (type_id as u32).checked_sub(1 + pkg.type_id_offset)?;
+        // The offset comes from the file: `u32::MAX` must not wrap to 0.
+        let idx = (type_id as u32).checked_sub(pkg.type_id_offset.checked_add(1)?)?;
         pkg.type_names.get(self.bytes(), idx)
     }
 
