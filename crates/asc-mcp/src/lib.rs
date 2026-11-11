@@ -44,6 +44,7 @@ pub mod output;
 mod res;
 mod rules;
 
+use asc_engine::asc_cache::LockExt;
 use asc_engine::{
     Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch,
     RefContext, RefResult, SharedCache, SmaliOptions, Threads, condition, hints, names,
@@ -59,7 +60,7 @@ use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Instant;
 
@@ -121,9 +122,9 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
         let Some(reply) = reply else { return };
         let mut line = reply.to_string();
         line.push('\n');
-        let mut out = output.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out = output.lock().expect("output mutex poisoned");
         if let Err(e) = out.write_all(line.as_bytes()).and_then(|()| out.flush()) {
-            lock(&write_error).get_or_insert(e);
+            write_error.lock().expect("write error mutex poisoned").get_or_insert(e);
         }
     };
     // Cancel flags of the calls running, by request id (as JSON text).
@@ -138,7 +139,7 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
             running.retain(|h: &thread::ScopedJoinHandle<()>| !h.is_finished());
             match classify(&line) {
                 Message::Cancel(id) => {
-                    if let Some(flag) = lock(&inflight).get(&id) {
+                    if let Some(flag) = inflight.lock_or_default().get(&id) {
                         flag.store(true, Ordering::Relaxed);
                     }
                 }
@@ -149,11 +150,11 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
                     // calls can use them; a failure is reported by the call itself.
                     let _ = server.register(&line);
                     let cancel = Arc::new(AtomicBool::new(false));
-                    lock(&inflight).insert(id.clone(), Arc::clone(&cancel));
+                    inflight.lock_or_default().insert(id.clone(), Arc::clone(&cancel));
                     let (server, send, inflight) = (&server, &send, &inflight);
                     running.push(scope.spawn(move || {
                         let reply = server.handle_call(&line, &Call { cancel: Arc::clone(&cancel) });
-                        lock(inflight).remove(&id);
+                        inflight.lock_or_default().remove(&id);
                         if !cancel.load(Ordering::Relaxed) {
                             send(reply);
                         }
@@ -164,7 +165,7 @@ pub fn serve(input: impl BufRead, output: impl Write + Send, opts: Options) -> i
         }
         Ok(())
     })?;
-    match write_error.into_inner().unwrap_or_else(PoisonError::into_inner) {
+    match write_error.into_inner().expect("write error mutex poisoned") {
         Some(e) => Err(e),
         None => Ok(()),
     }
@@ -192,12 +193,6 @@ fn classify(line: &str) -> Message {
         },
         _ => Message::Other,
     }
-}
-
-/// Lock `m` even if a panicking tool call poisoned it; the guarded state is
-/// only ever left consistent.
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Per-call state handed to every tool.
@@ -286,6 +281,17 @@ impl Sessions {
         Arc::clone(apk)
     }
 
+    /// Close every program, keeping the ids: what is left of the sessions
+    /// after a panic poisoned them ([`LockExt::lock_or_reset`]). An id opens
+    /// its program again on its next use.
+    fn close_all(&mut self) {
+        for apk in self.apks.drain(..) {
+            apk.engine.cancel_prebuild();
+            self.closed.insert(apk.id.clone(), apk.path.clone());
+        }
+        self.harmony.close_all();
+    }
+
     /// [`Sessions::touch`] for a HarmonyOS program.
     fn touch_harmony(&mut self, program: Arc<harmony::Session>) -> Arc<harmony::Session> {
         self.tick += 1;
@@ -355,6 +361,11 @@ impl Server {
             structured: opts.structured,
             cache: SharedCache::new(opts.cache, |m| eprintln!("{m}")),
         }
+    }
+
+    /// The open programs, every one closed if a panic poisoned them.
+    fn lock_sessions(&self) -> MutexGuard<'_, Sessions> {
+        self.sessions.lock_or_reset(Sessions::close_all)
     }
 
     /// Handle one JSON-RPC message; `None` for notifications.
@@ -474,7 +485,7 @@ impl Server {
     /// notes (e.g. dispatch not followed) stay after them.
     fn with_program_notes(&self, mut text: String, mut structured: Value) -> (String, Value) {
         let Some(id) = structured.get("apk_id").and_then(Value::as_str) else { return (text, structured) };
-        let Some(apk) = lock(&self.sessions).apks.iter().find(|a| a.id == id).cloned() else { return (text, structured) };
+        let Some(apk) = self.lock_sessions().apks.iter().find(|a| a.id == id).cloned() else { return (text, structured) };
         let mut notes = apk.engine.program_notes();
         notes.extend(apk.left_out.map(String::from));
         if notes.is_empty() {
@@ -492,7 +503,7 @@ impl Server {
     /// (or by the apk_id of one closed to keep within the memory budget).
     fn resolve(&self, args: &Value) -> Result<Arc<OpenApk>, ToolError> {
         // Held while opening, so two calls naming a new path get one session.
-        let mut sessions = lock(&self.sessions);
+        let mut sessions = self.lock_sessions();
         let (id, path) = match str_arg(args, "apk_id")? {
             Some(id) => {
                 if let Some(apk) = sessions.apks.iter().find(|a| a.id == id).cloned() {
@@ -530,7 +541,7 @@ impl Server {
             return Ok(None);
         }
         // Held while opening, so two calls naming a new path get one session.
-        let mut sessions = lock(&self.sessions);
+        let mut sessions = self.lock_sessions();
         // What does not read as a program is left to the DEX side to report.
         let (id, path) = match str_arg(args, "apk_id").ok().flatten() {
             Some(id) => {
@@ -584,7 +595,7 @@ impl Server {
     /// The session for `path`, opening it if needed.
     pub fn open_path(&self, path: &Path) -> Result<Arc<OpenApk>, ToolError> {
         let path = canonical(&path.to_string_lossy())?;
-        let mut sessions = lock(&self.sessions);
+        let mut sessions = self.lock_sessions();
         if let Some(apk) = sessions.apks.iter().find(|a| a.path == path).cloned() {
             return Ok(sessions.touch(&apk));
         }
@@ -623,10 +634,9 @@ impl Server {
     /// HarmonyOS programs ([`harmony::resident_bytes`]). Their apk_ids open
     /// them again.
     pub fn trim_sessions(&self) {
-        // Sized outside the sessions lock: an engine building its class
-        // graph holds the graph's lock until done.
+        // Sized outside the sessions lock: sizing takes each engine's cache locks.
         let mut open: Vec<(u64, OpenProgram)> = {
-            let sessions = lock(&self.sessions);
+            let sessions = self.lock_sessions();
             let apks = sessions.apks.iter().map(|apk| (apk.used.load(Ordering::Relaxed), OpenProgram::Android(Arc::clone(apk))));
             let harmony = sessions.harmony.iter().map(|program| (program.used(), OpenProgram::Harmony(Arc::clone(program))));
             apks.chain(harmony).collect()
@@ -640,7 +650,7 @@ impl Server {
         if closing.is_empty() {
             return;
         }
-        let mut sessions = lock(&self.sessions);
+        let mut sessions = self.lock_sessions();
         for i in closing {
             let (used, program) = &open[i];
             // Used again since it was sized: it stays.
@@ -730,7 +740,7 @@ impl Server {
     /// Keep `report` for its cursor and return its first page.
     pub fn report(&self, report: Report) -> ToolResult {
         let report = Arc::new(report);
-        let id = lock(&self.reports).keep(Arc::clone(&report));
+        let id = self.reports.lock_or_default().keep(Arc::clone(&report));
         Ok(with_full_report(&report, report.page(0, Some(id))))
     }
 
@@ -742,7 +752,11 @@ impl Server {
                  `more` / `next` hint as the call's arguments"
             ))
         })?;
-        let report = lock(&self.reports).get(id).ok_or_else(|| ToolError(format!("cursor {cursor:?} has expired; run the query again")))?;
+        let report = self
+            .reports
+            .lock_or_default()
+            .get(id)
+            .ok_or_else(|| ToolError(format!("cursor {cursor:?} has expired; run the query again")))?;
         if report.tool != tool {
             return Err(ToolError(format!("cursor {cursor:?} belongs to {}", report.tool)));
         }
@@ -1003,7 +1017,7 @@ impl Server {
                 Ok((SweepTarget { target, claims, cached: Mutex::new(None) }, units))
             },
             |apk, t, unit| match *unit {
-                None => lock(&t.cached).take().unwrap_or_default(),
+                None => t.cached.lock_or_default().take().unwrap_or_default(),
                 Some(i) => {
                     let (entry, claim) = (&t.target.entries[i], &t.claims[i]);
                     vec![apk.engine.search_target_entry_dedup(&t.target, entry, &compiled, true, &call.cancel, claim)]
@@ -1873,7 +1887,7 @@ mod tests {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hierarchy", "arguments": args}});
             server.handle_line(&line.to_string()).unwrap()["result"]["structuredContent"]["apk_id"].clone()
         };
-        let open = || lock(&server.sessions).apks.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        let open = || server.lock_sessions().apks.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
         for p in &paths {
             hierarchy(json!({"apk": p, "class": "java.lang.Object"}));
         }
@@ -1883,6 +1897,30 @@ mod tests {
         assert_eq!(hierarchy(json!({"apk_id": "apk1", "class": "java.lang.Object"})), "apk1", "reopened under its id");
         server.trim_sessions();
         assert_eq!(open(), ["apk1"]);
+    }
+
+    #[test]
+    fn a_panic_holding_the_sessions_closes_them_but_keeps_their_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.apk");
+        std::fs::write(&path, asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true)).unwrap();
+        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() }));
+        let hierarchy = |args: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hierarchy", "arguments": args}});
+            server.handle_line(&line.to_string()).unwrap()["result"]["structuredContent"].clone()
+        };
+        let first = hierarchy(json!({"apk": path, "class": "java.lang.Object"}));
+        assert_eq!(first["apk_id"], "apk1");
+        let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+            let _held = server.sessions.lock();
+            panic!("a tool call panics holding the sessions");
+        }));
+        assert!(caught.is_err() && server.sessions.is_poisoned());
+        // What runs after every call outside its guard must not panic.
+        server.trim_sessions();
+        assert!(server.lock_sessions().apks.is_empty());
+        assert_eq!(hierarchy(json!({"apk_id": "apk1", "class": "java.lang.Object"})), first, "reopened under its id");
+        assert_eq!(hierarchy(json!({"apk": dir.path().join("a.apk"), "class": "java.lang.Object"}))["apk_id"], "apk1");
     }
 
     #[test]
@@ -1899,7 +1937,7 @@ mod tests {
             std::fs::write(&path, &abc).unwrap();
             assert_eq!(listclass(json!({"apk": path}))["structuredContent"]["apk_id"], format!("apk{i}"));
         }
-        let open = || lock(&server.sessions).harmony.open_ids().join(" ");
+        let open = || server.lock_sessions().harmony.open_ids().join(" ");
         assert_eq!(open(), "apk2 apk3 apk4 apk5 apk6 apk7 apk8 apk9");
         // The closed program answers under its id again, without a second introduction.
         let again = listclass(json!({"apk_id": "apk1"}));
@@ -1940,7 +1978,7 @@ mod tests {
         assert!(second.contains("pages/App") && !second.contains("pages/Index"), "{second}");
         std::fs::write(&path, asc_fixture::abc::make_abc()).unwrap();
         assert_eq!(records(json!({"apk_id": "apk1"})), first);
-        assert_eq!(lock(&server.sessions).harmony.open_ids(), ["apk1"]);
+        assert_eq!(server.lock_sessions().harmony.open_ids(), ["apk1"]);
         // Gone, and back: the id still names it.
         std::fs::remove_file(&path).unwrap();
         assert_eq!(call_tool(&server, "listclass", json!({"apk_id": "apk1"}))["isError"], true);
@@ -1968,9 +2006,9 @@ mod tests {
             assert_ne!(reply["isError"], true, "{reply}");
             reply["structuredContent"]["apk_id"].clone()
         };
-        let analyses = |server: &Server, id: &str| lock(&server.sessions).harmony.by_id(id).map(|open| open.engine.memory_use().analyses);
+        let analyses = |server: &Server, id: &str| server.lock_sessions().harmony.by_id(id).map(|open| open.engine.memory_use().analyses);
         let open_ids = |server: &Server| {
-            let sessions = lock(&server.sessions);
+            let sessions = server.lock_sessions();
             let mut ids: Vec<String> =
                 sessions.apks.iter().map(|a| a.id.clone()).chain(sessions.harmony.open_ids().iter().map(|id| id.to_string())).collect();
             ids.sort();

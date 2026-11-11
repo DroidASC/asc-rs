@@ -6,6 +6,7 @@ use crate::{
     Call, Found, OpenApk, PER_APK, Server, ToolError, ToolResult, bool_arg, choice_arg, context_arg, describe_query, max_bytes,
     parse_query, ref_json, result_json, str_arg, usize_arg,
 };
+use asc_engine::asc_cache::LockExt;
 use asc_engine::{
     Claim, CompiledQuery, DexDedup, FindOptions, HierarchyQuery, Lineage, RefBatch, RefResult, SearchTarget, compile_rules, hints, names,
 };
@@ -262,7 +263,7 @@ impl Server {
                 Ok((RulesTarget { target, missing, claims, cached: Mutex::new(cached) }, units))
             },
             |apk, t, unit| match *unit {
-                None => std::mem::take(&mut *crate::lock(&t.cached)),
+                None => std::mem::take(&mut *t.cached.lock_or_default()),
                 Some(i) => {
                     let searched: Vec<&CompiledQuery> = t.missing.iter().map(|&r| &compiled[r]).collect();
                     let (entry, claim) = (&t.target.entries[i], &t.claims[i]);
@@ -280,7 +281,7 @@ impl Server {
                 }
                 let found: Vec<Found> = per_rule.into_iter().map(|b| Found::new(b, sdks.as_deref())).collect();
                 {
-                    let mut tally = tally.lock().unwrap();
+                    let mut tally = tally.lock().expect("rule tally mutex poisoned");
                     for (i, f) in found.iter().enumerate() {
                         // Counted like a single-rule sweep: SDK hits too.
                         tally[i].0 += f.rows.len() + f.sdk_hits;

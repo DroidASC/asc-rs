@@ -15,7 +15,7 @@
 //!   workers; it is permanent for the engine (an APK closed for good).
 
 use crate::{Engine, Job, Loaded, Result, WriteJob, lookup_cached, recharge, tiers};
-use asc_cache::Tier;
+use asc_cache::{LockExt, Tier};
 use asc_dex::Dex;
 use asc_findrefs::FindRefs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -105,7 +105,7 @@ impl Engine {
         let mut report = PrebuildReport::default();
         let Some(cache) = self.cache.as_deref().filter(|c| c.memory.is_some()) else { return Ok(report) };
         {
-            let mut running = self.prebuild.running.lock().unwrap();
+            let mut running = self.prebuild.running.lock_or_default();
             if *running || self.prebuild.cancelled() {
                 report.cancelled = true;
                 return Ok(report);
@@ -139,7 +139,7 @@ impl Engine {
                             None => None,
                         };
                         let Some(e) = cached else {
-                            tally.lock().unwrap().skipped += 1;
+                            tally.lock().expect("prebuild tally mutex poisoned").skipped += 1;
                             continue;
                         };
                         for (i, l) in e.logical().iter().enumerate() {
@@ -163,7 +163,7 @@ impl Engine {
                                     std::thread::sleep(YIELD_POLL);
                                 }
                             }
-                            let mut tally = tally.lock().unwrap();
+                            let mut tally = tally.lock().expect("prebuild tally mutex poisoned");
                             tally.dex += 1;
                             tally.from_disk += mapped as usize;
                         }
@@ -185,9 +185,9 @@ impl Engine {
     /// its workers to finish the table they are on.
     pub fn cancel_prebuild(&self) {
         self.prebuild.cancel();
-        let mut running = self.prebuild.running.lock().unwrap();
+        let mut running = self.prebuild.running.lock_or_default();
         while *running {
-            running = self.prebuild.done.wait(running).unwrap();
+            running = self.prebuild.done.wait(running).expect("prebuild flag mutex poisoned");
         }
     }
 }
@@ -197,7 +197,7 @@ struct Finished<'p>(&'p Prebuild);
 
 impl Drop for Finished<'_> {
     fn drop(&mut self) {
-        *self.0.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        *self.0.running.lock_or_default() = false;
         self.0.done.notify_all();
     }
 }

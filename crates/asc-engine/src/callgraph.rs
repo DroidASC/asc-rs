@@ -486,21 +486,21 @@ impl Engine {
                         let Some(v) = views.get(i) else { break };
                         match view_neighbours(v, frontier, dir, expand) {
                             Ok(local) => {
-                                let mut m = merged.lock().unwrap();
+                                let mut m = merged.lock().expect("merged callers mutex poisoned");
                                 for (sig, f) in local {
                                     let e = m.entry(sig).or_default();
                                     e.next.extend(f.next);
                                     e.bodies.extend(f.bodies);
                                 }
                             }
-                            Err(e) => errs.lock().unwrap().push(format!("{}: {e}", v.name)),
+                            Err(e) => errs.lock().expect("errors mutex poisoned").push(format!("{}: {e}", v.name)),
                         }
                     }
                 });
             }
         });
-        errors.extend(errs.into_inner().unwrap());
-        merged.into_inner().unwrap()
+        errors.extend(errs.into_inner().expect("errors mutex poisoned"));
+        merged.into_inner().expect("merged callers mutex poisoned")
     }
 }
 

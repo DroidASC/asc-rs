@@ -46,6 +46,7 @@ mod made;
 pub(crate) mod modules;
 mod stub;
 
+use asc_cache::LockExt;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -454,7 +455,7 @@ impl GraphCache {
 
     /// The slot of record `id`, made on first use.
     pub(crate) fn slot(&self, id: RecordId) -> Arc<Slot> {
-        let mut slots = self.slots.lock().expect("call graph cache mutex poisoned");
+        let mut slots = self.slots.lock_or_default();
         Arc::clone(slots.entry(id).or_insert_with(|| {
             self.charge(SLOT_BYTES);
             Arc::default()
@@ -478,6 +479,7 @@ impl GraphCache {
     /// one after the other they take as long as a query.
     pub(crate) fn discard(cache: Arc<GraphCache>, threads: usize) {
         let Some(cache) = Arc::into_inner(cache) else { return };
+        // Only freed: a poisoned cache is as good as any for that.
         let slots = cache.slots.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
         if threads < 2 || slots.len() < 2 * DISCARD_CHUNK {
             return;

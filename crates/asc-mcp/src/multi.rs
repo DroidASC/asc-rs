@@ -9,7 +9,7 @@
 //! pre-rendered lines; [`Report::page`] emits whole sections up to a byte
 //! budget and returns a cursor for the rest.
 
-use crate::{OpenApk, ToolError, lock};
+use crate::{OpenApk, ToolError};
 use asc_engine::Threads;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -138,7 +138,7 @@ where
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(apk) = apks.get(i) else { break };
                     let p = if cancel.load(Ordering::Relaxed) { Err("cancelled".to_string()) } else { plan(apk) };
-                    *lock(&plans[i]) = Some(p);
+                    *plans[i].lock().expect("plan slot mutex poisoned") = Some(p);
                 }
             });
         }
@@ -149,7 +149,7 @@ where
     let mut failed: Vec<Option<String>> = Vec::with_capacity(apks.len());
     let mut jobs: Vec<(u64, usize, usize)> = Vec::new();
     for (a, p) in plans.into_iter().enumerate() {
-        match p.into_inner().unwrap_or_else(|e| e.into_inner()).expect("planned") {
+        match p.into_inner().expect("plan slot mutex poisoned").expect("planned") {
             Ok((ctx, us)) => {
                 jobs.extend(us.iter().enumerate().map(|(j, (w, _))| (*w, a, j)));
                 failed.push(None);
@@ -167,7 +167,7 @@ where
     let left: Vec<AtomicUsize> = units.iter().map(|u| AtomicUsize::new(u.len())).collect();
     for (a, u) in units.iter().enumerate() {
         if u.is_empty() {
-            lock(&contexts[a]).take();
+            contexts[a].lock().expect("context slot mutex poisoned").take();
             done(&apks[a]);
         }
     }
@@ -190,13 +190,14 @@ where
                     let k = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&(_, a, j)) = jobs.get(k) else { break };
                     if !cancel.load(Ordering::Relaxed) {
-                        let ctx = lock(&contexts[a]).clone().expect("a context lives until its last unit");
+                        let ctx =
+                            contexts[a].lock().expect("context slot mutex poisoned").clone().expect("a context lives until its last unit");
                         let r = run(&apks[a], &ctx, &units[a][j]);
-                        lock(&slots[a])[j] = Some(r);
+                        slots[a].lock().expect("result slot mutex poisoned")[j] = Some(r);
                     }
                     if left[a].fetch_sub(1, Ordering::AcqRel) == 1 {
                         // Every other unit dropped its reference before counting down.
-                        lock(&contexts[a]).take();
+                        contexts[a].lock().expect("context slot mutex poisoned").take();
                         done(&apks[a]);
                     }
                 }
@@ -210,7 +211,7 @@ where
             if let Some(e) = f {
                 return Err(e);
             }
-            let rs: Option<Vec<R>> = slot.into_inner().unwrap_or_else(|e| e.into_inner()).into_iter().collect();
+            let rs: Option<Vec<R>> = slot.into_inner().expect("result slot mutex poisoned").into_iter().collect();
             rs.ok_or_else(|| "cancelled".to_string())
         })
         .collect()

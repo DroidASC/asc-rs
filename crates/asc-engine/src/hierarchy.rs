@@ -12,7 +12,7 @@
 
 use crate::resources::{FileIdent, file_ident};
 use crate::{DexView, Engine, EngineError, Job, NOT_CANCELLED, Result, WriteJob, cancelled};
-use asc_cache::Tier;
+use asc_cache::{LockExt, Tier};
 use asc_dex::Dex;
 use asc_findrefs::ClassRelation;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -247,8 +247,8 @@ impl ClassGraph {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(v) = views.get(i) else { break };
                         match dex_classes(v) {
-                            Ok(c) => parsed.lock().unwrap().push((i, c)),
-                            Err(e) => errs.lock().unwrap().push(format!("{}: {e}", v.name)),
+                            Ok(c) => parsed.lock().expect("parsed classes mutex poisoned").push((i, c)),
+                            Err(e) => errs.lock().expect("errors mutex poisoned").push(format!("{}: {e}", v.name)),
                         }
                     }
                 });
@@ -257,8 +257,8 @@ impl ClassGraph {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        errors.extend(errs.into_inner().unwrap());
-        let mut parsed = parsed.into_inner().unwrap();
+        errors.extend(errs.into_inner().expect("errors mutex poisoned"));
+        let mut parsed = parsed.into_inner().expect("parsed classes mutex poisoned");
         // Views in entry order, so "first definition" means the first DEX.
         parsed.sort_by_key(|(i, _)| *i);
         let mut b = Builder::default();
@@ -464,13 +464,23 @@ impl Engine {
     pub(crate) fn class_graph(&self, views: &[DexView], errors: &mut Vec<String>, cancel: &AtomicBool) -> Result<Arc<ClassGraph>> {
         let apk = self.open()?;
         let ident = file_ident(&apk);
-        let mut slot = self.class_graph.lock().unwrap();
-        if let Some((id, g)) = slot.as_ref()
-            && ident.is_some()
-            && *id == ident
-        {
-            return Ok(g.clone());
+        let kept = || {
+            let slot = self.class_graph.lock_or_default();
+            slot.as_ref().filter(|(id, _)| ident.is_some() && *id == ident).map(|(_, g)| Arc::clone(g))
+        };
+        if let Some(g) = kept() {
+            return Ok(g);
         }
+        // One build at a time, so concurrent first calls share it instead of
+        // each holding a graph's heap. The slot's own lock is not held across
+        // the build: a panic in it (the DEX is untrusted) must not poison the
+        // graph slot that `resident_bytes` reads after every request. This
+        // lock guards no data, so its poison means nothing.
+        let _building = self.graph_build.lock_or_default();
+        if let Some(g) = kept() {
+            return Ok(g);
+        }
+        let install = |g: &Arc<ClassGraph>| *self.class_graph.lock_or_default() = Some((ident, Arc::clone(g)));
         let disk = self.cache.as_ref().and_then(|c| c.disk.as_deref()).filter(|d| d.uses(Tier::Derived));
         let key = disk.and_then(|_| self.apk_key(&apk));
         if let (Some(disk), Some(key)) = (disk, &key) {
@@ -480,7 +490,7 @@ impl Engine {
             if let Some(g) = stored.filter(|g| g.0.dex_names().eq(views.iter().map(|v| v.name.as_str()))) {
                 self.stats.derived_hits.fetch_add(1, Ordering::Relaxed);
                 let g = Arc::new(g);
-                *slot = Some((ident, g.clone()));
+                install(&g);
                 return Ok(g);
             }
         }
@@ -495,7 +505,7 @@ impl Engine {
             let job = WriteJob { key, apk: Arc::from(apk.path()), kind: Job::Graph { graph: g.clone(), cost } };
             self.cache.as_ref().expect("a disk implies a cache").put_async(job);
         }
-        *slot = Some((ident, g.clone()));
+        install(&g);
         Ok(g)
     }
 
@@ -709,5 +719,42 @@ mod tests {
                 g.defined_classes_matching(&any);
             }
         }
+    }
+
+    /// Panic while holding `lock`, as a panicking request does.
+    fn poison<T>(lock: &Mutex<T>) {
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = lock.lock();
+            panic!("a request panics under the lock");
+        }));
+        assert!(caught.is_err() && lock.is_poisoned());
+    }
+
+    #[test]
+    fn a_panic_under_a_cache_lock_costs_a_rebuild_not_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let apk = dir.path().join("a.apk");
+        std::fs::write(&apk, asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true)).unwrap();
+        let engine = Engine::new(&apk).with_threads(2).with_cache(crate::CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
+        let q = HierarchyQuery { class: "Lexample/Custom;".into(), direction: Lineage::Supers, depth: 4, max_nodes: 100, method: None };
+        let before = engine.hierarchy(&q).unwrap().rows;
+        assert!(before.len() > 1, "{before:?}");
+        assert!(engine.resident_bytes() > 0);
+        // Every cache slot a query or `resident_bytes` takes, and the build
+        // lock a panicking graph build leaves poisoned.
+        poison(&engine.class_graph);
+        poison(&engine.graph_build);
+        poison(&engine.resources);
+        poison(&engine.opened);
+        poison(&engine.key_cache);
+        poison(engine.cache.as_ref().and_then(|c| c.memory.as_deref()).expect("a memory cache"));
+        // The poisoned slots read as empty, then fill again.
+        assert_eq!(engine.resident_bytes(), 0);
+        assert_eq!(engine.memory_cache_bytes(), 0);
+        assert_eq!(engine.hierarchy(&q).unwrap().rows, before);
+        assert!(engine.resident_bytes() > 0);
+        assert!(!engine.class_graph.is_poisoned() && !engine.graph_build.is_poisoned());
+        engine.release_memory_cache();
+        assert_eq!((engine.resident_bytes(), engine.memory_cache_bytes()), (0, 0));
     }
 }

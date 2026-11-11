@@ -269,6 +269,13 @@ impl Sessions {
         self.keep_closed(session.id.clone(), session.path.clone());
     }
 
+    /// Close every program; their ids open them again.
+    pub(crate) fn close_all(&mut self) {
+        for session in self.open.drain(..) {
+            self.closed.insert(session.id.clone(), session.path.clone());
+        }
+    }
+
     /// Remember that `id` names the program at `path`, which is not open.
     pub(crate) fn keep_closed(&mut self, id: String, path: PathBuf) {
         self.closed.insert(id, path);

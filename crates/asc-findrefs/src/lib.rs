@@ -346,6 +346,8 @@ fn built<'c, T>(cell: &'c OnceLock<T>, lock: &Mutex<()>, build: impl FnOnce() ->
     if let Some(v) = cell.get() {
         return Ok(v);
     }
+    // Guards no data, only the build: a build that panicked left nothing
+    // behind, so its poison means nothing.
     let _building = lock.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(v) = cell.get() {
         return Ok(v);

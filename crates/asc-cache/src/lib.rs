@@ -42,8 +42,10 @@
 //! * [`ProcessRegistry`] lets resident hosts of one user see each other, so
 //!   their memory budgets add up to one machine-wide budget.
 
+mod lock;
 mod procs;
 
+pub use lock::LockExt;
 pub use procs::{ProcessRegistry, ProcessUsage};
 
 use std::collections::{HashMap, HashSet};

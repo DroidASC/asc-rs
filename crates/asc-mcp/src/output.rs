@@ -17,6 +17,7 @@
 //! putting the whole text under [`FULL`] in its structured result.
 
 use crate::{ToolError, choice_arg, usize_arg};
+use asc_engine::asc_cache::LockExt;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -100,7 +101,8 @@ impl SpillDir {
     /// Write `text` (or find it already written: files are named by content)
     /// and return its path.
     pub fn write(&self, text: &str) -> io::Result<PathBuf> {
-        let _guard = self.lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Guards no data: a panic under it poisons nothing.
+        let _guard = self.lock.lock_or_default();
         create_private_dir(&self.dir)?;
         let digest = Sha256::digest(text.as_bytes());
         let name: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();

@@ -41,7 +41,7 @@ pub mod text;
 mod tiers;
 
 use asc_apk::{Apk, Entry, Limits};
-use asc_cache::{ApkKey, DexData, DiskCache, MemoryCache, Tier};
+use asc_cache::{ApkKey, DexData, DiskCache, LockExt, MemoryCache, Tier};
 use asc_dex::Dex;
 use asc_dex::container::{dex041_logical_offsets, logical_dex_buffers, logical_dex_iter};
 pub use asc_findrefs::CompiledQuery;
@@ -51,7 +51,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 pub use asc_apk::Limits as InflateLimits;
@@ -371,18 +371,18 @@ impl SharedCache {
 
     /// Bytes currently held by the shared in-memory cache.
     pub fn memory_bytes(&self) -> usize {
-        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
+        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| lock_memory(m).used_bytes()).unwrap_or(0)
     }
 
     /// Budget of the shared in-memory cache (0 when it is disabled).
     pub fn memory_capacity(&self) -> usize {
-        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().capacity_bytes()).unwrap_or(0)
+        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| lock_memory(m).capacity_bytes()).unwrap_or(0)
     }
 
     /// Bytes counted against the memory budget besides the cache's entries
     /// ([`SharedCache::set_reserved`]).
     pub fn memory_reserved(&self) -> usize {
-        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().reserved_bytes()).unwrap_or(0)
+        self.0.as_ref().and_then(|c| c.memory.as_ref()).map(|m| lock_memory(m).reserved_bytes()).unwrap_or(0)
     }
 
     /// Count `bytes` the host holds outside the cache (the class graphs and
@@ -390,7 +390,7 @@ impl SharedCache {
     /// the memory budget: the cache evicts entries to make room for them.
     pub fn set_reserved(&self, bytes: usize) {
         if let Some(m) = self.0.as_ref().and_then(|c| c.memory.as_ref()) {
-            m.lock().unwrap().set_reserved(bytes);
+            lock_memory(m).set_reserved(bytes);
         }
     }
 
@@ -627,6 +627,12 @@ struct Writer {
 
 type SharedMemory = Arc<Mutex<MemoryCache<CachedEntry>>>;
 
+/// Lock the memory cache, emptying it if a panic left it poisoned (its byte
+/// accounting may be half-updated); see [`LockExt`].
+pub(crate) fn lock_memory(memory: &Mutex<MemoryCache<CachedEntry>>) -> MutexGuard<'_, MemoryCache<CachedEntry>> {
+    memory.lock_or_reset(MemoryCache::clear)
+}
+
 struct EngineCache {
     memory: Option<SharedMemory>,
     /// Publishes (and, when automatic, adjusts) the memory cache's size.
@@ -658,7 +664,7 @@ impl EngineCache {
     /// sixteen servers sweeping at once would otherwise each queue 512 MiB
     /// whatever their caches may hold.
     fn queue_cap(&self) -> usize {
-        let budget = self.memory.as_ref().map_or(usize::MAX, |m| m.lock().unwrap().capacity_bytes());
+        let budget = self.memory.as_ref().map_or(usize::MAX, |m| lock_memory(m).capacity_bytes());
         self.queue_cap.min(budget)
     }
 
@@ -671,7 +677,7 @@ impl EngineCache {
         let Some(disk) = &self.disk else { return };
         // Before the writer lock: never hold it while waiting for the memory cache's.
         let cap = self.queue_cap();
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock_or_default();
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
@@ -716,7 +722,7 @@ impl EngineCache {
     /// afterwards are dropped (the next query re-inflates and re-queues them).
     fn flush(&self, close: bool) {
         let taken = {
-            let mut writer = self.writer.lock().unwrap();
+            let mut writer = self.writer.lock_or_default();
             // Under the lock, so a concurrent `put_async` either queued its job
             // before the take or sees the flag.
             if close {
@@ -776,9 +782,9 @@ impl EngineCache {
     }
 
     fn begin_inflate(&self, id: String) -> InflightGuard<'_> {
-        let mut set = self.inflight.lock().unwrap();
+        let mut set = self.inflight.lock().expect("inflight mutex poisoned");
         while set.contains(&id) {
-            set = self.inflight_done.wait(set).unwrap();
+            set = self.inflight_done.wait(set).expect("inflight mutex poisoned");
         }
         set.insert(id.clone());
         InflightGuard { cache: self, id }
@@ -873,7 +879,7 @@ fn remap_entry(
     let new = Arc::new(entry.with_data(Arc::new(mapped)));
     // Now file-backed: charged less.
     let size = new.charged_bytes();
-    let mut memory = memory.lock().unwrap();
+    let mut memory = lock_memory(memory);
     if memory.replace(&key, &name, &entry, Arc::clone(&new)) {
         memory.resize(&key, &name, &new, size);
     }
@@ -910,7 +916,7 @@ struct InflightGuard<'c> {
 
 impl Drop for InflightGuard<'_> {
     fn drop(&mut self) {
-        self.cache.inflight.lock().unwrap().remove(&self.id);
+        self.cache.inflight.lock().expect("inflight mutex poisoned").remove(&self.id);
         self.cache.inflight_done.notify_all();
     }
 }
@@ -1014,6 +1020,8 @@ pub struct Engine {
     prebuild: prebuild::Prebuild,
     /// The class hierarchy, for the APK version it was built from.
     class_graph: Mutex<Option<hierarchy::CachedGraph>>,
+    /// Held while the class graph is built, outside `class_graph`'s lock.
+    graph_build: Mutex<()>,
 }
 
 /// An APK opened for a search whose DEX entries are scheduled by the caller,
@@ -1110,6 +1118,7 @@ impl Engine {
             resources: Mutex::new(None),
             prebuild: prebuild::Prebuild::default(),
             class_graph: Mutex::new(None),
+            graph_build: Mutex::new(()),
         }
     }
 
@@ -1200,15 +1209,15 @@ impl Engine {
     /// keeping many engines counts it against its memory budget
     /// ([`SharedCache::set_reserved`]).
     pub fn resident_bytes(&self) -> usize {
-        let graph = self.class_graph.lock().unwrap().as_ref().map_or(0, |(_, g)| g.heap_bytes());
-        let table = self.resources.lock().unwrap().as_ref().map_or(0, resources::CachedTable::heap_bytes);
+        let graph = self.class_graph.lock_or_default().as_ref().map_or(0, |(_, g)| g.heap_bytes());
+        let table = self.resources.lock_or_default().as_ref().map_or(0, resources::CachedTable::heap_bytes);
         graph + table
     }
 
     /// Bytes currently charged to the in-memory cache: entry bytes plus the
     /// locator tables built for them.
     pub fn memory_cache_bytes(&self) -> usize {
-        self.cache.as_ref().and_then(|c| c.memory.as_ref()).map(|m| m.lock().unwrap().used_bytes()).unwrap_or(0)
+        self.cache.as_ref().and_then(|c| c.memory.as_ref()).map(|m| lock_memory(m).used_bytes()).unwrap_or(0)
     }
 
     /// Drop this APK's entries from the in-memory cache (shared or not), and
@@ -1216,18 +1225,18 @@ impl Engine {
     /// still holding them keep them alive.
     pub fn release_memory_cache(&self) -> usize {
         self.release_resources();
-        self.class_graph.lock().unwrap().take();
+        self.class_graph.lock_or_default().take();
         let Some(memory) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
-        let key = self.key_cache.lock().unwrap().as_ref().map(|(_, _, key)| key.clone());
+        let key = self.key_cache.lock_or_default().as_ref().map(|(_, _, key)| key.clone());
         let Some(key) = key.or_else(|| self.open().ok().and_then(|apk| self.apk_key(&apk))) else { return 0 };
-        memory.lock().unwrap().remove_apk(&key)
+        lock_memory(memory).remove_apk(&key)
     }
 
     /// Entry bytes of the in-memory cache that are mapped from the disk cache
     /// (file-backed pages the OS can reclaim) rather than held on the heap.
     pub fn memory_cache_mapped_bytes(&self) -> usize {
         let Some(m) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
-        m.lock().unwrap().values().filter(|e| e.is_mapped()).map(|e| e.data.len()).sum()
+        lock_memory(m).values().filter(|e| e.is_mapped()).map(|e| e.data.len()).sum()
     }
 
     /// Bytes of the in-memory cache's locator tables that are viewed in L2
@@ -1235,7 +1244,7 @@ impl Engine {
     /// held on the heap.
     pub fn memory_cache_mapped_table_bytes(&self) -> usize {
         let Some(m) = self.cache.as_ref().and_then(|c| c.memory.as_ref()) else { return 0 };
-        let m = m.lock().unwrap();
+        let m = lock_memory(m);
         m.values().filter_map(|e| e.logical.get()).flatten().map(|l| l.state.mapped_bytes()).sum()
     }
 
@@ -1264,7 +1273,7 @@ impl Engine {
     /// Open the APK, or reuse the one opened last while [`Apk::version_of`]
     /// finds the same files, sizes and times.
     pub fn open(&self) -> Result<Apk> {
-        let mut opened = self.opened.lock().unwrap();
+        let mut opened = self.opened.lock_or_default();
         // Nothing to compare with on the first open: opening reads the
         // version anyway, so do not walk a program's directories twice.
         if let Some(apk) = opened.as_ref()
@@ -1339,7 +1348,7 @@ impl Engine {
     pub fn apk_key(&self, apk: &Apk) -> Option<ApkKey> {
         self.cache.as_ref()?;
         let ident = apk.stamp().ok()?;
-        let mut cached = self.key_cache.lock().unwrap();
+        let mut cached = self.key_cache.lock_or_default();
         if let Some((len, mtime, key)) = cached.as_ref()
             && (*len, *mtime) == ident
         {
@@ -1844,7 +1853,7 @@ impl Engine {
                                     .collect(),
                             })
                             .map_err(|e| format!("{}: {e}", entry.name));
-                        done.lock().unwrap()[i] = Some(r);
+                        done.lock().expect("result slots mutex poisoned")[i] = Some(r);
                     }
                 });
             }
@@ -1867,7 +1876,7 @@ impl Engine {
     /// and queue the new tables for L2.
     fn recharge_views(&self, views: &[DexView]) {
         let Some(cache) = self.cache.as_deref() else { return };
-        let Some(key) = self.key_cache.lock().unwrap().as_ref().map(|k| k.2.clone()) else { return };
+        let Some(key) = self.key_cache.lock_or_default().as_ref().map(|k| k.2.clone()) else { return };
         let disk = cache.disk.as_deref().filter(|d| d.uses(Tier::Derived));
         let mut seen = HashSet::new();
         for v in views {
@@ -1946,7 +1955,7 @@ fn load_ranks(entries: &[Entry]) -> Vec<usize> {
 fn lookup_cached(cache: &EngineCache, key: Option<&ApkKey>, entry: &Entry, stats: &Stats) -> Option<(Arc<CachedEntry>, Source)> {
     let key = key?;
     if let Some(mem) = &cache.memory
-        && let Some(e) = mem.lock().unwrap().get(key, &entry.name)
+        && let Some(e) = lock_memory(mem).get(key, &entry.name)
     {
         stats.memory_hits.fetch_add(1, Ordering::Relaxed);
         return Some((e, Source::Memory));
@@ -1961,7 +1970,7 @@ fn lookup_cached(cache: &EngineCache, key: Option<&ApkKey>, entry: &Entry, stats
             // The declared size may be 0 (undeclared) and omits a
             // container's logical copies; charge what will be resident.
             let size = e.charged_bytes();
-            mem.lock().unwrap().insert(key, &entry.name, Arc::clone(&e), size);
+            lock_memory(mem).insert(key, &entry.name, Arc::clone(&e), size);
             cache.charged();
         }
         return Some((e, Source::Disk));
@@ -2012,7 +2021,7 @@ fn load_entry<'a>(
         if keep_in_memory && let Some(mem) = &c.memory {
             // Account for the container copies too, so the LRU cap holds.
             let size = e.charged_bytes();
-            mem.lock().unwrap().insert(k, &entry.name, Arc::clone(&e), size);
+            lock_memory(mem).insert(k, &entry.name, Arc::clone(&e), size);
             c.charged();
             remap = Some(Arc::downgrade(&e));
         }
@@ -2214,7 +2223,7 @@ fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEnt
     let (Some(mem), Some(key)) = (cache.and_then(|c| c.memory.as_ref()), key) else { return };
     let size = e.charged_bytes();
     {
-        let mut mem = mem.lock().unwrap();
+        let mut mem = lock_memory(mem);
         if !mem.charged_bytes(key, &e.name).is_some_and(|old| old != size) {
             return;
         }

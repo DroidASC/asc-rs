@@ -3,6 +3,7 @@
 use crate::{Engine, EngineError, Result};
 use asc_apk::{Apk, Entry, METHOD_STORED};
 use asc_arsc::{Config, EntryValue, ResTable, Value};
+use asc_cache::LockExt;
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -90,7 +91,7 @@ impl Engine {
     pub fn resources(&self) -> Result<Option<Arc<ResTable>>> {
         let apk = self.open()?;
         let ident = file_ident(&apk);
-        if let Some(cached) = &*self.resources.lock().unwrap()
+        if let Some(cached) = &*self.resources.lock_or_default()
             && ident.is_some()
             && cached.ident == ident
         {
@@ -125,14 +126,14 @@ impl Engine {
                 Some(Arc::new(table))
             }
         };
-        *self.resources.lock().unwrap() = Some(CachedTable { ident, table: table.clone(), inflated });
+        *self.resources.lock_or_default() = Some(CachedTable { ident, table: table.clone(), inflated });
         Ok(table)
     }
 
     /// Forget the parsed resource table (and its name index); the next
     /// resource query parses it again (about a millisecond even for Douyin).
     pub fn release_resources(&self) {
-        self.resources.lock().unwrap().take();
+        self.resources.lock_or_default().take();
     }
 
     /// Decode a binary XML file of the APK (`res/xml/...`, a layout, the

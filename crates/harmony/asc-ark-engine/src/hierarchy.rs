@@ -39,6 +39,7 @@
 //! kept for the life of the [`Engine`] (until [`Engine::release_analyses`]):
 //! supertypes need the records along the chain, subclasses every record.
 
+use asc_cache::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -632,13 +633,13 @@ impl<'e> Session<'e> {
 
     /// The class definitions of record `id`, worked out on first use.
     fn record(&self, id: RecordId) -> Arc<RecordClasses> {
-        let known = self.cache.records.lock().expect("class cache mutex poisoned").get(&id).cloned();
+        let known = self.cache.records.lock_or_default().get(&id).cloned();
         if let Some(known) = known {
             return known;
         }
         // Two walks may both analyse it; the first to finish is kept.
         let built = Arc::new(self.analyse(id));
-        let mut records = self.cache.records.lock().expect("class cache mutex poisoned");
+        let mut records = self.cache.records.lock_or_default();
         Arc::clone(records.entry(id).or_insert_with(|| {
             self.cache.bytes.fetch_add(ENTRY_BYTES + built.heap_bytes(), Ordering::Relaxed);
             built

@@ -37,6 +37,7 @@
 use crate::output::{Engines, Io};
 use crate::{Cli, Common, run_program};
 use asc_ark_engine::EngineError as HarmonyError;
+use asc_engine::asc_cache::LockExt;
 use asc_engine::{Busy, Engine, SharedCache};
 use asc_mcp::format::ProgramFormat;
 use clap::Parser;
@@ -54,7 +55,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// `off` disables the daemon: every command runs in its own process.
@@ -536,7 +537,7 @@ impl Pool {
 impl Engines for Daemon {
     fn engine(&self, common: &Common, apk_path: &Path) -> Arc<Engine> {
         let key = Pool::android_key(common, apk_path);
-        let mut pool = self.engines.lock().expect("engine pool mutex poisoned");
+        let mut pool = self.engines.lock_or_default();
         if let Some(Resident::Android(engine)) = pool.touch(&key) {
             return engine;
         }
@@ -550,7 +551,7 @@ impl Engines for Daemon {
 
     fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, HarmonyError> {
         let key = Pool::harmony_key(common, path);
-        let open = self.engines.lock().expect("engine pool mutex poisoned").touch(&key);
+        let open = self.engines.lock_or_default().touch(&key);
         // Unlike the DEX engine, this one reads its files once, when it
         // opens: one whose files changed since is replaced, and a command
         // still running on it finishes on the files it mapped.
@@ -563,7 +564,7 @@ impl Engines for Daemon {
         // decrypted files): other requests go on meanwhile. Two requests
         // may both open a new program; the later one stays in the pool.
         let engine = Arc::new(common.harmony_engine(&key.0)?);
-        self.engines.lock().expect("engine pool mutex poisoned").insert(key, Resident::Harmony(Arc::clone(&engine)));
+        self.engines.lock_or_default().insert(key, Resident::Harmony(Arc::clone(&engine)));
         Ok(engine)
     }
 }
@@ -624,7 +625,7 @@ fn serve(common: &Common, dir: &Path) -> Result<u8, String> {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(poll);
-                let idle = daemon.last.lock().expect("idle clock mutex poisoned").elapsed();
+                let idle = daemon.lock_last().elapsed();
                 if daemon.active.load(Ordering::SeqCst) == 0 && idle >= idle_exit {
                     daemon.shutdown(0);
                 }
@@ -665,20 +666,41 @@ fn retire_older_builds(dir: &Path, id: &Identity) {
     }
 }
 
+/// A request counted as running until dropped, even by a panic: a count
+/// left raised would keep the daemon from ever exiting idle.
+struct Active<'d>(&'d Daemon);
+
+impl<'d> Active<'d> {
+    fn enter(daemon: &'d Daemon) -> Active<'d> {
+        daemon.active.fetch_add(1, Ordering::SeqCst);
+        Active(daemon)
+    }
+}
+
+impl Drop for Active<'_> {
+    fn drop(&mut self) {
+        *self.0.lock_last() = Instant::now();
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Daemon {
+    /// When the last request ended; now, if a panic poisoned the clock.
+    fn lock_last(&self) -> MutexGuard<'_, Instant> {
+        self.last.lock_or_reset(|last| *last = Instant::now())
+    }
+
     fn handle(&self, mut stream: UnixStream) {
         let Ok(Some((kind, body))) = read_frame(&mut stream) else { return };
         match kind {
             REQ_RUN => {
-                self.active.fetch_add(1, Ordering::SeqCst);
+                let _active = Active::enter(self);
                 let busy = Busy::enter();
                 if self.run(stream, &body) {
                     self.served.fetch_add(1, Ordering::Relaxed);
                 }
                 self.trim_pool();
                 drop(busy);
-                *self.last.lock().expect("idle clock mutex poisoned") = Instant::now();
-                self.active.fetch_sub(1, Ordering::SeqCst);
             }
             REQ_STATUS => {
                 let _ = send_frame(&mut stream, STATUS, self.status().as_bytes());
@@ -695,10 +717,9 @@ impl Daemon {
     /// outside the cache exceeds their share of the memory budget
     /// ([`SharedCache::fit_resident_bytes`]).
     fn trim_pool(&self) {
-        // Sized outside the pool lock: an engine building its class graph
-        // holds the graph's lock until done.
+        // Sized outside the pool lock: sizing takes each engine's cache locks.
         let mut open: Vec<_> = {
-            let pool = self.engines.lock().expect("engine pool mutex poisoned");
+            let pool = self.engines.lock_or_default();
             pool.programs.iter().map(|(k, (program, used))| (*used, k.clone(), program.clone())).collect()
         };
         open.sort_unstable_by_key(|(used, ..)| std::cmp::Reverse(*used));
@@ -710,7 +731,7 @@ impl Daemon {
         let sizes: Vec<usize> = open.iter().map(|(_, _, program)| program.resident_bytes()).collect();
         let closing = self.cache.fit_resident_bytes(&sizes);
         if !closing.is_empty() {
-            let mut pool = self.engines.lock().expect("engine pool mutex poisoned");
+            let mut pool = self.engines.lock_or_default();
             for i in closing {
                 pool.programs.remove(&open[i].1);
             }
@@ -718,7 +739,7 @@ impl Daemon {
     }
 
     fn status(&self) -> String {
-        let open = self.engines.lock().expect("engine pool mutex poisoned").programs.len();
+        let open = self.engines.lock_or_default().programs.len();
         format!(
             "pid {}, up {} s, {} requests ({} running), {open} APKs open, memory cache {} of {} MiB ({} MiB reserved for open APKs), {} ({})\n",
             std::process::id(),

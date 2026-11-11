@@ -18,7 +18,7 @@
 
 use crate::{CompiledQuery, Engine, FindOptions, Job, Query, RefBatch, RefContext, SearchTarget, Shape, WriteJob, tiers};
 use asc_apk::Entry;
-use asc_cache::Tier;
+use asc_cache::{LockExt, Tier};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -78,7 +78,7 @@ impl DexDedup {
     /// into the sweep's rule set): it shares rows only with entries searched
     /// for the same rules.
     pub fn claim_rules(&self, entry: &Entry, rules: &[usize]) -> Claim {
-        let mut groups = self.groups.lock().unwrap();
+        let mut groups = self.groups.lock_or_default();
         let group = groups.entry((entry.crc32, entry.uncomp_size, rules.to_vec())).or_default();
         let lead = group.members.fetch_add(1, Ordering::Relaxed) == 0;
         Claim { group: Arc::clone(group), lead, shared: Arc::clone(&self.shared) }
@@ -101,7 +101,7 @@ struct Publish<'a>(&'a Group);
 
 impl Publish<'_> {
     fn set(self, value: Option<Arc<Shared>>) {
-        let mut r = self.0.result.lock().unwrap();
+        let mut r = self.0.result.lock().expect("shared result mutex poisoned");
         *r = Some(value);
         self.0.ready.notify_all();
         drop(r);
@@ -111,7 +111,7 @@ impl Publish<'_> {
 
 impl Drop for Publish<'_> {
     fn drop(&mut self) {
-        let mut r = self.0.result.lock().unwrap_or_else(|e| e.into_inner());
+        let mut r = self.0.result.lock_or_default();
         if r.is_none() {
             *r = Some(None);
         }
@@ -230,13 +230,13 @@ fn sweep_opts(aggregate: bool) -> FindOptions {
 
 /// The leader's result, once it is published.
 fn wait_shared(group: &Group, cancel: &AtomicBool) -> Option<Arc<Shared>> {
-    let mut r = group.result.lock().unwrap();
+    let mut r = group.result.lock().expect("shared result mutex poisoned");
     while r.is_none() {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
         // The leader is skipped if the sweep is cancelled: poll the flag.
-        r = group.ready.wait_timeout(r, Duration::from_millis(50)).unwrap().0;
+        r = group.ready.wait_timeout(r, Duration::from_millis(50)).expect("shared result mutex poisoned").0;
     }
     r.clone().flatten()
 }
@@ -254,11 +254,11 @@ fn content_id(target: &SearchTarget, entry: &Entry, hash: impl FnOnce() -> Optio
     let (size, modified) = target.apk.stamp().ok()?;
     let key = (target.apk.path().to_path_buf(), size, modified, entry.name.clone(), entry.crc32, entry.uncomp_size);
     let ids = IDS.get_or_init(Mutex::default);
-    if let Some(id) = ids.lock().unwrap().get(&key) {
+    if let Some(id) = ids.lock_or_default().get(&key) {
         return Some(*id);
     }
     let id = hash()?;
-    let mut ids = ids.lock().unwrap();
+    let mut ids = ids.lock_or_default();
     if ids.len() >= MAX_CONTENT_IDS {
         ids.clear();
     }

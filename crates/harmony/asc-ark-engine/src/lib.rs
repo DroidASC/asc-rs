@@ -41,6 +41,7 @@ mod scopes;
 pub mod text;
 mod track;
 
+use asc_cache::LockExt;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -154,6 +155,7 @@ pub struct Engine {
 impl Drop for Engine {
     /// The analyses go on several threads, as [`Engine::release_analyses`] frees them.
     fn drop(&mut self) {
+        // Only freed: a poisoned cache is as good as any for that.
         let graph = std::mem::take(self.graph.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner));
         callgraph::GraphCache::discard(graph, self.threads);
     }
@@ -225,8 +227,8 @@ impl Engine {
     /// the next query computes what it needs again. A query running now
     /// keeps what it started with until it is done.
     pub fn release_analyses(&self) -> usize {
-        let released = std::mem::take(&mut *self.graph.lock().expect("call graph cache mutex poisoned"));
-        let classes = std::mem::take(&mut *self.classes.lock().expect("class cache mutex poisoned"));
+        let released = std::mem::take(&mut *self.graph.lock_or_default());
+        let classes = std::mem::take(&mut *self.classes.lock_or_default());
         let bytes = released.heap_bytes() + classes.heap_bytes();
         callgraph::GraphCache::discard(released, self.threads);
         bytes
@@ -234,12 +236,12 @@ impl Engine {
 
     /// The class definitions a hierarchy walk starting now reads and fills.
     fn class_cache(&self) -> Arc<hierarchy::ClassCache> {
-        Arc::clone(&self.classes.lock().expect("class cache mutex poisoned"))
+        Arc::clone(&self.classes.lock_or_default())
     }
 
     /// The call graph cache a walk or search starting now reads and fills.
     fn graph_cache(&self) -> Arc<callgraph::GraphCache> {
-        Arc::clone(&self.graph.lock().expect("call graph cache mutex poisoned"))
+        Arc::clone(&self.graph.lock_or_default())
     }
 
     /// Every ABC entry of the program, in program order, readable or not.

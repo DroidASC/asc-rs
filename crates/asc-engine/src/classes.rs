@@ -158,13 +158,15 @@ impl Engine {
                                 .map(|(name, buf)| dex_classes_with(&name, &buf, prefix, strict))
                                 .collect()
                         });
-                        *slots[i].lock().unwrap() = Some(EntryClasses { entry_name: entry.name.clone(), result });
+                        *slots[i].lock().expect("entry slot mutex poisoned") =
+                            Some(EntryClasses { entry_name: entry.name.clone(), result });
                         progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                     }
                 });
             }
         });
-        let out: Vec<EntryClasses> = slots.into_iter().map(|s| s.into_inner().unwrap().expect("every entry is scanned")).collect();
+        let out: Vec<EntryClasses> =
+            slots.into_iter().map(|s| s.into_inner().expect("entry slot mutex poisoned").expect("every entry is scanned")).collect();
         if self.debug {
             let mut count = 0;
             for e in &out {

@@ -106,6 +106,7 @@ dependencies = [
  "asc-abc",
  "asc-apk",
  "asc-arkisa",
+ "asc-cache",
  "asc-fixture",
  "asc-hap",
  "asc-pasm",

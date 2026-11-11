@@ -26,7 +26,7 @@ use crate::{
     CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, MemoryPolicy, RefBatch, RefResult, RefSite, Shape, SharedMemory, TextRows,
     available_memory,
 };
-use asc_cache::{ApkKey, DiskCache, ProcessRegistry};
+use asc_cache::{ApkKey, DiskCache, LockExt, ProcessRegistry};
 use asc_dex::Dex;
 use asc_findrefs::{ClassRelation, Query, SearchState};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -154,7 +154,7 @@ pub(crate) fn write_derived(disk: &DiskCache, memory: Option<&SharedMemory>, key
     if mapped.table_mask() != mask || job.state.table_mask() != mask {
         return;
     }
-    let mut mem = memory.lock().unwrap();
+    let mut mem = crate::lock_memory(memory);
     let Some(current) = mem.peek(key, &job.entry) else { return };
     let still_ours = current.logical.get().and_then(|l| l.get(job.logical)).is_some_and(|l| Arc::ptr_eq(&l.state, &job.state));
     if still_ours {
@@ -482,7 +482,7 @@ pub struct Busy(());
 
 impl Busy {
     pub fn enter() -> Busy {
-        let mut reg = REGISTRATION.lock().unwrap();
+        let mut reg = REGISTRATION.lock().expect("process registration mutex poisoned");
         reg.requests += 1;
         if reg.requests == 1 {
             reg.publish();
@@ -493,7 +493,7 @@ impl Busy {
 
 impl Drop for Busy {
     fn drop(&mut self) {
-        let mut reg = REGISTRATION.lock().unwrap();
+        let mut reg = REGISTRATION.lock().expect("process registration mutex poisoned");
         reg.requests -= 1;
         if reg.requests == 0 {
             reg.publish();
@@ -512,7 +512,7 @@ pub(crate) struct MemoryBudget {
 
 impl MemoryBudget {
     pub(crate) fn new(auto: Option<MemoryPolicy>) -> MemoryBudget {
-        let mut reg = REGISTRATION.lock().unwrap();
+        let mut reg = REGISTRATION.lock().expect("process registration mutex poisoned");
         reg.caches += 1;
         if reg.registry.is_none() {
             reg.registry = ProcessRegistry::default_dir().and_then(ProcessRegistry::open);
@@ -524,19 +524,19 @@ impl MemoryBudget {
     /// process's share. At most once per [`REBALANCE_EVERY`].
     pub(crate) fn maybe_rebalance(&self, memory: &SharedMemory) {
         {
-            let mut last = self.last.lock().unwrap();
+            let mut last = self.last.lock_or_default();
             if last.is_some_and(|t| t.elapsed() < REBALANCE_EVERY) {
                 return;
             }
             *last = Some(Instant::now());
         }
         let used = {
-            let m = memory.lock().unwrap();
+            let m = crate::lock_memory(memory);
             (m.used_bytes() + m.reserved_bytes()) as u64
         };
         let previous = self.published.swap(used, Ordering::Relaxed);
         let (held, others) = {
-            let mut reg = REGISTRATION.lock().unwrap();
+            let mut reg = REGISTRATION.lock().expect("process registration mutex poisoned");
             reg.held = (reg.held + used).saturating_sub(previous);
             reg.publish();
             let Some(registry) = &reg.registry else { return };
@@ -544,14 +544,14 @@ impl MemoryBudget {
         };
         if let Some(policy) = self.auto {
             let cap = policy.share(available_memory(), held, &others);
-            memory.lock().unwrap().set_capacity(cap);
+            crate::lock_memory(memory).set_capacity(cap);
         }
     }
 }
 
 impl Drop for MemoryBudget {
     fn drop(&mut self) {
-        let mut reg = REGISTRATION.lock().unwrap();
+        let mut reg = REGISTRATION.lock().expect("process registration mutex poisoned");
         reg.held = reg.held.saturating_sub(self.published.load(Ordering::Relaxed));
         reg.caches -= 1;
         if reg.caches == 0 {
@@ -583,13 +583,13 @@ const THREADS_EVERY: Duration = Duration::from_millis(100);
 /// ([`crate::Threads::wait_turn`]).
 pub fn auto_threads() -> usize {
     static LAST: Mutex<Option<(Instant, usize)>> = Mutex::new(None);
-    let mut last = LAST.lock().unwrap();
+    let mut last = LAST.lock_or_default();
     if let Some((at, threads)) = *last
         && at.elapsed() < THREADS_EVERY
     {
         return threads;
     }
-    let others = match &REGISTRATION.lock().unwrap().registry {
+    let others = match &REGISTRATION.lock().expect("process registration mutex poisoned").registry {
         Some(registry) => registry.others(),
         // One-shot commands keep no memory cache and do not register; they
         // still give way to the resident hosts.
