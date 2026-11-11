@@ -83,12 +83,15 @@ record stays on one line. Row *content* matches the Python ASC semantically
 
 ## Class extraction
 
-`getclass` rebuilds the class into a standalone DEX: collect every index it depends on,
-sort the new id tables canonically, rewrite operands and data, seal with checksum and
-signature — the output is spec-valid (`dexdump` and jadx accept it, `--dump-dex` exports it).
-It is rendered as baksmali-style smali. Classes the rebuild refuses (undefined opcodes,
-`invoke-custom`, index overflow) are disassembled in place with a warning. `--method`
-accepts a full signature, a prefix or a bare name.
+`getclass` rebuilds the class (and its same-DEX nested / synthetic classes) into a standalone
+DEX: collect every index they depend on, sort the new id tables canonically, order superclasses
+before subclasses, rewrite operands and data, seal with checksum and signature — the output is
+spec-valid (`dexdump`, `dexdec` and jadx accept it, `--dump-dex` exports it). By default it is
+decompiled to Java through `dexdec` (`--lang kotlin|smali|auto`; `disassemble` renders
+baksmali-style smali). Decompiled outputs are cached in L3 keyed by the full input MD5 + class /
+method / language. Classes the rebuild refuses (`invoke-custom`, index overflow, malformed
+bytecode) fall back to the original DEX with a warning. `--method` accepts a full signature, a
+prefix, a Java-style signature or a bare name.
 
 ## Caches
 
@@ -96,8 +99,13 @@ Caches are filled by queries themselves, so the "no preprocessing" property hold
 
 * **Disk tiers**, keyed by `ApkKey` (size, mtime, hash of the central directory), one cap:
   - L1: inflated DEX entries (≥ 4 MiB), with a CRC trailer.
-  - L2: locator tables and call graphs that were costly to build, mapped back in place.
-  - L3: rendered findrefs results, keyed by query, options and the executable.
+  - L2: locator tables and call graphs that were costly to build, mapped back in place;
+    also the archive's full-input MD5 (32 bytes), so a later process reads it instead of
+    re-hashing hundreds of megabytes.
+  - L3: rendered findrefs results, keyed by query, options and the executable; and
+    decompiled classes, stored under two keys — the archive (`apk:<ApkKey>`, cheap, no
+    hashing) and its content (`md5:<hex>`, which also serves a copy under another path).
+    A content hit is copied to the archive key, so the next lookup skips the digest.
 
   Writes are temp file + `rename`, never synced: the cache holds nothing that cannot be
   rebuilt, and `fsync` is very slow on macOS. Files older than the boot are CRC-checked once

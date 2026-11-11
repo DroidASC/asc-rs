@@ -16,7 +16,8 @@ use asc_dex::encoded::{
 use asc_dex::leb128::{write_sleb128, write_uleb128};
 use asc_dex::{map_type, mutf8, ClassDef, Dex, HEADER_SIZE, NO_INDEX};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 struct Out {
     data: Vec<u8>,
@@ -235,7 +236,75 @@ fn order_static_values(dex: &Dex<'_>, h: &Hollow<'_>, values: &[EncodedValue], t
     Ok(ordered)
 }
 
-pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8>, usize)> {
+/// Order classes so every superclass and interface defined in the same DEX
+/// precedes its subclasses, breaking ties by mapped `class_idx`.
+fn sort_classes<'a, 'h>(hollows: &'h [Hollow<'a>], t: &Tables) -> Result<Vec<&'h Hollow<'a>>> {
+    if hollows.len() <= 1 {
+        return Ok(hollows.iter().collect());
+    }
+    let mut by_type: Vec<(u32, &'h Hollow<'a>)> = Vec::with_capacity(hollows.len());
+    for h in hollows {
+        by_type.push((t.map_type(h.def.class_idx)?, h));
+    }
+    by_type.sort_by_key(|(idx, _)| *idx);
+    let sorted: Vec<&'h Hollow<'a>> = by_type.into_iter().map(|(_, h)| h).collect();
+    let mut pos_of: HashMap<u32, usize> = HashMap::with_capacity(sorted.len());
+    for (i, h) in sorted.iter().enumerate() {
+        pos_of.insert(h.def.class_idx, i);
+    }
+    let n = sorted.len();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg: Vec<usize> = vec![0; n];
+    for (i, h) in sorted.iter().enumerate() {
+        let mut deps = Vec::new();
+        if h.def.superclass_idx != NO_INDEX {
+            if let Some(&p) = pos_of.get(&h.def.superclass_idx) {
+                if p != i {
+                    deps.push(p);
+                }
+            }
+        }
+        for &iface in &h.interfaces {
+            if let Some(&p) = pos_of.get(&(iface as u32)) {
+                if p != i && !deps.contains(&p) {
+                    deps.push(p);
+                }
+            }
+        }
+        indeg[i] = deps.len();
+        for p in deps {
+            children[p].push(i);
+        }
+    }
+    let mut ready: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
+    for (i, &d) in indeg.iter().enumerate() {
+        if d == 0 {
+            ready.push(Reverse(i));
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut placed = vec![false; n];
+    while let Some(Reverse(u)) = ready.pop() {
+        placed[u] = true;
+        out.push(sorted[u]);
+        for &v in &children[u] {
+            indeg[v] -= 1;
+            if indeg[v] == 0 {
+                ready.push(Reverse(v));
+            }
+        }
+    }
+    for (i, &done) in placed.iter().enumerate() {
+        if !done {
+            out.push(sorted[i]);
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn write(dex: &Dex<'_>, hollows: &[Hollow<'_>], t: &Tables) -> Result<(Vec<u8>, usize)> {
+    let order = sort_classes(hollows, t)?;
+    let n_cls = order.len();
     let n_str = t.strings.len();
     let n_type = t.types.len();
     let n_proto = t.protos.len();
@@ -247,8 +316,7 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
     let field_ids_off = proto_ids_off + n_proto * 12;
     let method_ids_off = field_ids_off + n_field * 8;
     let class_defs_off = method_ids_off + n_method * 8;
-    let data_base = class_defs_off + ClassDef::SIZE;
-
+    let data_base = class_defs_off + n_cls * ClassDef::SIZE;
     let mut out = Out { data: Vec::with_capacity(64 * 1024), base: data_base, map: Vec::new() };
     let remap = Remap::new(t);
     let map_type16 = |idx: u32| -> Result<u16> { Ok(t.map_type(idx)? as u16) };
@@ -300,8 +368,11 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
         type_lists.insert(list, off);
         off
     };
-    let interfaces = h.interfaces.iter().map(|&x| map_type16(x as u32)).collect::<Result<Vec<u16>>>()?;
-    let interfaces_off = emit_type_list(&mut out, interfaces);
+    let mut interfaces_offs = Vec::with_capacity(n_cls);
+    for h in &order {
+        let interfaces = h.interfaces.iter().map(|&x| map_type16(x as u32)).collect::<Result<Vec<u16>>>()?;
+        interfaces_offs.push(emit_type_list(&mut out, interfaces));
+    }
     let mut proto_param_offs = Vec::with_capacity(n_proto);
     for &p in &t.protos {
         let params = dex.proto_params(p)?.iter().map(|&x| map_type16(x as u32)).collect::<Result<Vec<u16>>>()?;
@@ -310,16 +381,17 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
     out.section(map_type::TYPE_LIST, type_list_count, first_type_list);
 
     // --- debug info ------------------------------------------------------
-    let mut methods_sorted: Vec<(u32, &EncodedMethod)> =
-        Vec::with_capacity(h.class_data.direct_methods.len() + h.class_data.virtual_methods.len());
-    for m in h.class_data.methods() {
-        methods_sorted.push((t.map_method(m.method_idx)?, m));
+    let mut methods_sorted: Vec<(u32, &Hollow<'_>, &EncodedMethod)> = Vec::new();
+    for &h in &order {
+        for m in h.class_data.methods() {
+            methods_sorted.push((t.map_method(m.method_idx)?, h, m));
+        }
     }
     methods_sorted.sort_by_key(|x| x.0);
     let mut debug_offs: HashMap<u32, u32> = HashMap::new();
     let first = out.pos();
     let mut debug_count = 0;
-    for (_, m) in &methods_sorted {
+    for (_, h, m) in &methods_sorted {
         if let Some(info) = h.debug.get(&m.method_idx) {
             debug_offs.insert(m.method_idx, out.pos());
             info.write(&mut out.data, &|s| remap.string(s), &|ty| remap.type_(ty));
@@ -332,7 +404,7 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
     // --- code items ------------------------------------------------------
     let mut code_offs: HashMap<u32, u32> = HashMap::new();
     let mut first_code = 0u32;
-    for (_, m) in &methods_sorted {
+    for (_, h, m) in &methods_sorted {
         if let Some(item) = h.code.get(&m.method_idx) {
             out.align4();
             if code_offs.is_empty() {
@@ -346,9 +418,20 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
     out.section(map_type::CODE, methods_with_code, first_code);
 
     // --- class data ------------------------------------------------------
-    let mut class_data_off = 0u32;
-    if !h.class_data.is_empty() {
-        class_data_off = out.pos();
+    let mut class_data_offs = Vec::with_capacity(n_cls);
+    let mut first_class_data = 0u32;
+    let mut class_data_count = 0usize;
+    for &h in &order {
+        if h.class_data.is_empty() {
+            class_data_offs.push(0);
+            continue;
+        }
+        let off = out.pos();
+        if class_data_count == 0 {
+            first_class_data = off;
+        }
+        class_data_count += 1;
+        class_data_offs.push(off);
         let sorted_fields = |list: &[EncodedField]| -> Result<Vec<(u32, EncodedField)>> {
             let mut v = list.iter().map(|f| Ok((t.map_field(f.field_idx)?, *f))).collect::<Result<Vec<_>>>()?;
             v.sort_by_key(|x| x.0);
@@ -384,30 +467,45 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
                 write_uleb128(&mut out.data, *code_offs.get(&m.method_idx).unwrap_or(&0));
             }
         }
-        out.section(map_type::CLASS_DATA, 1, class_data_off);
     }
+    out.section(map_type::CLASS_DATA, class_data_count, first_class_data);
 
     // --- annotations -----------------------------------------------------
+    let mut all_ann_items = BTreeMap::new();
+    let mut all_ann_sets = BTreeMap::new();
+    let mut all_ann_ref_lists = BTreeMap::new();
+    for &h in &order {
+        for (&k, v) in &h.ann_items {
+            all_ann_items.entry(k).or_insert(v);
+        }
+        for (&k, v) in &h.ann_sets {
+            all_ann_sets.entry(k).or_insert(v);
+        }
+        for (&k, v) in &h.ann_ref_lists {
+            all_ann_ref_lists.entry(k).or_insert(v);
+        }
+    }
+
     let mut ann_item_offs: HashMap<u32, u32> = HashMap::new();
     let first = out.pos();
-    for (&old, item) in &h.ann_items {
+    for (&old, &item) in &all_ann_items {
         ann_item_offs.insert(old, out.pos());
         write_annotation_item(&mut out.data, item, &remap);
         remap.check()?;
     }
-    out.section(map_type::ANNOTATION, h.ann_items.len(), first);
+    out.section(map_type::ANNOTATION, all_ann_items.len(), first);
 
     let internal = |what: &str, off: u32| RebuildError::Internal(format!("{what} at offset {off:#x} was referenced but never hollowed"));
     let mut ann_set_offs: HashMap<u32, u32> = HashMap::new();
-    if !h.ann_sets.is_empty() {
+    if !all_ann_sets.is_empty() {
         out.align4();
         let first = out.pos();
-        for (&old, items) in &h.ann_sets {
+        for (&old, &items) in &all_ann_sets {
             out.align4();
             ann_set_offs.insert(old, out.pos());
             let mut entries: Vec<(u32, u32)> = Vec::with_capacity(items.len());
             for &i in items.iter().filter(|&&i| i != 0) {
-                let item = h.ann_items.get(&i).ok_or_else(|| internal("annotation_item", i))?;
+                let item = all_ann_items.get(&i).ok_or_else(|| internal("annotation_item", i))?;
                 entries
                     .push((t.map_type(item.annotation.type_idx)?, *ann_item_offs.get(&i).ok_or_else(|| internal("annotation_item", i))?));
             }
@@ -417,7 +515,7 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
                 out.u32(off);
             }
         }
-        out.section(map_type::ANNOTATION_SET, h.ann_sets.len(), first);
+        out.section(map_type::ANNOTATION_SET, all_ann_sets.len(), first);
     }
     let set_off = |old: u32| -> Result<u32> {
         if old == 0 {
@@ -428,10 +526,10 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
     };
 
     let mut ann_ref_offs: HashMap<u32, u32> = HashMap::new();
-    if !h.ann_ref_lists.is_empty() {
+    if !all_ann_ref_lists.is_empty() {
         out.align4();
         let first = out.pos();
-        for (&old, sets) in &h.ann_ref_lists {
+        for (&old, &sets) in &all_ann_ref_lists {
             out.align4();
             ann_ref_offs.insert(old, out.pos());
             out.u32(sets.len() as u32);
@@ -440,13 +538,24 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
                 out.u32(off);
             }
         }
-        out.section(map_type::ANNOTATION_SET_REF_LIST, h.ann_ref_lists.len(), first);
+        out.section(map_type::ANNOTATION_SET_REF_LIST, all_ann_ref_lists.len(), first);
     }
 
-    let mut annotations_off = 0u32;
-    if let Some(dir) = &h.ann_dir {
+    let mut annotations_offs = Vec::with_capacity(n_cls);
+    let mut first_ann_dir = 0u32;
+    let mut ann_dir_count = 0usize;
+    for &h in &order {
+        let Some(dir) = &h.ann_dir else {
+            annotations_offs.push(0);
+            continue;
+        };
         out.align4();
-        annotations_off = out.pos();
+        let off = out.pos();
+        if ann_dir_count == 0 {
+            first_ann_dir = off;
+        }
+        ann_dir_count += 1;
+        annotations_offs.push(off);
         let mut fields: Vec<(u32, u32)> = Vec::with_capacity(dir.field_annotations.len());
         for (f, s) in &dir.field_annotations {
             fields.push((t.map_field(*f)?, set_off(*s)?));
@@ -457,8 +566,8 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
         }
         let mut params: Vec<(u32, u32)> = Vec::with_capacity(dir.parameter_annotations.len());
         for (m, r) in &dir.parameter_annotations {
-            let off = if *r == 0 { 0 } else { *ann_ref_offs.get(r).ok_or_else(|| internal("annotation_set_ref_list", *r))? };
-            params.push((t.map_method(*m)?, off));
+            let roff = if *r == 0 { 0 } else { *ann_ref_offs.get(r).ok_or_else(|| internal("annotation_set_ref_list", *r))? };
+            params.push((t.map_method(*m)?, roff));
         }
         fields.sort_unstable();
         methods.sort_unstable();
@@ -471,20 +580,30 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
             out.u32(*i);
             out.u32(*o);
         }
-        out.section(map_type::ANNOTATIONS_DIRECTORY, 1, annotations_off);
     }
+    out.section(map_type::ANNOTATIONS_DIRECTORY, ann_dir_count, first_ann_dir);
 
     // --- static values ---------------------------------------------------
-    let mut static_values_off = 0u32;
-    if let Some(values) = &h.static_values {
-        let ordered = order_static_values(dex, h, values, t)?;
-        if !ordered.is_empty() {
-            static_values_off = out.pos();
-            write_array(&mut out.data, &ordered, &remap);
-            remap.check()?;
-            out.section(map_type::ENCODED_ARRAY, 1, static_values_off);
+    let mut static_values_offs = Vec::with_capacity(n_cls);
+    let mut first_static_values = 0u32;
+    let mut static_values_count = 0usize;
+    for &h in &order {
+        let mut off = 0u32;
+        if let Some(values) = &h.static_values {
+            let ordered = order_static_values(dex, h, values, t)?;
+            if !ordered.is_empty() {
+                off = out.pos();
+                if static_values_count == 0 {
+                    first_static_values = off;
+                }
+                static_values_count += 1;
+                write_array(&mut out.data, &ordered, &remap);
+                remap.check()?;
+            }
         }
+        static_values_offs.push(off);
     }
+    out.section(map_type::ENCODED_ARRAY, static_values_count, first_static_values);
 
     // The id tables as `(map type, header size slot, count, offset)`. The spec
     // requires `*_off == 0` and no map entry whenever `*_size` is 0 (ART's
@@ -503,7 +622,7 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
     let map_off = out.pos();
     let mut map = vec![(map_type::HEADER, 1u32, 0u32)];
     map.extend(id_tables.iter().filter(|t| t.2 > 0).map(|&(ty, _, n, off)| (ty, n as u32, off as u32)));
-    map.push((map_type::CLASS_DEF, 1, class_defs_off as u32));
+    map.push((map_type::CLASS_DEF, n_cls as u32, class_defs_off as u32));
     map.extend(out.map.iter().copied());
     map.push((map_type::MAP_LIST, 1, map_off));
     map.sort_by_key(|m| m.2);
@@ -543,20 +662,22 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
         file.extend_from_slice(&(t.map_proto(id.proto_idx as u32)? as u16).to_le_bytes());
         file.extend_from_slice(&t.map_string(id.name_idx)?.to_le_bytes());
     }
-    let def = &h.def;
-    let superclass_idx = if def.superclass_idx == NO_INDEX { NO_INDEX } else { t.map_type(def.superclass_idx)? };
-    let source_file_idx = if def.source_file_idx == NO_INDEX { NO_INDEX } else { t.map_string(def.source_file_idx)? };
-    for v in [
-        t.map_type(def.class_idx)?,
-        def.access_flags,
-        superclass_idx,
-        interfaces_off,
-        source_file_idx,
-        annotations_off,
-        class_data_off,
-        static_values_off,
-    ] {
-        file.extend_from_slice(&v.to_le_bytes());
+    for (i, &h) in order.iter().enumerate() {
+        let def = &h.def;
+        let superclass_idx = if def.superclass_idx == NO_INDEX { NO_INDEX } else { t.map_type(def.superclass_idx)? };
+        let source_file_idx = if def.source_file_idx == NO_INDEX { NO_INDEX } else { t.map_string(def.source_file_idx)? };
+        for v in [
+            t.map_type(def.class_idx)?,
+            def.access_flags,
+            superclass_idx,
+            interfaces_offs[i],
+            source_file_idx,
+            annotations_offs[i],
+            class_data_offs[i],
+            static_values_offs[i],
+        ] {
+            file.extend_from_slice(&v.to_le_bytes());
+        }
     }
     debug_assert_eq!(file.len(), data_base);
     file.extend_from_slice(&out.data);
@@ -582,7 +703,7 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
         put(&mut file, slot, n as u32);
         put(&mut file, slot + 4, if n == 0 { 0 } else { off as u32 });
     }
-    put(&mut file, 0x60, 1);
+    put(&mut file, 0x60, n_cls as u32);
     put(&mut file, 0x64, class_defs_off as u32);
     put(&mut file, 0x68, (file_size - data_base) as u32);
     put(&mut file, 0x6C, data_base as u32);

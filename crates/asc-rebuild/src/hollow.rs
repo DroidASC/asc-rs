@@ -6,8 +6,8 @@ use asc_dex::class_data::ClassData;
 use asc_dex::code::CodeItem;
 use asc_dex::debug_info::DebugInfo;
 use asc_dex::encoded::{parse_annotation_item, parse_array, AnnotationItem, EncodedValue};
-use asc_dex::{ClassDef, Dex};
-use std::collections::{BTreeMap, HashMap};
+use asc_dex::{mutf8, ClassDef, Dex};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 pub(crate) struct Hollow<'a> {
     pub def: ClassDef,
@@ -29,11 +29,14 @@ pub(crate) struct Hollow<'a> {
 impl<'a> Hollow<'a> {
     pub fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Hollow<'a>> {
         let (_, def) =
-            dex.find_class_def(&asc_dex::mutf8::encode(descriptor))?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
+            dex.find_class_def(&mutf8::encode(descriptor))?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
+        Self::from_def(dex, def)
+    }
+
+    pub fn from_def(dex: &Dex<'a>, def: ClassDef) -> Result<Hollow<'a>> {
         let buf = dex.buf();
         let class_data = dex.class_data(def.class_data_off)?;
         let interfaces = dex.type_list(def.interfaces_off)?;
-
         let mut code = HashMap::new();
         let mut debug = HashMap::new();
         for m in class_data.methods() {
@@ -104,4 +107,105 @@ impl<'a> Hollow<'a> {
         self.ann_ref_lists.insert(off, sets);
         Ok(())
     }
+
+    /// Extract `descriptor` together with every nested / synthetic class in
+    /// `dex` owned by it (`Outer$*` descriptors and `dalvik.annotation.MemberClasses`
+    /// entries, transitively).
+    pub fn extract_closure(dex: &Dex<'a>, descriptor: &str) -> Result<Vec<Hollow<'a>>> {
+        let root = Self::extract(dex, descriptor)?;
+        let mut wanted = BTreeSet::new();
+        collect_prefix_types(dex, descriptor, &mut wanted)?;
+        collect_member_class_types(dex, &root, &mut wanted)?;
+        wanted.remove(&root.def.class_idx);
+        if wanted.is_empty() {
+            return Ok(vec![root]);
+        }
+
+        let mut defs_by_type = HashMap::with_capacity(dex.class_def_count() as usize);
+        for def in dex.class_defs() {
+            let def = def?;
+            defs_by_type.insert(def.class_idx, def);
+        }
+
+        let mut seen = BTreeSet::from([root.def.class_idx]);
+        let mut queue: VecDeque<u32> = wanted.into_iter().collect();
+        let mut out = vec![root];
+        while let Some(type_idx) = queue.pop_front() {
+            if !seen.insert(type_idx) {
+                continue;
+            }
+            let Some(&def) = defs_by_type.get(&type_idx) else {
+                continue;
+            };
+            let h = Self::from_def(dex, def)?;
+            let mut nested = BTreeSet::new();
+            if let Ok(desc) = dex.type_descriptor(type_idx) {
+                collect_prefix_types(dex, &desc, &mut nested)?;
+            }
+            collect_member_class_types(dex, &h, &mut nested)?;
+            for next in nested {
+                if !seen.contains(&next) {
+                    queue.push_back(next);
+                }
+            }
+            out.push(h);
+        }
+        Ok(out)
+    }
+}
+
+/// Find all `type_idx`s in `dex` whose descriptor starts with `<stem>$` where
+/// `descriptor` is `<stem>;`. Since `type_ids` is sorted by UTF-16 code units,
+/// this binary-searches the lower bound and scans only the matching prefix range.
+fn collect_prefix_types(dex: &Dex<'_>, descriptor: &str, out: &mut BTreeSet<u32>) -> Result<()> {
+    let Some(stem) = descriptor.strip_suffix(';') else {
+        return Ok(());
+    };
+    let prefix = mutf8::encode(&format!("{stem}$"));
+    let count = dex.type_count();
+    let (mut left, mut right) = (0u32, count);
+    while left < right {
+        let mid = left + (right - left) / 2;
+        if mutf8::cmp_utf16(dex.type_bytes(mid)?, &prefix).is_lt() {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+    for idx in left..count {
+        let bytes = dex.type_bytes(idx)?;
+        if !bytes.starts_with(&prefix) {
+            break;
+        }
+        out.insert(idx);
+    }
+    Ok(())
+}
+
+/// Collect type indexes listed in `Ldalvik/annotation/MemberClasses;` on `h`.
+fn collect_member_class_types(dex: &Dex<'_>, h: &Hollow<'_>, out: &mut BTreeSet<u32>) -> Result<()> {
+    let Some(dir) = &h.ann_dir else {
+        return Ok(());
+    };
+    let Some(items) = h.ann_sets.get(&dir.class_annotations_off) else {
+        return Ok(());
+    };
+    for &item_off in items {
+        let Some(item) = h.ann_items.get(&item_off) else {
+            continue;
+        };
+        if dex.type_bytes(item.annotation.type_idx)? != b"Ldalvik/annotation/MemberClasses;" {
+            continue;
+        }
+        for (_, value) in &item.annotation.elements {
+            if let EncodedValue::Array(values) = value {
+                for v in values {
+                    if let EncodedValue::Type(t) = *v {
+                        out.insert(t);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

@@ -645,52 +645,58 @@ impl Server {
     /// budget comes as an outline (unless `full`), the whole class handed on
     /// for a spill file.
     fn getclass(&self, args: &Value, call: &Call) -> ToolResult {
+        const LANGS: &[(&str, &[&str])] = &[("java", &[]), ("kotlin", &["kt"]), ("smali", &["baksmali", "disassemble"]), ("auto", &[])];
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("getclass needs `class`".into()))?;
-        // Off by default: obfuscated APKs carry meaningless `.line`s, and agents
-        // turned them off in 259 of 292 getclass calls of the Grok replay.
         let debug_info = bool_arg(args, "debug_info")?.unwrap_or(false);
+        let lang = if str_arg(args, "lang")?.is_some() {
+            let s = choice_arg(args, "lang", "java", LANGS)?;
+            asc_engine::SourceLang::parse(s).unwrap_or(asc_engine::SourceLang::Java)
+        } else if debug_info {
+            // `.line` / `.param` only exist in smali.
+            asc_engine::SourceLang::Smali
+        } else {
+            asc_engine::SourceLang::Java
+        };
+        let include_nested = bool_arg(args, "nested")?.unwrap_or(true);
         let descriptor = names::format_class_name(class)?;
-        let opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
-        let mut src = apk.engine.get_class_method_cancellable(&descriptor, opts, None, &call.cancel)?;
+        let smali_opts = SmaliOptions { line_numbers: debug_info, param_names: debug_info };
+        let dec_opts = asc_engine::DecompileOptions { lang, smali: smali_opts, include_nested };
+        let method_arg = str_arg(args, "method")?;
+        let mut src = apk.engine.decompile_class_method_cancellable(&descriptor, dec_opts, method_arg, false, &call.cancel)?;
         if bool_arg(args, "resource_names")?.unwrap_or(true) {
             src.source = apk.engine.annotate_resource_ids(&src.source);
         }
         let mut text = String::new();
         if let Some(w) = &src.warning {
-            // A smali comment, so the text still assembles.
             text.push_str(&format!("# Warning: {w}\n"));
         }
         if !src.also_defined_in.is_empty() {
             text.push_str(&format!("# from {}; also defined in {}\n", src.dex_name, src.also_defined_in.join(", ")));
         }
-        let parsed = ClassText::parse(&src.source);
         let budget = output::budget(args)?;
         let mut structured = json!({
             "apk_id": apk.id,
             "class": descriptor,
             "dex_name": src.dex_name,
+            "lang": src.lang.as_str(),
             "warning": src.warning,
             "rebuilt": src.rebuilt.is_some(),
+            "cached": src.cached,
         });
         if !src.also_defined_in.is_empty() {
             structured["also_defined_in"] = json!(src.also_defined_in);
         }
-        match str_arg(args, "method")? {
-            Some(m) => {
-                let picked = parsed.select(m);
-                if picked.is_empty() {
-                    return Err(ToolError(format!("{descriptor} has no method {m:?}; its methods: {}", parsed.signatures(4 << 10))));
-                }
-                structured["methods"] = json!(picked.iter().map(|b| b.signature).collect::<Vec<_>>());
-                text.push_str(&parsed.with_methods(&picked));
-            }
-            None if text.len() + src.source.len() > budget && !bool_arg(args, "full")?.unwrap_or(false) => {
-                structured["outline"] = json!(true);
-                structured[FULL] = json!(format!("{text}{}", src.source));
-                text.push_str(&parsed.outline(src.source.len(), budget));
-            }
-            None => text.push_str(&src.source),
+        if method_arg.is_some() {
+            structured["methods"] = json!(src.methods);
+            text.push_str(&src.source);
+        } else if text.len() + src.source.len() > budget && !bool_arg(args, "full")?.unwrap_or(false) {
+            let parsed = ClassText::parse(&src.source);
+            structured["outline"] = json!(true);
+            structured[FULL] = json!(format!("{text}{}", src.source));
+            text.push_str(&parsed.outline(src.source.len(), budget));
+        } else {
+            text.push_str(&src.source);
         }
         structured["source"] = json!(text);
         Ok((text, structured))
@@ -1603,18 +1609,19 @@ pub mod defs {
 
     pub fn getclass() -> Value {
         json!({
-            "description": "A class as smali. Over the budget: an outline (fields, method signatures and sizes) unless \
-                full=true; then ask for methods.",
+            "description": "A class as Java (or Kotlin/smali via lang). Over budget: an outline unless full=true; then ask for methods.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string", "description": "Lcom/a/B; or com.a.B"},
                 "method": {"type": "string", "description": "Only these methods: a name (every overload) or name(params)ret."},
+                "lang": {"type": "string", "description": "java (default), kotlin, smali or auto."},
+                "nested": {"type": "boolean", "description": "Inline nested / anonymous classes, default true."},
                 "full": {"type": "boolean", "description": "Whole class even over budget, default false."},
                 "debug_info": {"type": "boolean", "description": ".line / .param, default false."},
                 "resource_names": {"type": "boolean", "description": "`# @type/name` after resource ids, default true."},
             })]), "required": ["class"]},
             "outputSchema": shape(&[
-                ("apk_id", "string"), ("class", "string"), ("dex_name", "string"), ("source", "string"), ("warning", "string?"),
-                ("rebuilt", "boolean"),
+                ("apk_id", "string"), ("class", "string"), ("dex_name", "string"), ("lang", "string"), ("source", "string"),
+                ("warning", "string?"), ("rebuilt", "boolean"), ("cached", "boolean"),
             ]),
         })
     }

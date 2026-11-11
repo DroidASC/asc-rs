@@ -35,7 +35,15 @@ pub struct ClassText<'a> {
 const SECTIONS: &[&str] = &["# static fields", "# instance fields", "# direct methods", "# virtual methods"];
 
 impl<'a> ClassText<'a> {
-    pub fn parse(smali: &'a str) -> ClassText<'a> {
+    pub fn parse(source: &'a str) -> ClassText<'a> {
+        if source.starts_with(".class ") || source.contains("\n.method ") {
+            Self::parse_smali(source)
+        } else {
+            Self::parse_source(source)
+        }
+    }
+
+    fn parse_smali(smali: &'a str) -> ClassText<'a> {
         let mut header_end = None;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
@@ -60,6 +68,54 @@ impl<'a> ClassText<'a> {
             pos += line.len();
         }
         ClassText { header: &smali[..header_end.unwrap_or(smali.len())], fields, methods }
+    }
+
+    fn parse_source(src: &'a str) -> ClassText<'a> {
+        let mut header_end = None;
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        // (start, declaration, signature, indent of the closing `}`)
+        let mut open: Option<(usize, &'a str, &'a str, usize)> = None;
+        let mut pos = 0;
+        for line in src.split_inclusive('\n') {
+            let raw = line.trim_end_matches('\n');
+            let indent = raw.len() - raw.trim_start().len();
+            let text = raw.trim_start();
+            if let Some((start, decl, sig, member_indent)) = open {
+                if text.trim_end() == "}" && indent == member_indent {
+                    methods.push(MethodBlock { signature: sig, declaration: decl, text: &src[start..pos + line.len()] });
+                    open = None;
+                }
+                pos += line.len();
+                continue;
+            }
+            // Members sit at 4 spaces, or 8 inside a Kotlin `companion object`.
+            if (indent == 4 || indent == 8) && !text.is_empty() {
+                // `// @id/name` annotations appended to the line are not code.
+                let code = strip_line_comment(text).trim_end();
+                if !code.is_empty() && !code.starts_with(['/', '*', '@', '}', ')']) && !is_type_decl(code) {
+                    let decl = code.strip_suffix(" {").unwrap_or(code.strip_suffix(';').unwrap_or(code));
+                    let decl = &src[pos + (raw.len() - text.len())..pos + (raw.len() - text.len()) + decl.len()];
+                    if let Some(sig) = source_method_sig(code) {
+                        if header_end.is_none() {
+                            header_end = Some(pos);
+                        }
+                        if code.ends_with('{') {
+                            open = Some((pos, decl, sig, indent));
+                        } else {
+                            methods.push(MethodBlock { signature: sig, declaration: decl, text: &src[pos..pos + line.len()] });
+                        }
+                    } else if is_field_line(code) {
+                        if header_end.is_none() {
+                            header_end = Some(pos);
+                        }
+                        fields.push(&src[pos..pos + raw.len()]);
+                    }
+                }
+            }
+            pos += line.len();
+        }
+        ClassText { header: &src[..header_end.unwrap_or(src.len())], fields, methods }
     }
 
     /// The methods `query` names: an exact signature, a signature prefix
@@ -137,6 +193,83 @@ impl<'a> ClassText<'a> {
     }
 }
 
+fn is_type_decl(rest: &str) -> bool {
+    rest.split_whitespace().any(|w| matches!(w, "class" | "interface" | "enum" | "object"))
+}
+
+/// `code` without a trailing `// ...` comment (quotes are respected, so a `//`
+/// inside a string stays).
+pub(crate) fn strip_line_comment(code: &str) -> &str {
+    let bytes = code.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(q) => {
+                if b == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if b == b'"' || b == b'\'' {
+                    quote = Some(b);
+                } else if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                    return &code[..i];
+                }
+            }
+        }
+        i += 1;
+    }
+    code
+}
+
+/// A field / Kotlin property declaration (as opposed to an enum constant,
+/// which ends with `,`).
+fn is_field_line(code: &str) -> bool {
+    let code = code.trim_end();
+    if code.ends_with(',') {
+        return false;
+    }
+    if code.ends_with(';') {
+        return true;
+    }
+    code.starts_with("val ") || code.starts_with("var ") || code.starts_with("const ") || code.contains(" val ") || code.contains(" var ")
+}
+
+pub(crate) fn source_method_sig(rest: &str) -> Option<&str> {
+    // An enum constant with arguments (`FOO(1),`) is not a declaration.
+    if rest.trim_end().ends_with(',') {
+        return None;
+    }
+    let open_paren = rest.find('(')?;
+    if let Some(eq) = rest.find('=') {
+        if eq < open_paren {
+            return None;
+        }
+    }
+    let close_paren = rest[open_paren..].find(')')? + open_paren;
+    let before = rest[..open_paren].trim_end();
+    // Kotlin spells an awkward name in backticks: `fun `in`()`.
+    let name_start =
+        before.rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '$' && c != '<' && c != '>' && c != '`').map_or(0, |i| i + 1);
+    let name = &before[name_start..];
+    if name.is_empty() || matches!(name, "if" | "for" | "while" | "switch" | "catch" | "synchronized") {
+        return None;
+    }
+    // `BAR(2);` — the last enum constant — has no return type or modifiers
+    // before the name, unlike an abstract/native method (`void run();`).
+    let qualifiers = before[..name_start].trim();
+    if qualifiers.is_empty() && rest.trim_end().ends_with(");") {
+        return None;
+    }
+    Some(&rest[name_start..=close_paren])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +311,53 @@ mod tests {
         assert!(o.contains(".method public run(I)V  # 1 insns, "), "{o}");
         assert!(o.contains(".method public constructor <init>()V  # 2 insns, "), "{o}");
         assert!(!o.contains("return-void"), "{o}");
+    }
+
+    #[test]
+    fn kotlin_source_members_survive_comments_companion_and_backticks() {
+        let kt = [
+            "package x;",
+            "",
+            "public class A {",
+            "    public static int id = 2130903042; // @id/btn",
+            "",
+            "    companion object {",
+            "        public fun `in`(): Unit {",
+            "            return Unit.INSTANCE;",
+            "        }",
+            "    }",
+            "",
+            "    public fun bar(): Int {",
+            "        return 1;",
+            "    }",
+            "}",
+            "",
+        ]
+        .join("\n");
+        let c = ClassText::parse(&kt);
+        let sigs: Vec<_> = c.methods.iter().map(|m| m.signature).collect();
+        assert_eq!(sigs, ["`in`()", "bar()"], "{sigs:?}");
+        // The resource annotation is a comment, not the end of the declaration.
+        assert_eq!(c.fields.len(), 1, "{:?}", c.fields);
+        assert!(c.fields[0].contains("int id = 2130903042;"), "{:?}", c.fields);
+        assert!(c.methods[1].text.ends_with("}\n"), "{:?}", c.methods[1].text);
+        assert_eq!(c.select("bar").len(), 1);
+        assert_eq!(c.select("`in`").len(), 1);
+        // A method's member index maps back to its declaration line.
+        let index = crate::output::method_index(&kt);
+        assert_eq!(index.len(), 2, "{index:?}");
+        let lines: Vec<&str> = kt.lines().collect();
+        for (sig, first, last) in &index {
+            assert!(lines[first - 1].contains(sig), "{sig}: {}", lines[first - 1]);
+            assert_eq!(lines[last - 1].trim(), "}");
+        }
+    }
+
+    #[test]
+    fn enum_constants_with_arguments_are_not_methods() {
+        let java = ["public enum E {", "    FOO(1),", "    BAR(2);", "", "    public void run() {", "    }", "}", ""].join("\n");
+        let c = ClassText::parse(&java);
+        let sigs: Vec<_> = c.methods.iter().map(|m| m.signature).collect();
+        assert_eq!(sigs, ["run()"], "{sigs:?}");
     }
 }

@@ -371,7 +371,7 @@ impl ClassGraph {
                 continue;
             }
             let p = asc_smali::proto_descriptor(&dex, mid.proto_idx as u32)?;
-            if proto.is_none_or(|want| want == p) {
+            if proto.is_none_or(|want| p == want || p.starts_with(want)) {
                 out.push(format!("{name}{p}"));
             }
         }
@@ -504,11 +504,26 @@ impl Engine {
     /// [`Engine::hierarchy`] that stops, with `ApkError::Cancelled`, once
     /// `cancel` is raised.
     pub fn hierarchy_cancellable(&self, q: &HierarchyQuery, cancel: &AtomicBool) -> Result<HierarchyTree> {
-        let method = q.method.as_deref().map(split_method).transpose()?;
+        // The marker only annotates rows: a return-less signature keeps its
+        // parameters, an unbalanced one is still an error.
+        let method = match q.method.as_deref() {
+            None => None,
+            Some(m) => match split_method(m) {
+                Ok(v) => Some(v),
+                Err(e) => match crate::names::partial_proto(m) {
+                    Some((name, tail)) => Some((name, Some(tail))),
+                    None => return Err(e),
+                },
+            },
+        };
         let (views, mut errors) = self.load_views(None, cancel)?;
         let g = self.class_graph(&views, &mut errors, cancel)?;
-        let Some(root) = g.id(&q.class) else {
-            return Err(EngineError::Query(format!("no class {} in this APK", q.class)));
+        let root = match g.id(&q.class) {
+            Some(id) => id,
+            None => crate::names::denormalize_class_candidates(&q.class)
+                .into_iter()
+                .find_map(|cand| g.id(&cand))
+                .ok_or_else(|| EngineError::Query(format!("no class {} in this APK", q.class)))?,
         };
         // Breadth-first: each class's shallowest depth and its children.
         let max_nodes = q.max_nodes.max(1);
@@ -553,6 +568,23 @@ impl Engine {
                     }
                     Ok(_) => {}
                     Err(e) => errors.push(format!("{}: {e}", g.name(c))),
+                }
+            }
+            if defines.is_empty() {
+                if let Some(raw_m) = q.method.as_deref() {
+                    for cand in crate::names::denormalize_method_candidates(Some(g.name(root)), raw_m) {
+                        let Ok((c_name, c_proto)) = split_method(&cand) else { continue };
+                        for &c in depth_of.keys() {
+                            if let Ok(d) = g.defines(&views, g.name(c), &c_name, c_proto.as_deref()) {
+                                if !d.is_empty() {
+                                    defines.insert(c, d);
+                                }
+                            }
+                        }
+                        if !defines.is_empty() {
+                            break;
+                        }
+                    }
                 }
             }
         }

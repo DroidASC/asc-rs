@@ -112,9 +112,9 @@ fn full_session() {
 
     let class = ok(&replies[6]);
     assert_eq!(class["class"], "Lexample/Test;");
-    assert!(text(&replies[6]).contains(".class public Lexample/Test;"));
-    assert!(text(&replies[6]).contains("const-string v0, \"token\""));
-
+    assert_eq!(class["lang"], "java");
+    assert!(text(&replies[6]).contains("public class Test"), "{}", text(&replies[6]));
+    assert!(text(&replies[6]).contains("public static void first()"), "{}", text(&replies[6]));
     let classes = ok(&replies[7]);
     assert_eq!(classes["total"], 2);
     assert_eq!(text(&replies[7]), "Lexample/Test;\nLexample/Test;\n# 2 classes\n");
@@ -874,15 +874,18 @@ fn getclass_picks_methods_by_name_or_prefix_and_lists_them_when_missing() {
         call(2, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "second("})),
         call(3, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "Lexample/Test;->first()V"})),
         call(4, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "third"})),
+        call(5, "getclass", json!({"apk": a, "class": "Lexample/Test;", "method": "first", "lang": "smali"})),
     ]);
     let first = text(&replies[0]);
-    assert!(first.starts_with(".class public Lexample/Test;\n"), "{first}");
-    assert!(first.contains(" first()V\n") && !first.contains(" second()V"), "{first}");
+    assert!(first.contains("public static void first()") && !first.contains("second("), "{first}");
     assert_eq!(ok(&replies[0])["methods"], json!(["first()V"]));
     assert_eq!(ok(&replies[1])["methods"], json!(["second()V"]));
     assert_eq!(ok(&replies[2])["methods"], json!(["first()V"]));
     assert_eq!(replies[3]["result"]["isError"], true);
     assert_eq!(text(&replies[3]), "Error: Lexample/Test; has no method \"third\"; its methods: first()V, second()V");
+    let smali_first = text(&replies[4]);
+    assert!(smali_first.starts_with(".class public Lexample/Test;\n"), "{smali_first}");
+    assert!(smali_first.contains(" first()V\n") && !smali_first.contains(" second()V"), "{smali_first}");
 }
 
 #[test]
@@ -902,16 +905,20 @@ fn an_oversized_class_comes_as_an_outline_and_a_file() {
     let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
     let a = apk.path().to_str().unwrap();
     let out = tempfile::tempdir().unwrap();
-    let whole = session(&[call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": 65536}))]);
+    let whole = session(&[call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "lang": "smali", "max_bytes": 65536}))]);
     let source = text(&whole[0]).to_string();
     // Room for the outline and the file's index, not for the class.
     let budget = source.len() * 4 / 5;
     let replies = session_with(
         spill_opts(out.path()),
         &[
-            call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": budget})),
-            call(2, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": 256, "full": true, "spill": "never"})),
-            call(3, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "max_bytes": budget})),
+            call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "lang": "smali", "max_bytes": budget})),
+            call(
+                2,
+                "getclass",
+                json!({"apk": a, "class": "Lexample/Rich;", "lang": "smali", "max_bytes": 256, "full": true, "spill": "never"}),
+            ),
+            call(3, "getclass", json!({"apk": a, "class": "Lexample/Rich;", "lang": "smali", "max_bytes": budget})),
         ],
     );
     let outline = text(&replies[0]);
@@ -1045,15 +1052,15 @@ fn hints_passed_back_as_cursors_and_numbers_as_strings_are_understood() {
 
 #[test]
 fn compact_structured_content_leaves_the_bulk_to_the_text() {
-    let apk = temp_apk();
+    let apk = temp_apk_from(&make_apk(&[("classes.dex", &make_rich_dex())], true));
     let a = apk.path().to_str().unwrap();
     let mut o = opts();
     o.structured = asc_mcp::output::Structured::Compact;
-    let replies = session_with(o, &[call(1, "getclass", json!({"apk": a, "class": "Lexample/Test;"})), call(2, "tools/list", json!({}))]);
+    let replies = session_with(o, &[call(1, "getclass", json!({"apk": a, "class": "Lexample/Rich;"})), call(2, "tools/list", json!({}))]);
     let s = &replies[0]["result"]["structuredContent"];
     assert!(s.get("source").is_none() && s["omitted"] == json!(["source"]), "{s}");
-    assert_eq!(s["class"], "Lexample/Test;");
-    assert!(text(&replies[0]).contains("const-string v0, \"token\""));
+    assert_eq!(s["class"], "Lexample/Rich;");
+    assert!(text(&replies[0]).contains("public abstract class Rich implements Iface"), "{}", text(&replies[0]));
 }
 
 #[test]

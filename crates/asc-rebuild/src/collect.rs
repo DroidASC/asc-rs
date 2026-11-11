@@ -90,8 +90,16 @@ pub(crate) fn check_walk(method_idx: u32, stop: Stop) -> Result<()> {
     }
 }
 
-pub(crate) fn collect(dex: &Dex<'_>, h: &Hollow<'_>) -> Result<RefSet> {
+pub(crate) fn collect(dex: &Dex<'_>, hollows: &[Hollow<'_>]) -> Result<RefSet> {
     let mut refs = RefSet::default();
+    for h in hollows {
+        collect_one(&mut refs, h)?;
+    }
+    refs.close(dex)?;
+    Ok(refs)
+}
+
+fn collect_one(refs: &mut RefSet, h: &Hollow<'_>) -> Result<()> {
     let def = &h.def;
     refs.types.insert(def.class_idx);
     if def.superclass_idx != NO_INDEX {
@@ -170,7 +178,5 @@ pub(crate) fn collect(dex: &Dex<'_>, h: &Hollow<'_>) -> Result<RefSet> {
     if refs.method_handles {
         return Err(RebuildError::Unsupported(UNSUPPORTED_CALL_SITES));
     }
-
-    refs.close(dex)?;
-    Ok(refs)
+    Ok(())
 }

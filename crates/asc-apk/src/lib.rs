@@ -454,6 +454,11 @@ impl Apk {
         &self.archive(entry).map
     }
 
+    /// Raw memory-mapped bytes of each archive in program order.
+    pub fn raw_archives(&self) -> impl Iterator<Item = (&Path, &[u8])> {
+        self.archives.iter().map(|a| (a.path.as_path(), &a.map[..]))
+    }
+
     fn archive(&self, entry: &Entry) -> &Archive {
         self.archives.get(entry.archive).expect("entry of this APK")
     }

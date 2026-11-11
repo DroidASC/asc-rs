@@ -229,7 +229,7 @@ fn method_ids(dex: &Dex<'_>, class: &str, name: &str, proto: Option<&str>) -> Re
         if ((id.class_idx as u32), id.name_idx) != target {
             break;
         }
-        if proto.is_none_or(|p| asc_smali::proto_descriptor(dex, id.proto_idx as u32).is_ok_and(|d| d == p)) {
+        if proto.is_none_or(|p| asc_smali::proto_descriptor(dex, id.proto_idx as u32).is_ok_and(|d| d == p || d.starts_with(p))) {
             out.push(i);
         }
     }
@@ -438,26 +438,57 @@ impl Engine {
     /// Every overload of `class`'s `method` (or that exact signature) some
     /// DEX knows; an unknown method is an error.
     fn method_roots(&self, views: &[DexView], class: &str, method: &str) -> Result<BTreeSet<String>> {
-        let (name, proto) = match method.find('(') {
-            Some(p) => {
-                let sig = asc_smali::normalize_method_signature(method)?;
-                let p2 = sig.find('(').unwrap_or(p);
-                (sig[..p2].to_string(), Some(sig[p2..].to_string()))
+        let collect_for = |cls: &str, m_spec: &str| -> Result<BTreeSet<String>> {
+            let (name, proto) = match m_spec.find('(') {
+                Some(p) => match asc_smali::normalize_method_signature(m_spec) {
+                    Ok(sig) => {
+                        let p2 = sig.find('(').unwrap_or(p);
+                        (sig[..p2].to_string(), Some(sig[p2..].to_string()))
+                    }
+                    // `run(int)`, `entry(com.app.Outer.Inner)`: a return-less
+                    // signature is accepted, an unbalanced one is an error.
+                    Err(e) => match crate::names::partial_proto(m_spec) {
+                        Some((name, tail)) => (name, Some(tail)),
+                        None => return Err(e.into()),
+                    },
+                },
+                None => (m_spec.to_string(), None),
+            };
+            let mut roots = BTreeSet::new();
+            for v in views {
+                let dex = Dex::with_name(&v.data, &v.name)?;
+                for m in method_ids(&dex, cls, &name, proto.as_deref())? {
+                    roots.insert(asc_smali::method_signature(&dex, m)?);
+                }
             }
-            None => (method.to_string(), None),
+            Ok(roots)
         };
-        let mut roots = BTreeSet::new();
-        for v in views {
-            let dex = Dex::with_name(&v.data, &v.name)?;
-            for m in method_ids(&dex, class, &name, proto.as_deref())? {
-                roots.insert(asc_smali::method_signature(&dex, m)?);
+
+        let roots = collect_for(class, method)?;
+        if !roots.is_empty() {
+            return Ok(roots);
+        }
+
+        let mut class_cands = vec![class.to_string()];
+        class_cands.extend(crate::names::denormalize_class_candidates(class));
+        for cls_cand in &class_cands {
+            let mut method_cands = vec![method.to_string()];
+            method_cands.extend(crate::names::denormalize_method_candidates(Some(cls_cand), method));
+            for m_cand in &method_cands {
+                if cls_cand == class && m_cand == method {
+                    continue;
+                }
+                if let Ok(fallback_roots) = collect_for(cls_cand, m_cand) {
+                    if !fallback_roots.is_empty() {
+                        return Ok(fallback_roots);
+                    }
+                }
             }
         }
-        if roots.is_empty() {
-            let hint = self.member_not_found_hint(class, Some(&name), true);
-            return Err(EngineError::Query(format!("no method {class}->{method} in this APK{hint}")));
-        }
-        Ok(roots)
+
+        let name_only = method.split('(').next().unwrap_or(method);
+        let hint = self.member_not_found_hint(class, Some(name_only), true);
+        Err(EngineError::Query(format!("no method {class}->{method} in this APK{hint}")))
     }
 
     /// Look every frontier method up in every DEX (in parallel) and collect

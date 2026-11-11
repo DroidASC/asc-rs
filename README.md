@@ -19,7 +19,7 @@ cargo test --workspace
 droidasc manifest-summary app.apk | grep exported=true          # 暴露面
 droidasc findrefs app.apk string 'https?://' --limit 50         # 谁用了这个字符串
 droidasc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
-droidasc getclass app.apk com.poc.Main --method onCreate        # 读 smali
+droidasc getclass app.apk com.poc.Main --method onCreate        # 反编译为 Java（或 --lang kotlin / --smali）
 droidasc callgraph app.apk com.poc.Main onCreate --depth 3      # 调用者树
 droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 ```
@@ -28,7 +28,7 @@ droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec
 
 | 命令 | 作用 |
 |---|---|
-| `getclass` / `disassemble` | 定位类、在内存中重建单类 DEX 并输出 smali；`--method` 只看某个方法，`--dump-dex` 写出 DEX 交给 jadx 等工具 |
+| `getclass` / `disassemble` | 定位类、在内存中重建包含内部类的最小 DEX 并通过 `dexdec` 反编译（默认 Java，`--lang kotlin\|smali\|auto`）；`disassemble` 输出 smali；`--method` 只看某个方法，`--dump-dex` 导出最小 DEX；反编译结果按输入 MD5 + 类名缓存 |
 | `listclass`（`classes`） | 列出类，`--prefix` 过滤 |
 | `findrefs` | 对 `string` / `type` / `method` / `field` 的代码引用，`extends` / `impl` 直接子类和实现类；`all` 组合条件，`rules` 一次扫描回答多条规则 |
 | `callgraph` | 方法的调用者（默认）或 `--callees`，`--virtual` 沿类层次跟踪分派 |

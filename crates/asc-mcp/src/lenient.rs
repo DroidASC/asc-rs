@@ -33,7 +33,8 @@ const FINDREFS: &[(&str, &str)] = &[
 ];
 
 /// `(alias, canonical)` for the tools naming one method of a class.
-const METHOD_TOOLS: &[(&str, &str)] = &[("method_name", "method"), ("methodName", "method"), ("signature", "method")];
+const METHOD_TOOLS: &[(&str, &str)] =
+    &[("method_name", "method"), ("methodName", "method"), ("signature", "method"), ("language", "lang"), ("format", "lang")];
 
 /// `args` with the aliases of `tool` renamed and model habits undone, or
 /// `None` when nothing needed changing.

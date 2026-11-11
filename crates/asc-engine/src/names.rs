@@ -105,6 +105,9 @@ impl<'a> MemberTarget<'a> {
 /// `[A-Za-z_$][A-Za-z0-9_$]*`, the identifiers of Java class paths and members
 /// (obfuscators stay within it; non-ASCII names are left to `->`).
 fn is_identifier(s: &str) -> bool {
+    if let Some(inner) = s.strip_prefix('`').and_then(|r| r.strip_suffix('`')) {
+        return !inner.is_empty() && !inner.contains('`');
+    }
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
@@ -122,7 +125,7 @@ fn dotted_member_split(spec: &str) -> Option<usize> {
     let i = head.rfind('.')?;
     let (class, name) = (&head[..i], &head[i + 1..]);
     let segments: Vec<&str> = class.split(['.', '/']).collect();
-    let capitalised = segments.last().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase()));
+    let capitalised = segments.last().is_some_and(|l| l.trim_matches('`').starts_with(|c: char| c.is_ascii_uppercase()));
     let classlike = segments.iter().all(|s| is_identifier(s));
     // A signature or a constructor name settles it; otherwise Java naming does.
     let member_evident = head_end < spec.len() || name.starts_with('<');
@@ -139,7 +142,7 @@ pub fn looks_like_class(spec: &str) -> bool {
     let segments: Vec<&str> = s.split('.').collect();
     segments.len() > 1
         && segments.iter().all(|seg| is_identifier(seg))
-        && segments.last().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase()))
+        && segments.last().is_some_and(|l| l.trim_matches('`').starts_with(|c: char| c.is_ascii_uppercase()))
 }
 
 /// A class written without its package (`WebView`, `Build$VERSION`): a fuzzy
@@ -433,6 +436,596 @@ pub fn parse_rule(spec: &str) -> Result<Query> {
     crate::condition::parse_rule_in(spec, None)
 }
 
+/// Whether `value` is a Java reserved keyword or literal that `dexdec` prefixes
+/// with `C` when sanitizing DEX identifiers.
+pub fn is_java_reserved(value: &str) -> bool {
+    matches!(
+        value,
+        "abstract"
+            | "assert"
+            | "boolean"
+            | "break"
+            | "byte"
+            | "case"
+            | "catch"
+            | "char"
+            | "class"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extends"
+            | "final"
+            | "finally"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "implements"
+            | "import"
+            | "instanceof"
+            | "int"
+            | "interface"
+            | "long"
+            | "native"
+            | "new"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "return"
+            | "short"
+            | "static"
+            | "strictfp"
+            | "super"
+            | "switch"
+            | "synchronized"
+            | "this"
+            | "throw"
+            | "throws"
+            | "transient"
+            | "try"
+            | "void"
+            | "volatile"
+            | "while"
+            | "true"
+            | "false"
+            | "null"
+            | "_"
+    )
+}
+
+/// `name(params)` without a return type — a Java-style or abbreviated target
+/// such as `run(int)` or `entry(com.app.Outer.Inner)`. Anything unbalanced
+/// (`run(I`, `run`) is not a signature and returns `None`.
+pub(crate) fn partial_signature(spec: &str) -> Option<(&str, &str)> {
+    let open = spec.find('(')?;
+    let tail = &spec[open..];
+    let balanced = tail.ends_with(')') && tail.matches('(').count() == 1 && tail.matches(')').count() == 1;
+    let name = spec[..open].trim();
+    (balanced && !name.is_empty()).then_some((name, tail))
+}
+
+/// [`partial_signature`] with its Java-style or normalized parameter types put
+/// into Dalvik form: `onEvent(int)` -> `("onEvent", "(I)")`,
+/// `entry(com.app.Outer.Inner)` -> `("entry", "(Lcom/app/Outer$Inner;)")`.
+pub(crate) fn partial_proto(spec: &str) -> Option<(String, String)> {
+    let (name, tail) = partial_signature(spec)?;
+    let tail = java_signature_to_dalvik(spec)
+        .and_then(|dalvik| dalvik.find('(').map(|i| dalvik[i..].to_string()))
+        .unwrap_or_else(|| tail.to_string());
+    Some((name.to_string(), denormalize_signature_types(&tail)))
+}
+
+fn push_unique(out: &mut Vec<String>, item: String) {
+    if !item.is_empty() && !out.contains(&item) {
+        out.push(item);
+    }
+}
+
+/// Decode Kotlin `_dex_<HEX>_` escaped identifier, if `s` has that shape.
+fn decode_kotlin_dex_hex(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("_dex_")?;
+    if rest == "empty" {
+        return Some(String::new());
+    }
+    let rest = rest.strip_suffix('_')?;
+    let mut out = String::new();
+    for part in rest.split('_') {
+        let code = u32::from_str_radix(part, 16).ok()?;
+        out.push(char::from_u32(code)?);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Produce fallback de-normalized forms of a single `dexdec` identifier
+/// (excluding `ident` itself):
+/// - Kotlin backticks `` `in` `` -> `in`
+/// - Kotlin `_dex_<HEX>_` -> decoded characters
+/// - Collision suffix `name$2`, `name$3` -> `name`
+/// - Java reserved/numeric prefix `Cdo`, `Cif`, `C_`, `C1a` -> `do`, `if`, `_`, `1a`
+pub fn denormalize_identifier(ident: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let stripped = ident.strip_prefix('`').and_then(|s| s.strip_suffix('`')).unwrap_or(ident);
+    let mut seeds = Vec::new();
+    if stripped != ident {
+        push_unique(&mut out, stripped.to_string());
+        seeds.push(stripped.to_string());
+    } else {
+        seeds.push(ident.to_string());
+    }
+    if let Some(decoded) = decode_kotlin_dex_hex(stripped) {
+        push_unique(&mut out, decoded.clone());
+        seeds.push(decoded);
+    }
+    if let Some((base, num)) = stripped.rsplit_once('$') {
+        if !base.is_empty() && num.parse::<u32>().is_ok_and(|n| n >= 2) {
+            push_unique(&mut out, base.to_string());
+            seeds.push(base.to_string());
+        }
+    }
+    for s in seeds {
+        if let Some(rest) = s.strip_prefix('C') {
+            if is_java_reserved(rest) || rest.starts_with(|c: char| c.is_ascii_digit()) {
+                push_unique(&mut out, rest.to_string());
+            }
+        }
+    }
+    out.retain(|c| c != ident);
+    out
+}
+
+/// Produce fallback Dalvik class descriptors for a class name or descriptor
+/// that may have been normalized by `dexdec`:
+/// - Nested class dot separator (`Lcom/a/Outer/Inner;` -> `Lcom/a/Outer$Inner;`)
+/// - Anonymous class placeholder (`Anonymous1` -> `$1`)
+/// - Sanitized package/class segments (`Cdo` -> `do`, `` `in` `` -> `in`)
+pub fn denormalize_class_candidates(input: &str) -> Vec<String> {
+    let Ok(formatted) = format_class_name(input) else {
+        return Vec::new();
+    };
+    let dims = formatted.len() - formatted.trim_start_matches('[').len();
+    let array_prefix = &formatted[..dims];
+    let core = &formatted[dims..];
+    if !core.starts_with('L') || !core.ends_with(';') {
+        return Vec::new();
+    }
+    let inner = class_inner(core);
+    // Split into tokens coupled with the separator ('/' or '$') preceding each token.
+    let mut tokens: Vec<(char, &str)> = Vec::new();
+    for (i, slash_seg) in inner.split('/').enumerate() {
+        for (j, dollar_seg) in slash_seg.split('$').enumerate() {
+            let sep = if i == 0 && j == 0 {
+                '/'
+            } else if j > 0 {
+                '$'
+            } else {
+                '/'
+            };
+            tokens.push((sep, dollar_seg));
+        }
+    }
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    // Expand each token into `(token_text, force_dollar_before_it)`.
+    let mut token_variants: Vec<Vec<(String, bool)>> = Vec::with_capacity(tokens.len());
+    for &(_, raw_tok) in &tokens {
+        let mut vars = Vec::new();
+        let unquoted = raw_tok.strip_prefix('`').and_then(|s| s.strip_suffix('`')).unwrap_or(raw_tok);
+        if let Some(num) = unquoted.strip_prefix("Anonymous").filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+            vars.push((num.to_string(), true));
+        }
+        for d in denormalize_identifier(raw_tok) {
+            if !vars.iter().any(|(v, _)| v == &d) {
+                vars.push((d, false));
+            }
+        }
+        if !vars.iter().any(|(v, _)| v == raw_tok) {
+            vars.push((raw_tok.to_string(), false));
+        }
+        token_variants.push(vars);
+    }
+
+    // Generate token sequences (combining primary de-normalized variants and original).
+    let mut seqs: Vec<Vec<(String, bool)>> = vec![Vec::new()];
+    for vars in &token_variants {
+        let mut next = Vec::new();
+        for prefix in &seqs {
+            for v in vars.iter().take(2) {
+                let mut p = prefix.clone();
+                p.push(v.clone());
+                next.push(p);
+            }
+        }
+        seqs = next;
+        if seqs.len() > 16 {
+            seqs.truncate(16);
+        }
+    }
+
+    let mut out = Vec::new();
+    for seq in &seqs {
+        let build_with_split = |dollar_from: Option<usize>| -> String {
+            let mut s = format!("{array_prefix}L");
+            for (idx, (tok, force_dollar)) in seq.iter().enumerate() {
+                if idx > 0 {
+                    let orig_sep = tokens[idx].0;
+                    let use_dollar = orig_sep == '$' || *force_dollar || dollar_from.is_some_and(|df| idx > df);
+                    s.push(if use_dollar { '$' } else { '/' });
+                }
+                s.push_str(tok);
+            }
+            s.push(';');
+            s
+        };
+
+        // 1. Keep original '/' vs '$', only applying forced '$' for AnonymousN -> $N.
+        let base_desc = build_with_split(None);
+        if base_desc != formatted {
+            push_unique(&mut out, base_desc);
+        }
+
+        // 2. If a capitalised segment (in the de-normalized token or the name
+        //    as written) is followed by more segments, treat those as nested
+        //    classes ('$' instead of '/'). Obfuscated code often has none, so
+        //    the last two segments are always tried as an outer/inner split.
+        let upper = seq
+            .iter()
+            .position(|(t, _)| t.starts_with(|c: char| c.is_ascii_uppercase()))
+            .or_else(|| tokens.iter().position(|&(_, raw)| raw.trim_matches('`').starts_with(|c: char| c.is_ascii_uppercase())));
+        let mut splits = Vec::new();
+        if let Some(first_upper) = upper {
+            splits.extend(first_upper..seq.len().saturating_sub(1));
+        }
+        // Obfuscated lowercase outer classes (`com/app/a/B`) still nest: only a
+        // path with package segments to spare is split blindly.
+        if seq.len() >= 3 {
+            splits.push(seq.len() - 2);
+        }
+        splits.sort_unstable();
+        splits.dedup();
+        for split_at in splits {
+            let cand = build_with_split(Some(split_at));
+            if cand != formatted {
+                push_unique(&mut out, cand);
+            }
+        }
+    }
+    out
+}
+
+/// Possible simple source names for `class_descriptor` (used to detect constructor queries).
+fn class_constructor_names(class_descriptor: &str) -> Vec<String> {
+    let mut names = vec!["constructor".to_string()];
+    let inner = class_inner(class_descriptor.trim_start_matches('['));
+    let binary_cls = inner.rsplit('/').next().unwrap_or(inner);
+    let last = binary_cls.rsplit('$').next().unwrap_or(binary_cls);
+    if !last.is_empty() {
+        push_unique(&mut names, last.to_string());
+        if last.chars().all(|c| c.is_ascii_digit()) {
+            push_unique(&mut names, format!("Anonymous{last}"));
+        }
+        if is_java_reserved(last) || last.starts_with(|c: char| c.is_ascii_digit()) {
+            push_unique(&mut names, format!("C{last}"));
+        }
+    }
+    if binary_cls != last {
+        push_unique(&mut names, binary_cls.to_string());
+    }
+    names
+}
+
+/// Produce fallback method names or signatures for a method query that may use
+/// `dexdec`-normalized names (`Cdo`, `m$2`, `` `in` ``, `Anonymous1`, class constructor name).
+pub fn denormalize_method_candidates(class_descriptor: Option<&str>, method: &str) -> Vec<String> {
+    let trimmed = method.trim();
+    let (_, member) = trimmed.rsplit_once("->").unwrap_or(("", trimmed));
+    let (raw_name, sig_tail) = match member.find('(') {
+        Some(i) => (member[..i].trim(), Some(&member[i..])),
+        None => (member.trim(), None),
+    };
+    let mut name_cands = Vec::new();
+    push_unique(&mut name_cands, raw_name.to_string());
+    for d in denormalize_identifier(raw_name) {
+        push_unique(&mut name_cands, d);
+    }
+    if let Some(cls) = class_descriptor {
+        let ctor_names = class_constructor_names(cls);
+        for c in denormalize_class_candidates(cls) {
+            for extra in class_constructor_names(&c) {
+                if !ctor_names.contains(&extra) && (raw_name == extra || raw_name.trim_matches('`') == extra) {
+                    push_unique(&mut name_cands, "<init>".to_string());
+                }
+            }
+        }
+        if ctor_names.iter().any(|n| n == raw_name || n == raw_name.trim_matches('`')) {
+            push_unique(&mut name_cands, "<init>".to_string());
+        }
+    } else if raw_name == "constructor"
+        || raw_name.strip_prefix("Anonymous").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    {
+        push_unique(&mut name_cands, "<init>".to_string());
+    }
+
+    let mut sig_cands = Vec::new();
+    match sig_tail {
+        None => sig_cands.push(String::new()),
+        Some(sig) => {
+            sig_cands.push(sig.to_string());
+            let denorm_sig = denormalize_signature_types(sig);
+            if denorm_sig != sig {
+                push_unique(&mut sig_cands, denorm_sig);
+            }
+            if let Some(dalvik_full) = java_signature_to_dalvik(&format!("m{sig}")) {
+                if let Some(dalvik_sig) = dalvik_full.strip_prefix('m') {
+                    push_unique(&mut sig_cands, dalvik_sig.to_string());
+                    let denorm_dalvik = denormalize_signature_types(dalvik_sig);
+                    if denorm_dalvik != dalvik_sig {
+                        push_unique(&mut sig_cands, denorm_dalvik);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for n in &name_cands {
+        for s in &sig_cands {
+            let combined = format!("{n}{s}");
+            if combined != member && combined != trimmed {
+                push_unique(&mut out, combined.clone());
+            }
+            // `<init>(I)` and other return-less signatures: constructors return
+            // void, and every lookup wants a full `(params)ret` proto.
+            if (n == "<init>" || n == "constructor") && s.ends_with(')') {
+                push_unique(&mut out, format!("{combined}V"));
+            }
+        }
+    }
+    out
+}
+
+/// Replace normalized class descriptors inside a signature `(params)ret` or `:type`.
+pub(crate) fn denormalize_signature_types(sig: &str) -> String {
+    let mut out = String::with_capacity(sig.len());
+    let mut rest = sig;
+    while let Some(l_pos) = rest.find('L') {
+        out.push_str(&rest[..l_pos]);
+        let after_l = &rest[l_pos..];
+        if let Some(semi) = after_l.find(';') {
+            let desc = &after_l[..=semi];
+            if let Some(first) = denormalize_class_candidates(desc).into_iter().next() {
+                out.push_str(&first);
+            } else {
+                out.push_str(desc);
+            }
+            rest = &after_l[semi + 1..];
+        } else {
+            out.push_str(after_l);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn denormalize_type_match(tm: &TypeMatch) -> Vec<TypeMatch> {
+    match tm {
+        TypeMatch::Descriptor(d) => denormalize_class_candidates(d).into_iter().map(TypeMatch::Descriptor).collect(),
+        TypeMatch::Simple { name, dims } => {
+            let mut out = Vec::new();
+            if let Some(num) = name.strip_prefix("Anonymous").filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+                out.push(TypeMatch::Simple { name: format!("${num}"), dims: *dims });
+            }
+            for d in denormalize_identifier(name) {
+                out.push(TypeMatch::Simple { name: d, dims: *dims });
+            }
+            out
+        }
+    }
+}
+
+fn denormalize_member_signature(sig: &MemberSignature) -> Option<MemberSignature> {
+    match sig {
+        MemberSignature::Field(tm) => denormalize_type_match(tm).into_iter().next().map(MemberSignature::Field),
+        MemberSignature::Method { params, ret } => {
+            let mut changed = false;
+            let new_params: Vec<TypeMatch> = params
+                .iter()
+                .map(|p| match denormalize_type_match(p).into_iter().next() {
+                    Some(np) => {
+                        changed = true;
+                        np
+                    }
+                    None => p.clone(),
+                })
+                .collect();
+            let new_ret = match ret {
+                Some(r) => match denormalize_type_match(r).into_iter().next() {
+                    Some(nr) => {
+                        changed = true;
+                        Some(nr)
+                    }
+                    None => Some(r.clone()),
+                },
+                None => None,
+            };
+            changed.then_some(MemberSignature::Method { params: new_params, ret: new_ret })
+        }
+    }
+}
+
+fn denormalize_member_query(mq: &MemberQuery, is_method: bool) -> Vec<MemberQuery> {
+    let mut class_cands: Vec<Option<ClassQuery>> = vec![mq.class.clone()];
+    if let Some(cq) = &mq.class {
+        if cq.precise {
+            for c in denormalize_class_candidates(&cq.pattern) {
+                class_cands.push(Some(ClassQuery { pattern: c, precise: true }));
+            }
+        } else if let Some(inner) = cq.pattern.strip_prefix("[/L]").and_then(|s| s.strip_suffix(";\\x00")) {
+            let unescaped = inner.replace("\\$", "$");
+            if let Some(num) = unescaped.strip_prefix("Anonymous").filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+                class_cands.push(Some(ClassQuery { pattern: format!("\\${num};\\x00"), precise: false }));
+            }
+            for d in denormalize_identifier(&unescaped) {
+                class_cands.push(Some(ClassQuery { pattern: format!("[/L]{};\\x00", regex::escape(&d)), precise: false }));
+            }
+        } else {
+            for c in denormalize_class_candidates(&cq.pattern) {
+                let inner = class_inner(&c).to_string();
+                class_cands.push(Some(ClassQuery { pattern: regex::escape(&inner), precise: false }));
+            }
+        }
+    }
+
+    let cls_desc = mq.class.as_ref().map(|c| c.pattern.as_str());
+    let mut name_cands: Vec<Option<String>> = vec![mq.name.clone()];
+    if let Some(name) = &mq.name {
+        let extras = if is_method { denormalize_method_candidates(cls_desc, name) } else { denormalize_identifier(name) };
+        for e in extras {
+            let opt = Some(e);
+            if !name_cands.contains(&opt) {
+                name_cands.push(opt);
+            }
+        }
+    }
+
+    let mut sig_cands: Vec<Option<MemberSignature>> = vec![mq.signature.clone()];
+    if let Some(sig) = &mq.signature {
+        if let Some(ns) = denormalize_member_signature(sig) {
+            sig_cands.push(Some(ns));
+        }
+    }
+
+    let mut out = Vec::new();
+    for c in &class_cands {
+        for n in &name_cands {
+            for s in &sig_cands {
+                // A name this fallback invented (`a$2` -> `a`, `Cdo` -> `do`)
+                // is matched whole: a substring match on a precise class would
+                // also hit every member whose name merely contains it.
+                let exact_name = mq.exact_name || n != &mq.name || n.as_deref() == Some("<init>");
+                let cand = MemberQuery { class: c.clone(), name: n.clone(), exact_name, signature: s.clone() };
+                if &cand != mq && !out.contains(&cand) {
+                    out.push(cand);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Construct a fallback [`Query`] with de-normalized class, method, or field
+/// identifiers when the original query matched 0 results.
+pub fn denormalize_query(q: &Query) -> Option<Query> {
+    match q {
+        Query::Type(pat) => {
+            let cands = denormalize_class_candidates(pat);
+            if cands.is_empty() {
+                let id_cands = denormalize_identifier(pat);
+                if id_cands.is_empty() {
+                    return None;
+                }
+                let joined = id_cands.into_iter().map(|c| regex::escape(&c)).collect::<Vec<_>>().join("|");
+                return Some(Query::Type(format!("(?:{joined})")));
+            }
+            let joined = cands.into_iter().map(|c| regex::escape(&c)).collect::<Vec<_>>().join("|");
+            Some(Query::Type(format!("(?:{joined})")))
+        }
+        Query::Extends(cls) => denormalize_class_candidates(cls).into_iter().next().map(Query::Extends),
+        Query::Implements(cls) => denormalize_class_candidates(cls).into_iter().next().map(Query::Implements),
+        Query::Method(mq) => {
+            let vars = denormalize_member_query(mq, true);
+            match vars.len() {
+                0 => None,
+                1 => Some(Query::Method(vars.into_iter().next().unwrap())),
+                _ => Some(Query::MethodSet(vars)),
+            }
+        }
+        Query::Field(mq) => {
+            let vars = denormalize_member_query(mq, false);
+            collapse_field_variants(vars).map(Query::Field)
+        }
+        Query::FieldAccess { field, access } => {
+            let vars = denormalize_member_query(field, false);
+            collapse_field_variants(vars).map(|f| Query::FieldAccess { field: f, access: *access })
+        }
+        Query::Call { target, constraints } => {
+            denormalize_query(target).map(|t| Query::Call { target: Box::new(t), constraints: constraints.clone() })
+        }
+        Query::All { all, none } => {
+            let mut changed = false;
+            let new_all = all
+                .iter()
+                .map(|part| match denormalize_query(part) {
+                    Some(np) => {
+                        changed = true;
+                        np
+                    }
+                    None => part.clone(),
+                })
+                .collect();
+            changed.then_some(Query::All { all: new_all, none: none.clone() })
+        }
+        _ => None,
+    }
+}
+
+fn collapse_field_variants(vars: Vec<MemberQuery>) -> Option<MemberQuery> {
+    if vars.is_empty() {
+        return None;
+    }
+    if vars.len() == 1 {
+        return vars.into_iter().next();
+    }
+    let first = &vars[0];
+    let mut classes = Vec::new();
+    let mut names = Vec::new();
+    for v in &vars {
+        if let Some(c) = &v.class {
+            let pat = if c.precise { format!("^{}\\x00", regex::escape(&c.pattern)) } else { c.pattern.clone() };
+            push_unique(&mut classes, pat);
+        }
+        if let Some(n) = &v.name {
+            let pat = if v.exact_name { format!("^{}\\x00", regex::escape(n)) } else { regex::escape(n) };
+            push_unique(&mut names, pat);
+        }
+    }
+    let class = if classes.is_empty() {
+        None
+    } else if classes.len() == 1 && first.class.as_ref().is_some_and(|c| c.precise) {
+        first.class.clone()
+    } else {
+        Some(ClassQuery { pattern: format!("(?:{})", classes.join("|")), precise: false })
+    };
+    // A precise class compiles a non-exact name as a literal substring, so an
+    // alternation is only usable as a regex: keep `precise` only when there is
+    // exactly one name to match.
+    let precise_class = class.as_ref().is_some_and(|c| c.precise);
+    let (name, exact_name) = if names.is_empty() {
+        (None, false)
+    } else if names.len() == 1 && precise_class {
+        (first.name.clone(), first.exact_name)
+    } else {
+        let class = if precise_class && names.len() > 1 {
+            first.class.as_ref().map(|c| ClassQuery { pattern: format!("^{}\\x00", regex::escape(&c.pattern)), precise: false })
+        } else {
+            class
+        };
+        return Some(MemberQuery {
+            class,
+            name: Some(format!("(?:{})", names.join("|"))),
+            exact_name: false,
+            signature: vars.iter().rev().find_map(|v| v.signature.clone()),
+        });
+    };
+    Some(MemberQuery { class, name, exact_name, signature: vars.iter().rev().find_map(|v| v.signature.clone()) })
+}
 #[cfg(test)]
 mod tests {
     use super::*;

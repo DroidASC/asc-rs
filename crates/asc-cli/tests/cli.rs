@@ -43,15 +43,22 @@ fn path(p: &Path) -> &str {
 }
 
 #[test]
-fn getclass_prints_smali() {
+fn getclass_decompiles_java_by_default_and_supports_kotlin_and_smali() {
     let apk = temp_apk();
     for name in ["Lexample/Test;", "example.Test", "example/Test"] {
         let out = droidasc(&["getclass", path(apk.path()), name]);
         assert!(out.status.success(), "{}", stderr(&out));
         let text = stdout(&out);
-        assert!(text.contains(".class public Lexample/Test;"), "{text}");
-        assert!(text.contains("const-string v0, \"token\""), "{text}");
+        assert!(text.contains("package example;"), "{text}");
+        assert!(text.contains("public class Test"), "{text}");
+        assert!(text.contains("public static void first()"), "{text}");
     }
+    let smali = droidasc(&["getclass", path(apk.path()), "example.Test", "--smali"]);
+    assert!(smali.status.success(), "{}", stderr(&smali));
+    assert!(stdout(&smali).contains(".class public Lexample/Test;") && stdout(&smali).contains("const-string v0, \"token\""));
+    let kt = droidasc(&["getclass", path(apk.path()), "example.Test", "--lang", "kotlin"]);
+    assert!(kt.status.success(), "{}", stderr(&kt));
+    assert!(stdout(&kt).contains("fun first()"), "{}", stdout(&kt));
     let out = droidasc(&["getclass", path(apk.path()), "Lnope/Missing;"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).starts_with("Error:"), "{}", stderr(&out));
@@ -470,8 +477,8 @@ fn disassemble_defaults_to_no_debug_directives_and_writes_only_the_file() {
     assert!(text.contains(".method public static compute(II)I") && !text.contains(".line"), "{text}");
     let b = droidasc(&["disassemble", path(apk.path()), "example.Rich", "--debuginfo"]);
     assert!(stdout(&b).contains(".line"), "{}", stdout(&b));
-    // `--debuginfo` output is what getclass prints by default.
-    assert_eq!(stdout(&b), stdout(&droidasc(&["getclass", path(apk.path()), "example.Rich"])));
+    // `--debuginfo` output is what `getclass --smali` prints by default.
+    assert_eq!(stdout(&b), stdout(&droidasc(&["getclass", path(apk.path()), "example.Rich", "--smali"])));
     assert_eq!(text, stdout(&droidasc(&["getclass", path(apk.path()), "example.Rich", "--no-debug-info"])));
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("Rich.smali");
@@ -484,22 +491,35 @@ fn disassemble_defaults_to_no_debug_directives_and_writes_only_the_file() {
 #[test]
 fn method_flag_takes_a_name_or_a_signature() {
     let apk = rich_apk();
-    for cmd in ["getclass", "disassemble"] {
-        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run()V"]);
+    let java_out = droidasc(&["getclass", path(apk.path()), "example.Rich", "--method", "run()V"]);
+    assert!(java_out.status.success(), "{}", stderr(&java_out));
+    let java_text = stdout(&java_out);
+    assert!(java_text.contains("public void run()") && !java_text.contains("compute("), "{java_text}");
+    for m in ["run", "run()", "Lexample/Rich;->run()V"] {
+        let out = droidasc(&["getclass", path(apk.path()), "example.Rich", "--method", m]);
+        assert!(out.status.success(), "{m}: {}", stderr(&out));
+        assert_eq!(stdout(&out), java_text, "{m}");
+    }
+    for args in [&["disassemble"][..], &["getclass", "--smali"][..]] {
+        let mut base = args.to_vec();
+        base.extend_from_slice(&[path(apk.path()), "example.Rich", "--method", "run()V"]);
+        let out = droidasc(&base);
         assert!(out.status.success(), "{}", stderr(&out));
         let text = stdout(&out);
         assert_eq!(text.matches(".method ").count(), 1, "{text}");
         assert!(text.contains(".method public run()V") && !text.contains(".field"), "{text}");
-        // A bare name or a Java-style signature picks the same method.
         for m in ["run", "run()", "Lexample/Rich;->run()V"] {
-            let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", m]);
+            let mut call = args.to_vec();
+            call.extend_from_slice(&[path(apk.path()), "example.Rich", "--method", m]);
+            let out = droidasc(&call);
             assert!(out.status.success(), "{m}: {}", stderr(&out));
             let picked = stdout(&out);
             assert_eq!(picked.matches(".method ").count(), 1, "{m}: {picked}");
             assert!(picked.contains(".method public run()V") && !picked.contains(".field"), "{m}: {picked}");
         }
-        // A method the class lacks: the error lists the ones it has.
-        let out = droidasc(&[cmd, path(apk.path()), "example.Rich", "--method", "run(I)V"]);
+        let mut missing = args.to_vec();
+        missing.extend_from_slice(&[path(apk.path()), "example.Rich", "--method", "run(I)V"]);
+        let out = droidasc(&missing);
         assert_eq!(out.status.code(), Some(1));
         let err = stderr(&out);
         assert!(err.contains("Lexample/Rich; has no method \"run(I)V\"; its methods: ") && err.contains("run()V"), "{err}");

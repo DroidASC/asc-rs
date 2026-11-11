@@ -99,13 +99,26 @@ pub struct Rebuilt {
 /// Rebuild the class `descriptor` (e.g. `Lcom/poc/Main;`) from `dex`.
 pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt> {
     let t0 = Instant::now();
-    let hollow = hollow::Hollow::extract(dex, descriptor)?;
+    let hollows = vec![hollow::Hollow::extract(dex, descriptor)?];
+    finish_rebuild(dex, &hollows, t0)
+}
+
+/// Rebuild `descriptor` together with its same-DEX nested / synthetic classes
+/// (`Outer$*` and `MemberClasses` entries) so a high-level decompiler can
+/// inline anonymous classes, lambdas and nested declarations.
+pub fn rebuild_class_closure(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt> {
+    let t0 = Instant::now();
+    let hollows = hollow::Hollow::extract_closure(dex, descriptor)?;
+    finish_rebuild(dex, &hollows, t0)
+}
+
+fn finish_rebuild(dex: &Dex<'_>, hollows: &[hollow::Hollow<'_>], t0: Instant) -> Result<Rebuilt> {
     let t1 = Instant::now();
-    let refs = collect::collect(dex, &hollow)?;
+    let refs = collect::collect(dex, hollows)?;
     let t2 = Instant::now();
     let tables = Tables::build(dex, &refs)?;
     let t3 = Instant::now();
-    let (bytes, methods_with_code) = writer::write(dex, &hollow, &tables)?;
+    let (bytes, methods_with_code) = writer::write(dex, hollows, &tables)?;
     let t4 = Instant::now();
     Ok(Rebuilt {
         stats: Stats {
@@ -131,4 +144,10 @@ pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt> {
 pub fn rebuild_class_bytes(buf: &[u8], descriptor: &str) -> Result<Rebuilt> {
     let dex = Dex::parse(buf)?;
     rebuild_class(&dex, descriptor)
+}
+
+/// Convenience wrapper over raw bytes for [`rebuild_class_closure`].
+pub fn rebuild_class_closure_bytes(buf: &[u8], descriptor: &str) -> Result<Rebuilt> {
+    let dex = Dex::parse(buf)?;
+    rebuild_class_closure(&dex, descriptor)
 }

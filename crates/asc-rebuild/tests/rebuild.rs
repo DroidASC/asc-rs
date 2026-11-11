@@ -453,3 +453,81 @@ fn rebuilt_dex_passes_dexdump_verifier_when_available() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn rebuild_class_closure_includes_nested_and_orders_superclasses_first() {
+    use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec};
+    use asc_rebuild::rebuild_class_closure_bytes;
+
+    let mut d = DexBuilder::new();
+    d.type_("Ljava/lang/Object;")
+        .type_("Lexample/Outer;")
+        .type_("Lexample/Outer$ASub;")
+        .type_("Lexample/Outer$ZBase;")
+        .type_("Lexample/Unrelated;")
+        .method("Lexample/Outer;", "go", "I", &[])
+        .method("Lexample/Outer$ZBase;", "baseVal", "I", &[])
+        .method("Lexample/Outer$ASub;", "subVal", "I", &[])
+        .method("Lexample/Unrelated;", "nope", "V", &[]);
+    let mut ids = d.resolve();
+    let ret_const = |v: u8| CodeSpec {
+        registers: 1,
+        insns: vec![0x12, (v & 0x0f) << 4, 0x0f, 0x00], // const/4 v0, v; return v0
+        ..Default::default()
+    };
+    ids.add_class(ClassSpec {
+        descriptor: "Lexample/Outer;".into(),
+        access: 0x1,
+        superclass: Some("Ljava/lang/Object;".into()),
+        direct_methods: vec![MethodSpec { idx: ids.method("Lexample/Outer;", "go", "I", &[]), access: 0x9, code: Some(ret_const(1)) }],
+        ..Default::default()
+    });
+    // Lexicographically ASub < ZBase, but ASub extends ZBase, so ZBase must be emitted before ASub.
+    ids.add_class(ClassSpec {
+        descriptor: "Lexample/Outer$ASub;".into(),
+        access: 0x1,
+        superclass: Some("Lexample/Outer$ZBase;".into()),
+        direct_methods: vec![MethodSpec {
+            idx: ids.method("Lexample/Outer$ASub;", "subVal", "I", &[]),
+            access: 0x9,
+            code: Some(ret_const(2)),
+        }],
+        ..Default::default()
+    });
+    ids.add_class(ClassSpec {
+        descriptor: "Lexample/Outer$ZBase;".into(),
+        access: 0x1,
+        superclass: Some("Ljava/lang/Object;".into()),
+        direct_methods: vec![MethodSpec {
+            idx: ids.method("Lexample/Outer$ZBase;", "baseVal", "I", &[]),
+            access: 0x9,
+            code: Some(ret_const(3)),
+        }],
+        ..Default::default()
+    });
+    ids.add_class(ClassSpec {
+        descriptor: "Lexample/Unrelated;".into(),
+        access: 0x1,
+        superclass: Some("Ljava/lang/Object;".into()),
+        ..Default::default()
+    });
+    let raw = ids.finish();
+
+    let single = rebuild_class_bytes(&raw, "Lexample/Outer;").unwrap();
+    assert_eq!(Dex::parse(&single.bytes).unwrap().class_def_count(), 1);
+
+    let closure = rebuild_class_closure_bytes(&raw, "Lexample/Outer;").unwrap();
+    assert_eq!(u32_at(&closure.bytes, 8), adler32(&closure.bytes[12..]));
+    assert_eq!(&closure.bytes[12..32], &sha1(&closure.bytes[32..]));
+    let dex = Dex::parse(&closure.bytes).unwrap();
+    assert_eq!(dex.class_def_count(), 3);
+    let classes: Vec<String> =
+        (0..dex.class_def_count()).map(|i| dex.type_descriptor(dex.class_def(i).unwrap().class_idx).unwrap()).collect();
+    assert!(classes.contains(&"Lexample/Outer;".to_string()));
+    assert!(classes.contains(&"Lexample/Outer$ZBase;".to_string()));
+    assert!(classes.contains(&"Lexample/Outer$ASub;".to_string()));
+    assert!(!classes.contains(&"Lexample/Unrelated;".to_string()));
+    let base_pos = classes.iter().position(|c| c == "Lexample/Outer$ZBase;").unwrap();
+    let sub_pos = classes.iter().position(|c| c == "Lexample/Outer$ASub;").unwrap();
+    assert!(base_pos < sub_pos, "superclass must precede subclass in class_defs: {classes:?}");
+}

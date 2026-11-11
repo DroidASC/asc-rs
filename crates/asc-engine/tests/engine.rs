@@ -502,3 +502,51 @@ fn a_query_during_a_prebuild_gets_the_same_rows() {
         });
     }
 }
+
+#[test]
+fn decompile_java_kotlin_and_methods_with_md5_cache() {
+    use asc_engine::{DecompileOptions, SourceLang};
+
+    let dex = asc_fixture::make_rich_dex();
+    let apk_bytes = make_apk(&[("classes.dex", &dex), ("classes2.dex", &make_dex())], true);
+    let apk_a = temp_apk_from(&apk_bytes);
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = || asc_engine::CacheConfig { memory_bytes: 0, disk: Some(tiered_cache(dir.path())), ..Default::default() };
+
+    let engine_a = Engine::new(apk_a.path()).with_threads(2).with_cache(cfg());
+    let java_opts = DecompileOptions { lang: SourceLang::Java, ..Default::default() };
+    let first = engine_a.decompile_class("Lexample/Test;", java_opts).unwrap();
+    assert!(!first.cached);
+    assert_eq!(first.lang, SourceLang::Java);
+    assert!(first.source.contains("package example;"), "{}", first.source);
+    assert!(first.source.contains("class Test"), "{}", first.source);
+    assert!(first.source.contains("first()"), "{}", first.source);
+    assert!(first.source.contains("second()"), "{}", first.source);
+    engine_a.flush_cache_writes();
+
+    // Second lookup on the same file hits the MD5 + class disk cache.
+    let second = engine_a.decompile_class("Lexample/Test;", java_opts).unwrap();
+    assert!(second.cached);
+    assert_eq!(second.source, first.source);
+
+    // A copy of the same APK at a different path shares the same input MD5 + class cache entry.
+    let apk_b = temp_apk_from(&apk_bytes);
+    let engine_b = Engine::new(apk_b.path()).with_threads(2).with_cache(cfg());
+    let from_copy = engine_b.decompile_class("Lexample/Test;", java_opts).unwrap();
+    assert!(from_copy.cached, "identical input MD5 at a new path must hit the cache");
+    assert_eq!(from_copy.source, first.source);
+
+    // Kotlin output for the same class works and is cached under its own language key.
+    let kt_opts = DecompileOptions { lang: SourceLang::Kotlin, ..Default::default() };
+    let kt = engine_a.decompile_class("Lexample/Test;", kt_opts).unwrap();
+    assert!(!kt.cached);
+    assert_eq!(kt.lang, SourceLang::Kotlin);
+    assert!(kt.source.contains("fun first()"), "{}", kt.source);
+
+    // Method-level decompilation accepts bare name, prefix, Dalvik and Java signatures.
+    let m1 = engine_a.decompile_class_method("Lexample/Rich;", java_opts, Some("compute")).unwrap();
+    assert_eq!(m1.methods, ["compute(II)I"]);
+    assert!(m1.source.contains("compute(") && !m1.source.contains("void run("), "{}", m1.source);
+    let m2 = engine_a.decompile_class_method("Lexample/Rich;", java_opts, Some("compute(int, int)")).unwrap();
+    assert_eq!(m2.source, m1.source);
+}

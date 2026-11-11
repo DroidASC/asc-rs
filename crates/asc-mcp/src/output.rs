@@ -455,6 +455,36 @@ pub fn method_index(text: &str) -> Vec<(String, usize, usize)> {
             }
         }
     }
+    if !out.is_empty() {
+        return out;
+    }
+    // Java / Kotlin source: members at 4 spaces, or 8 inside a Kotlin
+    // `companion object`; a trailing `// @id/name` annotation is not code.
+    let mut open: Option<(String, usize, usize)> = None;
+    for (i, line) in text.lines().enumerate() {
+        let indent = line.len() - line.trim_start().len();
+        let raw = line.trim_start();
+        if let Some((sig, a, member_indent)) = open.as_ref() {
+            if raw.trim_end() == "}" && indent == *member_indent {
+                out.push((sig.clone(), *a, i + 1));
+                open = None;
+            }
+            continue;
+        }
+        if indent != 4 && indent != 8 {
+            continue;
+        }
+        let code = crate::class_text::strip_line_comment(raw).trim_end();
+        if code.is_empty() || code.starts_with(['/', '*', '@', '}', ')']) {
+            continue;
+        }
+        let Some(sig) = crate::class_text::source_method_sig(code) else { continue };
+        if code.ends_with('{') {
+            open = Some((sig.to_string(), i + 1, indent));
+        } else {
+            out.push((sig.to_string(), i + 1, i + 1));
+        }
+    }
     out
 }
 

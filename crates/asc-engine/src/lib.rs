@@ -26,6 +26,7 @@ mod compact;
 mod compose;
 pub mod condition;
 pub mod config;
+pub mod decompile;
 mod defs;
 mod hierarchy;
 pub mod hints;
@@ -48,7 +49,7 @@ pub use asc_findrefs::CompiledQuery;
 use asc_findrefs::{FindRefs, Hit, Query, RefKind, SearchState};
 use asc_rebuild::Rebuilt;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
@@ -65,6 +66,7 @@ pub use callgraph::{CallQuery, CallRoots, CallRow, CallTree, Direction};
 pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
 pub use compact::TextRows;
 pub use compose::{MatchingMethods, DEFAULT_FAN_OUT};
+pub use decompile::{DecompileOptions, SourceLang};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
 pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
 pub use prebuild::PrebuildReport;
@@ -110,6 +112,9 @@ pub type DexBytes = Arc<DexData>;
 pub struct ClassHit {
     pub dex_name: String,
     pub dex: DexBytes,
+    /// The resolved DEX class descriptor (equals the queried descriptor unless
+    /// fallback de-normalization resolved `Outer.Inner` / `Anonymous1` / `Cdo`).
+    pub descriptor: String,
     /// In a program, the DEX files of other archives that define the class
     /// too (the hit is the first archive's, in program order).
     pub also_defined_in: Vec<String>,
@@ -120,9 +125,8 @@ pub struct ClassHit {
 pub struct ClassSource {
     pub dex_name: String,
     pub source: String,
-    /// The minimal single-class DEX, or `None` when the class could not be
-    /// rebuilt (see `warning`) and `source` was disassembled from the
-    /// original DEX instead.
+    /// The minimal single-class (or closure) DEX, or `None` when the class
+    /// could not be rebuilt (see `warning`) or was served from the MD5 cache.
     pub rebuilt: Option<Rebuilt>,
     /// Why the rebuild was skipped, when it was.
     pub warning: Option<String>,
@@ -130,6 +134,12 @@ pub struct ClassSource {
     pub scan_us: u128,
     /// See [`ClassHit::also_defined_in`].
     pub also_defined_in: Vec<String>,
+    /// Output language (`Java`, `Kotlin`, or `Smali`).
+    pub lang: SourceLang,
+    /// Matched method signatures (`name(params)ret`) when filtered by method.
+    pub methods: Vec<String>,
+    /// Whether `source` was served from the disk MD5 + class cache.
+    pub cached: bool,
 }
 
 /// One aggregated reference result: a method and what it references.
@@ -495,18 +505,17 @@ impl CachedEntry {
     /// A container's normalised logical copies are owned and are kept as is.
     fn with_data(&self, data: DexBytes) -> CachedEntry {
         let logical = OnceLock::new();
-        if let Some(old) = self.logical.get() {
-            let moved = old
-                .iter()
-                .map(|l| LogicalDex {
-                    name: l.name.clone(),
-                    data: if Arc::ptr_eq(&l.data, &self.data) { Arc::clone(&data) } else { Arc::clone(&l.data) },
-                    state: Arc::clone(&l.state),
-                    persisted: Arc::clone(&l.persisted),
-                })
-                .collect();
-            let _ = logical.set(moved);
-        }
+        let moved = self
+            .logical()
+            .iter()
+            .map(|l| LogicalDex {
+                name: l.name.clone(),
+                data: if Arc::ptr_eq(&l.data, &self.data) { Arc::clone(&data) } else { Arc::clone(&l.data) },
+                state: Arc::clone(&l.state),
+                persisted: Arc::clone(&l.persisted),
+            })
+            .collect();
+        let _ = logical.set(moved);
         CachedEntry { name: self.name.clone(), data, logical }
     }
 
@@ -1001,6 +1010,8 @@ pub struct Engine {
     stats: Arc<Stats>,
     /// `(size, mtime, key)` of the APK the key was last computed for.
     key_cache: Mutex<Option<(u64, Option<SystemTime>, ApkKey)>>,
+    /// `(size, mtime, md5_hex)` of the APK the full-file MD5 was last computed for.
+    md5_cache: Mutex<Option<(u64, Option<SystemTime>, String)>>,
     /// The APK last opened, handed out again while its files are unchanged
     /// (a program of many jars costs a mapping and a directory parse each).
     opened: Mutex<Option<Apk>>,
@@ -1103,6 +1114,7 @@ impl Engine {
             shared_cache: false,
             stats: Arc::new(Stats::default()),
             key_cache: Mutex::new(None),
+            md5_cache: Mutex::new(None),
             opened: Mutex::new(None),
             limits: Limits::default(),
             resources: Mutex::new(None),
@@ -1348,6 +1360,38 @@ impl Engine {
         Some(key)
     }
 
+    /// Full-input MD5 hex digest for `apk`: computed once per APK version
+    /// (`stamp`) and persisted in L2 under the APK key, so a later one-shot
+    /// process reads 32 bytes instead of re-reading the whole archive.
+    pub fn apk_md5(&self, apk: &Apk) -> Option<String> {
+        let ident = apk.stamp().ok()?;
+        let mut cached = self.md5_cache.lock().unwrap();
+        if let Some((len, mtime, md5)) = cached.as_ref() {
+            if (*len, *mtime) == ident {
+                return Some(md5.clone());
+            }
+        }
+        let disk = self.cache.as_ref().and_then(|c| c.disk.as_ref()).filter(|d| d.uses(Tier::Derived));
+        let key = if disk.is_some() { self.apk_key(apk) } else { None };
+        if let (Some(disk), Some(key)) = (disk, key.as_ref()) {
+            if let Some(stored) = disk.get_derived(key, decompile::MD5_NAME, decompile::MD5_KIND, decompile::MD5_FORMAT) {
+                let text = std::str::from_utf8(stored.as_ref()).ok().map(str::trim).unwrap_or_default();
+                if text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    let md5 = text.to_string();
+                    *cached = Some((ident.0, ident.1, md5.clone()));
+                    return Some(md5);
+                }
+            }
+        }
+        let t0 = Instant::now();
+        let md5 = ApkKey::md5_for_apk(apk);
+        if let (Some(disk), Some(key)) = (disk, key.as_ref()) {
+            let _ = disk.put_derived(key, decompile::MD5_NAME, decompile::MD5_KIND, decompile::MD5_FORMAT, t0.elapsed(), md5.as_bytes());
+        }
+        *cached = Some((ident.0, ident.1, md5.clone()));
+        Some(md5)
+    }
+
     /// Inflated bytes of `entry`, through the caches when enabled. Stored
     /// entries are copied only when an in-memory cache wants to keep them.
     pub fn entry_bytes(&self, apk: &Apk, key: Option<&ApkKey>, entry: &Entry) -> Result<DexBytes> {
@@ -1376,6 +1420,42 @@ impl Engine {
     /// [`Engine::get_class_dex`] that stops, with `ApkError::Cancelled`, once
     /// `cancel` is raised.
     pub fn get_class_dex_cancellable(&self, descriptor: &str, cancel: &AtomicBool) -> Result<Option<ClassHit>> {
+        if let Some(hit) = self.get_class_dex_exact(descriptor, cancel)? {
+            return Ok(Some(hit));
+        }
+        let candidates = names::denormalize_class_candidates(descriptor);
+        for candidate in &candidates {
+            if let Some(hit) = self.get_class_dex_exact(candidate, cancel)? {
+                return Ok(Some(hit));
+            }
+        }
+        // Fallback for obfuscated inner classes renamed via `dalvik.annotation.InnerClass`
+        // (e.g. `Lcom/a/Outer$a;` rendered as `Outer.RealInner`). Several
+        // candidates can name the same outer class, so its DEX is looked up once.
+        let mut outers: HashMap<String, Option<ClassHit>> = HashMap::new();
+        for candidate in std::iter::once(descriptor).chain(candidates.iter().map(String::as_str)) {
+            let Some(stem) = candidate.strip_suffix(';') else { continue };
+            let Some((outer_stem, inner_name)) = stem.rsplit_once('$') else { continue };
+            let outer_desc = format!("{outer_stem};");
+            let hit = match outers.get(&outer_desc) {
+                Some(known) => known.clone(),
+                None => {
+                    let found = self.get_class_dex_exact(&outer_desc, cancel)?;
+                    outers.insert(outer_desc.clone(), found.clone());
+                    found
+                }
+            };
+            if let Some(mut hit) = hit {
+                if let Some(real_desc) = decompile::find_inner_class_by_annotation(&hit.dex, &outer_desc, inner_name) {
+                    hit.descriptor = real_desc;
+                    return Ok(Some(hit));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn get_class_dex_exact(&self, descriptor: &str, cancel: &AtomicBool) -> Result<Option<ClassHit>> {
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled());
         }
@@ -1470,7 +1550,8 @@ impl Engine {
                         }
                         match asc_dex::quick::dex_defines_class(&data, &target) {
                             Ok(true) => {
-                                found = Some(ClassHit { dex_name: name, dex: data, also_defined_in: Vec::new() });
+                                found =
+                                    Some(ClassHit { dex_name: name, dex: data, descriptor: String::new(), also_defined_in: Vec::new() });
                                 break;
                             }
                             Ok(false) => {}
@@ -1538,6 +1619,7 @@ impl Engine {
         let mut hits = hits.into_iter().map(|(_, h)| h);
         match (hits.next(), last_err) {
             (Some(mut h), _) => {
+                h.descriptor = descriptor.to_string();
                 let archive = archive_of(&h.dex_name).map(str::to_string);
                 h.also_defined_in = hits.map(|o| o.dex_name).filter(|n| archive_of(n).map(str::to_string) != archive).collect();
                 Ok(Some(h))
@@ -1580,8 +1662,9 @@ impl Engine {
         let hit = self
             .get_class_dex_cancellable(descriptor, cancel)?
             .ok_or_else(|| EngineError::ClassNotFound { class: descriptor.to_string(), hint: self.class_not_found_hint(descriptor) })?;
+        let resolved = &hit.descriptor;
         let scan_us = t0.elapsed().as_micros();
-        let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, descriptor, opts, method) {
+        let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, resolved, opts, method) {
             Ok((r, s)) => (Some(r), s, None),
             // The class is there but cannot be rebuilt faithfully (undefined
             // opcode, invoke-custom, too many members for 16-bit indexes...):
@@ -1589,7 +1672,7 @@ impl Engine {
             // there is no DEX to dump.
             Err(EngineError::Rebuild(e)) if e.is_input_limitation() => {
                 let dex = Dex::with_name(&hit.dex, &hit.dex_name)?;
-                let source = asc_smali::disassemble_class_method(&dex, descriptor, opts, method)?;
+                let source = asc_smali::disassemble_class_method(&dex, resolved, opts, method)?;
                 let warning = format!("class not rebuilt ({e}); disassembled from the original DEX instead");
                 self.log(format!("[DEBUG] {warning}"));
                 (None, source, Some(warning))
@@ -1609,7 +1692,168 @@ impl Engine {
                 ));
             }
         }
-        Ok(ClassSource { dex_name: hit.dex_name, source, rebuilt, warning, scan_us, also_defined_in: hit.also_defined_in })
+        Ok(ClassSource {
+            dex_name: hit.dex_name,
+            source,
+            rebuilt,
+            warning,
+            scan_us,
+            also_defined_in: hit.also_defined_in,
+            lang: SourceLang::Smali,
+            methods: method.map(|m| vec![m.to_string()]).unwrap_or_default(),
+            cached: false,
+        })
+    }
+
+    /// Locate, rebuild (including nested classes by default) and decompile a
+    /// class or method, backed by the full-input MD5 + class disk cache.
+    pub fn decompile_class(&self, descriptor: &str, opts: DecompileOptions) -> Result<ClassSource> {
+        self.decompile_class_method(descriptor, opts, None)
+    }
+
+    pub fn decompile_class_method(&self, descriptor: &str, opts: DecompileOptions, method: Option<&str>) -> Result<ClassSource> {
+        self.decompile_class_method_cancellable(descriptor, opts, method, false, &NOT_CANCELLED)
+    }
+
+    pub fn decompile_class_method_cancellable(
+        &self,
+        descriptor: &str,
+        opts: DecompileOptions,
+        method: Option<&str>,
+        need_rebuilt: bool,
+        cancel: &AtomicBool,
+    ) -> Result<ClassSource> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        let t0 = Instant::now();
+        let disk = self.cache.as_ref().and_then(|c| c.disk.as_ref()).filter(|d| d.uses(Tier::Rendered));
+        // Two keys for one result: the archive itself (size, mtime, central
+        // directory hash — cheap, and a hit needs no hashing at all) and its
+        // content (full-input MD5, which also serves a copy under another path).
+        let cache_apk = disk.and_then(|d| self.open().ok().map(|apk| (d, apk)));
+        let apk_key = cache_apk.as_ref().and_then(|(_, apk)| self.apk_key(apk));
+        // Smali output depends on the debug-directive options; they join the key.
+        let smali_flags =
+            if opts.lang == SourceLang::Smali { u8::from(opts.smali.line_numbers) | (u8::from(opts.smali.param_names) << 1) } else { 0 };
+        let apk_query = |k: &ApkKey| {
+            decompile::cache_query_key(&format!("apk:{}", k.as_str()), descriptor, opts.lang, opts.include_nested, method, smali_flags)
+        };
+        let md5_lookup = |apk: &Apk| {
+            self.apk_md5(apk).map(|md5| {
+                let key = ApkKey::for_md5(&md5);
+                let query =
+                    decompile::cache_query_key(&format!("md5:{md5}"), descriptor, opts.lang, opts.include_nested, method, smali_flags);
+                (key, query)
+            })
+        };
+        let hit_from = |hit: decompile::CachedDecompile, scan_us: u128| ClassSource {
+            dex_name: hit.dex_name,
+            source: hit.source,
+            rebuilt: None,
+            warning: None,
+            scan_us,
+            also_defined_in: hit.also_defined_in,
+            lang: hit.lang,
+            methods: hit.methods,
+            cached: true,
+        };
+        if !need_rebuilt {
+            if let (Some((d, _)), Some(k)) = (cache_apk.as_ref(), apk_key.as_ref()) {
+                let query = apk_query(k);
+                let hit = d.get_rendered_view(k, &query).as_ref().map(|v| v.as_ref()).and_then(decompile::decode_cached_decompile);
+                if let Some(hit) = hit {
+                    self.stats.disk_hits.fetch_add(1, Ordering::Relaxed);
+                    let scan_us = t0.elapsed().as_micros();
+                    self.log(format!(
+                        "[APK] decompile '{}' class={} lang={} source=result ({}) time={} us",
+                        hit.dex_name,
+                        descriptor,
+                        hit.lang,
+                        k.as_str(),
+                        scan_us
+                    ));
+                    return Ok(hit_from(hit, scan_us));
+                }
+            }
+        }
+        let cache_lookup = match (cache_apk.as_ref(), apk_key.as_ref()) {
+            (Some((d, apk)), _) => md5_lookup(apk).map(|(key, query)| (*d, key, query)),
+            _ => None,
+        };
+
+        if !need_rebuilt {
+            if let (Some((d, md5_key, query)), Some(k)) = (cache_lookup.as_ref(), apk_key.as_ref()) {
+                if let Some(view) = d.get_rendered_view(md5_key, query) {
+                    if let Some(hit) = decompile::decode_cached_decompile(view.as_ref()) {
+                        // Serve the archive key from now on: its next lookup
+                        // needs neither the MD5 nor this content tier.
+                        let _ = d.put_rendered(k, &apk_query(k), view.as_ref());
+                        self.stats.disk_hits.fetch_add(1, Ordering::Relaxed);
+                        let scan_us = t0.elapsed().as_micros();
+                        self.log(format!(
+                            "[APK] decompile '{}' class={} lang={} source=md5-cache ({}) time={} us",
+                            hit.dex_name,
+                            descriptor,
+                            hit.lang,
+                            md5_key.as_str(),
+                            scan_us
+                        ));
+                        return Ok(hit_from(hit, scan_us));
+                    }
+                }
+            }
+        }
+
+        let hit = self
+            .get_class_dex_cancellable(descriptor, cancel)?
+            .ok_or_else(|| EngineError::ClassNotFound { class: descriptor.to_string(), hint: self.class_not_found_hint(descriptor) })?;
+        let resolved = &hit.descriptor;
+        let scan_us = t0.elapsed().as_micros();
+        let dec = decompile::decompile_dex_source(&hit.dex, &hit.dex_name, resolved, opts, method)?;
+        if self.debug {
+            if let Some(w) = &dec.warning {
+                self.log(format!("[DEBUG] {w}"));
+            }
+            if let Some(r) = &dec.rebuilt {
+                let t = r.timings;
+                self.log(format!(
+                    "[DEBUG] Hollower Time: {} us\n[DEBUG] Collect Time: {} us\n[DEBUG] Remapper Time: {} us\n[DEBUG] Builder Time: {} us\n[DEBUG] Total Extraction Time: {} us",
+                    t.hollow_us,
+                    t.collect_us,
+                    t.map_us,
+                    t.build_us,
+                    t.total_us()
+                ));
+            }
+        }
+        if dec.warning.is_none() && !cancel.load(Ordering::Relaxed) {
+            if let Some((d, md5_key, query)) = cache_lookup {
+                let payload = decompile::encode_cached_decompile(&decompile::CachedDecompile {
+                    dex_name: hit.dex_name.clone(),
+                    lang: dec.lang,
+                    also_defined_in: hit.also_defined_in.clone(),
+                    methods: dec.methods.clone(),
+                    source: dec.source.clone(),
+                });
+                let _ = d.put_rendered(&md5_key, &query, &payload);
+                if let Some(k) = apk_key.as_ref() {
+                    let _ = d.put_rendered(k, &apk_query(k), &payload);
+                }
+                d.evict_lazily();
+            }
+        }
+        Ok(ClassSource {
+            dex_name: hit.dex_name,
+            source: dec.source,
+            rebuilt: dec.rebuilt,
+            warning: dec.warning,
+            scan_us,
+            also_defined_in: hit.also_defined_in,
+            lang: dec.lang,
+            methods: dec.methods,
+            cached: false,
+        })
     }
 
     /// Search every DEX entry for references. `sink` receives one batch per
@@ -1692,49 +1936,71 @@ impl Engine {
         let _query = self.prebuild.query();
         let compiled = CompiledQuery::new(resolved.queries.as_ref().map_or(query, |r| &r[0]))?;
         let mut recorder = rendered.as_ref().map(|(d, _, _)| tiers::ResultRecorder::new(tiers::result_limit(d, shape)));
-        let next = AtomicUsize::new(0);
-        let (tx, rx) = mpsc::channel::<RefBatch>();
         let workers = self.threads().min(entries.len()).max(1);
         let cache = self.cache.as_deref();
         let stats = &self.stats;
-        let probe = skip::Probe::new(vec![&compiled]);
-        let (compiled, probe) = (&compiled, &probe);
-        std::thread::scope(|s| {
-            for _ in 0..workers {
-                let tx = tx.clone();
-                let (apk, entries, next, key) = (&apk, &entries, &next, key.as_ref());
-                s.spawn(move || loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(entry) = entries.get(i) else { break };
-                    let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe), cancel, cache, stats);
-                    if tx.send(batch).is_err() {
-                        break;
-                    }
-                });
-            }
-            drop(tx);
-            for batch in rx {
-                if self.debug {
-                    self.log(format!(
-                        "[APK] '{}' {}={} us process={} us results={}{}",
-                        batch.entry_name,
-                        batch.source,
-                        batch.inflate_us,
-                        batch.search_us,
-                        batch.row_count(),
-                        batch.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default()
-                    ));
+        let run_pass = |compiled: &CompiledQuery| -> Vec<RefBatch> {
+            let next = AtomicUsize::new(0);
+            let (tx, rx) = mpsc::channel::<RefBatch>();
+            let probe = skip::Probe::new(vec![compiled]);
+            let probe_ref = &probe;
+            let mut collected = Vec::with_capacity(entries.len());
+            std::thread::scope(|s| {
+                for _ in 0..workers {
+                    let tx = tx.clone();
+                    let (apk, entries, next, key) = (&apk, &entries, &next, key.as_ref());
+                    s.spawn(move || loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(entry) = entries.get(i) else { break };
+                        let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe_ref), cancel, cache, stats);
+                        if tx.send(batch).is_err() {
+                            break;
+                        }
+                    });
                 }
-                summary.total_results += batch.row_count();
-                if let Some(r) = recorder.as_mut() {
-                    r.record(&batch);
+                drop(tx);
+                for batch in rx {
+                    collected.push(batch);
                 }
-                sink(batch);
+            });
+            collected
+        };
+
+        let mut batches = run_pass(&compiled);
+        let initial_hits: usize = batches.iter().map(RefBatch::row_count).sum();
+        if initial_hits == 0 && !cancel.load(Ordering::Relaxed) && batches.iter().all(|b| b.error.is_none()) {
+            let active_q = resolved.queries.as_ref().map_or(query, |r| &r[0]);
+            if let Some(fallback_q) = names::denormalize_query(active_q) {
+                if let Ok(fallback_compiled) = CompiledQuery::new(&fallback_q) {
+                    let fallback_batches = run_pass(&fallback_compiled);
+                    if fallback_batches.iter().map(RefBatch::row_count).sum::<usize>() > 0 {
+                        batches = fallback_batches;
+                    }
+                }
             }
-        });
+        }
+
+        for batch in batches {
+            if self.debug {
+                self.log(format!(
+                    "[APK] '{}' {}={} us process={} us results={}{}",
+                    batch.entry_name,
+                    batch.source,
+                    batch.inflate_us,
+                    batch.search_us,
+                    batch.row_count(),
+                    batch.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default()
+                ));
+            }
+            summary.total_results += batch.row_count();
+            if let Some(r) = recorder.as_mut() {
+                r.record(&batch);
+            }
+            sink(batch);
+        }
         if let (Some((_, k, q)), Some(payload)) = (rendered, recorder.and_then(|r| r.finish(&summary.notes))) {
             // A cancelled run may be missing entries.
             if !cancel.load(Ordering::Relaxed) {
@@ -2203,13 +2469,14 @@ pub(crate) fn search_entry_with(
 /// `e`, evicting other entries if that exceeds the capacity.
 fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEntry>) {
     let (Some(mem), Some(key)) = (cache.and_then(|c| c.memory.as_ref()), key) else { return };
-    let size = e.charged_bytes();
     {
         let mut mem = mem.lock().unwrap();
-        if !mem.charged_bytes(key, &e.name).is_some_and(|old| old != size) {
+        let Some(cur) = mem.peek(key, &e.name) else { return };
+        let size = cur.charged_bytes();
+        if mem.charged_bytes(key, &e.name) == Some(size) {
             return;
         }
-        mem.resize(key, &e.name, e, size);
+        mem.resize(key, &e.name, &cur, size);
     }
     if let Some(c) = cache {
         c.charged();
@@ -2261,7 +2528,19 @@ pub fn find_refs_in_dex(dex_name: &str, buf: &[u8], query: &Query, aggregate: bo
 
 /// [`find_refs_in_dex`] with a context.
 pub fn find_refs_in_dex_opts(dex_name: &str, buf: &[u8], query: &Query, opts: FindOptions) -> Result<Vec<RefResult>> {
-    find_refs_in_dex_compiled(dex_name, buf, &CompiledQuery::new(query)?, opts)
+    let rows = find_refs_in_dex_compiled(dex_name, buf, &CompiledQuery::new(query)?, opts)?;
+    if rows.is_empty() {
+        if let Some(fallback) = names::denormalize_query(query) {
+            if let Ok(compiled) = CompiledQuery::new(&fallback) {
+                if let Ok(fallback_rows) = find_refs_in_dex_compiled(dex_name, buf, &compiled, opts) {
+                    if !fallback_rows.is_empty() {
+                        return Ok(fallback_rows);
+                    }
+                }
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn find_refs_in_dex_compiled(dex_name: &str, buf: &[u8], query: &CompiledQuery, opts: FindOptions) -> Result<Vec<RefResult>> {

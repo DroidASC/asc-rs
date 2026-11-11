@@ -169,7 +169,7 @@ pub(crate) fn write_derived(disk: &DiskCache, memory: Option<&SharedMemory>, key
 /// Fingerprint of this build of the tool: the crate version plus the size
 /// and modification time of the running executable, so a rebuilt binary
 /// never replays results of the old one.
-fn tool_version() -> &'static str {
+pub(crate) fn tool_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION.get_or_init(|| {
         let exe = std::env::current_exe().ok().and_then(|p| std::fs::metadata(p).ok());

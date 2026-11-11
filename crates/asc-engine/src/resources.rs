@@ -270,28 +270,128 @@ impl Engine {
     }
 }
 
-fn annotate(table: &ResTable, smali: &str) -> String {
-    let mut out = String::with_capacity(smali.len() + smali.len() / 16);
-    for line in smali.split_inclusive('\n') {
+fn annotate(table: &ResTable, text: &str) -> String {
+    // Smali keeps its own comment syntax and literal shapes; a `#` comment on a
+    // Java/Kotlin line (or a `//` one on smali) would not assemble. A fragment
+    // (a single method) has no class header, so its instructions decide too.
+    let smali = text.starts_with(".class ")
+        || text.contains("\n.method ")
+        || text.lines().any(|line| {
+            let t = line.trim_start();
+            (t.starts_with("const ") && t.contains(", "))
+                || t.starts_with("const/high16 ")
+                || t.starts_with("const-string")
+                || t.starts_with(".array-data")
+                || t.starts_with(".registers")
+        });
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
         let t = body.trim_start();
-        let literal = if t.starts_with("const ") || t.starts_with("const/high16 ") {
-            t.rsplit(", ").next()
-        } else if t.starts_with("0x") && !t.contains(' ') {
-            Some(t)
-        } else {
-            None
-        };
-        let id = literal.and_then(|l| l.strip_prefix("0x")).filter(|h| h.len() == 8).and_then(|h| u32::from_str_radix(h, 16).ok());
-        match id.filter(|&id| id >> 24 != 0 && table.contains(id)) {
-            Some(id) => {
-                out.push_str(body);
-                out.push_str("  # @");
-                out.push_str(&table.ref_name(id));
-                out.push_str(&line[body.len()..]);
+        if smali {
+            let literal = if t.starts_with("const ") || t.starts_with("const/high16 ") {
+                t.rsplit(", ").next()
+            } else if t.starts_with("0x") && !t.contains(", ") {
+                // `.array-data` elements and `.sparse-switch` keys
+                // (`0x7f0b001c -> :sswitch_0`) both start with the literal.
+                Some(t.split_whitespace().next().unwrap_or(t))
+            } else {
+                None
+            };
+            let id = literal
+                .and_then(|lit| lit.strip_prefix("0x"))
+                .filter(|h| h.len() == 8)
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .filter(|&id| id >> 24 != 0 && table.contains(id));
+            match id {
+                Some(id) => {
+                    out.push_str(body);
+                    out.push_str("  # @");
+                    out.push_str(&table.ref_name(id));
+                    out.push_str(&line[body.len()..]);
+                }
+                None => out.push_str(line),
             }
-            None => out.push_str(line),
+            continue;
         }
+        let ids = source_line_resource_ids(table, t);
+        if ids.is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(body);
+        out.push_str(" // ");
+        for (i, id) in ids.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push('@');
+            out.push_str(&table.ref_name(*id));
+        }
+        out.push_str(&line[body.len()..]);
+    }
+    out
+}
+
+/// Extract resource IDs (hex `0x7f......` or decimal `213.......`) outside
+/// string literals and comments in a Java/Kotlin line.
+fn source_line_resource_ids(table: &ResTable, trimmed: &str) -> Vec<u32> {
+    if trimmed.is_empty()
+        || trimmed.starts_with('.')
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with("package ")
+        || trimmed.starts_with("import ")
+    {
+        return Vec::new();
+    }
+    let bytes = trimmed.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut in_str = false;
+    while i < bytes.len() {
+        if in_str {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_str = true;
+            i += 1;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            break;
+        }
+        if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let tok = &trimmed[start..i];
+            let id = if let Some(hex) = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
+                (hex.len() == 8).then(|| u32::from_str_radix(hex, 16).ok()).flatten()
+            } else if tok.len() == 10 && tok.bytes().all(|b| b.is_ascii_digit()) {
+                tok.parse::<u32>().ok()
+            } else {
+                None
+            };
+            if let Some(id) = id.filter(|&id| id >> 24 != 0 && table.contains(id)) {
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+            continue;
+        }
+        i += 1;
     }
     out
 }

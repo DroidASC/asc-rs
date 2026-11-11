@@ -20,7 +20,7 @@ cargo test --workspace
 droidasc manifest-summary app.apk | grep exported=true          # attack surface
 droidasc findrefs app.apk string 'https?://' --limit 50         # who uses this string
 droidasc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
-droidasc getclass app.apk com.poc.Main --method onCreate        # read smali
+droidasc getclass app.apk com.poc.Main --method onCreate        # decompile to Java (or --lang kotlin / --smali)
 droidasc callgraph app.apk com.poc.Main onCreate --depth 3      # caller tree
 droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 ```
@@ -29,7 +29,7 @@ droidasc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec
 
 | command | what it does |
 |---|---|
-| `getclass` / `disassemble` | Locate a class, rebuild a one-class DEX in memory and print smali; `--method` for one method, `--dump-dex` writes the DEX for jadx and friends |
+| `getclass` / `disassemble` | Locate a class, rebuild a minimal DEX (with nested classes) in memory and decompile via `dexdec` (default Java, `--lang kotlin\|smali\|auto`); `disassemble` prints smali; `--method` for one method, `--dump-dex` exports the minimal DEX; cached by input MD5 + class |
 | `listclass` (`classes`) | List classes, `--prefix` to filter |
 | `findrefs` | Code references to a `string` / `type` / `method` / `field`, direct subclasses and implementers (`extends` / `impl`); `all` combines conditions, `rules` answers many rules in one scan |
 | `callgraph` | Callers (default) or `--callees` of a method; `--virtual` follows dispatch through the class hierarchy |

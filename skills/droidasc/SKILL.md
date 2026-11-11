@@ -42,7 +42,7 @@ droidasc findrefs app.apk string 'https?://' --limit 50
 | callers of the methods that use X | `droidasc findrefs app.apk method '{literal:device_id}'` (one call, any depth of `{}`) |
 | calls of a list of methods | `droidasc findrefs app.apk method @methods.txt` |
 | code around each hit | add `--context 3`, or `--context method` for the whole method |
-| read code | `droidasc getclass app.apk com.a.B` (smali); one method: `--method onReceive` |
+| read code | `droidasc getclass app.apk com.a.B` (Java by default; `--lang kotlin` or `--smali`); one method: `--method onReceive` |
 | callers / callees | `droidasc callgraph app.apk com.a.B onReceive --depth 3` (`--callees`, `--virtual`) |
 | paths from a source to a sink | `droidasc callgraph app.apk --to 'method:Runtime.exec' --from 'method:Intent.getStringExtra' --unless 'method:Validator.check' --depth 4` |
 | classes | `droidasc listclass app.apk --prefix com.a` |

@@ -44,8 +44,9 @@ common:
   output then goes to a file the last line names, and --offset shows the next records.
 
 examples:
-  droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
-  droidasc getclass app.apk com.poc.Main --threads 16
+  droidasc getclass app.apk 'Lcom/poc/Main;' -o Main.java
+  droidasc getclass app.apk com.poc.Main --lang kotlin
+  droidasc getclass app.apk com.poc.Main --lang smali -o Main.smali
   droidasc getclass app.apk com.poc.Main --dump-dex Main.dex
   droidasc disassemble app.apk com.poc.Main --debuginfo
   droidasc disassemble app.apk com.poc.Main --method 'run(I)V'
@@ -260,22 +261,31 @@ impl Common {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Locate the target class in APK, extract one DEX in memory, then disassemble.
+    /// Locate the target class in APK, rebuild a minimal DEX in memory, and decompile (default Java).
     Getclass {
         /// Also write the output to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Do not emit .line / .param debug directives.
+        /// Output language: java (default), kotlin, smali or auto.
+        #[arg(long, visible_alias = "language", value_name = "LANG")]
+        lang: Option<String>,
+        /// Shorthand for --lang smali.
+        #[arg(long, conflicts_with = "lang")]
+        smali: bool,
+        /// Do not inline nested / anonymous classes when decompiling.
+        #[arg(long)]
+        no_nested: bool,
+        /// Do not emit .line / .param debug directives (implies smali when --lang is omitted).
         #[arg(long)]
         no_debug_info: bool,
-        /// Write the rebuilt single-class DEX to this file.
+        /// Write the rebuilt minimal DEX to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
         /// Render only these methods (no fields): a name (every overload) or a
         /// signature, e.g. run or run(I)V.
         #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method_signature: Option<String>,
-        /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
+        /// Annotate constants that are resource ids (from resources.arsc) with @type/name.
         #[arg(long)]
         res_names: bool,
         /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
@@ -864,6 +874,8 @@ struct ClassArgs {
     output: Option<PathBuf>,
     /// Print to stdout even with `-o`.
     tee: bool,
+    lang: asc_engine::SourceLang,
+    include_nested: bool,
     debug_info: bool,
     dump_dex: Option<PathBuf>,
     method_signature: Option<String>,
@@ -872,41 +884,14 @@ struct ClassArgs {
     dalvik_class: String,
 }
 
-/// The class, or only the methods `method` names: an exact signature is
-/// rendered on its own; a name, a signature prefix or a Java-style signature
-/// is picked from the whole class (as MCP `getclass` does).
-fn class_methods(
-    engine: &Engine,
-    descriptor: &str,
-    opts: asc_engine::SmaliOptions,
-    method: Option<&str>,
-    cancel: &AtomicBool,
-) -> Result<asc_engine::ClassSource, String> {
-    // `name(params)ret`: what the engine renders on its own.
-    let full_signature = |m: &&str| m.split_once(')').is_some_and(|(head, ret)| head.contains('(') && !ret.trim().is_empty());
-    if let Some(m) = method.filter(full_signature) {
-        if let Ok(src) = engine.get_class_method_cancellable(descriptor, opts, Some(m), cancel) {
-            return Ok(src);
-        }
-    }
-    let mut src = engine.get_class_method_cancellable(descriptor, opts, None, cancel).map_err(|e| e.to_string())?;
-    if let Some(m) = method {
-        let parsed = asc_mcp::class_text::ClassText::parse(&src.source);
-        let picked = parsed.select(m);
-        if picked.is_empty() {
-            return Err(format!("{descriptor} has no method {m:?}; its methods: {}", parsed.signatures(4 << 10)));
-        }
-        let text = parsed.with_methods(&picked);
-        src.source = text;
-    }
-    Ok(src)
-}
-
 fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), String> {
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = io.engine(common, &args.apk_path);
-    let opts = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
-    let mut src = class_methods(&engine, &descriptor, opts, args.method_signature.as_deref(), io.cancel)?;
+    let smali = asc_engine::SmaliOptions { line_numbers: args.debug_info, param_names: args.debug_info };
+    let opts = asc_engine::DecompileOptions { lang: args.lang, smali, include_nested: args.include_nested };
+    let mut src = engine
+        .decompile_class_method_cancellable(&descriptor, opts, args.method_signature.as_deref(), args.dump_dex.is_some(), io.cancel)
+        .map_err(|e| e.to_string())?;
     if args.res_names {
         src.source = engine.annotate_resource_ids(&src.source);
     }
@@ -950,14 +935,54 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
         }
     }
     match command {
-        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class } => {
-            let args =
-                ClassArgs { output, tee: true, debug_info: !no_debug_info, dump_dex, method_signature, res_names, apk_path, dalvik_class };
+        Command::Getclass {
+            output,
+            lang,
+            smali,
+            no_nested,
+            no_debug_info,
+            dump_dex,
+            method_signature,
+            res_names,
+            apk_path,
+            dalvik_class,
+        } => {
+            let resolved_lang = if smali {
+                asc_engine::SourceLang::Smali
+            } else if let Some(l) = lang {
+                asc_engine::SourceLang::parse(&l).ok_or_else(|| format!("unknown --lang {l:?}: expected java, kotlin, smali or auto"))?
+            } else if no_debug_info {
+                asc_engine::SourceLang::Smali
+            } else {
+                asc_engine::SourceLang::Java
+            };
+            let args = ClassArgs {
+                output,
+                tee: true,
+                lang: resolved_lang,
+                include_nested: !no_nested,
+                debug_info: !no_debug_info,
+                dump_dex,
+                method_signature,
+                res_names,
+                apk_path,
+                dalvik_class,
+            };
             getclass(io, common, args, t_start)?;
         }
         Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, apk_path, dalvik_class } => {
-            let args =
-                ClassArgs { output, tee: false, debug_info: debuginfo, dump_dex, method_signature, res_names, apk_path, dalvik_class };
+            let args = ClassArgs {
+                output,
+                tee: false,
+                lang: asc_engine::SourceLang::Smali,
+                include_nested: false,
+                debug_info: debuginfo,
+                dump_dex,
+                method_signature,
+                res_names,
+                apk_path,
+                dalvik_class,
+            };
             getclass(io, common, args, t_start)?;
         }
         Command::Listclass { prefix, output, apk_path } => {
