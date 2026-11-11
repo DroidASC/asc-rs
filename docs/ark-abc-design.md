@@ -270,7 +270,7 @@ Argument 2.8%、CallResult 9.0%、其他 0.7%、跨块 2.4%（原 9.1%）。
 样本 A 全图 346,983 条边，16 线程 49 ms；callers 深度 3 为 18 ms，以 `^import:@ohos:net\.http` 这类外部路径为根 77 ms。
 验证：用官方反汇编独立重推，49,094 个已解析的捕获变量、50,594 条跨 record 边、30,000 个随机调用点均未发现错误边；
 callers / callees 双向一致。依赖但未在运行时源码里核实的语义：闭包捕获定义点的环境、生成器恢复后环境不变、
-handler 进入时的环境、`stmodulevar N` 的索引空间。未做：sendable 环境、`super` 调用、调用结果的类型、继承来的成员。
+handler 进入时的环境、`stmodulevar N` 的索引空间。未做：sendable 环境、调用结果的类型（后来的进展见第 10 节）。
 
 ## 8. 分期
 
@@ -293,19 +293,19 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
    三种 record 名写法都要能还原。
 3. 对照工具：本机没有 `ark_disasm` / abcd-rs；样本 A 有一份官方 `ark_disasm` 的输出（本机，
    170 个 `.pa`，93,930 个函数，每条指令带文件偏移和原始字节），用它做全量语义比对。其他样本没有对照。
-4. 样本：多 region 的大型样本、13.0.1.0 和 HSP 都已有（样本 A–D，见第 10 节）；还缺 24.x 以上版本和 `modules_static.abc`。
+4. 样本：多 region 的大型样本、13.0.1.0 和 HSP 都已有（样本 A–D，见第 10 节）；9.0.0.0–24.0.0.0 由官方编译器现场编译覆盖；`modules_static.abc` 已定不做。
 5. 已定：目录里加密的 hap 和解密的裸 abc 自动配对，只看文件头（版本、`file_size`、校验和字段相同）和正文确实
    算得出该校验和，不看文件名；目录里的文件按内容识别（魔数、zip 内容），扩展名只是兜底。
 6. 数值常量搜索的 kind 名：第 7 节写的 `findrefs literal:` 与 DEX 侧已有的 `literal:TEXT`（字符串子串）冲突。
    倾向鸿蒙侧的 `literal:` 保持“字符串子串”的含义（CLI 已这样接入），数值常量另起名（如 `number:`）。
-7. 同一目录里 DEX 与 HAP 混放：目前走 Android，stderr 提示鸿蒙文件被略过；两种格式一起查留到 P3 之后。
+7. 同一目录里 DEX 与 HAP 混放：目前走 Android，stderr 提示鸿蒙文件被略过；已定：不做混合程序，鸿蒙文件单独给路径。
 8. `asc-fixture` 依赖了 `asc-abc` / `asc-arkisa`，Android 侧 crate 的测试依赖链因此会编译鸿蒙侧 crate。
    “两侧互不依赖”的 CI 检查只看正式依赖，或到 P3 把 fixture 拆成两个 crate。
 9. 裸包名形式的模块请求不解析到 record（样本 A 有 1007 个这样的请求，调用显示成 `[external]`）。
    需要用 `pkgContextInfo.json` 把包名映射到入口 record。
-10. `[external]` 不等于系统 API：调用返回值的成员、没解析出的程序内静态方法也标 `[external]`。是否拆成两个标记。
+10. `[external]` 不等于系统 API：调用返回值的成员、没解析出的程序内静态方法也标 `[external]`。已做：后者改标 `[unlinked]`。
 11. 经数组 / 表分发的调用（`handlerList[].handle`）是调用图的断点，只能用 `findrefs method NAME --exact --class RECORD`
-    列出同名定义再逐个走；该命令的字面量行只给原始名，应补还原名。
+    列出同名定义再逐个走；字面量行已补还原名。
 12. 已定：子命令两种精确写法都接受（`--exact` 和 `=NAME`）；`--to` / `--from` / `--unless` 的过滤在引擎的遍历里做，前端只传规则。
 
 ## 10. 进度（2026-11-10）
@@ -382,4 +382,21 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
   - `ets/sourceMaps.map`：一个 JSON 对象，键 `构建包|所属包|版本|产物路径`，值是 source map v3（样本里 `names` 为空）。
     只在调试 / 自建包里有，上架样本都没有。abc 调试信息的行号是编译中间文件的 0 基行，不是源码行；map 把它映射回
     源码行，并能分出构建生成的函数（没有映射行）。只索引顶层字节范围，按需解析一个模块。
-- 待办：前端没有暴露逐指令源码行；一个模块多个 `sources` 只取第一个；`xml` 读解包目录没有大小上限；“路由名 → 导航调用点”没有原语；`[external]` 是否拆成两个标记；14.x 以上版本没有样本。
+  - 调用图第二轮：类的成员不只在类字面量里——类体里第一个访问器（或计算名方法）之后的成员是定义后用
+    `definemethod` + `stownbyname` / `definegettersetterbyvalue` 补上的（样本 A 里约 5000 个方法、5000 处访问器），
+    现在都算类成员，`[this-class]` 因此增加 37%–83%。`[instance]` 扩到“函数 / 静态属性交出的确定类的对象”
+    （`callgraph/made.rs`：每个 `return` 都是 `new K` / 持有 K 的静态属性 / 空值才算；样本 A 的 `getInstance().m`
+    叶子 2333 → 831）；带热修复桩的函数因多出一个来源不明的 `return` 而不接。箭头函数里的 `super.m()` 沿
+    `definefunc` 链找外层成员。`[external]` 只留给根在程序外的叶子，根在程序内而没接上的是 `[unlinked]`
+    （占全部边的 2%–6%）。callers 方向每个类最多跟随 512 个子类（样本里最大的族是 387，上限从不触发），超出时
+    行上标 `[N+ subclasses skipped]`。全图冷构建慢约 5%–8%。
+  - 高版本：官方 `es2abc` 可产出 9.0.0.0（API 9–10）、11.0.2.0（11）、12.0.2.0（12）、12.0.6.0（12 beta3–17）、
+    13.0.1.0（18–23）、24.0.0.0（24–26）。8 份自写源码的 141 个产物与官方反汇编零差异（`$ASC_ES2ABC` +
+    `$ASC_ARK_DISASM` 开启的测试）。24.0.0.0 与 13.0.1.0 的同源产物除版本和校验和外相同。修了不合并布局
+    （函数在 `_GLOBAL`，模块记录在 `_ESModuleRecord`，scope names 在 `_ESScopeNamesRecord`）和注解字段默认值；
+    函数头列出用户注解。
+  - 零散：`getclass --lines`；解包目录里 `xml` 读的文件同样限 1 GiB；source map 多个 `sources` 按 source index 映射；
+    索引计入 `MemoryUse.source_maps`；包内 abc 条目按名字排序；kind 别名表只在引擎一处，CLI 也接受。
+- 待办：`--enable-callable-name` 的产物一次方法调用在 `findrefs prop` 下出两行；注解里的字符串搜不到；注解接口的
+  record 名被当成带版本的模块名；转发型 / 访问器型单例 getter、箭头函数里的 `super()`、命名空间成员调用仍是叶子；
+  `hierarchy` 的 `[unresolved]` 与调用图的 `[unlinked]` 未统一。“路由名 → 导航调用点”用 `findrefs string` 回答，不设原语。

@@ -97,7 +97,7 @@ format is detected from the file:
 | `findrefs prop` / `global` / `import` / `number` / `call` | — | ✓ |
 | `findrefs type` / `field` / `extends` / `impl` | ✓ | — (`hierarchy` answers inheritance) |
 | `callgraph` | ✓ | ✓: `--to` / `--from` / `--unless` take rules (`--to call:REGEX` roots at a callee path), `--no-defines`, `--unresolved`, `--entry`; no `--virtual` |
-| `hierarchy` | ✓ | ✓: the parent is read where each class is defined; `CLASS` is a class name, `RECORD->CLASS`, or a parent outside the program, `import:REGEX` / `global:REGEX`; `--method` sees the members of the class literal |
+| `hierarchy` | ✓ | ✓: the parent is read where each class is defined; `CLASS` is a class name, `RECORD->CLASS`, or a parent outside the program, `import:REGEX` / `global:REGEX`; `--method` sees the members (those defined after an accessor too) of the class |
 | `resources` | `resources.arsc` | `resources.index`, same options; QUERY is `0x…`, `string/name`, `$string:name` or `app.string.name` |
 | `xml` | binary XML | prints a text file of the package as it is: `'$profile:main_pages'` (page list, route table) or a path in the package |
 | `getclass --res-names` | resource id constants | appends `# string/name "value"` to the row of a `$r(...)` object |
@@ -136,12 +136,15 @@ much is known:
   unknown.
 - `callgraph` rows: no mark is a proved call; `[new]` a construction; `[super]` links `super()` / `super.m()` to
   the parent; `[this-class]` / `[inherited]` / `[instance]` are methods matched by name (in the class of the
-  caller, in an ancestor, in the class an exported `new C()` was made of), not guaranteed; `[reassigned]`
+  caller, in an ancestor, on an object of a known class: an exported `new C()`, or what a function / static property such
+  as `C.getInstance()` hands out), not guaranteed; `[reassigned]`
   went through a class a decorator assigned again and holds if the decorator kept the class; `[defines]` creates a closure, it is not a call
-  (`--no-defines` drops them); `[external]` is a leaf rooted at an import / global for which the program has
-  no function (system APIs, but also members of call results and imports that did not resolve);
+  (`--no-defines` drops them); `[external]` is a leaf rooted outside the program (a system module, a
+  native library, a global); `[unlinked]` is a leaf rooted at a record of the program but linked to no function
+  (a member of a call result and the like): its path names the record, continue there by hand;
   `[unresolved]` is a leaf of unknown origin (`--callees --unresolved` lists them, otherwise a row ends in
-  the count, `unresolved=N`); `(repeated)` marks a node expanded elsewhere.
+  the count, `unresolved=N`); `(repeated)` marks a node expanded elsewhere; `[N+ subclasses skipped]`
+  says the class has more than 512 subclasses and call sites inherited through the rest were not looked for.
 - Callbacks the system calls (lifecycle `onXxx`, event handlers) have no callers; where a path stops at
   `[unresolved]`, continue by name: `findrefs method NAME --exact` (who defines it), `findrefs prop NAME
   --exact --access call` (the other call sites).
@@ -159,6 +162,9 @@ much is known:
   the text around it.
 - Where a debug build names its local variables, a function header of `getclass` has a line
   `; locals [from, to): v3 name, …`.
+- `getclass --lines` (`disassemble --debuginfo` likewise) writes `; line N` where the source line changes; a
+  user annotation on a function is written `; @RECORD(name=value)`; in an abc compiled without merging, the
+  functions are all in the record `_GLOBAL`.
 - A package with `ets/sourceMaps.map` (debug builds only) gets a `source-maps … modules=N` row in
   `manifest-summary`; `getclass` heads the record with `; source ORIGINAL-PATH` and a function with `line N
   (source line M)`: `line N` is a line of the compiled intermediate file, from 0, `source line` the line of
@@ -166,9 +172,10 @@ much is known:
 
 Limits: a HarmonyOS program is served by the same daemon as APKs (the analyses stay resident), but has no
 disk cache (it opens in milliseconds); `super()` / inherited methods whose parent is outside the
-program, and calls on what a singleton getter returns, stay leaves; there are no call-site value constraints (`method:X[arg0=…]`) and no virtual dispatch; static ArkTS
-(`modules_static.abc`) is not supported; abc versions above 24.x have not been checked
-against real samples; a directory mixing DEX and HarmonyOS files is an Android program, so pass the HarmonyOS
+program stay leaves, and a singleton getter is linked only where what it returns is certain (not when it
+forwards to another class, keeps instances by key, or carries a hot-fix stub); there are no call-site value constraints (`method:X[arg0=…]`) and no virtual dispatch; static ArkTS
+(`modules_static.abc`) is not supported; versions 9.0.0.0–24.0.0.0 were checked
+against the official disassembler on output of the official compiler, later ones were not; a directory mixing DEX and HarmonyOS files is an Android program, so pass the HarmonyOS
 files by their own path.
 
 ## For agents

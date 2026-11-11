@@ -94,7 +94,7 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
 | `findrefs prop` / `global` / `import` / `number` / `call` | — | ✓ |
 | `findrefs type` / `field` / `extends` / `impl` | ✓ | —（继承关系用 `hierarchy`） |
 | `callgraph` | ✓ | ✓：`--to` / `--from` / `--unless` 都接受规则（`--to call:REGEX` 以被调用路径为根），`--no-defines`、`--unresolved`、`--entry`；没有 `--virtual` |
-| `hierarchy` | ✓ | ✓：父类取自每个类定义处；`CLASS` 可以是类名、`RECORD->CLASS`，或程序外的父类 `import:REGEX` / `global:REGEX`；`--method` 只看类字面量里的成员 |
+| `hierarchy` | ✓ | ✓：父类取自每个类定义处；`CLASS` 可以是类名、`RECORD->CLASS`，或程序外的父类 `import:REGEX` / `global:REGEX`；`--method` 看类的成员（含访问器之后才定义的方法） |
 | `resources` | `resources.arsc` | `resources.index`，参数相同；QUERY 可写 `0x…`、`string/name`、`$string:name`、`app.string.name` |
 | `xml` | 二进制 XML | 原样打印包内的文本文件：`'$profile:main_pages'`（页面清单、路由表）或包内路径 |
 | `getclass --res-names` | 资源 id 常量 | `$r(...)` 对象所在行追加 `# string/name "值"` |
@@ -129,10 +129,12 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
   `this.成员`、`local:函数` 是可确定的来源；`argN` 是本函数的第 N 个参数，`this@F` / `argN@F` 是闭包捕获的外层函数 F
   的 `this` / 参数，`x().成员` 是调用返回值的成员，`lex(层,槽)` 是有多个写入者的捕获变量，`?` 是未知。
 - `callgraph` 的行：无标记是可证明的调用；`[new]` 构造；`[super]` 是 `super()` / `super.m()` 接到父类；
-  `[this-class]` / `[inherited]` / `[instance]` 是按名字匹配的方法（在调用者所在的类、在祖先类、在导出的 `new C()`
-  所属的类里），不保证；`[reassigned]` 表示途中经过被装饰器重新赋值的类，装饰器没换掉类时成立；`[defines]` 是创建闭包而不是调用（`--no-defines` 去掉）；`[external]` 是以导入 / 全局为根、程序里找不到
-  对应函数的叶子（系统 API，也包括调用返回值的成员和没解析出来的导入）；`[unresolved]` 是来源未知的叶子
-  （`--callees --unresolved` 列出，否则只在行尾计数 `unresolved=N`）；`(repeated)` 表示该节点已在别处展开。
+  `[this-class]` / `[inherited]` / `[instance]` 是按名字匹配的方法（在调用者所在的类、在祖先类、在某个确定类的对象上：导出的 `new C()`，
+  或 `C.getInstance()` 这类函数 / 静态属性交出的对象），不保证；`[reassigned]` 表示途中经过被装饰器重新赋值的类，装饰器没换掉类时成立；`[defines]` 是创建闭包而不是调用（`--no-defines` 去掉）；`[external]` 是根在程序外的叶子
+  （系统模块、native 库、全局对象）；`[unlinked]` 是根在程序内某个 record、但没接到具体函数的叶子（调用返回值的成员等），
+  路径里有 record，可以手工接着查；`[unresolved]` 是来源未知的叶子
+  （`--callees --unresolved` 列出，否则只在行尾计数 `unresolved=N`）；`(repeated)` 表示该节点已在别处展开；
+  `[N+ subclasses skipped]` 表示该类子类超过 512 个，经更多子类继承来的调用点没有找。
 - 系统回调（生命周期 `onXxx`、事件处理函数）没有调用者；路径断在 `[unresolved]` 时按名字接着查：
   `findrefs method NAME --exact`（谁定义了它）、`findrefs prop NAME --exact --access call`（还有哪些调用点）。
 
@@ -143,14 +145,17 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
 - `manifest-summary` 另有 `page` / `route` 行（页面清单和路由表的每一项，带 `record=`，可直接给 `getclass`）、
   `abc` 行（每个 abc 条目，加密的条目由哪个解密文件顶替）；多个包里相同的 `pack.info` 只列一次。
 - 超过 2048 字节的字符串写成 `"…"… (+N bytes)`，匹配点在截断之后时带 `match at byte N` 和命中处的片段。
+- `getclass --lines`（`disassemble --debuginfo` 同义）在源码行变化处写 `; line N`；函数上的用户注解写成
+  `; @RECORD(name=value)`；不合并编译的 abc 里函数都在 `_GLOBAL` record。
 - 调试构建带局部变量名时，`getclass` 的函数头多一行 `; locals [起, 止): v3 name, …`。
 - 包里带 `ets/sourceMaps.map`（调试构建才有）时，`manifest-summary` 多一行 `source-maps … modules=N`；`getclass` 的
   record 头多一行 `; source 原始路径`，函数头写成 `line N (source line M)`：`line N` 是编译中间文件的行（从 0 计），
   `source line` 才是源码行；`(no source line)` 的函数是构建生成的（状态变量访问器、`rerender` 等）。
 
 限制：HarmonyOS 程序和 APK 共用同一个 daemon（调用图等分析结果驻留复用），但没有磁盘 cache（打开是毫秒级）；
-父类在程序外的 `super()` / 继承方法、单例 getter 返回的对象上的调用仍是叶子；没有调用点取值约束（`method:X[arg0=…]`）和虚分派；
-不支持静态 ArkTS（`modules_static.abc`）；24.x 以上版本的 abc 没有真实样本验证过；
+父类在程序外的 `super()` / 继承方法仍是叶子，单例 getter 只在返回值来源确定时才接上（转发给别的类、按 key 存的多例、
+带热修复桩的函数不接）；没有调用点取值约束（`method:X[arg0=…]`）和虚分派；
+不支持静态 ArkTS（`modules_static.abc`）；9.0.0.0–24.0.0.0 各版本用官方编译器的产物对照过官方反汇编，更高版本没有验证；
 目录里 DEX 与 HarmonyOS 文件混放时按 Android 程序处理，HarmonyOS 文件要单独给路径。
 
 ## 给 agent 用
