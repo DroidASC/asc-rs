@@ -32,8 +32,9 @@ use std::collections::BinaryHeap;
 /// Most distinct origins a register keeps before it becomes unknown.
 pub const MAX_CANDIDATES: usize = 4;
 
-/// Largest `blocks × registers` state a method may need; bigger methods are
-/// not analyzed (about 64 MiB of block states).
+/// Largest `blocks × registers` state, and most `(block, handler)` pairs of
+/// its try ranges, a method may need; bigger methods are not analyzed (about
+/// 64 MiB of block states).
 const MAX_SLOTS: usize = 1 << 22;
 
 /// A try range (byte offsets into the code, `end` exclusive) and one of its
@@ -434,6 +435,11 @@ impl Analyzer {
             let last = self.pcs.partition_point(|&p| (p as usize) < c.end);
             if first < last {
                 let (lo, hi) = (self.block_of(first), self.block_of(last - 1));
+                // Try ranges may each cover every block: as many try items
+                // as blocks would need their product of pairs.
+                if self.handlers.len() + (hi - lo + 1) > MAX_SLOTS {
+                    return None;
+                }
                 self.handlers.extend((lo..=hi).map(|b| (b as u32, handler)));
             }
         }
@@ -1362,6 +1368,20 @@ mod tests {
         assert!(an.analyze(code(&a, 1, 2, &[])).is_none());
         // Empty code is fine.
         assert!(an.analyze(MethodCode { insns: &[], registers: 0, ins: 0, catches: &[] }).is_some());
+    }
+
+    #[test]
+    fn try_ranges_over_every_block_are_not_analyzed() {
+        // 5000 blocks (each `goto +1` starts one), then 1000 try ranges that
+        // each cover nearly all of them: 5M block-handler pairs from 30 KB.
+        let blocks = 5000;
+        let mut insns = [0x28, 0x01].repeat(blocks);
+        insns.extend_from_slice(&[0x0e, 0x00]);
+        let handler = blocks * 2;
+        let catches: Vec<Catch> = (0..1000).map(|k| Catch { start: 0, end: handler - 2 * k, handler }).collect();
+        let mut an = Analyzer::new();
+        assert!(an.analyze(MethodCode { insns: &insns, registers: 1, ins: 0, catches: &catches }).is_none());
+        assert!(an.analyze(MethodCode { insns: &insns, registers: 1, ins: 0, catches: &catches[..8] }).is_some());
     }
 
     #[test]
