@@ -1,20 +1,21 @@
-//! Single-class DEX reconstruction.
+//! DEX reconstruction of a class and its `$` nested classes.
 //!
 //! Given a DEX buffer and a class descriptor, the pipeline
 //!
-//! 1. **hollows** the class: class_def, class_data, code items, debug info,
+//! 1. **hollows** the class and its nested classes: class_def, class_data, code items, debug info,
 //!    annotations and static values are parsed out of the original buffer;
-//! 2. **collects** every constant-pool index the class depends on (bytecode
+//! 2. **collects** every constant-pool index these classes depend on (bytecode
 //!    operands, prototypes, catch types, annotation values, ...) and closes
 //!    the set over the id tables (a method needs its class type, prototype
 //!    and name string, a prototype needs its shorty and parameter types, ...);
 //! 3. **maps** the collected items onto new, canonically sorted id tables;
-//! 4. **writes** a fresh DEX (`header`, id tables, one class_def, data section
+//! 4. **writes** a fresh DEX (`header`, shared id tables, class_defs, data section
 //!    and map list) with rewritten bytecode operands, a valid Adler-32
 //!    checksum and SHA-1 signature.
 //!
-//! The output is a spec-conformant DEX that only defines the requested class,
-//! so it can be handed to any decompiler or disassembler.
+//! The output defines the requested class and every class in the same DEX
+//! whose descriptor starts with its name followed by `$`. It can be handed
+//! to any decompiler or disassembler.
 
 mod collect;
 mod hollow;
@@ -97,6 +98,10 @@ pub struct Rebuilt {
 }
 
 /// Rebuild the class `descriptor` (e.g. `Lcom/poc/Main;`) from `dex`.
+///
+/// Includes its `$` nested classes at every depth in this DEX. For example,
+/// `LA;` includes `LA$a;` and `LA$a$b;`, while rebuilding `LA$a;` includes
+/// `LA$a$b;` but no definition for `LA;` or siblings such as `LA$c;`.
 pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt> {
     let t0 = Instant::now();
     let hollow = hollow::Hollow::extract(dex, descriptor)?;

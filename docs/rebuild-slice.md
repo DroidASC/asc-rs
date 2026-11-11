@@ -3,8 +3,10 @@
 状态：提案（2026-11-10）。使用方：[decompile-backends.md](decompile-backends.md)。
 
 目标：给定若干目标类，输出一个合规的 DEX，里面除了目标类，还带上反编译器为了产出与整包同等质量的
-源码所需要的上下文，同时尽量小、尽量快，并且输出确定（同一个闭包总是得到相同的字节）。现有的单类重建
-（`rebuild_class`）是它的特例，行为不变。
+源码所需要的上下文，同时尽量小、尽量快，并且输出确定（同一个闭包总是得到相同的字节）。现有的
+`rebuild_class` 默认重建目标类和同一 DEX 内描述符位于其 `$` 命名空间下的所有附属类：
+`LA;` 包含 `LA$a;`、`LA$a$b;`；`LA$a;` 包含 `LA$a$b;`，不包含 `LA;` 或兄弟类。
+后续闭包切片接口须保留这个默认行为；多来源、壳类和仅类定义档仍属于本提案。
 
 ## 1. 结论
 
@@ -12,7 +14,8 @@
   **仅类定义**（只有 `class_def`，没有成员）。
 - 闭包由 asc-engine 计算（它有跨 DEX 的 `ClassGraph`），asc-rebuild 只负责按清单写出多类、多来源的 DEX。
   两边的接口是一份清单（`SliceSpec`），不是策略。
-- 改动集中在三处：每个原始索引都要带上来源（哪个 DEX）；写出多个 `class_def` 并做拓扑排序；新增壳类和
+- 同一来源的多个完整类已可共用 ID 表写出，`class_def` 保留输入顺序。后续改动集中在三处：
+  每个原始索引都要带上来源（哪个 DEX）；多来源的 `class_def` 做拓扑排序；新增壳类和
   合成方法体。id 表本来就是按内容排序去重的（`tables.rs` 的 `assign`），合并多个来源基本不需要改。
 - invoke-custom、method handle 放到第三阶段支持（S3）。在那之前遇到这类类，按现在的做法报 `Unsupported`，
   由上层回退。
@@ -114,12 +117,13 @@ pub struct Slice {
 
 pub fn rebuild_slice(spec: &SliceSpec<'_>) -> Result<Slice>;
 
-/// 不变：等价于只有一个来源、一个完整档类的 rebuild_slice。
+/// 兼容入口：一个来源，目标类及其 `$` 附属类均为完整档。
 pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt>;
 ```
 
-`rebuild_class` 改为包装 `rebuild_slice`；现有的测试（`tests/rebuild.rs`、`tests/mutf8.rs`、`asc-smali`
-的测试）不改，必须继续逐字节通过。这一条保证单类输出与改动前完全一致。
+`rebuild_class` 改为包装 `rebuild_slice` 时，须传入目标类及其同一 DEX 内的全部 `$` 附属类。
+现有的测试（`tests/rebuild.rs`、`tests/mutf8.rs`、`asc-smali` 的测试）必须继续通过；
+没有附属类时保持原有输出，附属类集合及重映射由 `tests/nested.rs` 验证。
 
 ### 5.2 各阶段
 
@@ -193,7 +197,8 @@ pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt>;
   2. R → 去掉（被引用的 `method_id` / `field_id` 仍然存在，只是少了类定义）；
   3. P 中的壳 → 仅类定义（只保留继承链，不保留成员表）；
   4. O 中未保留代码的成员 → 去掉；
-  5. 仍然超出时，T ∪ A 不再降档，报 `TooManyItems`，由上层回退到单类切片。
+  5. 仍然超出时，T ∪ A 不再降档，报 `TooManyItems`，由上层回退到默认目标类及 `$` 附属类切片。
+     默认切片也无法重建时，沿用从原 DEX 反汇编的兜底。
 - 实际降到哪一档写在 `Slice::classes` 里。上层把它放进后端返回结果的头部，用户和 agent 能看到这次的
   上下文是否完整。
 
@@ -202,7 +207,7 @@ pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt>;
 - engine：新增 `Engine::slice(targets, policy) -> Result<SliceFile>`。它计算闭包，调用 `rebuild_slice`，把
   结果按 `sha256` 写到 `<cache>/slices/<前两位>/<哈希>.dex`（先写临时文件再 rename，和现有 cache 的写法
   一致；切片计入 L2 的容量和淘汰），并返回路径和清单。
-- CLI：`asc getclass --dump-dex FILE` 保持单类切片不变；新增 `--closure` 输出闭包切片，再加 `--manifest`
+- CLI：`asc getclass --dump-dex FILE` 保持默认目标类及 `$` 附属类切片；新增 `--closure` 输出更完整的闭包切片，再加 `--manifest`
   把清单打印到 stderr，方便直接拿去喂 jadx 等工具。
 - MCP：不单独做切片工具，由 `decompile` 内部使用。
 
@@ -211,7 +216,7 @@ pub fn rebuild_class(dex: &Dex<'_>, descriptor: &str) -> Result<Rebuilt>;
 | 项 | 方法 |
 |---|---|
 | 合规性 | 每个切片都要能被 `asc_dex::Dex::parse` 解析、被 `dexdump -d` 读取；再加一个可选测试：用 `d8` 把切片和平台库一起编译，不报错 |
-| 单类不变 | 现有测试逐字节通过；并在 corpus 上把 `rebuild_class` 改动前后的输出做哈希对比 |
+| 默认行为兼容 | 没有附属类时保留原有输出；`tests/nested.rs` 验证目标及 `$` 附属类集合、各类元数据、共享注解和重复重建的字节一致性 |
 | 合并正确 | 跨 DEX 的闭包（父类在 `classes2.dex`）：把切片 smali 化后，与分别从原始 DEX 反汇编的结果逐行比较 |
 | 确定性 | 同一个闭包构建两次，比较哈希；打乱 `SliceSpec.classes` 的顺序后结果不变 |
 | 质量 | 差分：dexdec、jadx 分别处理“整包 / 单类切片 / 闭包切片”三种输入，统计相对整包的差异行数。目标是闭包切片的差异不超过单类切片的 1/5 |
