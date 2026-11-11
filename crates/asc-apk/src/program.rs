@@ -48,6 +48,11 @@ impl Version {
     pub(crate) fn of_sources(sources: &[Source]) -> Version {
         Version(sources.iter().map(|s| (s.path.clone(), s.meta.len(), s.meta.modified().ok())).collect())
     }
+
+    /// The version of an archive read from memory: no file.
+    pub(crate) fn in_memory() -> Version {
+        Version(Vec::new())
+    }
 }
 
 /// The paths `spec` joins with `,`, or `spec` itself when a file of that

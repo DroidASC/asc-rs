@@ -421,6 +421,16 @@ impl Apk {
         Ok(Apk { path, archives: archives.into(), limits: Limits::default(), notes: notes.into(), version })
     }
 
+    /// Read `bytes` as a lone archive (or bare DEX file) already in memory,
+    /// as [`Apk::open`] reads a file; `path` only names it. Its
+    /// [`Apk::version`] lists no file.
+    pub fn from_bytes(path: impl Into<PathBuf>, bytes: Vec<u8>) -> Apk {
+        let path = path.into();
+        let bare_dex = bytes.starts_with(b"dex\n");
+        let archive = Archive { path: path.clone(), map: Data::Owned(bytes), label: String::new(), bare_dex };
+        Apk { path, archives: Arc::new([archive]), limits: Limits::default(), notes: Arc::new([]), version: Version::in_memory() }
+    }
+
     /// The files `path` (as [`Apk::open`] takes it) names now, with their
     /// sizes and modification times: equal to an open [`Apk::version`]
     /// when opening again would read the same files. Costs a directory walk
