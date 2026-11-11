@@ -15,6 +15,7 @@ use asc_dex::encoded::{AnnotationItem, EncodedValue, parse_annotation_item, pars
 use asc_dex::{ClassDef, Dex, NO_INDEX, access};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 pub use format::{escape_string, field_signature, method_signature, proto_descriptor};
 
@@ -28,6 +29,22 @@ pub enum SmaliError {
     BadMethodSignature(String),
     #[error("method not found or signature is not defined in the target DEX: {0}")]
     MethodNotFound(String),
+    /// The listing grew past [`listing_limit`] of the DEX: items shared by
+    /// many methods (code, annotations, a long string named over and over)
+    /// would make a small file expand without bound.
+    #[error("listing exceeds {0} bytes, far more than the DEX could hold")]
+    TooLarge(usize),
+}
+
+/// The most text a listing of a class of `dex` may run to: 64 times the DEX
+/// plus 1 MiB, beyond any real class.
+pub(crate) fn listing_limit(dex: &Dex<'_>) -> usize {
+    dex.buf().len().saturating_mul(64).saturating_add(1 << 20)
+}
+
+/// [`SmaliError::TooLarge`] once `out` has grown past `limit`.
+pub(crate) fn check_size(out: &str, limit: usize) -> Result<()> {
+    if out.len() > limit { Err(SmaliError::TooLarge(limit)) } else { Ok(()) }
 }
 
 pub type Result<T> = std::result::Result<T, SmaliError>;
@@ -211,10 +228,13 @@ impl<'d, 'a> Names<'d, 'a> {
 
 struct Annotations {
     class: Vec<AnnotationItem>,
-    fields: HashMap<u32, Vec<AnnotationItem>>,
-    methods: HashMap<u32, Vec<AnnotationItem>>,
-    params: HashMap<u32, Vec<Vec<AnnotationItem>>>,
+    fields: HashMap<u32, AnnotationSet>,
+    methods: HashMap<u32, AnnotationSet>,
+    params: HashMap<u32, Rc<Vec<AnnotationSet>>>,
 }
+
+/// One `annotation_set_item`, parsed once however many members share it.
+type AnnotationSet = Rc<Vec<AnnotationItem>>;
 
 struct Writer<'d, 'a, 'm> {
     names: Names<'d, 'a>,
@@ -290,6 +310,9 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
         Ok(rest == self.names.proto(id.proto_idx as u32)?)
     }
 
+    /// The annotations of `def`. Sets and parameter lists may be shared
+    /// by any number of members: each is parsed once, so a directory naming
+    /// one large set many times costs one copy of it.
     fn load_annotations(&self, def: &ClassDef) -> Result<Annotations> {
         let mut ann = Annotations { class: Vec::new(), fields: HashMap::new(), methods: HashMap::new(), params: HashMap::new() };
         if def.annotations_off == 0 {
@@ -297,33 +320,45 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
         }
         let buf = self.names.dex.buf();
         let dir = AnnotationsDirectory::parse(buf, def.annotations_off as usize)?;
-        let load_set = |off: u32| -> Result<Vec<AnnotationItem>> {
-            if off == 0 {
-                return Ok(Vec::new());
+        let mut sets: HashMap<u32, AnnotationSet> = HashMap::new();
+        let mut load_set = |off: u32| -> Result<AnnotationSet> {
+            if let Some(set) = sets.get(&off) {
+                return Ok(Rc::clone(set));
             }
             let mut items = Vec::new();
-            for item_off in parse_annotation_set(buf, off as usize)? {
-                if item_off != 0 {
-                    items.push(parse_annotation_item(buf, item_off as usize)?.0);
+            if off != 0 {
+                for item_off in parse_annotation_set(buf, off as usize)? {
+                    if item_off != 0 {
+                        items.push(parse_annotation_item(buf, item_off as usize)?.0);
+                    }
                 }
             }
-            Ok(items)
+            let set = Rc::new(items);
+            sets.insert(off, Rc::clone(&set));
+            Ok(set)
         };
-        ann.class = load_set(dir.class_annotations_off)?;
+        ann.class = load_set(dir.class_annotations_off)?.to_vec();
         for (f, off) in dir.field_annotations {
             ann.fields.insert(f, load_set(off)?);
         }
         for (m, off) in dir.method_annotations {
             ann.methods.insert(m, load_set(off)?);
         }
+        let mut lists: HashMap<u32, Rc<Vec<AnnotationSet>>> = HashMap::new();
         for (m, off) in dir.parameter_annotations {
             if off == 0 {
                 continue;
             }
-            let mut params = Vec::new();
-            for set_off in parse_annotation_set_ref_list(buf, off as usize)? {
-                params.push(load_set(set_off)?);
-            }
+            let params = match lists.get(&off) {
+                Some(params) => Rc::clone(params),
+                None => {
+                    let params =
+                        parse_annotation_set_ref_list(buf, off as usize)?.into_iter().map(&mut load_set).collect::<Result<Vec<_>>>()?;
+                    let params = Rc::new(params);
+                    lists.insert(off, Rc::clone(&params));
+                    params
+                }
+            };
             ann.params.insert(m, params);
         }
         Ok(ann)
@@ -382,7 +417,7 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
                 if i > 0 {
                     self.out.push('\n');
                 }
-                self.field(f, static_values.get(i), ann.fields.get(&f.field_idx))?;
+                self.field(f, static_values.get(i), ann.fields.get(&f.field_idx).map(|set| set.as_slice()))?;
             }
         }
         if !cd.instance_fields.is_empty() {
@@ -391,7 +426,7 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
                 if i > 0 {
                     self.out.push('\n');
                 }
-                self.field(f, None, ann.fields.get(&f.field_idx))?;
+                self.field(f, None, ann.fields.get(&f.field_idx).map(|set| set.as_slice()))?;
             }
         }
         if !cd.direct_methods.is_empty() {
@@ -415,7 +450,7 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
         Ok(())
     }
 
-    fn field(&mut self, f: &EncodedField, value: Option<&EncodedValue>, annotations: Option<&Vec<AnnotationItem>>) -> Result<()> {
+    fn field(&mut self, f: &EncodedField, value: Option<&EncodedValue>, annotations: Option<&[AnnotationItem]>) -> Result<()> {
         let dex = self.names.dex;
         let id = dex.field_id(f.field_idx)?;
         let _ = write!(
@@ -486,7 +521,7 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
                 }
                 let _ = writeln!(self.out, "    # {desc}");
                 if let Some(items) = anns {
-                    for item in items {
+                    for item in items.iter() {
                         self.annotation(item, 2)?;
                     }
                     self.out.push_str("    .end param\n");
@@ -495,7 +530,7 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
             reg += if wide { 2 } else { 1 };
         }
         if let Some(items) = ann.methods.get(&m.method_idx) {
-            for item in items {
+            for item in items.iter() {
                 self.annotation(item, 1)?;
             }
         }
@@ -521,6 +556,6 @@ impl<'d, 'a, 'm> Writer<'d, 'a, 'm> {
             let _ = writeln!(self.out, "{indent}    {} = {}", dex.string(*name)?, format::value_indented(dex, value, depth + 1)?);
         }
         let _ = writeln!(self.out, "{indent}.end annotation");
-        Ok(())
+        check_size(&self.out, listing_limit(dex))
     }
 }

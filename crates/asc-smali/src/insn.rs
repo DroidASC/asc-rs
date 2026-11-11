@@ -1,24 +1,26 @@
 //! Method body rendering: instructions, labels, payloads, try/catch.
 
 use crate::format::{call_site, escape_string, hex_i64, method_handle};
-use crate::{Names, Options, Result};
+use crate::{Names, Options, Result, check_size, listing_limit};
 use asc_dalvik::{Format, IndexKind, Instruction, PayloadKind};
-use asc_dex::code::CodeItem;
+use asc_dex::code::{CatchHandler, CodeItem};
 use asc_dex::debug_info::DebugInfo;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
 #[derive(Default)]
 struct Labels {
-    /// address (bytes) → label names
+    /// address (bytes) → label names, in the order they were added
     at: BTreeMap<usize, Vec<String>>,
+    /// Every `(address, label)` added: up to 65535 try items may start at
+    /// one address, too many to search the list there each time.
+    seen: HashSet<(usize, String)>,
 }
 
 impl Labels {
     fn add(&mut self, addr: usize, label: String) {
-        let v = self.at.entry(addr).or_default();
-        if !v.contains(&label) {
-            v.push(label);
+        if self.seen.insert((addr, label.clone())) {
+            self.at.entry(addr).or_default().push(label);
         }
     }
 }
@@ -79,34 +81,43 @@ fn decode_all(code: &CodeItem<'_>) -> Vec<Entry> {
     out
 }
 
-struct Try {
-    catches: Vec<(Option<u32>, usize)>,
+/// The handler of try item `n`, if it names one (shared, not copied: up to
+/// 65535 try items may name one handler of many catches).
+struct Try<'c> {
+    handler: Option<&'c CatchHandler>,
+}
+
+impl Try<'_> {
+    /// `(catch type, handler address in bytes)`, the catch-all last.
+    fn catches(&self) -> impl Iterator<Item = (Option<u32>, usize)> + '_ {
+        self.handler.into_iter().flat_map(|h| {
+            h.catches.iter().map(|&(ty, addr)| (Some(ty), addr as usize * 2)).chain(h.catch_all_addr.map(|addr| (None, addr as usize * 2)))
+        })
+    }
 }
 
 fn emit_try_end(
     out: &mut String,
     names: &mut Names<'_, '_>,
     addr: usize,
-    tries: &[Try],
+    tries: &[Try<'_>],
     try_ends: &BTreeMap<usize, Vec<usize>>,
 ) -> Result<()> {
+    let limit = listing_limit(names.dex);
     if let Some(list) = try_ends.get(&addr) {
         for &n in list {
             let _ = writeln!(out, "    :try_end_{n}");
-            for (ty, target) in &tries[n].catches {
+            for (ty, target) in tries[n].catches() {
                 match ty {
                     Some(ty) => {
-                        let _ = writeln!(
-                            out,
-                            "    .catch {} {{:try_start_{n} .. :try_end_{n}}} :catch_{:x}",
-                            names.type_(*ty)?,
-                            units(*target)
-                        );
+                        let _ =
+                            writeln!(out, "    .catch {} {{:try_start_{n} .. :try_end_{n}}} :catch_{:x}", names.type_(ty)?, units(target));
                     }
                     None => {
-                        let _ = writeln!(out, "    .catchall {{:try_start_{n} .. :try_end_{n}}} :catchall_{:x}", units(*target));
+                        let _ = writeln!(out, "    .catchall {{:try_start_{n} .. :try_end_{n}}} :catchall_{:x}", units(target));
                     }
                 }
+                check_size(out, limit)?;
             }
         }
     }
@@ -161,24 +172,22 @@ pub(crate) fn method_body(
     // Try/catch labels.
     let mut tries = Vec::with_capacity(code.tries.len());
     let mut try_ends: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    // Handlers whose catch labels are placed: each once, however many try
+    // items share it.
+    let mut labelled = HashSet::new();
     for (n, t) in code.tries.iter().enumerate() {
         let start = t.start_addr as usize * 2;
         let end = start + t.insn_count as usize * 2;
         labels.add(start, format!(":try_start_{n}"));
-        let mut catches = Vec::new();
-        if let Some(h) = code.handler_for(t) {
-            for (ty, addr) in &h.catches {
-                let a = *addr as usize * 2;
-                labels.add(a, format!(":catch_{:x}", units(a)));
-                catches.push((Some(*ty), a));
-            }
-            if let Some(a) = h.catch_all_addr {
-                let a = a as usize * 2;
-                labels.add(a, format!(":catchall_{:x}", units(a)));
-                catches.push((None, a));
+        let handler = code.handler_for(t);
+        let try_ = Try { handler };
+        if handler.is_some_and(|h| labelled.insert(h.offset)) {
+            for (ty, a) in try_.catches() {
+                let kind = if ty.is_some() { "catch" } else { "catchall" };
+                labels.add(a, format!(":{kind}_{:x}", units(a)));
             }
         }
-        tries.push(Try { catches });
+        tries.push(try_);
         try_ends.entry(end).or_default().push(n);
     }
 
@@ -191,8 +200,10 @@ pub(crate) fn method_body(
         }
     }
 
+    let limit = listing_limit(names.dex);
     let mut last_line: Option<u32> = None;
     for e in &entries {
+        check_size(out, limit)?;
         let pc = e.pc();
         emit_try_end(out, names, pc, &tries, &try_ends)?;
         if let Some(ls) = labels.at.get(&pc) {
@@ -487,4 +498,43 @@ fn instruction(names: &mut Names<'_, '_>, i: &Instruction, out: &mut String) -> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SmaliError;
+    use asc_dex::Dex;
+    use asc_dex::code::TryItem;
+
+    /// 65535 try items starting at one address and sharing one handler of
+    /// 64 catches, from a code item of half a megabyte: 65535 labels at one
+    /// address and 4M `.catch` lines. The labels are placed in linear time
+    /// and the listing stops at its limit.
+    #[test]
+    fn try_items_sharing_a_handler_are_bounded() {
+        let data = asc_fixture::make_dex();
+        let dex = Dex::parse(&data).unwrap();
+        let mut names = Names::new(&dex);
+        let handler = CatchHandler { offset: 1, catches: (0..64).map(|k| (0, k)).collect(), catch_all_addr: Some(0) };
+        let tries: Vec<TryItem> = (0..u16::MAX).map(|_| TryItem { start_addr: 0, insn_count: 1, handler_off: 1 }).collect();
+        let code = CodeItem {
+            offset: 0,
+            registers_size: 1,
+            ins_size: 0,
+            outs_size: 0,
+            tries_size: u16::MAX,
+            debug_info_off: 0,
+            insns: &[0x0e, 0x00],
+            tries,
+            handlers: vec![handler],
+            end: 0,
+        };
+        let mut out = String::new();
+        let err = method_body(&mut names, &code, None, Options::default(), &mut out, None).unwrap_err();
+        assert!(matches!(err, SmaliError::TooLarge(_)), "{err}");
+        // The limit is checked between instructions: one more address's
+        // labels may land past it, nowhere near the 250 MB of the catches.
+        assert!(out.len() < 8 << 20, "{} bytes", out.len());
+    }
 }
