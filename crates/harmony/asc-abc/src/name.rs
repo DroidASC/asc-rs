@@ -240,7 +240,8 @@ impl<'a> FunctionName<'a> {
     }
 }
 
-/// What a record stands for, judged by its name.
+/// What a record stands for, judged by its name ([`RecordName::kind`]) or,
+/// for a record of the file, by the record ([`crate::Class::kind`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordKind {
     /// A source module (one `.ets` / `.ts` / `.js` file).
@@ -251,6 +252,9 @@ pub enum RecordKind {
     /// A placeholder for a native system module (`@ohos.app`,
     /// `@system.router` …): no code, one `@native.…` field.
     SystemModule,
+    /// An annotation interface the program declares (`@interface`): no
+    /// code, one field per element with its default value.
+    Annotation,
 }
 
 /// A record name taken apart.
@@ -264,6 +268,18 @@ pub enum RecordName<'a> {
     /// Bundle form `<bundle>/<module>/<path>`:
     /// `com.hmos.exam5.pkg/entry/ets/pages/Home`.
     Bundle { bundle: &'a str, module: &'a str, path: &'a str },
+    /// An annotation interface declared in a module of the normalized
+    /// form, `<module record>.<Interface>`:
+    /// `&entry/src/main/ets/Marks&.Marked`, `&@ohos/lib/index&1.2.0.Marked`.
+    /// `module` is the record name of the module, itself of the
+    /// [`RecordName::Normalized`] form. Wherever in the module it is
+    /// declared, the interface has no qualifier.
+    ///
+    /// A name alone does not always tell: `&lib/index&1.0.0-beta.rc` is a
+    /// module of version `1.0.0-beta.rc` or the interface `rc` of version
+    /// `1.0.0-beta`, and is read as the interface. [`crate::Class::is_annotation`]
+    /// says which it is for a record of the file.
+    Annotation { module: &'a str, interface: &'a str },
     /// See [`RecordKind::Service`].
     Service(&'a str),
     /// See [`RecordKind::SystemModule`].
@@ -281,6 +297,9 @@ impl<'a> RecordName<'a> {
         }
         if let Some((bundle, rest)) = name.split_once('&') {
             if let Some((module_path, version)) = rest.rsplit_once('&') {
+                if let Some(interface) = interface_after(version) {
+                    return RecordName::Annotation { module: &name[..name.len() - interface.len() - 1], interface };
+                }
                 // A scoped package (`@ohos/crypto-js`) spans two segments.
                 let package_segments = if module_path.starts_with('@') { 2 } else { 1 };
                 let split = module_path.match_indices('/').nth(package_segments - 1).map_or(module_path.len(), |(i, _)| i);
@@ -301,6 +320,7 @@ impl<'a> RecordName<'a> {
     pub fn kind(&self) -> RecordKind {
         match self {
             RecordName::Normalized { .. } | RecordName::Bundle { .. } | RecordName::Other(_) => RecordKind::Module,
+            RecordName::Annotation { .. } => RecordKind::Annotation,
             RecordName::Service(_) => RecordKind::Service,
             RecordName::SystemModule(_) => RecordKind::SystemModule,
         }
@@ -310,8 +330,21 @@ impl<'a> RecordName<'a> {
     /// code; a class listing hides these by default.
     pub fn is_pseudo(&self) -> bool {
         match self.kind() {
-            RecordKind::Module => false,
+            RecordKind::Module | RecordKind::Annotation => false,
             RecordKind::Service | RecordKind::SystemModule => true,
+        }
+    }
+
+    /// The module an annotation interface is declared in; `None` for any
+    /// other record.
+    pub fn module(&self) -> Option<RecordName<'a>> {
+        match *self {
+            RecordName::Annotation { module, .. } => Some(RecordName::parse(module)),
+            RecordName::Normalized { .. }
+            | RecordName::Bundle { .. }
+            | RecordName::Service(_)
+            | RecordName::SystemModule(_)
+            | RecordName::Other(_) => None,
         }
     }
 
@@ -321,19 +354,33 @@ impl<'a> RecordName<'a> {
         match *self {
             RecordName::Normalized { package, .. } => Some(package),
             RecordName::Bundle { module, .. } => Some(module),
+            RecordName::Annotation { .. } => self.module().and_then(|module| module.package()),
             RecordName::Service(_) | RecordName::SystemModule(_) | RecordName::Other(_) => None,
         }
     }
 
     /// The path of the source file inside its package, without extension
-    /// (`src/main/ets/pages/Index`, `ets/pages/Home`); the whole name when
-    /// it has no such structure.
+    /// (`src/main/ets/pages/Index`, `ets/pages/Home`), for an annotation
+    /// interface the one of its module; the whole name when it has no such
+    /// structure.
     pub fn path(&self) -> &'a str {
         match *self {
             RecordName::Normalized { path, .. } | RecordName::Bundle { path, .. } => path,
+            RecordName::Annotation { module, .. } => self.module().map_or(module, |module| module.path()),
             RecordName::Service(name) | RecordName::SystemModule(name) | RecordName::Other(name) => name,
         }
     }
+}
+
+/// The interface name `tail` ends with, `tail` being what follows the
+/// second `&` of a normalized name: `Marked` of `.Marked` and of
+/// `1.2.0.Marked`, nothing of `1.2.0` or `1.0.0-rc.1` (a name does not
+/// start with a digit, the last part of a version mostly does).
+fn interface_after(tail: &str) -> Option<&str> {
+    let (_, interface) = tail.rsplit_once('.')?;
+    let mut chars = interface.chars();
+    let starts = chars.next().is_some_and(|first| first == '_' || first == '$' || first.is_alphabetic());
+    (starts && chars.all(|c| c == '_' || c == '$' || c.is_alphanumeric())).then_some(interface)
 }
 
 #[cfg(test)]
@@ -445,5 +492,41 @@ mod tests {
         assert_eq!(RecordName::parse("only&one"), RecordName::Other("only&one"));
         assert_eq!(RecordName::parse(""), RecordName::Other(""));
         assert_eq!(RecordName::parse("&"), RecordName::Other("&"));
+    }
+
+    #[test]
+    fn parses_annotation_interface_names() {
+        let own = RecordName::parse("&entry/src/main/ets/Marks&.Marked");
+        assert_eq!(own, RecordName::Annotation { module: "&entry/src/main/ets/Marks&", interface: "Marked" });
+        assert_eq!((own.kind(), own.is_pseudo()), (RecordKind::Annotation, false));
+        assert_eq!((own.package(), own.path()), (Some("entry"), "src/main/ets/Marks"));
+        assert_eq!(own.module(), Some(RecordName::Normalized { bundle: "", package: "entry", path: "src/main/ets/Marks", version: "" }));
+
+        // After a version, and after one whose last part is not a name.
+        let library = RecordName::parse("&@ohos/lib/src/marks&1.2.3.Marked");
+        assert_eq!(library, RecordName::Annotation { module: "&@ohos/lib/src/marks&1.2.3", interface: "Marked" });
+        assert_eq!(
+            library.module(),
+            Some(RecordName::Normalized { bundle: "", package: "@ohos/lib", path: "src/marks", version: "1.2.3" })
+        );
+        assert_eq!(
+            RecordName::parse("com.other.app&lib/marks&1.0.0-rc.1._$Mark2"),
+            RecordName::Annotation { module: "com.other.app&lib/marks&1.0.0-rc.1", interface: "_$Mark2" }
+        );
+        assert_eq!(RecordName::parse("com.other.app&lib/marks&1.0.0-rc.1._$Mark2").package(), Some("lib"));
+
+        // A version is not an interface, whatever it ends with.
+        for (name, version) in [
+            ("&lib/index&1.0.0-rc.1", "1.0.0-rc.1"),
+            ("&lib/index&2.0.0", "2.0.0"),
+            ("&lib/index&1.0.", "1.0."),
+            ("&lib/index&beta", "beta"),
+        ] {
+            assert_eq!(RecordName::parse(name), RecordName::Normalized { bundle: "", package: "lib", path: "index", version }, "{name}");
+            assert_eq!(RecordName::parse(name).module(), None);
+        }
+        // Only the normalized form says where the module name ends.
+        assert_eq!(RecordName::parse("Marked"), RecordName::Other("Marked"));
+        assert_eq!(RecordName::parse("com.example.app/entry/ets/Marks.Marked").kind(), RecordKind::Module);
     }
 }

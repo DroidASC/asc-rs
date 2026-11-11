@@ -64,9 +64,11 @@ impl<'a> RecordInfo<'a> {
     }
 }
 
-fn kind_text(class: &Class<'_>, name: &RecordName<'_>) -> &'static str {
-    match name.kind() {
-        _ if class.is_annotation() => "annotation interface",
+fn kind_text(class: &Class<'_>) -> &'static str {
+    match class.kind() {
+        RecordKind::Annotation => "annotation interface",
+        // The compiler's own annotation interfaces say what they are too.
+        RecordKind::Service if class.is_annotation() => "annotation interface",
         RecordKind::Module => "module",
         RecordKind::Service => "compiler service record",
         RecordKind::SystemModule => "system module placeholder",
@@ -85,7 +87,7 @@ pub(crate) fn write_header<W: Write>(
     out.write_str(".record ")?;
     write_name(out, &name)?;
     let parsed = RecordName::parse(&name);
-    write!(out, "\n; {}", kind_text(class, &parsed))?;
+    write!(out, "\n; {}", kind_text(class))?;
 
     match class.package_name() {
         Ok(Some(package)) => {

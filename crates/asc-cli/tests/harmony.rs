@@ -2,8 +2,8 @@
 //! `.abc` / `.hap` / `.app` files).
 
 use asc_fixture::abc::{
-    call_graph_program, class_hierarchy_program, make_abc, sample_program, CALLS_APP, CALLS_BOX, CALLS_INDEX, CALLS_UTIL, CLASSES_APP,
-    CLASSES_BASE, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL,
+    annotations_program, call_graph_program, callable_names_program, class_hierarchy_program, make_abc, sample_program, CALLS_APP,
+    CALLS_BOX, CALLS_INDEX, CALLS_UTIL, CLASSES_APP, CLASSES_BASE, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL,
 };
 use asc_fixture::hap::{
     make_app, make_hap, make_library_hsp, make_routed_hap, resource_program, sample_resources, Compression, Hap, DETAIL_PAGE, LABELS_PAGE,
@@ -1750,4 +1750,92 @@ fn findrefs_context_lists_the_code_around_each_hit() {
     assert!(cut.len() >= 4 && cut[1].starts_with("  @ pc ") && cut.last().unwrap().starts_with("# records 1-1 of "), "{cut:?}");
     let prefixed = inputs.lines(&["findrefs", &abc, "rules", "prop:=then", "--context", "0"]);
     assert_eq!(prefixed[2..4], ["r1 |  @ pc 0x3a", "r1 |  >   003a  ldobjbyname \"then\""]);
+}
+
+#[test]
+fn annotations_are_listed_found_and_looked_up() {
+    let inputs = Inputs::new();
+    let abc = inputs.file("modules.abc", &annotations_program().build().bytes);
+    // An annotation interface is a record of the program, named after its module.
+    assert_eq!(
+        inputs.lines(&["listclass", &abc]),
+        [
+            "&@ohos/lib/index&1.2.0 | functions=1",
+            "&@ohos/lib/index&1.2.0.Marked | functions=0 kind=annotation",
+            "&entry/src/main/ets/pages/Pay& | functions=3",
+            "&entry/src/main/ets/pages/Pay&.Route | functions=0 kind=annotation",
+        ]
+    );
+    assert_eq!(inputs.lines(&["listclass", &abc, "--prefix", "entry/src/main/ets/pages/Pay."]).len(), 1);
+    assert_eq!(
+        inputs.lines(&["getclass", &abc, "pages/Pay.Route"])[..2],
+        [".record &entry/src/main/ets/pages/Pay&.Route", "; annotation interface, package entry, 5 fields, 0 functions",]
+    );
+    assert_eq!(inputs.lines(&["getclass", &abc, "pages/Pay"])[0], ".record &entry/src/main/ets/pages/Pay&");
+
+    // A string of an annotation: on the function that carries it, or the field that declares its default.
+    let found = inputs.lines(&["findrefs", &abc, "string", "pay"]);
+    assert_eq!(
+        found,
+        [
+            "modules.abc | &entry/src/main/ets/pages/Pay&->#~@0=#Pay | Pay.constructor | annotation @&entry/src/main/ets/pages/Pay&.Route \
+             path=\"/pay\", tags[0]=\"pay\"",
+            "modules.abc | &entry/src/main/ets/pages/Pay&->#~@0>#open | Pay.open | annotation @&@ohos/lib/index&1.2.0.Marked note=\"opens /pay\"",
+            "modules.abc | &entry/src/main/ets/pages/Pay&->#~@0>#open+0x0 | Pay.open | lda.str \"/pay\"",
+        ]
+    );
+    assert_eq!(inputs.lines(&["findrefs", &abc, "string", "pay", "--literal"]), found);
+    assert_eq!(
+        inputs.lines(&["findrefs", &abc, "string", "^(none|default)$"]),
+        [
+            "modules.abc | &@ohos/lib/index&1.2.0.Marked field note | - | annotation default \"none\"",
+            "modules.abc | &entry/src/main/ets/pages/Pay&.Route field tags | - | annotation default [1]=\"default\"",
+        ]
+    );
+    // The location column is what getclass takes, with or without an offset; the listing has the whole annotation.
+    let listing = inputs.lines(&["getclass", &abc, found[1].split(" | ").nth(1).unwrap()]);
+    assert_eq!(functions(&listing), ["#~@0>#open"]);
+    assert!(listing.contains(&"; @&@ohos/lib/index&1.2.0.Marked(note=\"opens /pay\")".to_owned()), "{listing:?}");
+    // Only the row of an instruction has code around it.
+    let around = inputs.lines(&["findrefs", &abc, "string", "pay", "--context", "0"]);
+    assert_eq!(around[..2], found[..2]);
+    assert_eq!(around[2..], [found[2].as_str(), "  @ pc 0x0", "  >   0000  lda.str \"/pay\""]);
+}
+
+#[test]
+fn a_call_compiled_with_its_name_is_one_call_row() {
+    let inputs = Inputs::new();
+    let abc = inputs.file("modules.abc", &callable_names_program().build().bytes);
+    // Each row from its function on.
+    let rows = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["findrefs", &abc, "prop", "cut", "--exact"];
+        all.extend_from_slice(args);
+        inputs.lines(&all).iter().map(|line| line.split_once("->").unwrap().1.to_owned()).collect()
+    };
+    assert_eq!(
+        rows(&[]),
+        [
+            "#*#named+0x2 | named | ldobjbyname \"cut\" [read]",
+            "#*#named+0xe | named | callthis2withname \"cut\", a3, v1, v2 [call]",
+            "#*#named+0x25 | named | callthisrangewithname 1, \"cut\", v5  ; v5..v6 [call]",
+            "#*#named+0x3d | named | ldobjbyname \"cut\" [read]",
+            "#*#plain+0x2 | plain | ldobjbyname \"cut\" [read]",
+            "#*#plain+0xa | plain | ldobjbyname \"cut\" [call]",
+            "#*#plain+0x17 | plain | ldobjbyname \"cut\" [call]",
+        ]
+    );
+    assert_eq!(rows(&["--access", "read"]).len(), 3);
+    let calls = rows(&["--access", "call"]);
+    assert_eq!(calls.len(), 4);
+    assert!(calls.iter().all(|row| row.ends_with(" [call]")), "{calls:?}");
+    // The row is the call instruction: the one `findrefs call` has, and the one marked in its context.
+    let sites = inputs.lines(&["findrefs", &abc, "call", "\\.cut$"]);
+    assert!(sites[0].contains("->#*#named+0xe | ") && sites[1].contains("->#*#named+0x25 | "), "{sites:?}");
+    let around = inputs.lines(&["findrefs", &abc, "prop", "cut", "--exact", "--access", "call", "--context", "1"]);
+    assert_eq!(
+        around[1..5],
+        ["  @ pc 0xe", "      000a  ldobjbyname \"cut\"", "  >   000e  callthis2withname \"cut\", a3, v1, v2", "      0015  sta v3"]
+    );
+    let both = inputs.lines(&["findrefs", &abc, "all", "prop:=fold", "prop:=close", "--context", "0"]);
+    assert_eq!(both[1], "  @ pc 0x31, pc 0x36, pc 0x41");
 }

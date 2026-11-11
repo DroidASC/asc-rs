@@ -3,7 +3,10 @@
 //! A record is one source module (plus a few compiler-made pseudo records).
 //! Its canonical name is the one stored in the file, e.g.
 //! `&entry/src/main/ets/pages/Index&`; queries may also spell it by a path
-//! suffix (`pages/Index`, `pages/Index.ets`).
+//! suffix (`pages/Index`, `pages/Index.ets`). An annotation interface is a
+//! record of its own, named after its module: `pages/Index.Marked`.
+
+use std::borrow::Cow;
 
 use asc_abc::{Abc, Class, ClassEntry, Method, RecordKind, RecordName};
 use regex::Regex;
@@ -44,7 +47,8 @@ pub struct ListOptions {
     pub filter: Option<NameFilter>,
     /// Also list pseudo records (the compiler's `_ES…` annotation records
     /// and system module placeholders such as `@ohos.app`) and records the
-    /// file only declares.
+    /// file only declares. The annotation interfaces of the program are
+    /// listed either way.
     pub all: bool,
     /// Only the records of the ABC entries this names: an entry or a
     /// package, as [`crate::Engine::find_refs_in`] takes it.
@@ -67,8 +71,9 @@ pub struct RecordListing {
 }
 
 impl RecordListing {
-    /// `name | functions=N source=FILE`, with ` kind=…` for a pseudo record
-    /// and a third column naming the entry when `with_entry`.
+    /// `name | functions=N source=FILE`, with ` kind=…` for a record that
+    /// is no module (a pseudo record, an annotation interface) and a third
+    /// column naming the entry when `with_entry`.
     pub fn line(&self, with_entry: bool) -> String {
         let mut out = format!("{} | functions={}", self.name, self.functions);
         if let Some(source) = &self.source_file {
@@ -79,6 +84,7 @@ impl RecordListing {
             RecordKind::Module => {}
             RecordKind::Service => out.push_str(" kind=service"),
             RecordKind::SystemModule => out.push_str(" kind=system-module"),
+            RecordKind::Annotation => out.push_str(" kind=annotation"),
         }
         if self.foreign {
             out.push_str(" foreign");
@@ -93,15 +99,29 @@ impl RecordListing {
 
 /// The name without the decoration of the normalized form:
 /// `entry/src/main/ets/pages/Index` for `&entry/src/main/ets/pages/Index&`,
-/// `@ohos/crypto-js/index` for `&@ohos/crypto-js/index&2.0.0`.
-fn plain_name(name: &str) -> &str {
+/// `@ohos/crypto-js/index` for `&@ohos/crypto-js/index&2.0.0`. An annotation
+/// interface keeps its own name after its module's:
+/// `@ohos/lib/index.Marked` for `&@ohos/lib/index&1.2.0.Marked`.
+fn plain_name(name: &str) -> Cow<'_, str> {
     match RecordName::parse(name) {
-        RecordName::Normalized { bundle, version, .. } => {
-            // `<bundle>&<package>/<path>&<version>`: what is between the two `&`.
-            name.get(bundle.len() + 1..name.len() - version.len() - 1).unwrap_or(name)
-        }
-        RecordName::Bundle { .. } | RecordName::Service(_) | RecordName::SystemModule(_) | RecordName::Other(_) => name,
+        RecordName::Normalized { bundle, version, .. } => Cow::Borrowed(undecorated(name, bundle, version)),
+        RecordName::Annotation { module, interface } => match RecordName::parse(module) {
+            RecordName::Normalized { bundle, version, .. } => Cow::Owned(format!("{}.{interface}", undecorated(module, bundle, version))),
+            // The module of an interface is of the normalized form: nothing else is read as one.
+            RecordName::Annotation { .. }
+            | RecordName::Bundle { .. }
+            | RecordName::Service(_)
+            | RecordName::SystemModule(_)
+            | RecordName::Other(_) => Cow::Borrowed(name),
+        },
+        RecordName::Bundle { .. } | RecordName::Service(_) | RecordName::SystemModule(_) | RecordName::Other(_) => Cow::Borrowed(name),
     }
+}
+
+/// What is between the two `&` of the normalized name
+/// `<bundle>&<package>/<path>&<version>`.
+fn undecorated<'n>(name: &'n str, bundle: &str, version: &str) -> &'n str {
+    name.get(bundle.len() + 1..name.len() - version.len() - 1).unwrap_or(name)
 }
 
 /// The records `abc` defines, in class index order (the writer sorts it by
@@ -125,9 +145,11 @@ pub(crate) fn list(program: &Program, options: &ListOptions) -> Result<Vec<Recor
         for class in abc.classes().map_err(wrap)? {
             let class = class.map_err(wrap)?;
             let name = String::from_utf8_lossy(class.name());
-            let kind = RecordName::parse(&name).kind();
             let local = class.local();
-            let hidden = !options.all && (kind != RecordKind::Module || local.is_none());
+            // A record of the file knows what it is; of one it only declares, the name is all there is.
+            let kind = local.map_or_else(|| RecordName::parse(&name).kind(), |class| class.kind());
+            let is_pseudo = matches!(kind, RecordKind::Service | RecordKind::SystemModule);
+            let hidden = !options.all && (is_pseudo || local.is_none());
             if hidden || options.filter.as_ref().is_some_and(|filter| !filter.matches(&name)) {
                 continue;
             }
@@ -237,7 +259,7 @@ pub(crate) fn resolve_record<'a>(program: &'a Program, query: &str, entry: Optio
 /// starts at a `/`.
 fn is_path_of(name: &str, path: &str) -> bool {
     let plain = plain_name(name);
-    plain == path || plain.strip_suffix(path).is_some_and(|rest| rest.ends_with('/'))
+    *plain == *path || plain.strip_suffix(path).is_some_and(|rest| rest.ends_with('/'))
 }
 
 /// Whether `query` names the record called `name`, by the rules of
@@ -300,6 +322,11 @@ mod tests {
         assert_eq!(plain_name("com.hmos.exam5.pkg/entry/ets/pages/Home"), "com.hmos.exam5.pkg/entry/ets/pages/Home");
         assert_eq!(plain_name("_ESTypeAnnotation"), "_ESTypeAnnotation");
         assert_eq!(plain_name("&"), "&");
+        // An annotation interface is found after its module, with or without a version.
+        assert_eq!(plain_name("&entry/src/main/ets/Marks&.Marked"), "entry/src/main/ets/Marks.Marked");
+        assert_eq!(plain_name("&@ohos/lib/index&1.2.0.Marked"), "@ohos/lib/index.Marked");
+        assert!(is_path_of("&@ohos/lib/index&1.2.0.Marked", "index.Marked") && !is_path_of("&@ohos/lib/index&1.2.0.Marked", "index"));
+        assert!(is_path_of("&@ohos/lib/index&1.2.0", "index") && names_record("&entry/src/main/ets/Marks&", "ets/Marks.ets"));
     }
 
     #[test]
@@ -332,5 +359,7 @@ mod tests {
         row.kind = RecordKind::Service;
         row.source_file = None;
         assert!(row.line(true).ends_with("| functions=12 kind=service | entry.hap/ets/modules.abc"));
+        row.kind = RecordKind::Annotation;
+        assert!(row.line(false).ends_with("| functions=12 kind=annotation"));
     }
 }

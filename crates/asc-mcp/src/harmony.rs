@@ -802,12 +802,18 @@ fn no_results_hints(engine: &Engine, query: &Query, cancel: &AtomicBool) -> Vec<
 fn row_json(entry: &str, row: &RefRow) -> Value {
     let matched: Vec<Cow<'_, str>> = row.matched.iter().map(|matched| text::cut(matched, text::ROW_STRING_BYTES)).collect();
     let mut v = json!({"entry": entry, "record": row.record, "matched": matched, "text": row.text});
-    if let RefSite::Code { function, restored, pc } = &row.site {
-        v["function"] = json!(function);
-        v["name"] = json!(restored);
-        v["pc"] = json!(pc);
-    } else if let RefSite::Field { name } = &row.site {
-        v["field"] = json!(name);
+    match &row.site {
+        RefSite::Code { function, restored, pc } => {
+            v["function"] = json!(function);
+            v["name"] = json!(restored);
+            v["pc"] = json!(pc);
+        }
+        RefSite::Field { name } => v["field"] = json!(name),
+        // On the function, in none of its instructions: no `pc`.
+        RefSite::Annotation { function, restored } => {
+            v["function"] = json!(function);
+            v["name"] = json!(restored);
+        }
     }
     if let Some(context) = &row.context {
         v["sites"] = json!(row.sites);

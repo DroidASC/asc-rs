@@ -142,7 +142,8 @@ impl<'a> Plan<'a> {
                     | AbcFieldValue::Int(_)
                     | AbcFieldValue::Raw(_)
                     | AbcFieldValue::Wide(_)
-                    | AbcFieldValue::String(_) => continue,
+                    | AbcFieldValue::String(_)
+                    | AbcFieldValue::Array(_) => continue,
                 };
                 field_literals.insert((r, f), literals.len());
                 literals.push(item);

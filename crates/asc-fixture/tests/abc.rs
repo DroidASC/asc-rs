@@ -11,9 +11,9 @@ use asc_abc::{
     Version,
 };
 use asc_fixture::abc::{
-    adler32, make_abc, make_multi_region_abc, sample_program, AbcAnnotation, AbcBuilder, AbcCatch, AbcCode, AbcDebugInfo, AbcField,
-    AbcFieldValue, AbcFile, AbcFunction, AbcLayout, AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcTry, AbcType, AnnotationKind, Asm,
-    Catch, MethodRef, Op, RegionHint, ACC_STATIC, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL, SAMPLE_MAGIC, VERSION_12_0_6_0,
+    adler32, make_abc, make_multi_region_abc, sample_program, AbcAnnotation, AbcBuilder, AbcCatch, AbcCode, AbcDebugInfo, AbcElementValue,
+    AbcField, AbcFieldValue, AbcFile, AbcFunction, AbcLayout, AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcTry, AbcType, AnnotationKind,
+    Asm, Catch, MethodRef, Op, RegionHint, ACC_STATIC, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL, SAMPLE_MAGIC, VERSION_12_0_6_0,
     VERSION_13_0_1_0, VERSION_9_0_0_0,
 };
 use common::{load_large_sample, load_large_sample_entry, load_sample, walk, Stats};
@@ -125,7 +125,12 @@ fn check_annotations(abc: &Abc<'_>, at: &AbcLayout, found: &[(AnnotationKind, u3
         let annotation = abc.annotation(off).unwrap();
         assert_eq!((kind, annotation.class_off(abc).unwrap()), (declared.kind, at.class(&declared.class)));
         let elements: Vec<_> = annotation.elements().map(|e| (text(abc, e.name_off), e.value, e.tag)).collect();
-        assert_eq!(elements, declared.elements.iter().map(|e| (e.name.clone(), e.value, e.tag)).collect::<Vec<_>>());
+        let stored = |value: &AbcElementValue| match value {
+            AbcElementValue::Raw(value) => *value,
+            AbcElementValue::String(value) => at.string(value),
+            AbcElementValue::Array(id) => at.literal_array(*id),
+        };
+        assert_eq!(elements, declared.elements.iter().map(|e| (e.name.clone(), stored(&e.value), e.tag)).collect::<Vec<_>>());
     }
 }
 
@@ -268,6 +273,7 @@ fn verify(builder: &AbcBuilder, file: &AbcFile) -> (Stats, CodeStats) {
                     field.value()
                 }
                 AbcFieldValue::String(value) => Some(FieldValue::Raw(at.string(value))),
+                AbcFieldValue::Array(id) => Some(FieldValue::Raw(at.literal_array(*id))),
                 AbcFieldValue::ModuleRequestPhases(phases) => {
                     assert_eq!(class.module_request_phases().unwrap(), Some(phases.as_slice()));
                     assert_eq!(abc.module_request_phases(at.module_request_phases(name)).unwrap(), phases.as_slice());
@@ -713,6 +719,43 @@ fn kitchen_sink(version: [u8; 4]) -> AbcBuilder {
     // The second request is a lazy import.
     builder.record(AbcRecord::ets_module(OTHER, "library", &[], module).field(AbcField::module_request_phases(&[0, 1])).function(function));
     builder
+}
+
+#[test]
+fn annotation_values_round_trip() {
+    use asc_abc::ElementValue;
+    use asc_fixture::abc::{annotations_program, callable_names_program, MARKS_APP, MARKS_ROUTE};
+    let named = callable_names_program();
+    let file = named.build();
+    verify(&named, &file);
+    assert_eq!(layout_violations(&Abc::parse(&file.bytes).unwrap()), Vec::<String>::new());
+    // As in a file of the compiler, the class index is in the order of the names, which with
+    // an interface named after its module (`&m&.Route` after `&m&`) is not that of the descriptors.
+    let annotated = annotations_program();
+    let file = annotated.build();
+    verify(&annotated, &file);
+    assert_eq!(layout_violations(&Abc::parse(&file.bytes).unwrap()), ["class index sorted by descriptor"]);
+
+    let abc = Abc::parse(&file.bytes).unwrap();
+    // A string, an array and a number, each read by its type tag.
+    let constructor = abc.method(file.layout.method(MARKS_APP, "#~@0=#Pay")).unwrap();
+    let annotations: Vec<u32> = constructor
+        .tags()
+        .filter_map(|tag| match tag.unwrap() {
+            MethodTag::Annotation(off) => Some(off),
+            _ => None,
+        })
+        .collect();
+    let route = abc.annotation(annotations[1]).unwrap();
+    assert_eq!(route.class_off(&abc).unwrap(), file.layout.class(MARKS_ROUTE));
+    let values: Vec<ElementValue> = route.elements().map(|element| element.typed(&abc).unwrap()).collect();
+    let [ElementValue::String(path), ElementValue::Array(tags), ElementValue::Int(2)] = values[..] else { panic!("{values:?}") };
+    assert_eq!(text(&abc, path), "/pay");
+    let tags: Vec<String> = abc.literal_array(tags).unwrap().iter().map(|item| text(&abc, item.unwrap().string_off().unwrap())).collect();
+    assert_eq!(tags, ["pay", "checkout"]);
+    // An array type is declared by its descriptor, as the compiler does.
+    let descriptors: Vec<String> = abc.classes().unwrap().map(|class| class.unwrap().descriptor().to_str().into_owned()).collect();
+    assert!(descriptors.contains(&"[Lpanda.String;".to_owned()) && descriptors.contains(&"Lpanda.String;".to_owned()), "{descriptors:?}");
 }
 
 #[test]

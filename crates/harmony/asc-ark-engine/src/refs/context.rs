@@ -158,6 +158,10 @@ pub(crate) fn fill(abc: &Abc<'_>, rows: &mut [RefRow], context: RefContext) {
     }
     // The function of the row before, when all of it was listed there.
     let mut listed: Option<u32> = None;
+    // The listing of the function of the row before: a function with many
+    // rows (the top level of a module, with its string constants) is
+    // disassembled once, not once a row.
+    let mut last: Option<(u32, Result<String, String>)> = None;
     for row in rows {
         let (Some(offset), RefSite::Code { .. }) = (row.method, &row.site) else {
             listed = None;
@@ -174,11 +178,15 @@ pub(crate) fn fill(abc: &Abc<'_>, rows: &mut [RefRow], context: RefContext) {
             row.context = Some(block);
             continue;
         }
-        let text = method.class_off().and_then(|class| abc.class(class)).map_err(|e| e.to_string());
-        let text = text.and_then(|class| disasm::function(abc, &class, &method).map_err(|e| e.to_string()));
+        if last.as_ref().is_none_or(|(of, _)| *of != offset) {
+            let class = method.class_off().and_then(|class| abc.class(class)).map_err(|e| e.to_string());
+            let text = class.and_then(|class| disasm::function(abc, &class, &method).map_err(|e| e.to_string()));
+            last = Some((offset, text));
+        }
+        let Some((_, text)) = &last else { continue };
         match text {
             Ok(text) => {
-                let listing = Listing::of(&text);
+                let listing = Listing::of(text);
                 block.push_str(&render(&listing, &row.sites, context));
                 listed = shows_all(&listing, context).then_some(offset);
             }

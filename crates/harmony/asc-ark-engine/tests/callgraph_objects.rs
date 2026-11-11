@@ -9,8 +9,9 @@ use std::sync::atomic::AtomicBool;
 
 use asc_ark_engine::{CallEdge, CallNode, CallQuery, CallRoots, Direction, EdgeKind, Engine, LeafKind};
 use asc_fixture::abc::{
-    class_calls_program, handed_objects_program, late_members_program, AbcBuilder, HANDED_APP, HANDED_KIND, HANDED_STORE, LATE_PANEL,
-    LATE_SUB, LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE, LINEAGE_SERVICE,
+    class_calls_program, handed_objects_program, late_members_program, patched_objects_program, AbcBuilder, HANDED_APP, HANDED_KIND,
+    HANDED_STORE, LATE_PANEL, LATE_SUB, LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE, LINEAGE_SERVICE, PATCHED_APP,
+    PATCHED_CACHE, PATCHED_VAULT,
 };
 
 fn open(dir: &Path, builder: &AbcBuilder) -> Engine {
@@ -33,6 +34,9 @@ fn lines(engine: &Engine, query: &CallQuery) -> Vec<String> {
         (LINEAGE_MIDDLE, "Middle"),
         (LINEAGE_LEAF, "Leaf"),
         (LINEAGE_SERVICE, "Service"),
+        (PATCHED_APP, "Patched"),
+        (PATCHED_VAULT, "Vault"),
+        (PATCHED_CACHE, "Cache"),
     ];
     let short = |mut line: String| {
         for (record, name) in names {
@@ -172,6 +176,40 @@ fn callers_of_a_method_come_through_the_records_that_hand_out_its_objects() {
         ["0 Kind->#~@0>#base | KindBase.base", "  1 <- App->#*#run | run [instance]"]
     );
     assert_eq!(cold_callers(&program, "kind/Kind->Kind.own"), ["0 Kind->#~@1>#own | Kind.own", "  1 <- App->#*#run | run [instance]"]);
+    both_directions_agree(&program);
+}
+
+#[test]
+fn a_hot_patch_stub_does_not_hide_what_a_function_returns() {
+    let program = patched_objects_program();
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path(), &program);
+    assert_eq!(
+        callees(&engine, "pages/Patched->run"),
+        [
+            "0 Patched->#*#run | run",
+            // Four functions of the record open with the stub: its `return` is not one of theirs.
+            "  1 -> Vault->#~@0<#getInstance | Vault.getInstance",
+            "  1 -> Vault->#~@0>#load | Vault.load [instance]",
+            "  1 -> Vault->#~@0<#fresh | Vault.fresh",
+            "  1 -> Vault->#~@0>#save | Vault.save [instance]",
+            // A store on the way to the call: no stub, and a `return` of something nobody knows.
+            "  1 -> Vault->#~@0<#broken | Vault.broken",
+            "  1 -> import:N:patched/Vault&#Vault.broken().load [unlinked]",
+            // The same instructions in two functions of a record are an early return written twice.
+            "  1 -> Cache->#~@0<#getInstance | Cache.getInstance",
+            "  1 -> import:N:patched/Cache&#Cache.getInstance().get [unlinked]",
+        ]
+    );
+    assert_eq!(
+        cold_callers(&program, "patched/Vault->Vault.load"),
+        ["0 Vault->#~@0>#load | Vault.load", "  1 <- Patched->#*#run | run [instance]"]
+    );
+    assert_eq!(
+        cold_callers(&program, "patched/Vault->Vault.save"),
+        ["0 Vault->#~@0>#save | Vault.save", "  1 <- Patched->#*#run | run [instance]"]
+    );
+    assert_eq!(cold_callers(&program, "patched/Cache->Cache.get"), ["0 Cache->#~@0>#get | Cache.get"]);
     both_directions_agree(&program);
 }
 

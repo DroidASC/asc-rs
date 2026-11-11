@@ -460,6 +460,11 @@ impl Frame {
         self.values.get(id.0 as usize).copied().unwrap_or(Value { source: Source::Unknown, pc: 0 })
     }
 
+    /// The value in the accumulator.
+    pub(crate) fn acc(&self) -> ValueId {
+        self.acc
+    }
+
     pub(crate) fn reg(&self, reg: u16) -> ValueId {
         self.regs.get(usize::from(reg)).copied().unwrap_or(ValueId::UNKNOWN)
     }

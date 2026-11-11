@@ -390,7 +390,8 @@ enum Command {
         #[arg(long)]
         prefix: Option<String>,
         /// HarmonyOS: also list the pseudo records (compiler annotations,
-        /// system module placeholders).
+        /// system module placeholders). The annotation interfaces of the
+        /// program are listed either way, as `kind=annotation`.
         #[arg(long)]
         all: bool,
         /// HarmonyOS: only the records of this ABC entry (ets/widgets.abc)
@@ -521,6 +522,10 @@ enum Command {
     /// HarmonyOS programs take string, prop, global, import, method, number,
     /// call, all and rules. Rows are `entry | record->function+0xPC |
     /// restored name | instruction`; the second column is what getclass takes.
+    /// `string` also finds what no instruction holds: `record->function |
+    /// name | annotation @RECORD element="..."` for an annotation on a
+    /// function, `record field NAME | - | ...` for a record field (the
+    /// default of an annotation interface: `annotation default "..."`).
     Findrefs {
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
@@ -910,7 +915,9 @@ enum Find {
     },
     /// HarmonyOS: find property accesses by name (`obj.NAME`, `this.NAME`,
     /// `obj.NAME(...)`), labelled `[read]` / `[write]` / `[define]` /
-    /// `[call]`; `--access` keeps one kind.
+    /// `[call]`; `--access` keeps one kind. A method call is one `[call]`
+    /// row: the load of the method, or the call itself when it names the
+    /// method (`callthisNwithname`).
     Prop {
         /// Also write every result to this file.
         #[arg(short, long)]

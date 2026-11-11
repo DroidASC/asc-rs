@@ -18,9 +18,19 @@ use asc_dex::mutf8;
 use super::layout::MethodLayout;
 use super::plan::{Holder, LiteralItem, Plan, Region, RegionStart, Sym};
 use super::{
-    adler32, scramble_body, AbcAnnotation, AbcBuilder, AbcCatch, AbcDebugInfo, AbcField, AbcFieldValue, AbcFile, AbcFunction, AbcLayout,
-    AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcRegionLayout, AbcTry, AbcType, MethodRef, RegionHint,
+    adler32, scramble_body, AbcAnnotation, AbcBuilder, AbcCatch, AbcDebugInfo, AbcElementValue, AbcField, AbcFieldValue, AbcFile,
+    AbcFunction, AbcLayout, AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcRegionLayout, AbcTry, AbcType, MethodRef, RegionHint,
 };
+
+/// The descriptor of the class called `name`: `L<name>;`, an array type
+/// (`[Lpanda.String;`) being its own.
+fn descriptor(name: &str) -> String {
+    if name.starts_with('[') {
+        name.to_owned()
+    } else {
+        format!("L{name};")
+    }
+}
 
 /// `MethodTag::DEBUG_INFO`: runtime annotations are written before it, the
 /// other kinds after.
@@ -201,7 +211,7 @@ impl<'a> Emitter<'a> {
         let foreign_start = self.pos();
         for name in &builder.foreign_classes {
             self.define(Sym::Class(name.clone()));
-            self.string_item(&format!("L{name};"));
+            self.string_item(&descriptor(name));
         }
         self.tables.foreign = if builder.foreign_classes.is_empty() { (0, 0) } else { (foreign_start, self.pos() - foreign_start) };
 
@@ -285,7 +295,7 @@ impl<'a> Emitter<'a> {
         let region = &plan.regions[plan.class_region[r]];
         self.class_offsets.push(self.pos());
         self.define(Sym::Class(record.name.clone()));
-        self.string_item(&format!("L{};", record.name));
+        self.string_item(&descriptor(&record.name));
         self.u32(0);
         self.uleb(record.access_flags);
         self.count(record.fields.len());
@@ -348,6 +358,7 @@ impl<'a> Emitter<'a> {
             }
             AbcFieldValue::Wide(_) => Some(Sym::WideValue(r, f)),
             AbcFieldValue::String(text) => Some(Sym::Str(text.clone())),
+            AbcFieldValue::Array(id) => Some(Sym::Literal(plan.declared_literals_base + id.0)),
             AbcFieldValue::ScopeNames(_) | AbcFieldValue::Module(_) | AbcFieldValue::ModuleRequestPhases(_) => {
                 Some(Sym::Literal(plan.field_literals[&(r, f)]))
             }
@@ -524,7 +535,11 @@ impl<'a> Emitter<'a> {
         self.u16(u16::try_from(annotation.elements.len()).expect("at most 65535 annotation elements"));
         for element in &annotation.elements {
             self.string_ref(&element.name);
-            self.u32(element.value);
+            match &element.value {
+                AbcElementValue::Raw(value) => self.u32(*value),
+                AbcElementValue::String(text) => self.string_ref(text),
+                AbcElementValue::Array(id) => self.reference(Sym::Literal(plan.declared_literals_base + id.0)),
+            }
         }
         annotation.elements.iter().for_each(|element| self.u8(element.tag));
     }
@@ -668,7 +683,9 @@ impl<'a> Emitter<'a> {
             self.patch(at, offset);
         }
 
-        // `ItemContainer::class_map_` is a `std::map` keyed by descriptor: byte order.
+        // `ItemContainer::class_map_` is a `std::map` keyed by name: byte order. A module comes
+        // before the annotation interfaces named after it (`&m&` before `&m&.Marked`), which
+        // is not the order of their descriptors (`L&m&.Marked;` before `L&m&;`).
         let mut by_name: Vec<(Vec<u8>, u32)> =
             plan.class_names.iter().map(|&name| (mutf8::encode(name), self.offset_of(&Sym::Class(name.to_owned())))).collect();
         by_name.sort();

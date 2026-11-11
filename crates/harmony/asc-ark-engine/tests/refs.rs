@@ -208,6 +208,7 @@ fn short(row: &RefRow) -> String {
     match &row.site {
         RefSite::Code { function, .. } => format!("{record}{function} | {}", row.text),
         RefSite::Field { name } => format!("{record}field {name} | {}", row.text),
+        RefSite::Annotation { function, .. } => format!("{record}{function} | {}", row.text),
     }
 }
 

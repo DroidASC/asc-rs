@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 
 use crate::abc::Region;
 use crate::reader::{entity_pos, file_off, read_u64, Reader};
-use crate::{Abc, AbcError, Code, DebugInfo, FunctionName, LiteralArray, ModuleRecord, Result, StringData};
+use crate::{Abc, AbcError, Code, DebugInfo, FunctionName, LiteralArray, ModuleRecord, RecordKind, RecordName, Result, StringData};
 
 /// Access flag bits shared by classes, fields and methods (`modifiers.h`).
 pub mod access {
@@ -461,6 +461,19 @@ impl<'a> Class<'a> {
     #[inline]
     pub fn is_annotation(&self) -> bool {
         self.access_flags & access::ANNOTATION != 0
+    }
+
+    /// What the record stands for: what its name says, except that the
+    /// record itself knows whether it is an annotation interface (a name
+    /// can be read both ways, and outside the normalized form says
+    /// nothing). The compiler's own annotation interfaces stay
+    /// [`RecordKind::Service`].
+    pub fn kind(&self) -> RecordKind {
+        match RecordName::parse(&String::from_utf8_lossy(self.name())).kind() {
+            RecordKind::Module | RecordKind::Annotation if self.is_annotation() => RecordKind::Annotation,
+            RecordKind::Module | RecordKind::Annotation => RecordKind::Module,
+            pseudo @ (RecordKind::Service | RecordKind::SystemModule) => pseudo,
+        }
     }
 
     /// Entry `index` of the scope name table: what `@<hex>` in a mangled

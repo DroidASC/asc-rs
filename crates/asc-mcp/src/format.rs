@@ -22,7 +22,7 @@ impl ProgramFormat {
     /// wrong with it.
     pub fn of(spec: &Path) -> ProgramFormat {
         let harmony = if spec.is_file() {
-            asc_ark_engine::Format::detect(spec).is_some()
+            !is_android_name(spec) && asc_ark_engine::Format::detect(spec).is_some()
         } else {
             asc_ark_engine::Format::accepts(spec) && !has_dex(spec)
         };
@@ -32,6 +32,15 @@ impl ProgramFormat {
             ProgramFormat::Android
         }
     }
+}
+
+/// A file whose name says DEX code. Such a file is not opened to look for
+/// HarmonyOS content: reading the directory of a large APK costs about a
+/// millisecond, on every command, to rule out what its name already does.
+fn is_android_name(file: &Path) -> bool {
+    file.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| ["apk", "dex", "jar", "aar", "apex"].iter().any(|known| extension.eq_ignore_ascii_case(known)))
 }
 
 /// Whether the DEX engine finds code under `spec`.
@@ -45,4 +54,21 @@ pub fn left_out_note(spec: &Path) -> Option<&'static str> {
     (!spec.is_file() && asc_ark_engine::Format::accepts(spec)).then_some(
         "HarmonyOS files (.hap, .hsp, .app, .abc) of this program are left out next to its DEX code; query them by their own path",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_named_as_dex_code_is_not_opened_to_look_for_more() {
+        for name in ["app.apk", "classes.dex", "lib.JAR", "base.aar", "com.android.art.apex"] {
+            assert!(is_android_name(Path::new(name)), "{name}");
+        }
+        for name in ["entry.hap", "shop.app", "modules.abc", "bundle.zip", "apk", "noextension"] {
+            assert!(!is_android_name(Path::new(name)), "{name}");
+        }
+        // No such file: nothing is read, and the answer is the DEX engine's to give.
+        assert_eq!(ProgramFormat::of(Path::new("/nonexistent/app.apk")), ProgramFormat::Android);
+    }
 }

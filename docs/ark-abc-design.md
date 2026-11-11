@@ -386,7 +386,10 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
     `definemethod` + `stownbyname` / `definegettersetterbyvalue` 补上的（样本 A 里约 5000 个方法、5000 处访问器），
     现在都算类成员，`[this-class]` 因此增加 37%–83%。`[instance]` 扩到“函数 / 静态属性交出的确定类的对象”
     （`callgraph/made.rs`：每个 `return` 都是 `new K` / 持有 K 的静态属性 / 空值才算；样本 A 的 `getInstance().m`
-    叶子 2333 → 831）；带热修复桩的函数因多出一个来源不明的 `return` 而不接。箭头函数里的 `super.m()` 沿
+    叶子 2333 → 831）；函数入口的热修复桩（“问补丁运行时是否
+    被替换，是则返回它给的结果”）按固定形状识别（`callgraph/stub.rs`：对导入对象的一次调用，传一个各函数互异的整数、
+    `this` 和全部参数；同一 record 至少 3 个函数同模板），它的 `return` 不计入；样本 D 的 `[instance]` 6132 → 12046，
+    样本 A–C 不变。箭头函数里的 `super.m()` 沿
     `definefunc` 链找外层成员。`[external]` 只留给根在程序外的叶子，根在程序内而没接上的是 `[unlinked]`
     （占全部边的 2%–6%）。callers 方向每个类最多跟随 512 个子类（样本里最大的族是 387，上限从不触发），超出时
     行上标 `[N+ subclasses skipped]`。全图冷构建慢约 5%–8%。
@@ -397,6 +400,13 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
     函数头列出用户注解。
   - 零散：`getclass --lines`；解包目录里 `xml` 读的文件同样限 1 GiB；source map 多个 `sources` 按 source index 映射；
     索引计入 `MemoryUse.source_maps`；包内 abc 条目按名字排序；kind 别名表只在引擎一处，CLI 也接受。
-- 待办：`--enable-callable-name` 的产物一次方法调用在 `findrefs prop` 下出两行；注解里的字符串搜不到；注解接口的
-  record 名被当成带版本的模块名；转发型 / 访问器型单例 getter、箭头函数里的 `super()`、命名空间成员调用仍是叶子；
+  - 注解与带名调用：`callthisNwithname` 与它前面同名的 `ldobjbyname` 在 `findrefs prop` 下合为一行 `[call]`，位置在调用
+    指令；`findrefs string` 也搜用户注解的值和注解接口字段的默认值（`annotation @RECORD name="…"` / `annotation default …`，
+    不参与 `all` 组合）；注解接口 record 名是 `<模块 record 名>.<接口名>`，以 `ACC_ANNOTATION` 标志为准，`listclass` 默认
+    列出并标 `kind=annotation`。
+  - 性能（同一大 APK，12 条命令，三种模式）：Android 输出与 `main` 逐字节相同，耗时内存持平。名字是 `.apk` / `.dex` /
+    `.jar` / `.aar` / `.apex` 的文件不再打开来探测鸿蒙内容（否则每条命令多约 1 ms）。`--context` 连续命中同一函数时只
+    反汇编一次（样本 D 上 1.5 s → 0.3 s）。鸿蒙热态 `findrefs` 每次重扫指令（10–80 ms），没有驻留的倒排索引。
+- 待办：不带 callable-name 的调用行在 `ldobjbyname` 上，比调用点早几个字节；桩前有默认参数初始化、或 record 内带桩函数
+  不足 3 个的不认；转发型 / 访问器型单例 getter、箭头函数里的 `super()`、命名空间成员调用仍是叶子；
   `hierarchy` 的 `[unresolved]` 与调用图的 `[unlinked]` 未统一。“路由名 → 导航调用点”用 `findrefs string` 回答，不设原语。

@@ -780,6 +780,42 @@ fn engine_rows(path: &str, query: &asc_ark_engine::Query) -> Vec<String> {
 }
 
 #[test]
+fn annotation_rows_name_the_function_and_no_instruction() {
+    use asc_fixture::abc::{annotations_program, callable_names_program, MARKS_APP, MARKS_LIB_MARKED, MARKS_ROUTE};
+    let inputs = Inputs::new();
+    let marks = inputs.file("marks.abc", &annotations_program().build().bytes);
+    let named = inputs.file("named.abc", &callable_names_program().build().bytes);
+    let replies = session(&[
+        call(1, "findrefs", json!({"apk": marks, "kind": "string", "value": "pay"})),
+        call(2, "findrefs", json!({"apk": marks, "kind": "string", "value": "^none$"})),
+        call(3, "listclass", json!({"apk": marks})),
+        call(4, "findrefs", json!({"apk": named, "kind": "prop", "value": "cut", "exact": true})),
+        call(5, "findrefs", json!({"apk": named, "kind": "prop", "value": "cut", "exact": true, "access": "call"})),
+    ]);
+    // The text is the rows of the CLI.
+    assert_eq!(rows(&replies[0]), engine_rows(&marks, &asc_ark_engine::Query::string_regex("pay").unwrap()));
+    let results = ok(&replies[0])["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert_eq!(
+        results[0],
+        json!({"entry": "marks.abc", "record": MARKS_APP, "function": "#~@0=#Pay", "name": "Pay.constructor", "matched": ["/pay", "pay"],
+               "text": format!("annotation @{MARKS_ROUTE} path=\"/pay\", tags[0]=\"pay\"")})
+    );
+    assert!(results[1].get("pc").is_none() && results[2]["pc"] == 0, "{results:?}");
+    let defaults = ok(&replies[1])["results"].as_array().unwrap();
+    assert_eq!(
+        defaults[0],
+        json!({"entry": "marks.abc", "record": MARKS_LIB_MARKED, "field": "note", "matched": ["none"], "text": "annotation default \"none\""})
+    );
+    assert!(rows(&replies[2]).contains(&format!("{MARKS_ROUTE} | functions=0 kind=annotation").as_str()), "{}", text(&replies[2]));
+    // One row per call, the call instruction.
+    assert_eq!(rows(&replies[3]).len(), 7, "{}", text(&replies[3]));
+    let calls = rows(&replies[4]);
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(calls[0].ends_with("callthis2withname \"cut\", a3, v1, v2 [call]"), "{calls:?}");
+}
+
+#[test]
 fn findrefs_answers_every_kind_the_cli_does() {
     use asc_ark_engine::{Access, Pattern, Query};
     let inputs = Inputs::new();

@@ -24,9 +24,21 @@
 //! - `new this()` in a static method is the class the method is called on
 //!   ([`Maker::Receiver`]): `C` itself for `C.getInstance()`.
 //!
+//! - The `return` of a hot-patch stub is not a `return` of the function. A
+//!   build that can be patched in the field has its functions open with
+//!   `const answer = PATCHER.ask(NUMBER, this, ...parameters); if
+//!   (answer.replaced) return answer.value;`: what a patch would return, if
+//!   one is ever installed. [`super::stub`] tells such a stub by its exact
+//!   shape at the head of the function, and only in a record where at least
+//!   [`super::stub::FAMILY`] functions open with the same one. What the
+//!   function returns is then what its other `return`s say: what the code
+//!   as shipped does, which is all a static reading can tell.
+//!
 //! What this does not see: a store into `C.p` from another record, a store
 //! with a computed name, a subclass that reads the property through its
-//! parent. An edge made of it is by name ([`super::EdgeKind::Instance`]).
+//! parent, a patch that replaces a function at run time. An edge made of it
+//! is by name ([`super::EdgeKind::Instance`]), with or without a stub in
+//! the way: the edge does not say which.
 //!
 //! What a function returns is read from that function alone when a call
 //! site asks; only one that returns the value of a static property has the
@@ -37,9 +49,11 @@ use std::collections::{HashMap, HashSet};
 
 use super::edges::{frame_function, listed, FnRef, Home, Site, NEW};
 use super::modules::RecordId;
+use super::stub::{self, StubKey};
 use super::{EdgeKind, Session, Slot};
 use crate::hierarchy::ClassRef;
 use crate::path::{Link, NoLexicals, Origin, Path, PathBuilder};
+use crate::refs::Function;
 use crate::scopes::{export_group, Reader, Scopes};
 use crate::table_bytes;
 use crate::track::{Event, StringRef, Tracker, Watch};
@@ -236,17 +250,42 @@ impl<'e> Session<'e> {
         }
     }
 
+    /// The hot-patch stub the functions of record `there` open with
+    /// ([`stub::family`]); the heads of its functions are read on first use.
+    fn stubs_of(&self, there: &Home<'_, 'e>) -> Option<StubKey> {
+        *there.slot.stubs.get_or_init(|| {
+            let regions = self.regions(there.id.entry)?;
+            let methods = there.class.methods().into_iter().flatten().map_while(|method| method.ok());
+            stub::family(methods.filter_map(|method| {
+                let function = regions.function(there.abc, &method)?;
+                stub::entry_stub(&function.code, |id| function.entity(id))
+            }))
+        })
+    }
+
+    /// The offset of the `return` that is not one of `function`, a function
+    /// of record `there`: the one of the hot-patch stub it opens with.
+    fn stub_return(&self, there: &Home<'_, 'e>, function: &Function<'_, 'e>) -> Option<usize> {
+        let stub = stub::entry_stub(&function.code, |id| function.entity(id))?;
+        (self.stubs_of(there) == Some(stub.key)).then_some(stub.return_pc)
+    }
+
     /// What each `return` of the function at method offset `function` of
-    /// record `there` hands back: `None` for code that does not decode.
+    /// record `there` hands back, but the one of a hot-patch stub: `None`
+    /// for code that does not decode.
     fn returns_of(&self, there: &Home<'_, 'e>, function: u32) -> Option<Vec<Value<'e>>> {
         let regions = self.regions(there.id.entry)?;
         let method = there.abc.method(function).ok()?;
         let code = regions.function(there.abc, &method)?;
         let reader = Reader::new(there.scopes, function);
         let entity = |entity_id: u32| code.entity(entity_id);
+        let patched = self.stub_return(there, &code);
         let (mut path, mut returned) = (Path::default(), Vec::new());
-        let walked = Tracker::default().run_events(self.tables.effects(), &code.code, Watch::Objects, |frame, _, event| {
+        let walked = Tracker::default().run_events(self.tables.effects(), &code.code, Watch::Objects, |frame, insn, event| {
             let Event::Return { value } = event else { return };
+            if patched == Some(insn.pc) {
+                return;
+            }
             match &reader {
                 Some(reader) => PathBuilder { frame, function, entity: &entity, lexicals: reader }.build(value, &mut path),
                 None => PathBuilder { frame, function, entity: &entity, lexicals: &NoLexicals }.build(value, &mut path),
@@ -306,13 +345,15 @@ impl<'e> Session<'e> {
             let offset = method.offset();
             let reader = Reader::new(scopes, offset);
             let entity = |entity_id: u32| function.entity(entity_id);
+            let patched = self.stub_return(&home, &function);
             let mut returned = Vec::new();
-            let walked = tracker.run_events(self.tables.effects(), &function.code, Watch::Objects, |frame, _, event| {
+            let walked = tracker.run_events(self.tables.effects(), &function.code, Watch::Objects, |frame, insn, event| {
                 let read = |value, path: &mut Path| match &reader {
                     Some(reader) => PathBuilder { frame, function: offset, entity: &entity, lexicals: reader }.build(value, path),
                     None => PathBuilder { frame, function: offset, entity: &entity, lexicals: &NoLexicals }.build(value, path),
                 };
                 match event {
+                    Event::Return { .. } if patched == Some(insn.pc) => {}
                     Event::Return { value } => {
                         read(value, &mut path);
                         returned.push(self.value_of(&home, offset, &path));

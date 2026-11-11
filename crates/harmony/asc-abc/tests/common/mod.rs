@@ -80,16 +80,20 @@ pub fn walk(abc: &Abc<'_>, strict: bool) -> Result<Stats, AbcError> {
         let descriptor = entry.descriptor().to_str();
         if strict {
             // The writer sorts the class index by name; byte order is enough for these files.
-            assert!(previous < entry.descriptor().bytes, "class index out of order at {descriptor}");
-            previous = entry.descriptor().bytes;
+            assert!(previous < entry.name(), "class index out of order at {descriptor}");
+            previous = entry.name();
         }
         let name = String::from_utf8_lossy(entry.name()).into_owned();
         let record_name = RecordName::parse(&name);
         stats.pseudo_records += u32::from(record_name.is_pseudo());
         if strict {
-            assert!(descriptor.starts_with('L') && descriptor.ends_with(';'), "{descriptor}");
+            // A record, or an array type, which is declared and never defined.
+            let is_array = descriptor.starts_with('[') && matches!(entry, ClassEntry::Foreign(_));
+            assert!(is_array || (descriptor.starts_with('L') && descriptor.ends_with(';')), "{descriptor}");
             assert_eq!(abc.find_class(entry.descriptor().bytes)?.map(|found| found.offset()), Some(entry.offset()));
-            assert_eq!(abc.find_record(entry.name())?.map(|found| found.offset()), Some(entry.offset()));
+            if !is_array {
+                assert_eq!(abc.find_record(entry.name())?.map(|found| found.offset()), Some(entry.offset()));
+            }
         }
         let ClassEntry::Local(class) = entry else {
             stats.foreign_classes += 1;

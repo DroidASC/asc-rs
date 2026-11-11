@@ -5,15 +5,27 @@
 //! instructions count: every string operand and the strings of literal
 //! arrays for `string:`, the by-name property instructions for `prop:`, the
 //! by-name global instructions for `global:`.
+//!
+//! `string:` also reads what is no instruction: the record fields that hold
+//! strings, and the annotations of the program (`@interface`), whose values
+//! are named by file offset from the function that carries them and, for
+//! the defaults, from the fields of the annotation interface:
+//!
+//! ```text
+//! a.abc | &entry/src/main/ets/Net&->#~@0>#load | Net.load | annotation @&entry/src/main/ets/Marks&.Route path="/pay", tags[1]="pay"
+//! a.abc | &entry/src/main/ets/Marks&.Route field path | - | annotation default "/"
+//! ```
 
 use std::collections::HashMap;
 
-use asc_abc::{record_field, Abc, Literal, StringData};
+use asc_abc::{record_field, Abc, ClassEntry, ElementValue, FieldType, Literal, MethodTag, RecordKind, RecordName, StringData};
 use asc_arkisa::{DecodeError, OperandKind};
 use memchr::memmem;
 use regex::Regex;
 
-use super::{pc_of, Condition, Env, Function, Hit, IdSet, Pattern, Record, RecordHit, Worker, MAX_LITERAL_DEPTH};
+use super::{
+    chunks, pc_of, run_units, AnnotationHit, Condition, Env, Function, Hit, IdSet, Pattern, Record, RecordHit, Worker, MAX_LITERAL_DEPTH,
+};
 use crate::ops::{Access, NameUse, OpTable};
 use crate::track::{Effects, Source, Tracker};
 use crate::{text, Result};
@@ -159,6 +171,51 @@ pub(crate) struct Names<'q, 'a> {
     operands: OpTable<u8>,
     /// For telling a property read that is called from one that is not.
     effects: Effects,
+    /// File offsets of the annotation interfaces of the program that
+    /// annotations of the file can name, in ascending order. Empty for a
+    /// search that does not read annotations, and for a file without any:
+    /// no function is asked for its annotations then.
+    interfaces: Vec<u32>,
+}
+
+/// Classes tested per unit of work when the annotation interfaces are looked for.
+const CLASS_CHUNK: usize = 1024;
+/// The type of a string field.
+const STRING_DESCRIPTOR: &[u8] = b"Lpanda.String;";
+
+/// The annotation interfaces of the program in the class tables of the
+/// file, which is where an annotation names its interface: every class
+/// there but the compiler's own (`_ES…`), the types of fields and, of the
+/// records of the file, those that are no annotation interface. One the
+/// file only declares counts: nothing but its name is known.
+fn program_interfaces(env: &Env<'_, '_>) -> Result<Vec<u32>> {
+    let abc = env.abc;
+    // A region whose header or table does not read names no interface.
+    let tables = abc.regions().into_iter().flat_map(|regions| regions.iter()).filter_map(|region| region.class_table().ok());
+    let mut classes: Vec<u32> = tables
+        .flat_map(|table| (0..table.len()).filter_map(move |index| table.get(index)))
+        // The other entries are the codes of primitive types.
+        .filter_map(|entry| if let FieldType::Class(off) = FieldType::from_entry(entry) { Some(off) } else { None })
+        .collect();
+    classes.sort_unstable();
+    classes.dedup();
+    let is_interface = |off: u32| match abc.class_entry(off) {
+        // The flag first: nearly every record is a module, whose name need not be read.
+        Ok(ClassEntry::Local(class)) => class.is_annotation() && class.kind() == RecordKind::Annotation,
+        Ok(foreign @ ClassEntry::Foreign(_)) => {
+            let descriptor = foreign.descriptor().bytes;
+            descriptor.starts_with(b"L")
+                && descriptor != STRING_DESCRIPTOR
+                && !RecordName::parse(&String::from_utf8_lossy(foreign.name())).is_pseudo()
+        }
+        Err(_) => false,
+    };
+    // Every record of the file is looked at: on the threads of the search, like its strings.
+    let units: Vec<std::ops::Range<usize>> = chunks(classes.len(), CLASS_CHUNK).collect();
+    let found = run_units(units.len(), env.workers, env.cancel, |unit| {
+        classes[units[unit].clone()].iter().copied().filter(|&off| is_interface(off)).collect::<Vec<u32>>()
+    })?;
+    Ok(found.into_iter().flatten().collect())
 }
 
 impl<'q, 'a> Names<'q, 'a> {
@@ -169,7 +226,10 @@ impl<'q, 'a> Names<'q, 'a> {
         } else {
             Some(IdSet::locate(env, |off| abc.string(off).is_ok_and(|string| matcher.matches(&string)))?)
         };
-        Ok(Names { abc, matcher, scope, ids, operands: OpTable::build(|opcode| scope.flags(opcode)), effects: Effects::new() })
+        // Asked for by a lone query only (`Worker::annotations`).
+        let reads_annotations = scope == Scope::Text && env.is_lone && ids.is_some();
+        let interfaces = if reads_annotations { program_interfaces(env)? } else { Vec::new() };
+        Ok(Names { abc, matcher, scope, ids, operands: OpTable::build(|opcode| scope.flags(opcode)), effects: Effects::new(), interfaces })
     }
 }
 
@@ -240,25 +300,93 @@ impl<'a> NamesWorker<'_, '_, 'a> {
         out
     }
 
+    /// `"plain"`, or `[0]="a", [2]="b"`: the matched strings of the value
+    /// at `off` of an annotation element or of a field of an annotation
+    /// interface, which is a string or an array as `is_array` says. Each
+    /// is added to `matched`; `None` when none matches.
+    fn annotation_value(&mut self, off: u32, is_array: bool, prefix: &str, matched: &mut Vec<String>) -> Option<String> {
+        if !is_array {
+            let value = self.offset_matches(off)?.to_str().into_owned();
+            let text = format!("{prefix}={}", text::quoted_match(&value, self.names.matcher.find(&value)));
+            matched.push(value);
+            return Some(text);
+        }
+        let mut found = Vec::new();
+        self.literal_hits(off, prefix, 0, &mut found);
+        if found.is_empty() {
+            return None;
+        }
+        let matcher = &self.names.matcher;
+        let items: Vec<String> =
+            found.iter().map(|hit| format!("{}={}", hit.position, text::quoted_match(&hit.value, matcher.find(&hit.value)))).collect();
+        matched.extend(found.into_iter().map(|hit| hit.value));
+        Some(items.join(", "))
+    }
+
+    /// The default values of the elements of annotation interface `record`
+    /// that match: one hit per field.
+    fn interface_defaults(&mut self, record: &Record<'_, 'a>, hits: &mut Vec<RecordHit>) {
+        let abc = self.names.abc;
+        for field in record.fields.clone().map_while(|field| field.ok()) {
+            let (Ok(name), Some(value), Ok(FieldType::Class(class))) = (field.name(), field.raw_value(), field.field_type()) else {
+                continue;
+            };
+            let Ok(descriptor) = abc.string(class) else { continue };
+            let is_array = descriptor.bytes.starts_with(b"[");
+            if !is_array && descriptor.bytes != STRING_DESCRIPTOR {
+                continue;
+            }
+            let mut matched = Vec::new();
+            let Some(found) = self.annotation_value(value, is_array, "", &mut matched) else { continue };
+            // A lone string has no position to follow.
+            let found = found.strip_prefix('=').unwrap_or(&found);
+            hits.push(RecordHit { field: name.to_str().into_owned(), matched, text: format!("annotation default {found}") });
+        }
+    }
+
     /// Label the property hits `hits[from..]` of `function` with their
     /// access and drop the ones the query does not ask for. A read whose
     /// value is the callee of a call in the same block is a `call`.
+    ///
+    /// A call that names its property itself (`callthisNwithname`, what
+    /// `--enable-callable-name` compiles a method call to) still has the
+    /// load in front of it, `ldobjbyname "cut"` … `callthis2withname "cut"`.
+    /// The two are one call: the row is the call instruction, where
+    /// `findrefs call` and the call graph put the call site, and the load
+    /// is no row, of any access.
     fn classify(&mut self, function: &Function<'_, 'a>, hits: &mut Vec<Hit>, from: usize, accesses: &[Access]) {
         let mut called = Vec::new();
+        let mut absorbed = Vec::new();
         if !self.reads.is_empty() {
             let reads = &self.reads;
             // Code that does not decode was reported by the scan; its reads stay reads.
-            let _ = self.tracker.run(&self.names.effects, &function.code, |frame, _, call| {
+            let _ = self.tracker.run(&self.names.effects, &function.code, |frame, insn, call| {
                 let callee = frame.value(call.callee);
-                if matches!(callee.source, Source::Property { .. }) && reads.binary_search(&callee.pc).is_ok() {
-                    called.push(callee.pc);
+                let Source::Property { name, .. } = callee.source else { return };
+                if callee.pc != pc_of(insn) {
+                    if reads.binary_search(&callee.pc).is_ok() {
+                        called.push(callee.pc);
+                    }
+                    return;
+                }
+                // The callee was made by the call itself: it names the property. What the
+                // accumulator holds is the load of that property the compiler put before it.
+                let loaded = frame.value(frame.acc());
+                if matches!(loaded.source, Source::Property { name: loaded, .. } if loaded == name)
+                    && reads.binary_search(&loaded.pc).is_ok()
+                {
+                    absorbed.push(loaded.pc);
                 }
             });
         }
         let filter = self.names.scope.filter();
         let found = hits.split_off(from);
         hits.extend(found.into_iter().zip(accesses).filter_map(|(mut hit, &access)| {
-            let access = if access == Access::Read && called.contains(&hit.pc) { Access::Call } else { access };
+            let is_read = access == Access::Read;
+            if is_read && absorbed.contains(&hit.pc) {
+                return None;
+            }
+            let access = if is_read && called.contains(&hit.pc) { Access::Call } else { access };
             hit.text.push_str(" [");
             hit.text.push_str(access.label());
             hit.text.push(']');
@@ -270,6 +398,11 @@ impl<'a> NamesWorker<'_, '_, 'a> {
 impl<'a> Worker<'a> for NamesWorker<'_, '_, 'a> {
     fn record(&mut self, record: &Record<'_, 'a>, hits: &mut Vec<RecordHit>) -> bool {
         if self.names.scope != Scope::Text {
+            return true;
+        }
+        // The flag first: the name of a module need not be read.
+        if record.class.is_annotation() && record.class.kind() == RecordKind::Annotation {
+            self.interface_defaults(record, hits);
             return true;
         }
         // A malformed field is reported by the scan, when the methods are reached through it.
@@ -372,6 +505,38 @@ impl<'a> Worker<'a> for NamesWorker<'_, '_, 'a> {
             self.classify(function, hits, from, &accesses);
         }
         walked
+    }
+
+    fn annotations(&mut self, function: &Function<'_, 'a>, hits: &mut Vec<AnnotationHit>) {
+        if self.names.interfaces.is_empty() {
+            return;
+        }
+        let abc = self.names.abc;
+        // A tag list that does not read is reported when the function is listed.
+        for tag in function.method.tags().map_while(|tag| tag.ok()) {
+            let (MethodTag::Annotation(off) | MethodTag::RuntimeAnnotation(off)) = tag else { continue };
+            let Ok(annotation) = abc.annotation(off) else { continue };
+            let Ok(interface) = annotation.class_off(&abc) else { continue };
+            if self.names.interfaces.binary_search(&interface).is_err() {
+                continue;
+            }
+            let mut matched = Vec::new();
+            let mut found = Vec::new();
+            for element in annotation.elements() {
+                let (off, is_array) = match element.typed(&abc) {
+                    Ok(ElementValue::String(off)) => (off, false),
+                    Ok(ElementValue::Array(off)) => (off, true),
+                    Ok(ElementValue::Bool(_) | ElementValue::Int(_) | ElementValue::F64(_) | ElementValue::Other(_)) | Err(_) => continue,
+                };
+                let name = abc.string(element.name_off).map(|name| name.to_str().into_owned()).unwrap_or_default();
+                found.extend(self.annotation_value(off, is_array, &name, &mut matched));
+            }
+            if found.is_empty() {
+                continue;
+            }
+            let interface = abc.class_entry(interface).map(|class| String::from_utf8_lossy(class.name()).into_owned()).unwrap_or_default();
+            hits.push(AnnotationHit { matched, text: format!("annotation @{interface} {}", found.join(", ")) });
+        }
     }
 }
 

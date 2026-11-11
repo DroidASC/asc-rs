@@ -1,7 +1,9 @@
 //! The daemon answers one-shot commands exactly as the process itself would.
 #![cfg(unix)]
 
-use asc_fixture::abc::{call_graph_program, class_hierarchy_program, make_abc, sample_program};
+use asc_fixture::abc::{
+    annotations_program, call_graph_program, callable_names_program, class_hierarchy_program, make_abc, sample_program,
+};
 use asc_fixture::hap::{
     library_program, make_app, make_hap, make_library_hsp, make_routed_hap, resource_program, Compression, Hap, SAMPLE_MODULE_JSON,
 };
@@ -92,6 +94,8 @@ impl Env {
         self.write("labels.hap", &make_hap(&resource_program().build().bytes));
         self.write("two.hap", &Hap::new().modules_abc(&sample).abc("widgets", &sample).module_json("{}").build());
         self.write("calls.abc", &call_graph_program().build().bytes);
+        self.write("marks.abc", &annotations_program().build().bytes);
+        self.write("named.abc", &callable_names_program().build().bytes);
         // Read relative to the client's directory, by the client and by the daemon.
         self.write("listed.txt", b"# functions\nstar\n");
         self.write("rules.txt", b"# rules\nprop:=then\ncall:{@listed.txt}\n");
@@ -349,6 +353,18 @@ fn daemon_output_is_byte_identical_for_harmony_programs() {
         &["findrefs", "calls.abc", "rules", "--file", "rules.txt", "--context", "1"],
         &["findrefs", "calls.abc", "rules"],
         &["findrefs", "calls.abc", "prop", "then", "--exact", "--context", "1"],
+        // Annotations of the program: their interfaces, the strings in them; calls that name their method.
+        &["listclass", "marks.abc"],
+        &["listclass", "marks.abc", "--all"],
+        &["getclass", "marks.abc", "pages/Pay.Route"],
+        &["getclass", "marks.abc", "index"],
+        &["findrefs", "marks.abc", "string", "."],
+        &["findrefs", "marks.abc", "string", "pay", "--context", "1"],
+        &["findrefs", "marks.abc", "rules", "string:pay", "string:^/pay$ & !string:opens"],
+        &["findrefs", "named.abc", "prop", "."],
+        &["findrefs", "named.abc", "prop", "cut", "--exact", "--access", "read"],
+        &["findrefs", "named.abc", "prop", "cut", "--exact", "--access", "call", "--context", "1"],
+        &["findrefs", "named.abc", "all", "prop:=fold", "prop:=close", "--context", "0"],
         &["findrefs", "calls.abc", "prop", ".", "--context", "method", "--limit", "3"],
         &["findrefs", "calls.abc", "all", "prop:=make", "prop:=then", "--context", "0"],
         &["findrefs", "entry.hap", "string", "https?://", "--context-method"],

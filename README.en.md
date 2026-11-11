@@ -74,7 +74,8 @@ format is detected from the file:
 - **Inputs**: a `.hap` / `.hsp`, an `.app` (inner haps may be compressed), a bare `.abc`, or a directory /
   `,` list read as one program; every `ets/*.abc` of a hap is read, and the entry column of a row says which
   one it came from. The files of a directory are recognized by content (the `PANDA` magic, a zip holding
-  `module.json` / `ets/*.abc`), whatever their names and extensions. An unpacked package directory
+  `module.json` / `ets/*.abc`), whatever their names and extensions (but a file named `.apk` / `.dex` / `.jar` / `.aar` / `.apex` is an
+  Android file, and is not looked into). An unpacked package directory
   (`module.json` and `ets/*.abc`) is the package: manifest, resources and `xml` work on it. Packages inside a
   zip are found by content, at any depth up to 4 zips in a file (4 GiB inflated in all); an entry carries
   its whole path, `shop.app/entry.hap/ets/modules.abc`.
@@ -90,7 +91,7 @@ format is detected from the file:
 
 | command | Android | HarmonyOS |
 |---|---|---|
-| `listclass` | classes | records; `--all` adds pseudo records (annotations) |
+| `listclass` | classes | records; an annotation interface the program declares is marked `kind=annotation`; `--all` adds the compiler's pseudo records |
 | `getclass` / `disassemble` | smali | pandasm-style disassembly; `--method` for one function, `--entry` picks the abc |
 | `getmanifest` / `manifest-summary` | `AndroidManifest.xml` | `module.json` (`--file pack.info` / `pkgContextInfo.json`); in the summary each ability / extension carries `record=`, and a `callbacks` line lists its `onXxx` functions |
 | `findrefs string` / `method` / `all` / `rules`, `--context` | ✓ | ✓ (`method` finds where a function is **defined**, not its calls; combined with other parts it means "the function is named so"); `!PART` / `--none` exclude; `call:{RULE}` is "calls a function matching RULE" and nests |
@@ -163,7 +164,8 @@ much is known:
 - Where a debug build names its local variables, a function header of `getclass` has a line
   `; locals [from, to): v3 name, …`.
 - `getclass --lines` (`disassemble --debuginfo` likewise) writes `; line N` where the source line changes; a
-  user annotation on a function is written `; @RECORD(name=value)`; in an abc compiled without merging, the
+  user annotation on a function is written `; @RECORD(name=value)` (`findrefs string` finds the strings of
+  annotations too, on rows marked `annotation`); in an abc compiled without merging, the
   functions are all in the record `_GLOBAL`.
 - A package with `ets/sourceMaps.map` (debug builds only) gets a `source-maps … modules=N` row in
   `manifest-summary`; `getclass` heads the record with `; source ORIGINAL-PATH` and a function with `line N
@@ -173,7 +175,8 @@ much is known:
 Limits: a HarmonyOS program is served by the same daemon as APKs (the analyses stay resident), but has no
 disk cache (it opens in milliseconds); `super()` / inherited methods whose parent is outside the
 program stay leaves, and a singleton getter is linked only where what it returns is certain (not when it
-forwards to another class, keeps instances by key, or carries a hot-fix stub); there are no call-site value constraints (`method:X[arg0=…]`) and no virtual dispatch; static ArkTS
+forwards to another class or keeps instances by key; a hot-fix stub at the entry of a function is not counted
+as what it returns, so the edge is that of the code as shipped); there are no call-site value constraints (`method:X[arg0=…]`) and no virtual dispatch; static ArkTS
 (`modules_static.abc`) is not supported; versions 9.0.0.0–24.0.0.0 were checked
 against the official disassembler on output of the official compiler, later ones were not; a directory mixing DEX and HarmonyOS files is an Android program, so pass the HarmonyOS
 files by their own path.

@@ -1,4 +1,4 @@
-//! Two programs for the call graph rules that need more than a class
+//! Three programs for the call graph rules that need more than a class
 //! literal, their code shaped as the official compiler emits it.
 //!
 //! [`handed_objects_program`]: calls on what a function returned or a static
@@ -30,6 +30,25 @@
 //!   `Store.pick().load()`, `Store.cached().load()`, `Hub.loose().load()`
 //!   and `Store.getInstance().absent()`.
 //!
+//! [`patched_objects_program`]: the same calls in a build whose functions
+//! open with a hot-patch stub (`const answer = patcher.ask(NUMBER, this,
+//! ...parameters); if (answer.replaced) return answer.value;`).
+//!
+//! - [`PATCHED_RUNTIME`] `patch/Runtime`: exports the object `patcher`;
+//! - [`PATCHED_VAULT`] `patched/Vault`: imports `patcher`. Exports class
+//!   `Vault`. `load()`, `save(a)`, `static getInstance()` (the lazy
+//!   singleton) and `static fresh(a)` (`return new Vault()`) open with the
+//!   stub, each with a number of its own. `static broken()` (`return new
+//!   Vault()`) opens with one that stores a property between the load of
+//!   the method and the call;
+//! - [`PATCHED_CACHE`] `patched/Cache`: imports `patcher`. Exports class
+//!   `Cache` (`get()`): `static getInstance()` (the lazy singleton) and
+//!   `static peek()` open with the very same instructions, and no other
+//!   function of the record does;
+//! - [`PATCHED_APP`] `pages/Patched`: imports `Vault` and `Cache`. `run()`
+//!   calls `Vault.getInstance().load()`, `Vault.fresh().save()`,
+//!   `Vault.broken().load()` and `Cache.getInstance().get()`.
+//!
 //! [`late_members_program`]: members a class gets after its definition, and
 //! `super` in arrow functions.
 //!
@@ -53,6 +72,10 @@ use asc_abc::FunctionKind;
 pub const HANDED_KIND: &str = "&entry/src/main/ets/kind/Kind&";
 pub const HANDED_STORE: &str = "&entry/src/main/ets/store/Store&";
 pub const HANDED_APP: &str = "&entry/src/main/ets/pages/App&";
+pub const PATCHED_RUNTIME: &str = "&entry/src/main/ets/patch/Runtime&";
+pub const PATCHED_VAULT: &str = "&entry/src/main/ets/patched/Vault&";
+pub const PATCHED_CACHE: &str = "&entry/src/main/ets/patched/Cache&";
+pub const PATCHED_APP: &str = "&entry/src/main/ets/pages/Patched&";
 pub const LATE_PANEL: &str = "&entry/src/main/ets/late/Panel&";
 pub const LATE_SUB: &str = "&entry/src/main/ets/late/Sub&";
 
@@ -126,17 +149,22 @@ fn kind_record(builder: &mut AbcBuilder) -> AbcRecord {
 /// holder and the class loaded by `holder` and `maker` (into the accumulator).
 fn lazy(name: &str, holder: &dyn Fn(&mut Asm), maker: &dyn Fn(&mut Asm)) -> Asm {
     let mut asm = Asm::new();
-    holder(&mut asm);
+    lazy_into(&mut asm, name, holder, maker);
+    asm
+}
+
+/// [`lazy`], after what `asm` already has.
+fn lazy_into(asm: &mut Asm, name: &str, holder: &dyn Fn(&mut Asm), maker: &dyn Fn(&mut Asm)) {
+    holder(asm);
     asm.op("ldobjbyname", [0.into(), Op::str(name)]).op("jnez", [Op::label("made")]);
-    holder(&mut asm);
+    holder(asm);
     asm.op("sta", [0.into()]);
-    maker(&mut asm);
-    construct(&mut asm, 1);
+    maker(asm);
+    construct(asm, 1);
     asm.op("stobjbyname", [0.into(), Op::str(name), 0.into()]);
     asm.label("made");
-    holder(&mut asm);
+    holder(asm);
     asm.op("ldobjbyname", [0.into(), Op::str(name)]).op("return", []);
-    asm
 }
 
 fn store_record(builder: &mut AbcBuilder) -> AbcRecord {
@@ -409,5 +437,147 @@ pub fn late_members_program() -> AbcBuilder {
     let panel = panel_record(&mut builder);
     let sub = sub_record(&mut builder);
     builder.record(sub).record(panel);
+    builder
+}
+
+/// How a function of the patched records opens.
+#[derive(Clone, Copy)]
+struct Stub {
+    /// The number the function passes.
+    number: u8,
+    /// Whether it has a `this` to pass: `undefined` goes in its place otherwise.
+    has_this: bool,
+    /// Whether it has one declared parameter; it has none otherwise.
+    has_parameter: bool,
+    /// Whether a property is stored on the patcher before it is asked.
+    spoiled: bool,
+}
+
+impl Stub {
+    const fn new(number: u8) -> Stub {
+        Stub { number, has_this: false, has_parameter: false, spoiled: false }
+    }
+
+    /// The stub as the official compiler emits it, in a function with four
+    /// locals (`this` is register 6, the parameter register 7) whose
+    /// regular import 0 is the patcher.
+    fn open(self) -> Asm {
+        let mut asm = Asm::new();
+        asm.op("ldexternalmodulevar", [0.into()]).op("sta", [0.into()]);
+        asm.op("throw.undefinedifholewithname", [Op::str("patcher")]);
+        asm.op("lda", [0.into()]).op("ldobjbyname", [0.into(), Op::str("ask")]).op("sta", [1.into()]);
+        if self.spoiled {
+            asm.op("ldtrue", []).op("stobjbyname", [0.into(), Op::str("asked"), 0.into()]);
+        }
+        let receiver = if self.has_this {
+            6
+        } else {
+            asm.op("ldundefined", []).op("sta", [2.into()]);
+            2
+        };
+        asm.op("ldai", [self.number.into()]).op("sta", [3.into()]).op("lda", [1.into()]);
+        if self.has_parameter {
+            asm.op("callthis3", [0.into(), 0.into(), 3.into(), receiver.into(), 7.into()]);
+        } else {
+            asm.op("callthis2", [0.into(), 0.into(), 3.into(), receiver.into()]);
+        }
+        asm.op("sta", [0.into()]).op("ldobjbyname", [0.into(), Op::str("replaced")]);
+        asm.op("isfalse", []).op("jnez", [Op::label("shipped")]);
+        asm.op("lda", [0.into()]).op("ldobjbyname", [0.into(), Op::str("value")]).op("return", []);
+        asm.label("shipped");
+        asm
+    }
+}
+
+fn patch_runtime_record() -> AbcRecord {
+    let mut main = Asm::new();
+    main.op("createemptyobject", []).op("stmodulevar", [0.into()]).op("returnundefined", []);
+    let module = AbcModule::new().export("patcher", "patcher");
+    AbcRecord::ets_module(PATCHED_RUNTIME, "entry", &[], module).function(function("func_main_0", 0, 0, main))
+}
+
+/// `func_main_0` of a record whose one class, with constructor `ctor` and
+/// literal `literal`, is kept in a captured variable and exported.
+fn one_class_main(ctor: &str, literal: LiteralArrayId) -> Asm {
+    let mut main = Asm::new();
+    main.op("newlexenv", [1.into()]).op("ldhole", []).op("sta", [0.into()]);
+    define(&mut main, ctor, literal, 0);
+    main.op("sta", [1.into()]).op("stlexvar", [0.into(), 0.into()]);
+    main.op("lda", [1.into()]).op("stmodulevar", [0.into()]).op("returnundefined", []);
+    main
+}
+
+/// The class of a patched record, as its own code reads it.
+fn own_class(asm: &mut Asm) {
+    asm.op("ldlexvar", [0.into(), 0.into()]);
+}
+
+fn vault_record(builder: &mut AbcBuilder) -> AbcRecord {
+    let module = AbcModule::new().import("patcher", "patcher", &request(PATCHED_RUNTIME)).export("Vault", "Vault");
+    let statics = [("getInstance", "#~@0<#getInstance"), ("fresh", "#~@0<#fresh"), ("broken", "#~@0<#broken")];
+    let vault = class_literal(builder, PATCHED_VAULT, &[("load", "#~@0>#load"), ("save", "#~@0>#save")], &statics);
+    let method = |stub: Stub| {
+        let mut asm = stub.open();
+        asm.op("returnundefined", []);
+        asm
+    };
+    let maker = |stub: Stub| {
+        let mut asm = stub.open();
+        own_class(&mut asm);
+        construct(&mut asm, 0);
+        asm.op("return", []);
+        asm
+    };
+    let mut get_instance = Stub::new(3).open();
+    lazy_into(&mut get_instance, "instance", &own_class, &own_class);
+    AbcRecord::ets_module(PATCHED_VAULT, "entry", &["Vault"], module)
+        .function(function("func_main_0", 2, 0, one_class_main("#~@0=#Vault", vault)))
+        .function(function("#~@0=#Vault", 0, 0, leaf()))
+        .function(function("#~@0>#load", 4, 0, method(Stub { has_this: true, ..Stub::new(1) })))
+        .function(function("#~@0>#save", 4, 1, method(Stub { has_this: true, has_parameter: true, ..Stub::new(2) })))
+        .function(function("#~@0<#getInstance", 4, 0, get_instance))
+        .function(function("#~@0<#fresh", 4, 1, maker(Stub { has_parameter: true, ..Stub::new(4) })))
+        .function(function("#~@0<#broken", 4, 0, maker(Stub { spoiled: true, ..Stub::new(5) })))
+}
+
+fn cache_record(builder: &mut AbcBuilder) -> AbcRecord {
+    let module = AbcModule::new().import("patcher", "patcher", &request(PATCHED_RUNTIME)).export("Cache", "Cache");
+    let statics = [("getInstance", "#~@0<#getInstance"), ("peek", "#~@0<#peek")];
+    let cache = class_literal(builder, PATCHED_CACHE, &[("get", "#~@0>#get")], &statics);
+    let mut get_instance = Stub::new(1).open();
+    lazy_into(&mut get_instance, "instance", &own_class, &own_class);
+    let mut peek = Stub::new(2).open();
+    peek.op("returnundefined", []);
+    AbcRecord::ets_module(PATCHED_CACHE, "entry", &["Cache"], module)
+        .function(function("func_main_0", 2, 0, one_class_main("#~@0=#Cache", cache)))
+        .function(function("#~@0=#Cache", 0, 0, leaf()))
+        .function(function("#~@0>#get", 0, 0, leaf()))
+        .function(function("#~@0<#getInstance", 4, 0, get_instance))
+        .function(function("#~@0<#peek", 4, 0, peek))
+}
+
+fn patched_app_record() -> AbcRecord {
+    let module = AbcModule::new().import("Vault", "Vault", &request(PATCHED_VAULT)).import("Cache", "Cache", &request(PATCHED_CACHE));
+    let mut main = Asm::new();
+    main.op("definefunc", [0.into(), Op::method("#*#run"), 0.into()]).op("callarg0", [0.into()]).op("returnundefined", []);
+    let mut run = Asm::new();
+    for (import, getter, name) in [(0, "getInstance", "load"), (0, "fresh", "save"), (0, "broken", "load"), (1, "getInstance", "get")] {
+        run.op("ldexternalmodulevar", [import.into()]);
+        call_method(&mut run, 0, getter);
+        call_method(&mut run, 0, name);
+    }
+    run.op("returnundefined", []);
+    AbcRecord::ets_module(PATCHED_APP, "entry", &[], module)
+        .function(function("func_main_0", 0, 0, main))
+        .function(function("#*#run", 1, 0, run))
+}
+
+/// The program: [`PATCHED_APP`], [`PATCHED_VAULT`], [`PATCHED_CACHE`] and
+/// [`PATCHED_RUNTIME`] in one ABC file.
+pub fn patched_objects_program() -> AbcBuilder {
+    let mut builder = AbcBuilder::new();
+    let vault = vault_record(&mut builder);
+    let cache = cache_record(&mut builder);
+    builder.record(patched_app_record()).record(vault).record(cache).record(patch_runtime_record());
     builder
 }

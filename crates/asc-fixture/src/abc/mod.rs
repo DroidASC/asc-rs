@@ -31,6 +31,7 @@
 //! assert_eq!(method.resolve(0).unwrap(), file.layout.string("hello"));
 //! ```
 
+mod annotations;
 mod asm;
 mod calls;
 mod classes;
@@ -43,21 +44,25 @@ mod sample;
 mod spec;
 mod writer;
 
+pub use annotations::{annotations_program, callable_names_program, MARKS_APP, MARKS_LIB, MARKS_LIB_MARKED, MARKS_ROUTE, NAMED_APP};
 pub use asm::{Asm, Assembled, Catch, Op};
 pub use calls::{call_graph_program, CALLS_APP, CALLS_BOX, CALLS_INDEX, CALLS_UTIL};
 pub use classes::{class_hierarchy_program, CLASSES_APP, CLASSES_BASE, CLASSES_INDEX};
 pub use layout::{AbcFile, AbcLayout, AbcRegionLayout};
 pub use lineage::{class_calls_program, LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE, LINEAGE_SERVICE};
-pub use objects::{handed_objects_program, late_members_program, HANDED_APP, HANDED_KIND, HANDED_STORE, LATE_PANEL, LATE_SUB};
+pub use objects::{
+    handed_objects_program, late_members_program, patched_objects_program, HANDED_APP, HANDED_KIND, HANDED_STORE, LATE_PANEL, LATE_SUB,
+    PATCHED_APP, PATCHED_CACHE, PATCHED_RUNTIME, PATCHED_VAULT,
+};
 pub use packages::{
     packaged_entry_program, packaged_library_program, PACKAGED_ENTRY_MODULE_JSON, PACKAGED_ENTRY_PKG_CONTEXT, PACKAGED_INDEX, PACKAGED_KIT,
     PACKAGED_LIBRARY_MODULE_JSON, PACKAGED_OWN, PACKAGED_TOOL,
 };
 pub use sample::{make_abc, make_multi_region_abc, sample_program, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL, SAMPLE_MAGIC};
 pub use spec::{
-    AbcAnnotation, AbcAnnotationElement, AbcCatch, AbcCode, AbcDebugInfo, AbcField, AbcFieldValue, AbcFunction, AbcIndirectExport,
-    AbcLineOp, AbcLiteral, AbcLocalExport, AbcModule, AbcNamespaceImport, AbcRecord, AbcRegularImport, AbcTry, AbcType, AnnotationKind,
-    LiteralArrayId, MethodRef,
+    AbcAnnotation, AbcAnnotationElement, AbcCatch, AbcCode, AbcDebugInfo, AbcElementValue, AbcField, AbcFieldValue, AbcFunction,
+    AbcIndirectExport, AbcLineOp, AbcLiteral, AbcLocalExport, AbcModule, AbcNamespaceImport, AbcRecord, AbcRegularImport, AbcTry, AbcType,
+    AnnotationKind, LiteralArrayId, MethodRef,
 };
 
 /// 9.0.0.0: field / proto region tables and a header literal array index.

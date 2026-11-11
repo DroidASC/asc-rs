@@ -44,6 +44,7 @@
 mod edges;
 mod made;
 pub(crate) mod modules;
+mod stub;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
@@ -405,6 +406,9 @@ pub(crate) struct Slot {
     /// The objects its functions and static properties hand out: asked by
     /// the call sites on what a function of the record returned.
     objects: OnceLock<RecordObjects>,
+    /// The hot-patch stub its functions open with, if they do ([`stub`]):
+    /// asked when a function whose result is wanted has the shape of one.
+    stubs: OnceLock<Option<stub::StubKey>>,
     /// Left by the first `call:` search that went through the whole record.
     call_paths: OnceLock<CallPaths>,
 }

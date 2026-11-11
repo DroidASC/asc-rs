@@ -511,10 +511,10 @@ impl<'p> Code<'p> {
             // As above: an unreadable class index contributes no records.
             for class in abc.classes().into_iter().flatten().flatten() {
                 let ClassEntry::Local(class) = class else { continue };
-                let name = String::from_utf8_lossy(class.name());
-                if asc_abc::RecordName::parse(&name).kind() != asc_abc::RecordKind::Module {
+                if class.kind() != asc_abc::RecordKind::Module {
                     continue;
                 }
+                let name = String::from_utf8_lossy(class.name());
                 match table.locate(&name).and_then(|owner| index_of.get(owner.package.name.as_str())) {
                     Some(&index) => records.per_package[index] += 1,
                     None => records.unlocated += 1,

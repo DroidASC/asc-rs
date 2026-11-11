@@ -19,7 +19,8 @@ pub enum AbcType {
     U64,
     Reference,
     Any,
-    /// A record or foreign class, by name.
+    /// A record or foreign class, by name; an array type by its descriptor
+    /// (`[Lpanda.String;`), declared as a foreign class.
     Record(String),
 }
 
@@ -58,13 +59,25 @@ pub enum AnnotationKind {
     RuntimeType,
 }
 
+/// The value of an annotation element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbcElementValue {
+    /// The four value bytes, as stored.
+    Raw(u32),
+    /// The offset of this string.
+    String(String),
+    /// The offset of a literal array declared with
+    /// [`AbcBuilder::literal_array`](super::AbcBuilder::literal_array).
+    Array(LiteralArrayId),
+}
+
 /// One `name = value` of an annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbcAnnotationElement {
     pub name: String,
-    /// The four value bytes, as stored.
-    pub value: u32,
-    /// The type tag byte (`b'7'` is `u32`).
+    pub value: AbcElementValue,
+    /// The type tag byte (`b'7'` is `u32`, `b'C'` a string, `b'K'` to
+    /// `b'Z'` and `b'#'` arrays).
     pub tag: u8,
 }
 
@@ -86,7 +99,22 @@ impl AbcAnnotation {
     /// Add a `u32` element.
     #[must_use]
     pub fn element(mut self, name: &str, value: u32) -> AbcAnnotation {
-        self.elements.push(AbcAnnotationElement { name: name.to_owned(), value, tag: b'7' });
+        self.elements.push(AbcAnnotationElement { name: name.to_owned(), value: AbcElementValue::Raw(value), tag: b'7' });
+        self
+    }
+
+    /// Add a string element.
+    #[must_use]
+    pub fn string(mut self, name: &str, value: &str) -> AbcAnnotation {
+        self.elements.push(AbcAnnotationElement { name: name.to_owned(), value: AbcElementValue::String(value.to_owned()), tag: b'C' });
+        self
+    }
+
+    /// Add an array element with type tag `tag` (`b'K'` to `b'Z'`, `b'#'`):
+    /// the items are those of `array`.
+    #[must_use]
+    pub fn array(mut self, name: &str, tag: u8, array: LiteralArrayId) -> AbcAnnotation {
+        self.elements.push(AbcAnnotationElement { name: name.to_owned(), value: AbcElementValue::Array(array), tag });
         self
     }
 
@@ -284,6 +312,9 @@ pub enum AbcFieldValue {
     ModuleRequestPhases(Vec<u8>),
     /// `VALUE` tag pointing at a literal array of these strings (`scopeNames`).
     ScopeNames(Vec<String>),
+    /// `VALUE` tag pointing at a declared literal array: the default value
+    /// of an array field of an annotation interface.
+    Array(LiteralArrayId),
     /// `VALUE` tag pointing at a module record (`moduleRecordIdx`).
     Module(AbcModule),
 }

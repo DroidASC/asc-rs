@@ -78,8 +78,16 @@ pub enum RefSite {
         /// Byte offset of the instruction in the function's code.
         pc: u32,
     },
-    /// A field of the record itself (`scopeNames`, `jsonFileContent`).
+    /// A field of the record itself (`scopeNames`, `jsonFileContent`, the
+    /// default value of an element of an annotation interface).
     Field { name: String },
+    /// An annotation a function carries: no instruction of its code.
+    Annotation {
+        /// The raw (mangled) function name.
+        function: String,
+        /// The readable name.
+        restored: String,
+    },
 }
 
 /// One reference: an instruction or record field naming a matched string.
@@ -117,13 +125,16 @@ impl RefRow {
     /// column uses canonical names, which a query can be given back (`->`
     /// as in the DEX rows; a `.` would run into versioned record names such
     /// as `&@ohos/crypto-js/index&2.0.0`). A field reference is
-    /// `entry | record field NAME | - | text`.
+    /// `entry | record field NAME | - | text`, one in an annotation of a
+    /// function `entry | record->function | restored name | text`: the
+    /// function without an offset.
     pub fn line(&self, entry: &str) -> String {
         match &self.site {
             RefSite::Code { function, restored, pc } => {
                 format!("{entry} | {}->{function}+{pc:#x} | {restored} | {}", self.record, self.text)
             }
             RefSite::Field { name } => format!("{entry} | {} field {name} | - | {}", self.record, self.text),
+            RefSite::Annotation { function, restored } => format!("{entry} | {}->{function} | {restored} | {}", self.record, self.text),
         }
     }
 }
@@ -339,6 +350,12 @@ pub(crate) struct RecordHit {
     pub text: String,
 }
 
+/// A match in an annotation of a function.
+pub(crate) struct AnnotationHit {
+    pub matched: Vec<String>,
+    pub text: String,
+}
+
 /// A query prepared for one ABC entry: what step 1 found, shared by the
 /// worker threads.
 pub(crate) trait Condition<'a>: Sync {
@@ -367,6 +384,10 @@ pub(crate) trait Worker<'a> {
     /// # Errors
     /// Code that does not decode: the hits before the bad instruction stay.
     fn function(&mut self, function: &Function<'_, 'a>, hits: &mut Vec<Hit>) -> std::result::Result<(), DecodeError>;
+
+    /// Reports the matches in the annotations `function` carries, in file
+    /// order. Asked of a lone query only: a conjunction is about the code.
+    fn annotations(&mut self, _function: &Function<'_, 'a>, _hits: &mut Vec<AnnotationHit>) {}
 }
 
 /// The functions of the sets a query names, by the address of each
@@ -587,6 +608,8 @@ struct Scanner<'s, 'a> {
     hits: Vec<Vec<Hit>>,
     /// Reused for the hits of an excluder.
     excluded: Vec<Hit>,
+    /// The hits in the annotations of the function being scanned.
+    annotated: Vec<AnnotationHit>,
     rows: Vec<RefRow>,
     /// Method offsets of the functions that match, for [`Wanted::Functions`].
     functions: Vec<u32>,
@@ -668,6 +691,12 @@ impl<'a> Scanner<'_, 'a> {
         };
         let function = Function { abc: self.abc, method, code, region, table: self.regions.0[region].table };
         let mut failed = None;
+        self.annotated.clear();
+        if plan.is_lone {
+            if let Some(worker) = self.workers.first_mut() {
+                worker.annotations(&function, &mut self.annotated);
+            }
+        }
         self.hits.iter_mut().for_each(Vec::clear);
         for &index in &plan.order {
             let hits = &mut self.hits[index];
@@ -696,7 +725,7 @@ impl<'a> Scanner<'_, 'a> {
         if let Some(err) = failed {
             self.errors.note(|| format!("{}->{}: {err}", record(), raw_name()));
         }
-        if !matches {
+        if !matches && self.annotated.is_empty() {
             return;
         }
         if plan.wanted == Wanted::Functions {
@@ -707,6 +736,17 @@ impl<'a> Scanner<'_, 'a> {
         let names = FunctionNames { record: record(), restored: class.restore_function_name(&raw), raw };
         let site = |pc| RefSite::Code { function: names.raw.clone(), restored: names.restored.clone(), pc };
         if plan.is_lone {
+            // What stands on the function comes before what is in it. Without a match in the
+            // code there is no code hit to drain.
+            self.rows.extend(self.annotated.drain(..).map(|hit| RefRow {
+                record: names.record.clone(),
+                site: RefSite::Annotation { function: names.raw.clone(), restored: names.restored.clone() },
+                matched: hit.matched,
+                text: hit.text,
+                sites: Vec::new(),
+                context: None,
+                method: None,
+            }));
             for hit in self.hits[0].drain(..) {
                 self.rows.push(RefRow {
                     record: names.record.clone(),
@@ -890,6 +930,7 @@ fn scan_entry<'a>(entry: &Entry<'_, 'a>, query: &Query, scope: &Scope<'_, 'a>, w
             excluder_live: vec![true; excluders.len()],
             hits: conditions.iter().map(|_| Vec::new()).collect(),
             excluded: Vec::new(),
+            annotated: Vec::new(),
             rows: Vec::new(),
             functions: Vec::new(),
             errors: Errors::default(),
@@ -946,6 +987,12 @@ mod tests {
         );
         row.site = RefSite::Field { name: "scopeNames".into() };
         assert_eq!(row.line("a.abc"), "a.abc | &entry/src/main/ets/pages/Index& field scopeNames | - | lda.str \"hello\"");
+        row.site = RefSite::Annotation { function: "#~@0>#build".into(), restored: "Index.build".into() };
+        row.text = "annotation @&entry/src/main/ets/Marks&.Route path=\"hello\"".into();
+        assert_eq!(
+            row.line("a.abc"),
+            "a.abc | &entry/src/main/ets/pages/Index&->#~@0>#build | Index.build | annotation @&entry/src/main/ets/Marks&.Route path=\"hello\""
+        );
     }
 
     #[test]

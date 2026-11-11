@@ -75,7 +75,7 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
 
 - **输入**：`.hap` / `.hsp`、`.app`（内层 hap 可以是压缩的）、裸 `.abc`，或一个目录 / `,` 列表（当作一个程序；一个 hap
   里的每个 `ets/*.abc` 都读，行首的 entry 列说明来自哪个）。目录里的文件按内容识别（`PANDA` 魔数、zip 里有
-  `module.json` / `ets/*.abc`），叫什么名字、用什么扩展名都可以。解包后的包目录（有 `module.json` 和 `ets/*.abc`）
+  `module.json` / `ets/*.abc`），叫什么名字、用什么扩展名都可以（例外：名字是 `.apk` / `.dex` / `.jar` / `.aar` / `.apex` 的文件直接按 Android 处理，不看内容）。解包后的包目录（有 `module.json` 和 `ets/*.abc`）
   与原包等价：清单、资源、`xml` 都能用。zip 里的包也按内容找，可以多层（一个文件里至多 4 层，解压总量至多
   4 GiB），条目名带完整路径，如 `shop.app/entry.hap/ets/modules.abc`。
 - **加密的包**：应用市场下载的 hap 里 `ets/modules.abc` 是加密的，会在 stderr 以 `# warning:` 点名并跳过（`findrefs` /
@@ -87,7 +87,7 @@ classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/S
 
 | 命令 | Android | HarmonyOS |
 |---|---|---|
-| `listclass` | 类 | record；`--all` 连同注解等伪 record |
+| `listclass` | 类 | record；用户声明的注解接口标 `kind=annotation`；`--all` 连同编译器自己的伪 record |
 | `getclass` / `disassemble` | smali | pandasm 风格反汇编；`--method` 只看一个函数，`--entry` 指定 abc |
 | `getmanifest` / `manifest-summary` | `AndroidManifest.xml` | `module.json`（`--file pack.info` / `pkgContextInfo.json`）；摘要里每个 ability / extension 带 `record=`，`callbacks` 行列出它的 `onXxx` 函数 |
 | `findrefs string` / `method` / `all` / `rules`，`--context` | ✓ | ✓（`method` 找的是函数的**定义位置**，不是调用；与其他条件组合时指“函数名匹配”）；`!条件` / `--none` 排除；`call:{规则}` 是“调用了匹配该规则的函数”，可嵌套 |
@@ -145,7 +145,7 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
 - `manifest-summary` 另有 `page` / `route` 行（页面清单和路由表的每一项，带 `record=`，可直接给 `getclass`）、
   `abc` 行（每个 abc 条目，加密的条目由哪个解密文件顶替）；多个包里相同的 `pack.info` 只列一次。
 - 超过 2048 字节的字符串写成 `"…"… (+N bytes)`，匹配点在截断之后时带 `match at byte N` 和命中处的片段。
-- `getclass --lines`（`disassemble --debuginfo` 同义）在源码行变化处写 `; line N`；函数上的用户注解写成
+- `getclass --lines`（`disassemble --debuginfo` 同义）在源码行变化处写 `; line N`；函数上的用户注解（`findrefs string` 也搜注解里的字符串，行上标 `annotation`）写成
   `; @RECORD(name=value)`；不合并编译的 abc 里函数都在 `_GLOBAL` record。
 - 调试构建带局部变量名时，`getclass` 的函数头多一行 `; locals [起, 止): v3 name, …`。
 - 包里带 `ets/sourceMaps.map`（调试构建才有）时，`manifest-summary` 多一行 `source-maps … modules=N`；`getclass` 的
@@ -153,8 +153,8 @@ ArkTS 的调用指令不带被调用者，只在函数内追踪它的来源，�
   `source line` 才是源码行；`(no source line)` 的函数是构建生成的（状态变量访问器、`rerender` 等）。
 
 限制：HarmonyOS 程序和 APK 共用同一个 daemon（调用图等分析结果驻留复用），但没有磁盘 cache（打开是毫秒级）；
-父类在程序外的 `super()` / 继承方法仍是叶子，单例 getter 只在返回值来源确定时才接上（转发给别的类、按 key 存的多例、
-带热修复桩的函数不接）；没有调用点取值约束（`method:X[arg0=…]`）和虚分派；
+父类在程序外的 `super()` / 继承方法仍是叶子，单例 getter 只在返回值来源确定时才接上（转发给别的类、按 key 存的多例
+不接；函数入口的热修复桩不算作它的返回值，边反映的是出厂代码）；没有调用点取值约束（`method:X[arg0=…]`）和虚分派；
 不支持静态 ArkTS（`modules_static.abc`）；9.0.0.0–24.0.0.0 各版本用官方编译器的产物对照过官方反汇编，更高版本没有验证；
 目录里 DEX 与 HarmonyOS 文件混放时按 Android 程序处理，HarmonyOS 文件要单独给路径。
 
