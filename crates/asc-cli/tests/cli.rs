@@ -311,6 +311,17 @@ fn usage_errors_exit_1_not_2() {
 }
 
 #[test]
+fn deeply_nested_rule_is_a_usage_error_not_a_crash() {
+    // Parsed before the APK is opened, so a missing file does not matter;
+    // before the depth limit this overflowed the stack and aborted (134).
+    let n = 5000;
+    let rule = format!("{}La;->a()V{}", "method:{".repeat(n), "}".repeat(n));
+    let out = bin().env("ASC_DAEMON", "off").args(["--no-cache", "findrefs", "/nonexistent.apk", "all", &rule]).output().expect("run asc");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("nested deeper than 8 levels"), "{}", stderr(&out));
+}
+
+#[test]
 fn class_that_cannot_be_rebuilt_is_still_disassembled() {
     let dex = asc_fixture::make_rich_dex();
     let bytes = make_apk(&[("classes.dex", &dex)], true);

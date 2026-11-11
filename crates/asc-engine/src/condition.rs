@@ -35,16 +35,23 @@
 //! the analysis cannot decide (marked `?`), `==` drops it. `*` only shows
 //! the values. A REGEX runs to the next `,` / `]` outside `()` / `{}`, or is
 //! quoted like TEXT (`\"`, `\\` escape).
+//!
+//! Bodies (`method:{...}`, `in:{...}`) nest at most [`MAX_DEPTH`] deep.
 
 use crate::names::{exact_method, format_class_name, member_query, parse_kind};
 use crate::{EngineError, Result};
 use asc_findrefs::{CallConstraint, Certainty, Defined, MemberQuery, Query, ResultWant, Slot, Want};
 use std::path::Path;
 
+/// Bodies inside bodies deeper than this are a mistake or hostile: each
+/// level is another pass over the code, and the parser recurses per level.
+/// The Ark rules use the same limit.
+pub const MAX_DEPTH: usize = 8;
+
 /// Parse a rule (see the module docs). `@PATH` files are read relative to
 /// `dir` (the current directory when `None`).
 pub fn parse_rule_in(spec: &str, dir: Option<&Path>) -> Result<Query> {
-    let mut p = Parser { src: spec, pos: 0, dir };
+    let mut p = Parser { src: spec, pos: 0, dir, depth: 0 };
     let q = p.rule(false)?;
     match p.peek() {
         None => Ok(q),
@@ -82,6 +89,8 @@ struct Parser<'a> {
     src: &'a str,
     pos: usize,
     dir: Option<&'a Path>,
+    /// Bodies open at the cursor.
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -109,6 +118,21 @@ impl<'a> Parser<'a> {
 
     fn error(&self, what: &str) -> EngineError {
         EngineError::Query(format!("bad rule {:?}: {what} at column {}", self.src, self.pos + 1))
+    }
+
+    /// The `{...}` body at the cursor, its `{` already eaten, parsed by
+    /// `inner` one level deeper.
+    fn body<T>(&mut self, inner: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.error(&format!("bodies are nested deeper than {MAX_DEPTH} levels")));
+        }
+        self.depth += 1;
+        let parsed = inner(self)?;
+        self.depth -= 1;
+        if !self.eat('}') {
+            return Err(self.error("expected `}`"));
+        }
+        Ok(parsed)
     }
 
     /// `part ('&' part)*`, up to the end or (`nested`) the closing `}`.
@@ -150,10 +174,7 @@ impl<'a> Parser<'a> {
             if !self.eat('{') {
                 return Err(self.error("in: takes a class condition in braces, e.g. in:{extends:android.app.Activity}"));
             }
-            let inner = self.condition(true)?;
-            if !self.eat('}') {
-                return Err(self.error("expected `}`"));
-            }
+            let inner = self.body(|p| p.condition(true))?;
             return Ok(Query::Defined(Defined::In(Box::new(inner))));
         }
         let value = self.text(nested)?.trim();
@@ -185,10 +206,7 @@ impl<'a> Parser<'a> {
             None => Query::Virtual { target: Box::new(set), via: Default::default(), fan_out: Some(crate::compose::DEFAULT_FAN_OUT) },
         };
         let target = if self.eat('{') {
-            let inner = self.rule(true)?;
-            if !self.eat('}') {
-                return Err(self.error("expected `}`"));
-            }
+            let inner = self.body(|p| p.rule(true))?;
             dispatch(Query::Nested(Box::new(inner)))
         } else if self.eat('@') {
             let path = self.text_until(nested, Stop::Constraint)?.trim();
@@ -622,6 +640,24 @@ mod tests {
             assert!(e.contains(want), "{spec}: {e}");
         }
         assert!(parse_condition("string:a & string:b").unwrap_err().to_string().contains("several conditions"));
+    }
+
+    #[test]
+    fn bodies_nest_up_to_the_limit() {
+        let nest = |open: &str, n: usize, leaf: &str| format!("{}{leaf}{}", open.repeat(n), "}".repeat(n));
+        for open in ["method:{", "method:={", "method:*{", "in:{"] {
+            assert!(parse_rule(&nest(open, MAX_DEPTH, "string:a")).is_ok(), "{open} x{MAX_DEPTH}");
+            // Far past the limit is an error, not a stack overflow.
+            for n in [MAX_DEPTH + 1, 100_000] {
+                let e = parse_rule(&nest(open, n, "string:a")).unwrap_err().to_string();
+                assert!(e.contains(&format!("nested deeper than {MAX_DEPTH} levels")), "{open} x{n}: {}", &e[e.len().saturating_sub(80)..]);
+            }
+        }
+        // Mixed kinds share one budget; siblings do not add up.
+        let mixed = format!("{}string:a{}", "method:{in:{".repeat(MAX_DEPTH / 2 + 1), "}}".repeat(MAX_DEPTH / 2 + 1));
+        assert!(parse_rule(&mixed).is_err());
+        let wide = vec![nest("method:{", MAX_DEPTH, "string:a"); 50].join(" & ");
+        assert!(parse_rule(&wide).is_ok());
     }
 
     #[test]

@@ -280,10 +280,19 @@ pub fn java_signature_to_dalvik(signature: &str) -> Option<String> {
 
 /// `int` → `I`, `java.lang.String[]` → `[Ljava/lang/String;`, descriptors as they are.
 fn java_type(t: &str) -> Option<String> {
-    let t = t.trim();
-    if let Some(inner) = t.strip_suffix("[]") {
-        return Some(format!("[{}", java_type(inner)?));
+    // A loop, not recursion: the dimensions come from the user's query.
+    let mut t = t.trim();
+    let mut dims = 0;
+    while let Some(inner) = t.strip_suffix("[]") {
+        t = inner.trim();
+        dims += 1;
     }
+    let element = java_element_type(t)?;
+    Some("[".repeat(dims) + &element)
+}
+
+/// [`java_type`] of a type that is not a Java array.
+fn java_element_type(t: &str) -> Option<String> {
     let primitive = match t {
         "void" => "V",
         "boolean" => "Z",
@@ -586,6 +595,10 @@ mod tests {
         assert_eq!(java_signature_to_dalvik("f(byte[], Lx;) void").as_deref(), Some("f([BLx;)V"));
         assert_eq!(java_signature_to_dalvik("run()").as_deref(), Some("run()"));
         assert_eq!(java_signature_to_dalvik("run"), None);
+        assert_eq!(java_signature_to_dalvik("f(int [] [])").as_deref(), Some("f([[I)"));
+        // Array dimensions are counted, not recursed into.
+        let deep = format!("f(int{})", "[]".repeat(1_000_000));
+        assert_eq!(java_signature_to_dalvik(&deep).map(|s| s.len()), Some("f()I".len() + 1_000_000));
         assert_eq!(edit_distance("kitten", "sitting", 5), Some(3));
         assert_eq!(edit_distance("kitten", "sitting", 2), None);
         assert_eq!(edit_distance("a", "a", 0), Some(0));
