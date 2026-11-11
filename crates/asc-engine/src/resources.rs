@@ -131,7 +131,7 @@ impl Engine {
     }
 
     /// Forget the parsed resource table (and its name index); the next
-    /// resource query parses it again (about a millisecond even for Douyin).
+    /// resource query parses it again (about a millisecond even for a large app).
     pub fn release_resources(&self) {
         self.resources.lock_or_default().take();
     }
