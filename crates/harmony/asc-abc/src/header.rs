@@ -23,6 +23,7 @@ impl fmt::Display for Version {
 
 /// Parsed file header (60 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Header {
     /// Adler-32 of everything after the checksum field (from offset 12).
     pub checksum: u32,
@@ -92,6 +93,7 @@ impl Header {
 /// of the file `[start, end)` whose entities use this region's 16-bit index
 /// tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RegionHeader {
     pub start: u32,
     pub end: u32,

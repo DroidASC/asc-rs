@@ -8,6 +8,7 @@ use crate::value::{self, Findings, Line, Note, Obj};
 
 /// A parsed `pack.info`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct PackInfo {
     /// `summary.app`.
     pub app: PackApp,
@@ -23,6 +24,7 @@ pub struct PackInfo {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackApp {
     pub bundle_name: Option<String>,
     pub bundle_type: Option<String>,
@@ -33,6 +35,7 @@ pub struct PackApp {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackModule {
     /// `distro.moduleName`.
     pub name: Option<String>,
@@ -53,12 +56,14 @@ pub struct PackModule {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackAbility {
     pub name: Option<String>,
     pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackExtension {
     pub name: Option<String>,
     /// Service widgets (cards) a form extension offers.
@@ -66,6 +71,7 @@ pub struct PackExtension {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackForm {
     pub name: Option<String>,
     /// `type`: `JS` or `eTS`.
@@ -79,6 +85,7 @@ pub struct PackForm {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackPackage {
     /// File stem of the package inside the bundle (`entry-default`).
     pub name: Option<String>,

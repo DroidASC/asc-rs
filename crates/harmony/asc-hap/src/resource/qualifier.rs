@@ -5,6 +5,7 @@ use std::fmt;
 
 /// What a qualifier restricts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum QualifierKey {
     Language,
     Region,
@@ -61,6 +62,7 @@ impl fmt::Display for QualifierKey {
 
 /// One key of a qualifier set with its stored value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Qualifier {
     pub key: QualifierKey,
     /// The stored number: packed letters for language, script and region,

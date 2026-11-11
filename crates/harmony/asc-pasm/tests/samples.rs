@@ -228,12 +228,12 @@ fn options_change_the_listing() {
     let abc = Abc::parse(&data).unwrap();
     let class = abc.find_record(b"com.hmos.exam5.pkg/entry/ets/entryability/EntryAbility").unwrap().unwrap().local().unwrap();
 
-    let slots = render(&abc, &class, &Options { ic_slots: true, ..Options::default() });
+    let slots = render(&abc, &class, &Options::default().ic_slots(true));
     assert!(slots.contains("\n  0006  tryldglobalbyname 0x0, \"console\"\n"));
     assert!(slots.contains("\n  000e  ldobjbyname 0x1, \"info\"\n"));
     assert!(slots.contains("\n  001b  callthis1 0x3, v5, v6\n"));
 
-    let lines = render(&abc, &class, &Options { lines: true, ..Options::default() });
+    let lines = render(&abc, &class, &Options::default().lines(true));
     let closure = function(&lines, "#~@0>@1*#");
     assert!(closure.contains("0 params), code 33 bytes\n"), "{closure}");
     assert!(closure.contains("\n  ; line 27\n  0006  tryldglobalbyname \"console\"\n"), "{closure}");
@@ -246,7 +246,7 @@ fn options_change_the_listing() {
         .collect();
     assert_eq!(without, plain);
 
-    let short = render(&abc, &class, &Options { literal_limit: 2, string_limit: 5, ..Options::default() });
+    let short = render(&abc, &class, &Options::default().literal_limit(2).string_limit(5));
     assert!(
         short.contains("defineclasswithbuffer #~@0=#EntryAbility, [ \"onCre\"… (+3 bytes), method:#~@0>#onCreate, … (+17 more) ], 0, v6")
     );

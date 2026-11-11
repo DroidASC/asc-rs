@@ -374,6 +374,7 @@ impl<'a> Subject<'a> {
                     flags.unrenderable += 1;
                     b"<unrenderable>".to_vec()
                 }
+                other => panic!("no oracle rendering for {other:?}"),
             };
             items.extend_from_slice(&item);
             items.extend_from_slice(b", ");
@@ -418,6 +419,7 @@ impl<'a> Subject<'a> {
                 Literal::EtsImplements(off) => format!("ets_implements:{}", text(off)),
                 Literal::TagValue(value) => format!("tag_value:{value}"),
                 Literal::TypedArray { tag, data_off } => format!("typed_array:{tag:#x}@{data_off:#x}"),
+                other => panic!("no listing for {other:?}"),
             })
             .collect();
         format!("[ {} ]", items.join(", "))
@@ -1726,7 +1728,8 @@ impl<'a> Comparer<'a> {
         code: &Code<'a>,
         context: &dyn Fn() -> String,
     ) -> bool {
-        let opts = Options { lines: true, locals: true, ic_slots: true, literal_limit: usize::MAX, string_limit: usize::MAX, source: None };
+        let opts =
+            Options::default().lines(true).locals(true).ic_slots(true).literal_limit(usize::MAX).string_limit(usize::MAX).source(None);
         self.listing.clear();
         write_function(&mut self.listing, &self.subject.abc, class, method, &opts).unwrap();
         let listing = std::mem::take(&mut self.listing);

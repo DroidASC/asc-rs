@@ -9,6 +9,7 @@ use super::reader::Reader;
 /// The type of a resource: the `string` of `$string:app_name` and of
 /// `$r('app.string.app_name')`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ResourceType {
     Integer,
     String,
@@ -162,6 +163,7 @@ impl fmt::Display for ResourceRef<'_> {
 /// A name with its value: a plural form, or an attribute of a theme or
 /// pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Attr<'a> {
     pub name: Cow<'a, str>,
     pub value: Cow<'a, str>,

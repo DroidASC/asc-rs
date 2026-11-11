@@ -9,6 +9,7 @@ use crate::value::{self, Findings, Line, Note, Obj};
 
 /// A parsed page list: `{"src": ["pages/Index", …]}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PageList {
     /// Page paths relative to the module's `ets/` directory, without
     /// extension, in file order.
@@ -47,6 +48,7 @@ impl PageList {
 
 /// A parsed route table: `{"routerMap": [{…}, …]}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RouterMap {
     /// In file order.
     pub routes: Vec<Route>,
@@ -57,6 +59,7 @@ pub struct RouterMap {
 /// One route: a name the navigation stack is pushed with, and the builder
 /// function that makes its page.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Route {
     pub name: Option<String>,
     /// The source file of the page, relative to the root of the package

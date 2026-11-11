@@ -12,6 +12,7 @@ use crate::{Opcode, Operand, OperandKind, Prefix, flag, opcode, prefixed_opcode}
 
 /// Why the bytes at an offset are not an instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// Undefined opcode byte, or undefined sub-opcode `sub` of the prefix byte `opcode`.
     Undefined { pc: usize, opcode: u8, sub: Option<u8> },
@@ -67,6 +68,7 @@ pub struct RegRange {
 
 /// One instruction inside a code slice.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Instruction<'a> {
     /// Offset of the instruction in the code it was decoded from.
     pub pc: usize,

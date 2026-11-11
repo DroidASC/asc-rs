@@ -7,6 +7,7 @@ use crate::{Abc, AbcError, Result};
 
 /// A `DebugInfo` item.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct DebugInfo<'a> {
     abc: Abc<'a>,
     off: u32,
@@ -160,6 +161,7 @@ impl<'a> DebugInfo<'a> {
 
 /// A local variable: the code range in which a register holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LocalVar {
     /// The register; `-1` is the accumulator. Registers at or above the
     /// code item's `num_vregs` are arguments.

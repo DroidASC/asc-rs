@@ -37,6 +37,7 @@ use std::fmt::Write as _;
 
 /// What a scope chain element is (its tag character).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScopeKind {
     Class,
     Namespace,
@@ -64,6 +65,7 @@ impl ScopeKind {
 
 /// The name part of a scope chain element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScopeIdent<'a> {
     Anonymous,
     Named(&'a str),
@@ -73,6 +75,7 @@ pub enum ScopeIdent<'a> {
 
 /// One element of a scope chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Scope<'a> {
     pub kind: ScopeKind,
     pub ident: ScopeIdent<'a>,

@@ -11,6 +11,7 @@ use crate::HapError;
 
 /// A field that was present but could not be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Note {
     /// JSON path of the field (`module.abilities[0].exported`).
     pub path: String,

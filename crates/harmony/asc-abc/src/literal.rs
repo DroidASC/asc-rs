@@ -6,6 +6,7 @@ use crate::{AbcError, Result};
 
 /// A literal array.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct LiteralArray<'a> {
     buf: &'a [u8],
     off: u32,
@@ -117,6 +118,7 @@ pub mod tag {
 
 /// One item of a literal array. Offsets are raw file offsets.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Literal {
     /// Tag `0x00` (`TAGVALUE` / `INTEGER_8`): one byte.
     TagValue(u8),

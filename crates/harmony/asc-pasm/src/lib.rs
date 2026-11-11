@@ -58,6 +58,7 @@ use text::write_error;
 /// Rendering options. The defaults suit a language model reading the
 /// listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Options<'a> {
     /// Most items of a literal array shown inline; the rest is summed up as
     /// `… (+N more)`.
@@ -98,6 +99,7 @@ pub struct SourceLine {
 /// What a source map says of the lines the debug info of a record names:
 /// they are lines of the file the build compiled, not of the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SourceLines<'a> {
     /// The source files, as the source map names them.
     pub files: &'a [String],
@@ -108,6 +110,15 @@ pub struct SourceLines<'a> {
     /// For each line of the compiled file, counted from 0 as the debug
     /// info counts: the source line it was made from.
     pub lines: &'a [Option<SourceLine>],
+}
+
+impl<'a> SourceLines<'a> {
+    /// The source `files` of a source map, the ones of them the record's
+    /// header names (`named`, indexes into `files`), and the source line of
+    /// each line of the compiled file (`lines`, counted from 0).
+    pub fn new(files: &'a [String], named: &'a [u32], lines: &'a [Option<SourceLine>]) -> SourceLines<'a> {
+        SourceLines { files, named, lines }
+    }
 }
 
 impl SourceLines<'_> {
@@ -157,6 +168,44 @@ impl SourceLines<'_> {
 impl Options<'_> {
     pub const DEFAULT_LITERAL_LIMIT: usize = 256;
     pub const DEFAULT_STRING_LIMIT: usize = 2048;
+}
+
+impl<'a> Options<'a> {
+    /// These options with at most `items` of a literal array inline.
+    #[must_use]
+    pub fn literal_limit(self, items: usize) -> Self {
+        Options { literal_limit: items, ..self }
+    }
+
+    /// These options with at most `bytes` of a string shown.
+    #[must_use]
+    pub fn string_limit(self, bytes: usize) -> Self {
+        Options { string_limit: bytes, ..self }
+    }
+
+    /// These options with inline-cache slot operands shown or dropped.
+    #[must_use]
+    pub fn ic_slots(self, ic_slots: bool) -> Self {
+        Options { ic_slots, ..self }
+    }
+
+    /// These options with a `; line N` wherever the line changes, or not.
+    #[must_use]
+    pub fn lines(self, lines: bool) -> Self {
+        Options { lines, ..self }
+    }
+
+    /// These options with the `; locals` / `; params` header lines, or not.
+    #[must_use]
+    pub fn locals(self, locals: bool) -> Self {
+        Options { locals, ..self }
+    }
+
+    /// These options with the source lines a source map gives, if any.
+    #[must_use]
+    pub fn source(self, source: Option<SourceLines<'a>>) -> Self {
+        Options { source, ..self }
+    }
 }
 
 impl Default for Options<'_> {

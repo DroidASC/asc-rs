@@ -279,6 +279,7 @@ fn record_name(descriptor: &[u8]) -> &[u8] {
 
 /// A class declared in the foreign region: only its name is stored.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ForeignClass<'a> {
     pub off: u32,
     pub descriptor: StringData<'a>,
@@ -287,6 +288,7 @@ pub struct ForeignClass<'a> {
 /// A class defined in this file. In the dynamic (ECMAScript) flavour a
 /// class is a *record*: one per source module, plus a few pseudo records.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Class<'a> {
     abc: Abc<'a>,
     off: u32,
@@ -646,6 +648,7 @@ pub enum FieldValue {
 
 /// A field (local or foreign).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Field<'a> {
     abc: Abc<'a>,
     off: u32,
@@ -783,6 +786,7 @@ impl FunctionKind {
 /// A method (local or foreign). In the dynamic flavour every function,
 /// method and closure of a module is a method of the module's record.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Method<'a> {
     abc: Abc<'a>,
     off: u32,

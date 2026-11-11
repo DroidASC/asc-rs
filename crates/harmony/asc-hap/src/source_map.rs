@@ -276,6 +276,7 @@ impl Scanner<'_> {
 
 /// A line of one of the source files of a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct SourceLine {
     /// Which of [`ModuleMap::sources`], by index.
     pub source: u32,
@@ -286,6 +287,7 @@ pub struct SourceLine {
 /// The source map of one module: which source line each line of the
 /// compiled file comes from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ModuleMap {
     /// The source files, as the build names them: from the project root
     /// (`entry/src/main/ets/pages/Index.ets`,

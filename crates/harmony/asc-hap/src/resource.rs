@@ -57,6 +57,7 @@ type Result<T> = std::result::Result<T, ResourceIndexError>;
 
 /// Which of the two layouts an index uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum IndexFormat {
     /// `Restool <version>`.
     V1,

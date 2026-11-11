@@ -48,7 +48,7 @@ impl<'m> Mapped<'m> {
     }
 
     fn source_lines(&self) -> SourceLines<'_> {
-        SourceLines { files: &self.map.sources, named: &self.named, lines: &self.lines }
+        SourceLines::new(&self.map.sources, &self.named, &self.lines)
     }
 }
 
@@ -56,7 +56,7 @@ impl Listing<'_> {
     fn write(self, write: impl FnOnce(&Options<'_>) -> std::result::Result<(), asc_pasm::Error>) -> Result<()> {
         let mapped = self.map.and_then(Mapped::of);
         let source = mapped.as_ref().map(Mapped::source_lines);
-        write(&Options { source, lines: self.lines, ..Options::default() }).map_err(failed)
+        write(&Options::default().source(source).lines(self.lines)).map_err(failed)
     }
 }
 
@@ -89,7 +89,7 @@ pub(crate) fn instruction(abc: &Abc<'_>, method: &Method<'_>, insn: &Instruction
 /// (`[ … (+7 more) ]`): for rows that list the items they are about
 /// themselves.
 pub(crate) fn instruction_without_literals(abc: &Abc<'_>, method: &Method<'_>, insn: &Instruction<'_>) -> String {
-    instruction_with(abc, method, insn, &Options { literal_limit: 0, ..Options::default() })
+    instruction_with(abc, method, insn, &Options::default().literal_limit(0))
 }
 
 fn instruction_with(abc: &Abc<'_>, method: &Method<'_>, insn: &Instruction<'_>, options: &Options<'_>) -> String {

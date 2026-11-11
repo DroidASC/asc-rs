@@ -6,6 +6,7 @@ use crate::{Abc, AbcError, Result};
 
 /// An annotation attached to a class, field or method.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Annotation<'a> {
     off: u32,
     /// Index of the annotation class in the region's class table.
@@ -16,6 +17,7 @@ pub struct Annotation<'a> {
 
 /// One name-value pair of an annotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AnnotationElement {
     pub name_off: u32,
     /// The value itself for types up to 32 bits, otherwise the offset of

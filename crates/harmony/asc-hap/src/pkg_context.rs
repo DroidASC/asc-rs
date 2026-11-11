@@ -14,6 +14,7 @@ use crate::value::{self, Findings, Line, Note, Obj};
 
 /// A parsed `pkgContextInfo.json`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct PkgContextInfo {
     /// Sorted by [`PkgContext::name`].
     packages: Vec<PkgContext>,
@@ -27,6 +28,7 @@ pub struct PkgContextInfo {
 /// One package. Strings the file leaves empty stay empty here: the file
 /// itself writes `""` for "none".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PkgContext {
     /// The key of the entry: the name code refers to the package by.
     pub name: String,
@@ -62,6 +64,7 @@ impl PkgContext {
 
 /// A normalized record name split against the package table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordOwner<'c, 'r> {
     pub package: &'c PkgContext,
     /// Text before the first `&`; empty for records of this bundle.

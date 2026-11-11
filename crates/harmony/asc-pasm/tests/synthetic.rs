@@ -350,7 +350,7 @@ fn operands_are_resolved_in_place() {
     code.push(0x63); // fldai 0.5
     code.extend_from_slice(&0.5f64.to_le_bytes());
     code.push(0x65);
-    let text = listing_with(&[Function::new("#~@0>#build", &code)], &Options { literal_limit: 8, ..Options::default() });
+    let text = listing_with(&[Function::new("#~@0>#build", &code)], &Options::default().literal_limit(8));
     assert_eq!(
         body(&text),
         [
@@ -373,10 +373,7 @@ fn operands_are_resolved_in_place() {
     );
 
     // Inline-cache slots come back on request, where `isa.yaml` puts them.
-    let text = listing_with(
-        &[Function::new("f", &[0x33, 0x09, id::FIRST_FUNCTION, 0x00, 0x02])],
-        &Options { ic_slots: true, ..Options::default() },
-    );
+    let text = listing_with(&[Function::new("f", &[0x33, 0x09, id::FIRST_FUNCTION, 0x00, 0x02])], &Options::default().ic_slots(true));
     assert_eq!(body(&text), ["  0000  definefunc 0x9, f, 2"]);
 }
 
@@ -384,7 +381,7 @@ fn operands_are_resolved_in_place() {
 fn literal_arrays_are_bounded() {
     let code = [0x06, 0x00, id::NUMBERS, 0x00];
     let line = |limit: usize| {
-        let text = listing_with(&[Function::new("f", &code)], &Options { literal_limit: limit, ..Options::default() });
+        let text = listing_with(&[Function::new("f", &code)], &Options::default().literal_limit(limit));
         body(&text)[0].to_owned()
     };
     assert_eq!(line(0), "  0000  createarraywithbuffer [ … (+20 more) ]");
@@ -578,7 +575,7 @@ impl Rng {
 fn render_damaged(data: &[u8]) {
     let Ok(abc) = Abc::parse_lenient(data) else { return };
     let Ok(classes) = abc.classes() else { return };
-    let opts = Options { lines: true, locals: true, ic_slots: true, ..Options::default() };
+    let opts = Options::default().lines(true).locals(true).ic_slots(true);
     let mut text = String::new();
     for entry in classes {
         let Ok(ClassEntry::Local(class)) = entry else { continue };
@@ -644,7 +641,7 @@ fn listing_with_debug(debug: AbcDebugInfo, damage: impl FnOnce(&mut Vec<u8>, &Ab
     let class = abc.find_record(RECORD.as_bytes()).unwrap().unwrap().local().unwrap();
     let method = class.methods().unwrap().next().unwrap().unwrap();
     let mut text = String::new();
-    write_function(&mut text, &abc, &class, &method, &Options { locals: true, ..Options::default() }).unwrap();
+    write_function(&mut text, &abc, &class, &method, &Options::default().locals(true)).unwrap();
     text
 }
 
@@ -716,7 +713,7 @@ fn every_opcode_renders_with_any_operands() {
     let abc = Abc::parse(&data).unwrap();
     let class = abc.find_record(RECORD.as_bytes()).unwrap().unwrap().local().unwrap();
     let method = class.methods().unwrap().next().unwrap().unwrap();
-    let opts = Options { ic_slots: true, ..Options::default() };
+    let opts = Options::default().ic_slots(true);
     let mut text = String::new();
     for fill in [0x00, 0x01, 0x7f, 0x80, 0xff] {
         for opcode in asc_arkisa::opcodes() {
@@ -752,8 +749,8 @@ fn source_lines_follow_the_lines_of_the_debug_info() {
     let method = class.methods().unwrap().next().unwrap().unwrap();
     let files = ["src/a file.ets".to_owned(), "src/unused.ets".to_owned(), "src/part.ets".to_owned()];
     let listing = |named: &[u32], lines: &[Option<SourceLine>], whole: bool, every_line: bool| {
-        let source = asc_pasm::SourceLines { files: &files, named, lines };
-        let opts = Options { source: Some(source), lines: every_line, ..Options::default() };
+        let source = asc_pasm::SourceLines::new(&files, named, lines);
+        let opts = Options::default().source(Some(source)).lines(every_line);
         let mut text = String::new();
         if whole {
             write_record(&mut text, &abc, &class, &opts).unwrap();
@@ -803,9 +800,9 @@ fn source_lines_follow_the_lines_of_the_debug_info() {
     // Only so many are named.
     let many: Vec<u32> = (0..12).collect();
     let files: Vec<String> = many.iter().map(|index| format!("f{index}.ets")).collect();
-    let source = asc_pasm::SourceLines { files: &files, named: &many, lines: &[] };
+    let source = asc_pasm::SourceLines::new(&files, &many, &[]);
     let mut text = String::new();
-    write_record(&mut text, &abc, &class, &Options { source: Some(source), ..Options::default() }).unwrap();
+    write_record(&mut text, &abc, &class, &Options::default().source(Some(source))).unwrap();
     assert!(
         text.lines().nth(2).unwrap().starts_with("; sources #0 f0.ets, #1 f1.ets, ") && text.contains(", #7 f7.ets, … (+4 more) (by "),
         "{text}"

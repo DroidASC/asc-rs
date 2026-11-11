@@ -64,6 +64,8 @@ fn write_literal<W: Write>(out: &mut W, abc: &Abc<'_>, literal: &Literal, opts: 
         }
         Literal::TagValue(value) => write!(out, "tag_value:{value}"),
         Literal::TypedArray { tag, data_off } => write!(out, "typed_array:{tag:#x}@{data_off:#x}"),
+        // A tag newer than this writer.
+        _ => write!(out, "{literal:?}"),
     }
 }
 

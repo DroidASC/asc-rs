@@ -14,6 +14,7 @@ use crate::value::{self, Findings, Line, Note, Obj};
 
 /// A parsed `module.json`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ModuleJson {
     pub app: App,
     pub module: Module,
@@ -49,6 +50,7 @@ impl fmt::Display for ApiVersion {
 
 /// The `app` object: bundle-wide facts.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct App {
     pub bundle_name: Option<String>,
     /// `app`, `atomicService`, `shared`, `appService`…
@@ -80,6 +82,7 @@ pub struct App {
 
 /// `multiAppMode` of the `app` object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MultiAppMode {
     /// `multiAppModeType`: `appClone` or `multiInstance`.
     pub kind: Option<String>,
@@ -88,6 +91,7 @@ pub struct MultiAppMode {
 
 /// A `name` / `value` pair (`appEnvironments`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NameValue {
     pub name: Option<String>,
     pub value: Option<String>,
@@ -95,6 +99,7 @@ pub struct NameValue {
 
 /// A `metadata` entry: a literal `value`, a `$profile:` `resource`, or both.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Metadata {
     pub name: Option<String>,
     pub value: Option<String>,
@@ -103,6 +108,7 @@ pub struct Metadata {
 
 /// The `module` object.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Module {
     pub name: Option<String>,
     /// `entry`, `feature`, `har` or `shared`.
@@ -144,6 +150,7 @@ pub struct Module {
 
 /// A shared package (HSP) the module depends on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dependency {
     pub bundle_name: Option<String>,
     pub module_name: Option<String>,
@@ -152,6 +159,7 @@ pub struct Dependency {
 
 /// A `proxyData` entry: data shared through the data-share proxy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProxyData {
     pub uri: Option<String>,
     pub required_read_permission: Option<String>,
@@ -161,6 +169,7 @@ pub struct ProxyData {
 
 /// Which array of the module an [`Ability`] comes from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum AbilityKind {
     /// `abilities`: a UIAbility.
     #[default]
@@ -181,6 +190,7 @@ impl AbilityKind {
 
 /// An entry of `abilities` or `extensionAbilities`.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Ability {
     pub kind: AbilityKind,
     pub name: Option<String>,
@@ -264,6 +274,7 @@ impl Ability {
 
 /// One entry of `skills`: the implicit wants an ability accepts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Skill {
     pub actions: Vec<String>,
     pub entities: Vec<String>,
@@ -275,6 +286,7 @@ pub struct Skill {
 
 /// One entry of a skill's `uris`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SkillUri {
     pub scheme: Option<String>,
     pub host: Option<String>,
@@ -341,6 +353,7 @@ impl SkillUri {
 
 /// An entry of `requestPermissions`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequestPermission {
     pub name: Option<String>,
     pub reason: Option<String>,
@@ -352,6 +365,7 @@ pub struct RequestPermission {
 
 /// An entry of `definePermissions`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DefinePermission {
     pub name: Option<String>,
     /// `system_grant` or `user_grant`.
@@ -366,6 +380,7 @@ pub struct DefinePermission {
 
 /// `testRunner`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TestRunner {
     pub name: Option<String>,
     pub src_path: Option<String>,
@@ -373,6 +388,7 @@ pub struct TestRunner {
 
 /// `atomicService`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AtomicService {
     /// `preloads[].moduleName`.
     pub preloads: Vec<String>,

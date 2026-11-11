@@ -6,6 +6,7 @@ use crate::reader::{Reader, entity_pos, file_off};
 
 /// A `Code` item.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Code<'a> {
     buf: &'a [u8],
     off: u32,

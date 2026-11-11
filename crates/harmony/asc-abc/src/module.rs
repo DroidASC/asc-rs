@@ -140,6 +140,7 @@ impl<'a, T: ModuleEntry + 'a> Section<'a, T> {
 
 /// A module record, with all section bounds checked up front.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ModuleRecord<'a> {
     off: u32,
     /// The leading `u32`; a literal count that readers skip.

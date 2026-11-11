@@ -19,6 +19,7 @@ pub(crate) fn strip_source_extension(path: &str) -> &str {
 /// a package uses is a build option (normalized OHM URLs); packages built
 /// with it carry a `pkgContextInfo.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordNames {
     /// `&<packageName>/<source root><path>&<version>`, e.g.
     /// `&entry/src/main/ets/entryability/EntryAbility&`. `None` when the
