@@ -125,7 +125,7 @@ impl<'a> IndexList<'a> {
         self.bytes.is_empty()
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = u16> + 'a {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = u16> + 'a + use<'a> {
         self.bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))
     }
 }
@@ -332,7 +332,7 @@ impl<'a> Class<'a> {
     }
 
     /// The tagged values, in file order.
-    pub fn tags(&self) -> impl Iterator<Item = Result<ClassTag<'a>>> + 'a {
+    pub fn tags(&self) -> impl Iterator<Item = Result<ClassTag<'a>>> + 'a + use<'a> {
         Tags::new(self.abc.bytes(), self.tags_pos)
     }
 
@@ -746,7 +746,7 @@ impl<'a> Field<'a> {
     }
 
     /// The tagged values, in file order (empty for foreign fields).
-    pub fn tags(&self) -> impl Iterator<Item = Result<FieldTag>> + 'a {
+    pub fn tags(&self) -> impl Iterator<Item = Result<FieldTag>> + 'a + use<'a> {
         self.tags_pos.map(|pos| Tags::new(self.abc.bytes(), pos)).into_iter().flatten()
     }
 }
@@ -914,7 +914,7 @@ impl<'a> Method<'a> {
     }
 
     /// The tagged values, in file order (empty for foreign methods).
-    pub fn tags(&self) -> impl Iterator<Item = Result<MethodTag>> + 'a {
+    pub fn tags(&self) -> impl Iterator<Item = Result<MethodTag>> + 'a + use<'a> {
         self.tags_pos.map(|pos| Tags::new(self.abc.bytes(), pos)).into_iter().flatten()
     }
 

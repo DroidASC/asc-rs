@@ -610,7 +610,7 @@ mod tests {
 
     const GIB: u64 = 1 << 30;
 
-    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
         let vars: HashMap<String, String> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         move |k| vars.get(k).cloned()
     }

@@ -94,7 +94,7 @@ impl<'a> Annotation<'a> {
         self.tags.is_empty()
     }
 
-    pub fn elements(&self) -> impl Iterator<Item = AnnotationElement> + 'a {
+    pub fn elements(&self) -> impl Iterator<Item = AnnotationElement> + 'a + use<'a> {
         self.elements
             .chunks_exact(Self::ELEMENT_SIZE)
             .zip(self.tags)

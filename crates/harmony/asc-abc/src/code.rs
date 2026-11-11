@@ -94,7 +94,7 @@ impl<'a> TryBlock<'a> {
 
     /// The catch blocks, in the order the runtime tries them. They were
     /// validated when the try block was read, so this cannot fail.
-    pub fn catch_blocks(&self) -> impl Iterator<Item = CatchBlock> + 'a {
+    pub fn catch_blocks(&self) -> impl Iterator<Item = CatchBlock> + 'a + use<'a> {
         let mut r = self.catches;
         (0..self.num_catches).map_while(move |_| CatchBlock::read(&mut r).ok())
     }

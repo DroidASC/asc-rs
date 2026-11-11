@@ -149,7 +149,7 @@ impl<'a> Abc<'a> {
     ///
     /// # Errors
     /// `Truncated` when the class index does not fit in the file.
-    pub fn classes(&self) -> Result<impl Iterator<Item = Result<ClassEntry<'a>>> + 'a> {
+    pub fn classes(&self) -> Result<impl Iterator<Item = Result<ClassEntry<'a>>> + 'a + use<'a>> {
         let abc = *self;
         Ok(self.class_index()?.iter().map(move |off| abc.class_entry(off)))
     }
@@ -397,7 +397,7 @@ impl<'a> OffsetTable<'a> {
         read_u32(self.bytes, (i as usize).checked_mul(4)?).ok()
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = u32> + DoubleEndedIterator + 'a {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = u32> + DoubleEndedIterator + 'a + use<'a> {
         self.bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
     }
 
@@ -433,7 +433,7 @@ impl<'a> Regions<'a> {
         Some(Region { buf: self.buf, index, header, header_pos: self.table_pos + rel })
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Region<'a>> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = Region<'a>> + 'a + use<'a> {
         let regions = *self;
         (0..self.len()).filter_map(move |i| regions.get(i))
     }

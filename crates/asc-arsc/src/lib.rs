@@ -548,7 +548,7 @@ impl ResTable {
                     });
                 }
                 let base = (pkg.id as u32) << 24 | (t as u32) << 16;
-                out.extend(seen.iter().enumerate().filter(|(_, &s)| s).map(|(i, _)| base | i as u32));
+                out.extend(seen.iter().enumerate().filter(|&(_, &s)| s).map(|(i, _)| base | i as u32));
             }
         }
         out.sort_unstable();

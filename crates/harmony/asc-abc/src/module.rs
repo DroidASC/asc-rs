@@ -133,7 +133,7 @@ impl<'a, T: ModuleEntry + 'a> Section<'a, T> {
         self.bytes.get(start..start.checked_add(T::SIZE)?).and_then(T::decode)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = T> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = T> + 'a + use<'a, T> {
         self.bytes.chunks_exact(T::SIZE).filter_map(T::decode)
     }
 }

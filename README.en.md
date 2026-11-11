@@ -11,7 +11,7 @@ people and agents: CLI first (with a transparent warm daemon on Unix), plus an M
 ## Build
 
 ```sh
-cargo build --release        # -> target/release/asc (Rust 1.85+)
+cargo build --release        # -> target/release/asc (Rust 1.98+)
 cargo test --workspace
 ```
 

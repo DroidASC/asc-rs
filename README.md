@@ -9,7 +9,7 @@
 ## 构建
 
 ```sh
-cargo build --release        # -> target/release/asc（需要 Rust 1.85+）
+cargo build --release        # -> target/release/asc（需要 Rust 1.98+）
 cargo test --workspace
 ```
 

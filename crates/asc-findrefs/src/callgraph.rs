@@ -55,7 +55,7 @@ impl CallGraph {
         // (insn_off, method) for methods with a body, so shared code items are
         // adjacent and walked once.
         let mut bodies: Vec<(u32, u16)> =
-            bounds.iter().take(n).enumerate().filter(|(_, &b)| b != u32::MAX).map(|(m, &b)| (b, m as u16)).collect();
+            bounds.iter().take(n).enumerate().filter(|&(_, &b)| b != u32::MAX).map(|(m, &b)| (b, m as u16)).collect();
         bodies.sort_unstable();
         let mut edges: Vec<(u16, u16)> = Vec::new();
         let mut last: Option<(u32, usize, usize)> = None; // (insn_off, edges range of its first method)

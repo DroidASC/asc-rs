@@ -224,7 +224,7 @@ impl Packed {
     }
 
     /// The classes carrying the class annotation `annotation`.
-    pub(super) fn annotated(&self, annotation: &str) -> impl Iterator<Item = u32> + '_ {
+    pub(super) fn annotated(&self, annotation: &str) -> impl Iterator<Item = u32> + '_ + use<'_> {
         let ann = |i: usize| self.text(self.word(self.at.ann, 3 * i) as usize..self.word(self.at.ann, 3 * i + 1) as usize);
         let (mut lo, mut hi) = (0, self.at.anns);
         while lo < hi {

@@ -159,7 +159,7 @@ impl<'a> FunctionName<'a> {
 
     /// The scope chain from the outermost scope to the function itself (the
     /// last element). Empty for names without a scope chain.
-    pub fn scopes(&self) -> impl Iterator<Item = Scope<'a>> + 'a {
+    pub fn scopes(&self) -> impl Iterator<Item = Scope<'a>> + 'a + use<'a> {
         let (mut chain, name) = match self.form {
             Form::Scoped { chain, name } => (chain, name),
             Form::Plain | Form::Numbered { .. } => ("", ""),

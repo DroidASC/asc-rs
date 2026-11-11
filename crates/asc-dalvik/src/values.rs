@@ -326,7 +326,7 @@ pub struct Analyzer {
     wide_live: Vec<bool>,
     /// Per block, the registers it reads before writing them and those it
     /// writes, `live_words` words each.
-    gen: Vec<u64>,
+    used: Vec<u64>,
     kill: Vec<u64>,
     /// Successor blocks (not handlers) of block `b`:
     /// `succ[succ_start[b]..succ_start[b + 1]]`; empty until needed.
@@ -564,27 +564,27 @@ impl Analyzer {
         let (nblocks, words) = (self.blocks.len(), regs.div_ceil(64).max(1));
         self.live_words = words;
         self.live.resize(nblocks * words, 0);
-        for v in [&mut self.gen, &mut self.kill] {
+        for v in [&mut self.used, &mut self.kill] {
             v.clear();
             v.resize(nblocks * words, 0);
         }
         // Each block's reads-before-writes and writes, in one backward pass.
         for b in 0..nblocks {
             let insns = self.blocks[b] as usize..self.block_end(b);
-            let (gen, kill) = (&mut self.gen[b * words..(b + 1) * words], &mut self.kill[b * words..(b + 1) * words]);
+            let (used, kill) = (&mut self.used[b * words..(b + 1) * words], &mut self.kill[b * words..(b + 1) * words]);
             for i in insns.rev() {
                 let pc = self.pcs[i] as usize;
                 let op = opcode(code[pc]).expect("walked instruction has a defined opcode");
                 if let Some((lo, hi)) = written(code, pc, op) {
                     for r in lo.max(0)..=hi.min(regs as i64 - 1) {
                         let (w, bit) = (r as usize / 64, 1u64 << (r % 64));
-                        gen[w] &= !bit;
+                        used[w] &= !bit;
                         kill[w] |= bit;
                     }
                 }
                 for_each_read(code, pc, op, |r| {
                     if let Some(r) = usize::try_from(r).ok().filter(|&r| r < regs) {
-                        gen[r / 64] |= 1 << (r % 64);
+                        used[r / 64] |= 1 << (r % 64);
                     }
                 });
             }
@@ -600,7 +600,7 @@ impl Analyzer {
                     let s = s as usize;
                     live.iter_mut().zip(&self.live[s * words..(s + 1) * words]).for_each(|(l, x)| *l |= x);
                 }
-                for (l, (g, k)) in live.iter_mut().zip(self.gen[b * words..].iter().zip(&self.kill[b * words..(b + 1) * words])) {
+                for (l, (g, k)) in live.iter_mut().zip(self.used[b * words..].iter().zip(&self.kill[b * words..(b + 1) * words])) {
                     *l = g | (*l & !k);
                 }
                 for k in self.block_handlers(b) {
@@ -632,11 +632,11 @@ impl Analyzer {
         // Per block: read before written, and written.
         let gen_kill: Vec<(bool, bool)> = (0..n)
             .map(|b| {
-                (self.blocks[b] as usize..self.block_end(b)).rev().fold((false, false), |(gen, kill), i| {
+                (self.blocks[b] as usize..self.block_end(b)).rev().fold((false, false), |(used, kill), i| {
                     let pc = self.pcs[i] as usize;
                     let op = opcode(code[pc]).expect("walked instruction has a defined opcode");
                     let write = kills(code, pc, op, r, true);
-                    (reads(code, pc, op, r) || reads(code, pc, op, r + 1) || (gen && !write), kill || write)
+                    (reads(code, pc, op, r) || reads(code, pc, op, r + 1) || (used && !write), kill || write)
                 })
             })
             .collect();
@@ -647,9 +647,9 @@ impl Analyzer {
             changed = false;
             for b in (0..n).rev() {
                 let out = self.succ[self.succ_start[b] as usize..self.succ_start[b + 1] as usize].iter().any(|&s| live[s as usize]);
-                let (gen, kill) = gen_kill[b];
+                let (used, kill) = gen_kill[b];
                 let caught = self.handlers[self.block_handlers(b)].iter().any(|&(_, h)| live[h as usize]);
-                if (gen || (out && !kill) || caught) && !live[b] {
+                if (used || (out && !kill) || caught) && !live[b] {
                     live[b] = true;
                     changed = true;
                 }

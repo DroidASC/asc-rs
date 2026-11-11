@@ -165,7 +165,7 @@ pub(crate) fn immediate(insn: &Instruction<'_>, index: usize) -> Option<u32> {
 }
 
 /// The registers of `insn` whose operand is of `kind`, in assembly order.
-pub(crate) fn registers<'a>(insn: &Instruction<'a>, kind: OperandKind) -> impl Iterator<Item = u16> + 'a {
+pub(crate) fn registers<'a>(insn: &Instruction<'a>, kind: OperandKind) -> impl Iterator<Item = u16> + 'a + use<'a> {
     insn.opcode.operands.iter().zip(insn.operands()).filter_map(move |(operand, value)| match value {
         Value::Reg(reg) if operand.kind == kind => Some(reg),
         _ => None,

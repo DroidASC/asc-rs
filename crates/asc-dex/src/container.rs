@@ -65,7 +65,7 @@ pub fn logical_dex_buffers<'a>(name: &str, data: &'a [u8]) -> Vec<(String, Cow<'
 /// Lazy [`logical_dex_buffers`]: each logical DEX is normalised only when it
 /// is reached, so a caller that drops it before the next holds one copy of
 /// the container at a time instead of one per logical DEX.
-pub fn logical_dex_iter<'a>(name: &str, data: &'a [u8]) -> impl Iterator<Item = (String, Cow<'a, [u8]>)> + 'a {
+pub fn logical_dex_iter<'a>(name: &str, data: &'a [u8]) -> impl Iterator<Item = (String, Cow<'a, [u8]>)> + 'a + use<'a> {
     let offsets = dex041_logical_offsets(data);
     let container = offsets.len() > 1;
     let name = name.to_string();

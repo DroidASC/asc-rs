@@ -224,7 +224,7 @@ pub(crate) fn lower_priority() {
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        extern "C" {
+        unsafe extern "C" {
             fn gettid() -> std::os::raw::c_int;
             fn setpriority(which: std::os::raw::c_int, who: std::os::raw::c_uint, prio: std::os::raw::c_int) -> std::os::raw::c_int;
         }

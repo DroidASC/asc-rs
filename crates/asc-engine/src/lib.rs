@@ -889,7 +889,7 @@ fn tune_allocator() {
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            extern "C" {
+            unsafe extern "C" {
                 fn mallopt(param: std::os::raw::c_int, value: std::os::raw::c_int) -> std::os::raw::c_int;
             }
             const M_MMAP_THRESHOLD: std::os::raw::c_int = -3;

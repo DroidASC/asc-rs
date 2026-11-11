@@ -44,7 +44,7 @@ impl<'a> DebugInfo<'a> {
 
     /// String offsets of the parameter names; `0` for a nameless parameter.
     /// The list was validated when the item was parsed.
-    pub fn params(&self) -> impl Iterator<Item = u32> + 'a {
+    pub fn params(&self) -> impl Iterator<Item = u32> + 'a + use<'a> {
         let mut r = Reader::new(self.abc.bytes(), self.params_pos);
         (0..self.num_params).map_while(move |_| r.uleb().ok())
     }
