@@ -1,16 +1,10 @@
+use crate::call_site::{CallSite, MethodHandle};
 use crate::class_data::ClassData;
 use crate::code::CodeItem;
-use crate::header::Header;
-use crate::{DexError, Result, leb128, mutf8, u16_at, u32_at};
+use crate::header::{Header, Section};
+use crate::map::{MapItem, MapList};
+use crate::{DexError, Result, leb128, map_type, mutf8, u16_at, u32_at};
 use std::ops::Range;
-
-/// One entry of the map list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MapItem {
-    pub kind: u16,
-    pub size: u32,
-    pub offset: u32,
-}
 
 /// `proto_id_item`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,9 +383,95 @@ impl<'a> Dex<'a> {
         CodeItem::parse(self.buf, off as usize)
     }
 
+    // ---- method handles / call sites --------------------------------------
+
+    /// The `(offset, count)` of the map list entry of type `kind`; empty when
+    /// the map has no such entry. In bounds when the map list validated.
+    fn map_section(&self, kind: u16) -> Result<Section> {
+        Ok(self.map()?.find(kind).map(|item| Section { off: item.offset, size: item.size }).unwrap_or_default())
+    }
+
+    /// Number of `method_handle_item`s.
+    ///
+    /// # Errors
+    ///
+    /// When the map list is invalid (see [`Self::map`]).
+    pub fn method_handle_count(&self) -> Result<u32> {
+        Ok(self.map_section(map_type::METHOD_HANDLE)?.size)
+    }
+
+    /// Method handle `idx` (the operand of `const-method-handle` and of
+    /// `VALUE_METHOD_HANDLE` encoded values).
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` for `idx` or for a field/method index outside its
+    /// table, `Malformed` for an unknown handle type, and the errors of
+    /// [`Self::map`].
+    pub fn method_handle(&self, idx: u32) -> Result<MethodHandle> {
+        let section = self.map_section(map_type::METHOD_HANDLE)?;
+        self.check_idx("method_handle", idx, section.size)?;
+        let handle = MethodHandle::parse(self.buf, section.off as usize + idx as usize * MethodHandle::SIZE)?;
+        let (what, size) = if handle.kind.is_field_accessor() { ("field", self.field_count()) } else { ("method", self.method_count()) };
+        self.check_idx(what, handle.field_or_method_idx.into(), size)?;
+        Ok(handle)
+    }
+
+    /// Number of `call_site_id_item`s.
+    ///
+    /// # Errors
+    ///
+    /// When the map list is invalid (see [`Self::map`]).
+    pub fn call_site_count(&self) -> Result<u32> {
+        Ok(self.map_section(map_type::CALL_SITE_ID)?.size)
+    }
+
+    /// `call_site_off` of call site `idx`: the offset of its
+    /// `encoded_array_item`.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` for `idx` and the errors of [`Self::map`].
+    pub fn call_site_off(&self, idx: u32) -> Result<u32> {
+        let section = self.map_section(map_type::CALL_SITE_ID)?;
+        self.check_idx("call_site", idx, section.size)?;
+        u32_at(self.buf, section.off as usize + idx as usize * 4)
+    }
+
+    /// Call site `idx` (the operand of `invoke-custom` and
+    /// `invoke-custom/range`), with the bootstrap method handle, name and
+    /// proto indexes checked against their tables.
+    ///
+    /// # Errors
+    ///
+    /// `IndexOutOfRange` for `idx` or a leading element, the errors of
+    /// [`CallSite::parse`] and of [`Self::map`].
+    pub fn call_site(&self, idx: u32) -> Result<CallSite> {
+        let site = CallSite::parse(self.buf, self.call_site_off(idx)? as usize)?;
+        self.check_idx("method_handle", site.bootstrap, self.method_handle_count()?)?;
+        self.check_idx("string", site.method_name, self.string_count())?;
+        self.check_idx("proto", site.method_type, self.proto_count())?;
+        Ok(site)
+    }
+
     // ---- map list --------------------------------------------------------
 
-    /// Parse the map list (empty when `map_off` is 0 or invalid).
+    /// The validated map list (see [`MapList::parse`]); empty when `map_off`
+    /// is 0.
+    ///
+    /// # Errors
+    ///
+    /// When the list or one of its entries does not fit in the file.
+    pub fn map(&self) -> Result<MapList<'a>> {
+        match self.header.map_off {
+            0 => Ok(MapList::EMPTY),
+            off => MapList::parse(self.buf, off as usize),
+        }
+    }
+
+    /// Parse the map list leniently: stops at the first entry out of the
+    /// buffer, entries are not validated (see [`Self::map`] for that).
+    /// Empty when `map_off` is 0 or invalid.
     pub fn map_list(&self) -> Vec<MapItem> {
         let off = self.header.map_off as usize;
         if off == 0 {
@@ -473,6 +553,8 @@ fn binary_search(size: u32, mut cmp: impl FnMut(u32) -> Result<std::cmp::Orderin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoded::EncodedValue;
+    use crate::{MethodHandleKind, map_type};
     use asc_fixture::make_dex;
 
     #[test]
@@ -502,6 +584,116 @@ mod tests {
         long[off] = 0x7f;
         let dex = Dex::parse(&long).unwrap();
         assert_eq!(dex.string(5).unwrap(), "token");
+    }
+
+    /// A header-only DEX (id tables declared but empty: only their sizes
+    /// matter) followed by `method_handle_item`s, `call_site_id_item`s, the
+    /// call sites' encoded arrays and the map list.
+    fn call_site_dex(handles: &[(u16, u16)], sites: &[Vec<EncodedValue>]) -> Vec<u8> {
+        let mut buf = vec![0u8; crate::HEADER_SIZE];
+        buf[..8].copy_from_slice(b"dex\n038\0");
+        for (size_off, size) in [(0x38, 5u32), (0x48, 2), (0x50, 2), (0x58, 3)] {
+            buf[size_off..size_off + 4].copy_from_slice(&size.to_le_bytes());
+        }
+        let handles_off = buf.len() as u32;
+        for &(kind, idx) in handles {
+            buf.extend_from_slice(&[kind.to_le_bytes(), [0; 2], idx.to_le_bytes(), [0; 2]].concat());
+        }
+        let ids_off = buf.len();
+        buf.resize(ids_off + 4 * sites.len(), 0);
+        for (i, site) in sites.iter().enumerate() {
+            let off = buf.len() as u32;
+            buf[ids_off + 4 * i..ids_off + 4 * i + 4].copy_from_slice(&off.to_le_bytes());
+            crate::encoded::write_array(&mut buf, site, &crate::encoded::Identity);
+        }
+        buf.resize(buf.len().next_multiple_of(4), 0);
+        let map_off = buf.len() as u32;
+        buf[0x34..0x38].copy_from_slice(&map_off.to_le_bytes());
+        let items = [
+            (map_type::HEADER, 1, 0),
+            (map_type::METHOD_HANDLE, handles.len() as u32, handles_off),
+            (map_type::CALL_SITE_ID, sites.len() as u32, ids_off as u32),
+            (map_type::MAP_LIST, 1, map_off),
+        ];
+        buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        for (kind, size, off) in items {
+            buf.extend_from_slice(&[&kind.to_le_bytes()[..], &[0; 2], &size.to_le_bytes(), &off.to_le_bytes()].concat());
+        }
+        buf
+    }
+
+    fn site(bootstrap: u32, name: u32, proto: u32) -> Vec<EncodedValue> {
+        vec![EncodedValue::MethodHandle(bootstrap), EncodedValue::String(name), EncodedValue::MethodType(proto)]
+    }
+
+    #[test]
+    fn method_handles_and_call_sites_resolve_through_the_map() {
+        let mut extra = site(1, 4, 0);
+        extra.push(EncodedValue::MethodHandle(0));
+        let data = call_site_dex(&[(0x04, 2), (0x03, 1)], &[site(0, 4, 1), extra]);
+        let dex = Dex::parse(&data).unwrap();
+        assert_eq!(dex.map().unwrap().len(), 4);
+        assert_eq!(dex.method_handle_count(), Ok(2));
+        assert_eq!(dex.method_handle(0), Ok(MethodHandle { kind: MethodHandleKind::InvokeStatic, field_or_method_idx: 2 }));
+        assert_eq!(dex.method_handle(1), Ok(MethodHandle { kind: MethodHandleKind::InstanceGet, field_or_method_idx: 1 }));
+        assert_eq!(dex.method_handle(2), Err(DexError::IndexOutOfRange { what: "method_handle", index: 2, size: 2 }));
+        assert_eq!(dex.call_site_count(), Ok(2));
+        assert_eq!(dex.call_site(0), Ok(CallSite { bootstrap: 0, method_name: 4, method_type: 1, extra_args: vec![] }));
+        assert_eq!(dex.call_site(1).unwrap().extra_args, [EncodedValue::MethodHandle(0)]);
+        assert_eq!(dex.call_site(2), Err(DexError::IndexOutOfRange { what: "call_site", index: 2, size: 2 }));
+        assert_eq!(dex.call_site_off(u32::MAX), Err(DexError::IndexOutOfRange { what: "call_site", index: u32::MAX, size: 2 }));
+
+        // No map list: no handles, no call sites.
+        let mut no_map = data.clone();
+        no_map[0x34..0x38].fill(0);
+        let dex = Dex::parse(&no_map).unwrap();
+        assert_eq!((dex.method_handle_count(), dex.call_site_count()), (Ok(0), Ok(0)));
+        assert!(dex.call_site(0).is_err());
+    }
+
+    #[test]
+    fn call_site_and_handle_indexes_are_checked() {
+        let oob = |what, index, size| DexError::IndexOutOfRange { what, index, size };
+        // Handle targets: method 3 of 3, field 2 of 2.
+        let data = call_site_dex(&[(0x04, 3), (0x00, 2), (0x09, 0)], &[site(3, 0, 0), site(0, 5, 0), site(0, 0, 2)]);
+        let dex = Dex::parse(&data).unwrap();
+        assert_eq!(dex.method_handle(0), Err(oob("method", 3, 3)));
+        assert_eq!(dex.method_handle(1), Err(oob("field", 2, 2)));
+        assert!(matches!(dex.method_handle(2), Err(DexError::Malformed { what: "method_handle_item", .. })));
+        assert_eq!(dex.call_site(0), Err(oob("method_handle", 3, 3)));
+        assert_eq!(dex.call_site(1), Err(oob("string", 5, 5)));
+        assert_eq!(dex.call_site(2), Err(oob("proto", 2, 2)));
+    }
+
+    #[test]
+    fn hostile_map_entries_are_rejected() {
+        let data = call_site_dex(&[(0x04, 0)], &[site(0, 0, 0)]);
+        let map_off = u32_at(&data, 0x34).unwrap() as usize;
+        // Entry 1 is METHOD_HANDLE, entry 2 CALL_SITE_ID.
+        let patch = |entry: usize, size: u32, off: u32| {
+            let mut data = data.clone();
+            let at = map_off + 4 + entry * MapItem::SIZE;
+            data[at + 4..at + 8].copy_from_slice(&size.to_le_bytes());
+            data[at + 8..at + 12].copy_from_slice(&off.to_le_bytes());
+            data
+        };
+        for data in [patch(1, u32::MAX, 0x70), patch(2, u32::MAX, 0x78), patch(2, 1, u32::MAX), patch(1, 1, data.len() as u32 - 4)] {
+            let dex = Dex::parse(&data).unwrap();
+            assert!(matches!(dex.map(), Err(DexError::BadRange { what: "map_item", .. })));
+            assert!(dex.method_handle(0).is_err());
+            assert!(dex.call_site(0).is_err());
+            assert!(dex.call_site_count().is_err());
+        }
+        // Map list count out of range.
+        let mut data = data.clone();
+        data[map_off..map_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let dex = Dex::parse(&data).unwrap();
+        assert_eq!(dex.map(), Err(DexError::BadRange { what: "map_list", offset: map_off }));
+        // A call site offset pointing past the end of the file.
+        let data = call_site_dex(&[(0x04, 0)], &[site(0, 0, 0)]);
+        let mut bad = data.clone();
+        bad[0x78..0x7c].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        assert!(matches!(Dex::parse(&bad).unwrap().call_site(0), Err(DexError::Truncated { .. })));
     }
 
     #[test]
