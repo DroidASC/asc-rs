@@ -12,7 +12,7 @@ use asc_abc::{Abc, Class, ClassEntry, Method, RecordKind, RecordName};
 use regex::Regex;
 
 use crate::program::Program;
-use crate::{text, EngineError, Result};
+use crate::{EngineError, Result, text};
 
 /// Candidates an ambiguity error lists before it says how many more there are.
 const MAX_CANDIDATES: usize = 20;

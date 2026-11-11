@@ -7,9 +7,9 @@
 //! lib.jar: `Lp/Impl;` implements `Lp/I;`, and its `leak` body loads
 //! "android_id".
 
-use asc_engine::{names, CacheConfig, CallQuery, CallRoots, Direction, Engine};
+use asc_engine::{CacheConfig, CallQuery, CallRoots, Direction, Engine, names};
 use asc_findrefs::Query;
-use asc_fixture::{make_apk, ClassSpec, CodeSpec, DexBuilder, MethodSpec};
+use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec, make_apk};
 use std::sync::atomic::AtomicBool;
 
 const IFACE: &str = "Lp/I;";

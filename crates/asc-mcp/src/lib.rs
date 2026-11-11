@@ -45,15 +45,15 @@ mod res;
 mod rules;
 
 use asc_engine::{
-    condition, hints, names, Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits,
-    Matched, RefBatch, RefContext, RefResult, SharedCache, SmaliOptions, Threads,
+    Busy, CacheConfig, CallQuery, CallRoots, Claim, CompiledQuery, DexDedup, Direction, Engine, InflateLimits, Matched, RefBatch,
+    RefContext, RefResult, SharedCache, SmaliOptions, Threads, condition, hints, names,
 };
 use asc_findrefs::{FieldAccess, Query};
 use class_text::ClassText;
 use format::ProgramFormat;
 use multi::{Report, Reports, Section};
-use output::{SpillDir, Structured, FITTED, FULL};
-use serde_json::{json, Map, Value};
+use output::{FITTED, FULL, SpillDir, Structured};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -1295,7 +1295,7 @@ impl Found {
                     g.0 += 1;
                 }
                 let mut groups: Vec<_> = groups.into_iter().collect();
-                groups.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(b.0)));
+                groups.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(b.0)));
                 let mut shown = Vec::new();
                 for (pkg, (n, example)) in groups.iter().take(view.per_apk) {
                     let line = format!("{id} | {pkg} | {n} hits | e.g. {example}");
@@ -1653,7 +1653,7 @@ fn tool_definitions() -> Value {
 /// few words, those every tool shares only where the instructions do not:
 /// the list is what an agent reads before its first call.
 pub mod defs {
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     /// What every tool is: it reads the APK and answers; caches are not
     /// part of what the tool changes.

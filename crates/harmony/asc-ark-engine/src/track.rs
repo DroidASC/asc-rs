@@ -39,7 +39,7 @@
 use asc_abc::Code;
 use asc_arkisa::{DecodeError, Instruction, Opcode, OperandKind, Prefix};
 
-use crate::ops::{base_name, immediate, registers, ModuleOperand, OpTable};
+use crate::ops::{ModuleOperand, OpTable, base_name, immediate, registers};
 
 /// Registers tracked per function. The register count comes from the file;
 /// a hostile one must not size an allocation.

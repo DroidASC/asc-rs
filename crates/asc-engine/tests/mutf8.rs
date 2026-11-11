@@ -1,9 +1,9 @@
 //! Class names outside the BMP: user input is UTF-8, DEX descriptors are
 //! MUTF-8, so every exact lookup must encode before it compares.
 
-use asc_engine::{names, Engine};
+use asc_engine::{Engine, names};
 use asc_findrefs::Query;
-use asc_fixture::{make_apk, ClassSpec, CodeSpec, DexBuilder, MethodSpec};
+use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec, make_apk};
 use std::io::Write;
 
 const CLASS: &str = "Lexample/\u{1f600};";

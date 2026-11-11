@@ -24,11 +24,11 @@
 //! bounds-checked too, so a damaged file gives wrong answers at worst, never
 //! a crash.
 
+use crate::SearchState;
 use crate::callgraph::CallGraph;
 use crate::insn_locator::InsnLocator;
 use crate::locators::{FieldLocator, MemberLocator, MethodLocator, StringLocator, TypeLocator};
 use crate::table::{Backing, Pod, Table};
-use crate::SearchState;
 use asc_dex::Dex;
 
 /// Version of the persisted layout; part of the cache key of persisted

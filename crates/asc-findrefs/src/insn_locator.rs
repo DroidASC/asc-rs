@@ -23,7 +23,7 @@
 //! only; the DEX buffer is handed back in for verification (`locate`).
 
 use crate::table::Table;
-use asc_dex::{class_data, map_type, Dex, Result};
+use asc_dex::{Dex, Result, class_data, map_type};
 
 /// Method(s) owning an instruction offset.
 #[derive(Debug, Clone, PartialEq, Eq)]

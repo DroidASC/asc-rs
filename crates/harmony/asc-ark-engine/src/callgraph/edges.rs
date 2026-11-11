@@ -82,9 +82,9 @@ use asc_abc::{Abc, Class, ModuleRecord};
 use super::modules::RecordId;
 use super::{Session, Slot};
 use crate::hierarchy::ClassRef;
-use crate::path::{FrameOf, Link, Names, Origin, Path, PathBuilder, MAX_PATH_LINKS};
+use crate::path::{FrameOf, Link, MAX_PATH_LINKS, Names, Origin, Path, PathBuilder};
 use crate::refs::pc_of;
-use crate::scopes::{export_group, member_named, DefinitionKind, Named, Reader, Scopes, Unresolved};
+use crate::scopes::{DefinitionKind, Named, Reader, Scopes, Unresolved, export_group, member_named};
 use crate::table_bytes;
 use crate::track::Tracker;
 
@@ -721,11 +721,7 @@ impl<'e> Session<'e> {
             .borrow_mut()
             .entry(request)
             .or_insert_with(|| u16::try_from(request).ok().and_then(|request| self.layout().request(home.id, request)).is_some());
-        if in_program {
-            LeafKind::Unlinked
-        } else {
-            LeafKind::External
-        }
+        if in_program { LeafKind::Unlinked } else { LeafKind::External }
     }
 
     /// The edges of record `id`; `slot` is its slot and `scopes` are its own.

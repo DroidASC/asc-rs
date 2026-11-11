@@ -15,11 +15,7 @@ pub fn quoted(s: &str) -> String {
 /// which would otherwise blur where the pair ends.
 pub fn value(s: &str) -> Cow<'_, str> {
     let plain = !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\\' | '='));
-    if plain {
-        Cow::Borrowed(s)
-    } else {
-        Cow::Owned(quoted(s))
-    }
+    if plain { Cow::Borrowed(s) } else { Cow::Owned(quoted(s)) }
 }
 
 #[cfg(test)]

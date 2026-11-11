@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use asc_abc::ClassEntry;
 
 use crate::path::{FrameOf, Link, Names, NoLexicals, Origin, Path, PathBuilder};
-use crate::refs::{chunks, pc_of, run_units, Regions, RECORD_CHUNK};
+use crate::refs::{RECORD_CHUNK, Regions, chunks, pc_of, run_units};
 use crate::scopes::{RecordScopes, ScopeStats, ScopeTables, Unresolved};
 use crate::track::{Source, Tracker};
 use crate::{Engine, EngineError, Result};

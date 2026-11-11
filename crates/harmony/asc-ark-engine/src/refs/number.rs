@@ -15,8 +15,8 @@ use asc_abc::{Abc, Literal};
 use asc_arkisa::{DecodeError, OperandKind, Value};
 use memchr::memmem;
 
-use super::{pc_of, Condition, Env, Function, Hit, NumberQuery, Record, RecordHit, Worker, MAX_LITERAL_DEPTH};
-use crate::ops::{base_name, OpTable};
+use super::{Condition, Env, Function, Hit, MAX_LITERAL_DEPTH, NumberQuery, Record, RecordHit, Worker, pc_of};
+use crate::ops::{OpTable, base_name};
 
 /// Where an opcode holds a number.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -92,11 +92,7 @@ impl<'q, 'a> Numbers<'q, 'a> {
 /// `1919810 (0x1d4b42)`: both spellings, as the disassembly gives them, so
 /// that nobody converts by hand; small numbers stay plain.
 fn int_text(value: i32) -> String {
-    if (-9..=9).contains(&value) {
-        format!("{value}")
-    } else {
-        format!("{value} ({value:#x})")
-    }
+    if (-9..=9).contains(&value) { format!("{value}") } else { format!("{value} ({value:#x})") }
 }
 
 impl<'a> Condition<'a> for Numbers<'_, 'a> {

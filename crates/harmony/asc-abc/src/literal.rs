@@ -1,7 +1,7 @@
 //! Literal arrays: `u32 num` (twice the number of items) followed by
 //! unaligned `(u8 tag, value)` items.
 
-use crate::reader::{entity_pos, file_off, Reader};
+use crate::reader::{Reader, entity_pos, file_off};
 use crate::{AbcError, Result};
 
 /// A literal array.
@@ -204,11 +204,7 @@ impl Literal {
 
     /// The string offset of a `STRING` item.
     pub fn string_off(&self) -> Option<u32> {
-        if let Literal::String(off) = *self {
-            Some(off)
-        } else {
-            None
-        }
+        if let Literal::String(off) = *self { Some(off) } else { None }
     }
 
     /// The method offset of a method-like item (`METHOD`,
@@ -239,10 +235,6 @@ impl Literal {
 
     /// The offset of a nested `LITERALARRAY` item.
     pub fn literal_array_off(&self) -> Option<u32> {
-        if let Literal::LiteralArray(off) = *self {
-            Some(off)
-        } else {
-            None
-        }
+        if let Literal::LiteralArray(off) = *self { Some(off) } else { None }
     }
 }

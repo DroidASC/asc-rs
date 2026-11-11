@@ -7,11 +7,11 @@ use std::iter::Peekable;
 use asc_abc::{Abc, CatchBlock, Code, DebugInfo, FunctionKind, LineRows, LocalVar, Method, TryBlock};
 use asc_arkisa::walk;
 
-use crate::annotation::write_annotations;
-use crate::insn::{write_label, InsnPrinter};
-use crate::record::RecordInfo;
-use crate::text::{write_count, write_error, write_name, ELLIPSIS};
 use crate::Options;
+use crate::annotation::write_annotations;
+use crate::insn::{InsnPrinter, write_label};
+use crate::record::RecordInfo;
+use crate::text::{ELLIPSIS, write_count, write_error, write_name};
 
 /// Closes every function, so a listing cut short by the caller is
 /// recognisable.

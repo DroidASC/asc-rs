@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 
 use asc_ark_engine::{ClassQuery, Engine, EngineError, EntryStatus, Format, ListOptions, NameFilter, Query, RefRow, RefSite};
 use asc_fixture::make_apk;
-use common::{adler32, encrypted, synthetic, RECORD_A, RECORD_B};
+use common::{RECORD_A, RECORD_B, adler32, encrypted, synthetic};
 
 /// The synthetic file with string `from` replaced by the equally long `to`
 /// and the checksum fixed: a second, different, valid ABC file.
@@ -71,9 +71,9 @@ fn lone_package_with_two_abc_files() {
         let engine = Engine::open(&path).unwrap();
         assert_eq!(entry_names(&engine), ["ets/modules.abc", "ets/widgets.abc"]);
         assert!(engine.notes().is_empty() && engine.has_several_entries());
-        assert!(engine
-            .entries()
-            .all(|info| info.status == EntryStatus::Readable && info.version.is_some_and(|v| v.to_string() == "12.0.6.0")));
+        assert!(
+            engine.entries().all(|info| info.status == EntryStatus::Readable && info.version.is_some_and(|v| v.to_string() == "12.0.6.0"))
+        );
         assert_eq!(engine.entries().map(|info| info.size).collect::<Vec<_>>(), [abc.len() as u64; 2]);
         assert_eq!(
             record_names(&engine, false),
@@ -147,8 +147,10 @@ fn application_package_with_stored_and_deflated_inner_packages() {
         assert!(engine.notes().iter().any(|note| note.starts_with("broken.hsp: skipped: ")));
         let hits = find(&engine, &Query::string_regex("^wo.ld$").unwrap());
         assert_eq!(hits.len(), 8, "{hits:#?}");
-        assert!(hits[0]
-            .starts_with(&format!("entry-default.hap/ets/modules.abc | {RECORD_A}->#~@0>#build+0x0 | Index.build | lda.str \"world\"")));
+        assert!(
+            hits[0]
+                .starts_with(&format!("entry-default.hap/ets/modules.abc | {RECORD_A}->#~@0>#build+0x0 | Index.build | lda.str \"world\""))
+        );
         assert!(hits[7].starts_with(&format!("feature.hap/ets/modules.abc | {RECORD_B}->#*#+0x0 | <anonymous> | lda.str \"woild\"")));
     }
 }

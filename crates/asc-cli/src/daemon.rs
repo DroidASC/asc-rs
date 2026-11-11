@@ -35,7 +35,7 @@
 //! on every open of its own.
 
 use crate::output::{Engines, Io};
-use crate::{run_program, Cli, Common};
+use crate::{Cli, Common, run_program};
 use asc_ark_engine::EngineError as HarmonyError;
 use asc_engine::{Busy, Engine, SharedCache};
 use asc_mcp::format::ProgramFormat;
@@ -621,11 +621,13 @@ fn serve(common: &Common, dir: &Path) -> Result<u8, String> {
         let daemon = Arc::clone(&daemon);
         let idle_exit = common.config().daemon_idle.value.0;
         let poll = idle_exit.clamp(Duration::from_millis(100), IDLE_POLL);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(poll);
-            let idle = daemon.last.lock().expect("idle clock mutex poisoned").elapsed();
-            if daemon.active.load(Ordering::SeqCst) == 0 && idle >= idle_exit {
-                daemon.shutdown(0);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(poll);
+                let idle = daemon.last.lock().expect("idle clock mutex poisoned").elapsed();
+                if daemon.active.load(Ordering::SeqCst) == 0 && idle >= idle_exit {
+                    daemon.shutdown(0);
+                }
             }
         });
     }

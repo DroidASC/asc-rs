@@ -4,7 +4,7 @@
 use std::marker::PhantomData;
 
 use crate::abc::Region;
-use crate::reader::{entity_pos, file_off, read_u64, Reader};
+use crate::reader::{Reader, entity_pos, file_off, read_u64};
 use crate::{Abc, AbcError, Code, DebugInfo, FunctionName, LiteralArray, ModuleRecord, RecordKind, RecordName, Result, StringData};
 
 /// Access flag bits shared by classes, fields and methods (`modifiers.h`).

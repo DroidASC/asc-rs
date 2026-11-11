@@ -14,8 +14,8 @@ use asc_abc::{
     SourceLang,
 };
 use asc_fixture::abc::{
-    AbcAnnotation, AbcBuilder, AbcCode, AbcDebugInfo, AbcField, AbcFieldValue, AbcFile, AbcFunction, AbcLineOp, AbcLiteral, AbcModule,
-    AbcRecord, AbcType, Asm, Catch, LiteralArrayId, Op, ACC_STATIC,
+    ACC_STATIC, AbcAnnotation, AbcBuilder, AbcCode, AbcDebugInfo, AbcField, AbcFieldValue, AbcFile, AbcFunction, AbcLineOp, AbcLiteral,
+    AbcModule, AbcRecord, AbcType, Asm, Catch, LiteralArrayId, Op,
 };
 
 /// What a full walk saw.

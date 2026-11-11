@@ -126,11 +126,7 @@ impl SourceLines<'_> {
     /// `source line 21`, or `source #2 line 21` when the record has
     /// several source files.
     pub(crate) fn write_line<W: Write>(&self, out: &mut W, at: SourceLine) -> fmt::Result {
-        if self.several() {
-            write!(out, "source #{} line {}", at.file, at.line)
-        } else {
-            write!(out, "source line {}", at.line)
-        }
+        if self.several() { write!(out, "source #{} line {}", at.file, at.line) } else { write!(out, "source line {}", at.line) }
     }
 
     /// The header line of a record: the file, or the numbered files, and

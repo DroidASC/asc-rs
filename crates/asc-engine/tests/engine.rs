@@ -1,4 +1,4 @@
-use asc_engine::{names, Engine, Matched};
+use asc_engine::{Engine, Matched, names};
 use asc_findrefs::Query;
 use asc_fixture::{make_apk, make_dex};
 use std::io::Write;

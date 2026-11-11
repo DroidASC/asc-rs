@@ -32,11 +32,7 @@ fn indexes(label: &str, bytes: Vec<u8>, found: &mut Vec<(String, Vec<u8>)>) -> R
         let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
         let label = format!("{label}!{name}");
-        if nested {
-            indexes(&label, data, found)?
-        } else {
-            found.push((label, data))
-        }
+        if nested { indexes(&label, data, found)? } else { found.push((label, data)) }
     }
     Ok(())
 }

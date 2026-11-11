@@ -52,7 +52,7 @@ use std::collections::{HashMap, HashSet};
 use asc_abc::Code;
 use asc_arkisa::{Instruction, OperandKind, Value};
 
-use crate::ops::{base_name, immediate, registers, ModuleOperand};
+use crate::ops::{ModuleOperand, base_name, immediate, registers};
 
 /// Functions of one record that have to open with the same stub for it to
 /// be one. Two functions that share an early return are code somebody

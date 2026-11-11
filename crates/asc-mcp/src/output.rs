@@ -16,8 +16,8 @@
 //! standing for the whole class, the first page of a multi-APK report) by
 //! putting the whole text under [`FULL`] in its structured result.
 
-use crate::{choice_arg, usize_arg, ToolError};
-use serde_json::{json, Map, Value};
+use crate::{ToolError, choice_arg, usize_arg};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};

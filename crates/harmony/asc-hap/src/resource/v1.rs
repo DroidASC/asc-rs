@@ -11,7 +11,7 @@
 //! that their length counts.
 
 use super::qualifier::{Qualifier, Qualifiers};
-use super::reader::{widen, Reader};
+use super::reader::{Reader, widen};
 use super::value::ResourceType;
 use super::{Entries, Entry, ResourceIndexError, Result, Tables};
 

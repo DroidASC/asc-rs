@@ -130,14 +130,14 @@ impl CompiledQuery {
             Query::Nested(_) => {
                 return Err(FindError::Invalid(
                     "method:{...} has to be resolved over every DEX first (by the engine), not compiled for one".into(),
-                ))
+                ));
             }
             Query::Call { target, constraints } => Parts::Call(CompiledCall::new(target, constraints)?),
             Query::Virtual { target, via, .. } => Parts::Virtual(Box::new(CompiledQuery::new(target)?), via.clone()),
             Query::Defined(Defined::Override(_) | Defined::In(_)) => {
                 return Err(FindError::Invalid(
                     "override: / in:{...} need the class hierarchy (every DEX); the engine resolves them before a search".into(),
-                ))
+                ));
             }
             Query::Defined(d) => Parts::Defined(d.clone()),
             Query::Field(m) | Query::FieldAccess { field: m, .. } => Parts::Member(compile_member(m, RefKind::Field)?),
@@ -216,11 +216,7 @@ fn is_ascii_word(pattern: &str) -> bool {
 }
 
 fn compile_opt(pattern: &str) -> Result<Option<Regex>> {
-    if pattern.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(Regex::new(pattern)?))
-    }
+    if pattern.is_empty() { Ok(None) } else { Ok(Some(Regex::new(pattern)?)) }
 }
 
 fn compile_member(m: &MemberQuery, kind: RefKind) -> Result<CompiledMember> {

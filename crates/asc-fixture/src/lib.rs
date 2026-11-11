@@ -12,10 +12,10 @@
 //! [`hap`] (`.hap` / `.app` archives).
 
 use asc_dex::checksum::seal;
-use asc_dex::debug_info::{DebugInfo, DebugOp, DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE};
-use asc_dex::encoded::{write_annotation_item, write_array, AnnotationItem, EncodedAnnotation, EncodedValue, Identity};
+use asc_dex::debug_info::{DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE, DebugInfo, DebugOp};
+use asc_dex::encoded::{AnnotationItem, EncodedAnnotation, EncodedValue, Identity, write_annotation_item, write_array};
 use asc_dex::leb128::{write_sleb128, write_uleb128};
-use asc_dex::{mutf8, NO_INDEX};
+use asc_dex::{NO_INDEX, mutf8};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
@@ -23,7 +23,7 @@ pub mod abc;
 pub mod hap;
 pub mod res;
 
-pub use abc::{make_abc, make_multi_region_abc, AbcBuilder};
+pub use abc::{AbcBuilder, make_abc, make_multi_region_abc};
 pub use hap::{make_app, make_hap};
 
 fn uleb(value: u32) -> Vec<u8> {

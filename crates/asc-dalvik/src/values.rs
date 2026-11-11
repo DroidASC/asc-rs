@@ -25,7 +25,7 @@
 
 use crate::decode::{fetch16, vreg_a, vreg_b, vreg_c};
 use crate::walk::walk_insns;
-use crate::{opcode, Format, Instruction, Opcode, PACKED_SWITCH_PAYLOAD, SPARSE_SWITCH_PAYLOAD};
+use crate::{Format, Instruction, Opcode, PACKED_SWITCH_PAYLOAD, SPARSE_SWITCH_PAYLOAD, opcode};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 

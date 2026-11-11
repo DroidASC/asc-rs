@@ -16,7 +16,7 @@
 //! A rule set claims with the rules it still has to search (the others came
 //! from L3), so only entries searched for the same rules share rows.
 
-use crate::{tiers, CompiledQuery, Engine, FindOptions, Job, Query, RefBatch, RefContext, SearchTarget, Shape, WriteJob};
+use crate::{CompiledQuery, Engine, FindOptions, Job, Query, RefBatch, RefContext, SearchTarget, Shape, WriteJob, tiers};
 use asc_apk::Entry;
 use asc_cache::Tier;
 use sha2::{Digest, Sha256};

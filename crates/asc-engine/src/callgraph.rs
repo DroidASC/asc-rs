@@ -13,12 +13,12 @@
 //! overrides of each callee in its subclasses (marked `override of`).
 
 use crate::hierarchy::{ClassGraph, Lineage};
-use crate::{cancelled, DexView, Engine, EngineError, Result, NOT_CANCELLED};
+use crate::{DexView, Engine, EngineError, NOT_CANCELLED, Result, cancelled};
 use asc_dex::Dex;
 use asc_findrefs::{FindRefs, Query};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Which way to walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,22 +477,24 @@ impl Engine {
         let workers = self.threads().min(views.len()).max(1);
         std::thread::scope(|s| {
             for _ in 0..workers {
-                s.spawn(|| loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = next_view.fetch_add(1, Ordering::Relaxed);
-                    let Some(v) = views.get(i) else { break };
-                    match view_neighbours(v, frontier, dir, expand) {
-                        Ok(local) => {
-                            let mut m = merged.lock().unwrap();
-                            for (sig, f) in local {
-                                let e = m.entry(sig).or_default();
-                                e.next.extend(f.next);
-                                e.bodies.extend(f.bodies);
-                            }
+                s.spawn(|| {
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
                         }
-                        Err(e) => errs.lock().unwrap().push(format!("{}: {e}", v.name)),
+                        let i = next_view.fetch_add(1, Ordering::Relaxed);
+                        let Some(v) = views.get(i) else { break };
+                        match view_neighbours(v, frontier, dir, expand) {
+                            Ok(local) => {
+                                let mut m = merged.lock().unwrap();
+                                for (sig, f) in local {
+                                    let e = m.entry(sig).or_default();
+                                    e.next.extend(f.next);
+                                    e.bodies.extend(f.bodies);
+                                }
+                            }
+                            Err(e) => errs.lock().unwrap().push(format!("{}: {e}", v.name)),
+                        }
                     }
                 });
             }

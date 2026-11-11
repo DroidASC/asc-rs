@@ -15,8 +15,8 @@ use std::fmt::{self, Write};
 
 use asc_abc::{Abc, AnnotationElement, ElementValue, Literal, Method, MethodTag, RecordName};
 
-use crate::text::{write_error, write_f64, write_imm, write_name, write_quoted, ELLIPSIS};
 use crate::Options;
+use crate::text::{ELLIPSIS, write_error, write_f64, write_imm, write_name, write_quoted};
 
 /// Arrays inside arrays deeper than this are not followed: a literal array
 /// may name itself.

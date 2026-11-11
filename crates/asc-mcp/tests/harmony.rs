@@ -3,14 +3,14 @@
 
 use asc_engine::CacheConfig;
 use asc_fixture::abc::{
-    call_graph_program, class_hierarchy_program, make_abc, sample_program, CALLS_APP, CALLS_BOX, CALLS_INDEX, CALLS_UTIL, CLASSES_APP,
-    CLASSES_BASE, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL,
+    CALLS_APP, CALLS_BOX, CALLS_INDEX, CALLS_UTIL, CLASSES_APP, CLASSES_BASE, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL,
+    call_graph_program, class_hierarchy_program, make_abc, sample_program,
 };
 use asc_fixture::hap::{
-    make_app, make_hap, resource_program, Compression, Hap, LABELS_PAGE, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON, SAMPLE_PACK_INFO,
+    Compression, Hap, LABELS_PAGE, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON, SAMPLE_PACK_INFO, make_app, make_hap, resource_program,
 };
 use asc_fixture::{make_apk, make_dex};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 const TOOLS: &str = "listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, findrefs \
@@ -154,9 +154,9 @@ fn a_hap_opens_and_answers_the_tools_that_carry_over() {
             "entries": [{"name": "ets/modules.abc", "version": "12.0.6.0", "size": size, "status": "readable"}],
         })
     );
-    assert!(replies[1..]
-        .iter()
-        .all(|r| !text(r).contains("HarmonyOS program") && r["result"]["structuredContent"].get("program").is_none()));
+    assert!(
+        replies[1..].iter().all(|r| !text(r).contains("HarmonyOS program") && r["result"]["structuredContent"].get("program").is_none())
+    );
     assert!(listed.get("notes").is_none(), "{listed}");
 
     // listclass: the CLI's rows, a footer with the total.
@@ -781,7 +781,7 @@ fn engine_rows(path: &str, query: &asc_ark_engine::Query) -> Vec<String> {
 
 #[test]
 fn annotation_rows_name_the_function_and_no_instruction() {
-    use asc_fixture::abc::{annotations_program, callable_names_program, MARKS_APP, MARKS_LIB_MARKED, MARKS_ROUTE};
+    use asc_fixture::abc::{MARKS_APP, MARKS_LIB_MARKED, MARKS_ROUTE, annotations_program, callable_names_program};
     let inputs = Inputs::new();
     let marks = inputs.file("marks.abc", &annotations_program().build().bytes);
     let named = inputs.file("named.abc", &callable_names_program().build().bytes);
@@ -960,7 +960,10 @@ fn a_search_without_results_says_where_the_name_is() {
             json!({"kind": "method", "value": "createHttp"}),
             "no function is defined under that name, but it is a property name, used once: try `kind=prop` (access call for its calls)",
         ),
-        (json!({"kind": "import", "value": "@ohos:#request", "decl": true}), "`kind=import . requests` lists the module requests of the program"),
+        (
+            json!({"kind": "import", "value": "@ohos:#request", "decl": true}),
+            "`kind=import . requests` lists the module requests of the program",
+        ),
         (
             json!({"kind": "string", "value": "@ohos:net.http", "literal": true}),
             "1 module request matches (e.g. @ohos:net.http): imports are not string operands, try `kind=import`",
@@ -1494,7 +1497,7 @@ fn a_call_graph_goes_through_the_output_budget_and_names_entries_that_differ() {
 
 #[test]
 fn pages_routes_long_strings_and_one_package_of_several() {
-    use asc_fixture::hap::{library_program, make_library_hsp, make_routed_hap, DETAIL_PAGE, LONG_FILLER_BYTES, SHARED_PAGE};
+    use asc_fixture::hap::{DETAIL_PAGE, LONG_FILLER_BYTES, SHARED_PAGE, library_program, make_library_hsp, make_routed_hap};
     let inputs = Inputs::new();
     inputs.file("app/entry.hap", &make_routed_hap());
     inputs.file("app/lib.hsp", &make_library_hsp());

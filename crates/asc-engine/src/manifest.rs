@@ -13,7 +13,7 @@ use crate::text::value;
 use crate::{Engine, Result};
 use asc_arsc::{EntryValue, ResTable, TYPE_INT_BOOLEAN, TYPE_STRING};
 use asc_axml::{Attribute, Element};
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 
 /// Android 12 (API 31) requires an explicit `android:exported` on every
 /// component with an intent filter; before it such components were exported.
@@ -529,11 +529,7 @@ fn domain_config(el: &Element, cleartext: &dyn Fn(&Element) -> Option<bool>, anc
         .children_named("domain")
         .map(|d| {
             let sub = d.plain("includeSubdomains").and_then(|a| a.as_bool()).unwrap_or(false);
-            if sub {
-                format!("*.{}", d.text)
-            } else {
-                d.text.clone()
-            }
+            if sub { format!("*.{}", d.text) } else { d.text.clone() }
         })
         .collect();
     let pins: usize = el.children_named("pin-set").map(|p| p.children_named("pin").count()).sum();

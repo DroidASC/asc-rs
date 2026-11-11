@@ -47,14 +47,14 @@ use asc_abc::{Abc, Class, ClassEntry, Code, Fields, Method, OffsetTable};
 use asc_arkisa::{DecodeError, Instruction};
 
 pub(crate) use call::CallPaths;
-pub(crate) use context::fill as fill_context;
 pub use context::RefContext;
-pub(crate) use import::module_requests;
+pub(crate) use context::fill as fill_context;
 pub use import::RequestListing;
+pub(crate) use import::module_requests;
 pub use query::{FunctionSet, ListedFunction, NumberQuery, Pattern, Query};
 
 use crate::callgraph::{FnRef, GraphCache, Session};
-use crate::{disasm, EngineError, Result};
+use crate::{EngineError, Result, disasm};
 
 /// Region table entries tested per unit of work in step 1.
 const ID_CHUNK: usize = 8192;
@@ -506,7 +506,7 @@ fn condition<'q, 'a: 'q>(query: &'q Query, env: &Env<'q, 'a>) -> Result<Box<dyn 
             Box::new(callto::CallsTo::new(graph.session, functions, env.entry_index))
         }
         Query::All(_) | Query::Not(_) => {
-            return Err(EngineError::Query("a conjunction inside a conjunction is not supported: list its conditions".into()))
+            return Err(EngineError::Query("a conjunction inside a conjunction is not supported: list its conditions".into()));
         }
     })
 }

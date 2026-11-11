@@ -293,11 +293,7 @@ fn density_better(this: u16, other: u16, requested: u16) -> bool {
     if l >= requested {
         return !i_am_bigger;
     }
-    if (2 * l - requested) * h > requested * requested {
-        !i_am_bigger
-    } else {
-        i_am_bigger
-    }
+    if (2 * l - requested) * h > requested * requested { !i_am_bigger } else { i_am_bigger }
 }
 
 /// Unpack a two-byte language/region field; three-letter codes are packed

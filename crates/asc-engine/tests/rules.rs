@@ -1,9 +1,9 @@
 //! Compound queries, rule sets, the class hierarchy and virtual dispatch
 //! over a two-DEX APK.
 
-use asc_engine::{names, CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage};
+use asc_engine::{CacheConfig, CallQuery, Direction, Engine, FindOptions, HierarchyQuery, Lineage, names};
 use asc_findrefs::Query;
-use asc_fixture::{make_apk, ClassSpec, CodeSpec, DexBuilder, MethodSpec};
+use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec, make_apk};
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
 

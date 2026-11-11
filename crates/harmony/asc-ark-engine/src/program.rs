@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use asc_abc::{Abc, AbcError, Header};
-use asc_apk::{Apk, Limits, Prefix, PrefixStep, METHOD_STORED};
+use asc_apk::{Apk, Limits, METHOD_STORED, Prefix, PrefixStep};
 use asc_hap::SourceMaps;
 
 use crate::manifest::Document;

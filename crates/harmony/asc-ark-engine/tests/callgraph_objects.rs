@@ -9,9 +9,9 @@ use std::sync::atomic::AtomicBool;
 
 use asc_ark_engine::{CallEdge, CallNode, CallQuery, CallRoots, Direction, EdgeKind, Engine, LeafKind};
 use asc_fixture::abc::{
-    class_calls_program, handed_objects_program, late_members_program, patched_objects_program, AbcBuilder, HANDED_APP, HANDED_KIND,
-    HANDED_STORE, LATE_PANEL, LATE_SUB, LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE, LINEAGE_SERVICE, PATCHED_APP,
-    PATCHED_CACHE, PATCHED_VAULT,
+    AbcBuilder, HANDED_APP, HANDED_KIND, HANDED_STORE, LATE_PANEL, LATE_SUB, LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE,
+    LINEAGE_SERVICE, PATCHED_APP, PATCHED_CACHE, PATCHED_VAULT, class_calls_program, handed_objects_program, late_members_program,
+    patched_objects_program,
 };
 
 fn open(dir: &Path, builder: &AbcBuilder) -> Engine {

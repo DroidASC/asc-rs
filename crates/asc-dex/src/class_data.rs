@@ -1,7 +1,7 @@
 //! `class_data_item` parsing.
 
-use crate::leb128::{read_uleb128, uleb128_len};
 use crate::Result;
+use crate::leb128::{read_uleb128, uleb128_len};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodedField {

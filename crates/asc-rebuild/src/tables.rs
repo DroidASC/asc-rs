@@ -2,7 +2,7 @@
 
 use crate::collect::RefSet;
 use crate::{RebuildError, Result};
-use asc_dex::{mutf8, Dex};
+use asc_dex::{Dex, mutf8};
 use std::collections::HashMap;
 
 /// New id tables. Each `Vec` lists original indexes in new-index order and
@@ -44,11 +44,7 @@ fn assign<K: Ord>(mut items: Vec<(K, u32)>) -> (Vec<u32>, HashMap<u32, u32>) {
 }
 
 fn check_limit(what: &'static str, count: usize) -> Result<()> {
-    if count > 0xFFFF {
-        Err(RebuildError::TooManyItems { what, count })
-    } else {
-        Ok(())
-    }
+    if count > 0xFFFF { Err(RebuildError::TooManyItems { what, count }) } else { Ok(()) }
 }
 
 impl Tables {

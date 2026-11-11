@@ -8,9 +8,9 @@ use asc_abc::{
     RegularImport, SourceLang, Version,
 };
 use asc_fixture::abc::{
-    adler32, seal, AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcLiteral, AbcRecord, Asm, MethodRef, VERSION_13_0_1_0,
+    AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcLiteral, AbcRecord, Asm, MethodRef, VERSION_13_0_1_0, adler32, seal,
 };
-use common::{synthetic, synthetic_builder, walk, BIG, FOREIGN, RECORD_A, RECORD_B};
+use common::{BIG, FOREIGN, RECORD_A, RECORD_B, synthetic, synthetic_builder, walk};
 
 #[test]
 fn full_walk_of_the_synthetic_file() {

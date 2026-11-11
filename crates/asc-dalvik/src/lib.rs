@@ -11,9 +11,9 @@ pub mod values;
 pub mod verify;
 pub mod walk;
 
-pub use decode::{get_index, set_index, vreg_a, vreg_b, vreg_c, vreg_h, Instruction, PayloadKind};
+pub use decode::{Instruction, PayloadKind, get_index, set_index, vreg_a, vreg_b, vreg_c, vreg_h};
 pub use table::OPCODES;
-pub use walk::{walk, Step};
+pub use walk::{Step, walk};
 
 /// Size of one code unit in bytes.
 pub const WORD: usize = 2;

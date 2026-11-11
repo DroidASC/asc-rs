@@ -2,10 +2,10 @@
 //! its resource table, for one APK or (`apks` / `dir`) many.
 
 use crate::multi::{self, Report, Section};
-use crate::{bool_arg, choice_arg, max_bytes, str_arg, usize_arg, Call, OpenApk, Server, ToolError, ToolResult};
+use crate::{Call, OpenApk, Server, ToolError, ToolResult, bool_arg, choice_arg, max_bytes, str_arg, usize_arg};
 use asc_engine::{ManifestSummary, ResourceField, ResourceRow};
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -374,7 +374,7 @@ impl Server {
 /// `tools/list` entries of this module's tools.
 pub mod defs {
     use crate::defs::{apk_props, many, merge, shape_many};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     pub fn manifest_summary() -> Value {
         json!({

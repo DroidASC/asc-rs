@@ -18,11 +18,7 @@ fn shown(pattern: &Pattern) -> String {
 }
 
 fn times(count: usize) -> String {
-    if count == 1 {
-        "once".to_owned()
-    } else {
-        format!("{count} times")
-    }
+    if count == 1 { "once".to_owned() } else { format!("{count} times") }
 }
 
 impl Engine {

@@ -61,11 +61,11 @@ use std::collections::{HashMap, HashSet};
 use asc_abc::{Abc, Class, FunctionName, Method};
 use asc_arkisa::OperandKind;
 
-use classes::{class_literal, literal_methods, Member};
-pub(crate) use classes::{member_named, ClassInfo, Membership, Named};
+pub(crate) use classes::{ClassInfo, Membership, Named, member_named};
+use classes::{Member, class_literal, literal_methods};
 pub(crate) use env::ScopeTables;
 use env::{Found, Sites};
-pub(crate) use exports::{export_group, Exported, ExportedDefinitions};
+pub(crate) use exports::{Exported, ExportedDefinitions, export_group};
 pub(crate) use reader::{Reader, RecordScopes};
 
 use crate::ops::base_name;
@@ -521,11 +521,7 @@ impl Scopes {
         let method = insn.method_id().and_then(|id| function.entity(id));
         let literal = insn.literal_array_id().and_then(|id| {
             let wide = insn.opcode.operand_of(OperandKind::LiteralArrayId).is_some_and(|operand| operand.width > 16);
-            if wide {
-                Some(id)
-            } else {
-                function.entity(id)
-            }
+            if wide { Some(id) } else { function.entity(id) }
         });
         let is_class = method.is_some() && literal.is_some();
         if let Some(method) = method {

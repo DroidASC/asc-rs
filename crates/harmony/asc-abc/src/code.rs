@@ -1,8 +1,8 @@
 //! Code items: register counts, the instruction bytes and the try blocks.
 //! Instructions are handed out raw; decoding them is `asc-arkisa`'s job.
 
-use crate::reader::{entity_pos, file_off, Reader};
 use crate::Result;
+use crate::reader::{Reader, entity_pos, file_off};
 
 /// A `Code` item.
 #[derive(Debug, Clone, Copy)]

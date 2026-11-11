@@ -9,7 +9,7 @@ mod attrs;
 mod tree;
 
 pub use attrs::android_attr_name;
-pub use tree::{parse_tree, Attribute, Element, ANDROID_NS};
+pub use tree::{ANDROID_NS, Attribute, Element, parse_tree};
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -280,11 +280,7 @@ fn complex_unit(units: &[&'static str], data: u32) -> &'static str {
 }
 
 fn package_prefix(id: u32) -> &'static str {
-    if id >> 24 == ANDROID_PACKAGE_ID {
-        "android:"
-    } else {
-        ""
-    }
+    if id >> 24 == ANDROID_PACKAGE_ID { "android:" } else { "" }
 }
 
 /// Render a typed attribute value the way androguard/aapt do.

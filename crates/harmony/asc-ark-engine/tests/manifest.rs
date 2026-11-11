@@ -11,10 +11,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use asc_ark_engine::{CodeLink, Document, Engine, EngineError, Manifest};
-use asc_fixture::abc::{make_abc, make_multi_region_abc, sample_program, ENTRY_ABILITY, INDEX_PAGE};
+use asc_fixture::abc::{ENTRY_ABILITY, INDEX_PAGE, make_abc, make_multi_region_abc, sample_program};
 use asc_fixture::hap::{
-    make_app, make_hap, make_library_hsp, make_routed_hap, routed_module_json, Compression, Hap, DETAIL_PAGE, SAMPLE_MODULE_JSON,
-    SHARED_PAGE,
+    Compression, DETAIL_PAGE, Hap, SAMPLE_MODULE_JSON, SHARED_PAGE, make_app, make_hap, make_library_hsp, make_routed_hap,
+    routed_module_json,
 };
 
 /// The package table of the sample module, plus a library and a native one.
@@ -67,7 +67,9 @@ fn a_hap_joins_its_components_to_records() {
     let all = lines(&manifest, None);
     assert_eq!(
         starting(&all, "ability"),
-        [format!("ability EntryAbility exported=true (explicit) permissions=- skills=1 srcEntry=./ets/entryability/EntryAbility.ets record={ENTRY_ABILITY}")]
+        [format!(
+            "ability EntryAbility exported=true (explicit) permissions=- skills=1 srcEntry=./ets/entryability/EntryAbility.ets record={ENTRY_ABILITY}"
+        )]
     );
     assert_eq!(starting(&all, "callbacks"), [format!("callbacks EntryAbility record={ENTRY_ABILITY} functions=EntryAbility.onCreate")]);
     // The ability's lines stay together, the callbacks right after it.

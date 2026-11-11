@@ -9,8 +9,8 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::value::{self, Findings, Line, Note, Obj};
 use crate::HapError;
+use crate::value::{self, Findings, Line, Note, Obj};
 
 /// A parsed `module.json`.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,11 +43,7 @@ impl ApiVersion {
 /// `50001013(13)`, or just `9` when the value is the level.
 impl fmt::Display for ApiVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.level() == self.0 {
-            write!(f, "{}", self.0)
-        } else {
-            write!(f, "{}({})", self.0, self.level())
-        }
+        if self.level() == self.0 { write!(f, "{}", self.0) } else { write!(f, "{}({})", self.0, self.level()) }
     }
 }
 

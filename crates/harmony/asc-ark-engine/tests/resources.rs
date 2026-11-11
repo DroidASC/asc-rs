@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use asc_ark_engine::{ChainEnd, ClassQuery, Engine, EngineError, Pattern, ResourceField, ResourceTables};
 use asc_fixture::abc::make_abc;
 use asc_fixture::hap::{
-    make_app, make_hap, qualifier, resource_program, resource_type, sample_resources, Compression, Hap, ResourceTable, LABELS_PAGE,
-    SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON,
+    Compression, Hap, LABELS_PAGE, ResourceTable, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON, make_app, make_hap, qualifier, resource_program,
+    resource_type, sample_resources,
 };
 
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
@@ -167,12 +167,13 @@ fn packages_without_an_index_are_notes() {
     let error = broken.resources().err().unwrap().to_string();
     assert!(error.starts_with("no resources.index in ") && error.contains("c.hsp (c.hsp: resources.index: "), "{error}");
     let bare = Engine::open(write(dir.path(), "bare.abc", &abc)).unwrap();
-    assert!(bare
-        .resources()
-        .err()
-        .unwrap()
-        .to_string()
-        .ends_with("(a bare .abc carries none: pass the .hap / .app it came from, or a directory holding both)"));
+    assert!(
+        bare.resources()
+            .err()
+            .unwrap()
+            .to_string()
+            .ends_with("(a bare .abc carries none: pass the .hap / .app it came from, or a directory holding both)")
+    );
     assert!(matches!(bare.package_files("module.json"), Err(EngineError::NotFound { what: "file", .. })));
 }
 

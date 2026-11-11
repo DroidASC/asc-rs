@@ -7,7 +7,7 @@
 //! ([`Engine::find_refs_rules`]), which also keeps each of them in L3.
 
 use crate::hierarchy::{ClassGraph, Defining};
-use crate::{names, CacheConfig, DexView, Engine, EngineError, FindOptions, Lineage, Result};
+use crate::{CacheConfig, DexView, Engine, EngineError, FindOptions, Lineage, Result, names};
 use asc_dex::Dex;
 use asc_findrefs::{ClassQuery, CompiledQuery, Defined, MemberQuery, Query};
 use std::collections::{BTreeMap, BTreeSet, HashMap};

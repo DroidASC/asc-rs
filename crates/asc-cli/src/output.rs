@@ -3,7 +3,7 @@
 //! Commands write through [`Io`] only, so both run the same code.
 
 use crate::Common;
-use asc_engine::{condition, Engine};
+use asc_engine::{Engine, condition};
 use asc_findrefs::Query;
 use asc_mcp::output::SpillDir;
 use std::borrow::Cow;
@@ -11,8 +11,8 @@ use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Supplies the engine a command runs on: the DEX engine or the HarmonyOS
 /// one, by the format of the program ([`asc_mcp::format::ProgramFormat`]).

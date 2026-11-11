@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use asc_arkisa::DecodeError;
 
-use super::{pc_of, Condition, Function, Hit, Record, RecordHit, Worker};
+use super::{Condition, Function, Hit, Record, RecordHit, Worker, pc_of};
 use crate::callgraph::{EdgeKind, FnRef, RecordId, Session, Slot};
 
 /// A prepared search of one ABC entry for the calls into `functions`.

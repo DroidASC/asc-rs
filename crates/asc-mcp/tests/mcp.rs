@@ -2,7 +2,7 @@
 
 use asc_engine::CacheConfig;
 use asc_fixture::{make_apk, make_class_only_dex, make_dex, make_field_access_dex, make_rich_dex};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
@@ -363,8 +363,11 @@ fn findrefs_over_a_directory_reports_per_apk() {
     // A tiny budget: one section per page and a cursor for the rest.
     let first = ok(&replies[1]);
     assert_eq!(first["shown"], json!([0, 1]));
-    assert!(text(&replies[1])
-        .contains(r#"apk1 | more | 3 more: findrefs {"apk_id":"apk1","collapse_sdks":true,"kind":"string","offset":1,"value":"token"}"#));
+    assert!(
+        text(&replies[1]).contains(
+            r#"apk1 | more | 3 more: findrefs {"apk_id":"apk1","collapse_sdks":true,"kind":"string","offset":1,"value":"token"}"#
+        )
+    );
     // Cursors live in the session that made them.
     let other = session(&[call(1, "findrefs", json!({"cursor": first["cursor"]}))]);
     assert!(text(&other[0]).contains("expired"), "{}", other[0]);

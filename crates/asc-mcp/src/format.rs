@@ -26,11 +26,7 @@ impl ProgramFormat {
         } else {
             asc_ark_engine::Format::accepts(spec) && !has_dex(spec)
         };
-        if harmony {
-            ProgramFormat::Harmony
-        } else {
-            ProgramFormat::Android
-        }
+        if harmony { ProgramFormat::Harmony } else { ProgramFormat::Android }
     }
 }
 

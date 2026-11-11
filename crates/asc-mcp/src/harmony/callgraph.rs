@@ -3,14 +3,13 @@
 //! command shows its trees through [`TreeText`] too, so that both front ends
 //! print the same rows.
 
-use super::{without_pc, Session};
-use crate::{bool_arg, choice_arg, str_arg, usize_arg, Call, ToolError, ToolResult, CALLGRAPH_DEPTH, CALLGRAPH_MAX_NODES, CALL_DIRECTIONS};
+use super::{Session, without_pc};
+use crate::{CALL_DIRECTIONS, CALLGRAPH_DEPTH, CALLGRAPH_MAX_NODES, Call, ToolError, ToolResult, bool_arg, choice_arg, str_arg, usize_arg};
 use asc_ark_engine::{CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EngineError, LeafKind, Query};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// What the tool takes on a HarmonyOS program, for the program's introduction.
-pub(super) const USAGE: &str =
-    "# callgraph: class=RECORD + method=FUNCTION (or class=RECORD->FUNCTION as rows print it, or method alone), \
+pub(super) const USAGE: &str = "# callgraph: class=RECORD + method=FUNCTION (or class=RECORD->FUNCTION as rows print it, or method alone), \
      direction, depth, max_nodes; or to=RULE: \"call:REGEX\" for the callers of every callee path matching (the paths of kind=call, e.g. \
      call:^import:@ohos:net\\.http), any other rule for the functions it matches (to=\"string:^https?://\"); from=RULE keeps only \
      the paths from the functions matching (`[from]`; alone: their callees), unless=RULE (or a list) leaves out the functions \
@@ -171,7 +170,7 @@ pub(super) fn callgraph(session: &Session, args: &Value, call: &Call) -> ToolRes
             return Err(ToolError("give the target as `class` + `method` or as `to`, not both".into()));
         }
         (None, None, Some(_)) if entry.is_some() => {
-            return Err(ToolError("`entry` picks the root function: it does not go with `to`".into()))
+            return Err(ToolError("`entry` picks the root function: it does not go with `to`".into()));
         }
         (None, None, Some(to)) => {
             // The callers of a callee path are the only walk from one.

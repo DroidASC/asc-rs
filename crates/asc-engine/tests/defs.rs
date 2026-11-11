@@ -2,7 +2,7 @@
 //! fixture (its `Lexample/Rich;` carries a class annotation `Lexample/Marker;`
 //! and its `handle` method a method annotation of the same type).
 
-use asc_engine::{names, Engine};
+use asc_engine::{Engine, names};
 use asc_findrefs::Query;
 use asc_fixture::{make_apk, make_rich_dex};
 use std::io::Write;
@@ -61,8 +61,8 @@ fn annotation_predicates_match_method_and_class_annotations() {
 
 #[test]
 fn the_class_graph_is_kept_on_disk_for_later_processes() {
-    use asc_engine::asc_cache::DiskCache;
     use asc_engine::CacheConfig;
+    use asc_engine::asc_cache::DiskCache;
     let apk = temp_apk();
     let dir = tempfile::tempdir().unwrap();
     let cached = || {

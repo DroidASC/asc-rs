@@ -346,8 +346,11 @@ fn fixture_manifest() {
     assert_eq!(entry.deep_links(), ["sample://open"]);
     assert_eq!(m.module.request_permissions.len(), 1);
     let summary = m.summary();
-    assert!(summary
-        .contains("ability EntryAbility exported=true (explicit) permissions=- skills=1 srcEntry=./ets/entryability/EntryAbility.ets\n"));
+    assert!(
+        summary.contains(
+            "ability EntryAbility exported=true (explicit) permissions=- skills=1 srcEntry=./ets/entryability/EntryAbility.ets\n"
+        )
+    );
     assert!(summary.contains("deeplink EntryAbility sample://open\n"));
     assert!(summary.contains("request-permission ohos.permission.INTERNET reason=- when=- abilities=-\n"));
 

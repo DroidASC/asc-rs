@@ -8,9 +8,9 @@ mod settings;
 
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::config::Config;
-use asc_engine::{names, CacheConfig, CallQuery, CallRoots, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext};
+use asc_engine::{CacheConfig, CallQuery, CallRoots, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext, names};
 use asc_findrefs::Query;
-use asc_mcp::format::{left_out_note, ProgramFormat};
+use asc_mcp::format::{ProgramFormat, left_out_note};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use output::{Io, LocalEngines, SpillTarget, Window};
 use std::collections::HashMap;

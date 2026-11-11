@@ -4,14 +4,14 @@
 use std::fmt::{self, Write};
 
 use asc_abc::{
-    record_field, Abc, AbcError, Class, Field, FieldType, FieldValue, FunctionName, LiteralArray, ModuleRecord, RecordKind, RecordName,
+    Abc, AbcError, Class, Field, FieldType, FieldValue, FunctionName, LiteralArray, ModuleRecord, RecordKind, RecordName, record_field,
 };
 
+use crate::Options;
 use crate::annotation;
 use crate::literal::{method_name, write_literal_array};
 use crate::module::ModuleText;
-use crate::text::{write_count, write_error, write_f32, write_f64, write_imm, write_name, write_quoted, ELLIPSIS};
-use crate::Options;
+use crate::text::{ELLIPSIS, write_count, write_error, write_f32, write_f64, write_imm, write_name, write_quoted};
 
 /// What rendering the functions of a record needs from the record itself,
 /// looked up once per record rather than once per instruction.
@@ -154,7 +154,7 @@ fn write_type<W: Write>(out: &mut W, abc: &Abc<'_>, field: &Field<'_>) -> fmt::R
             return match abc.string(off) {
                 Ok(descriptor) => write_name(out, &descriptor.to_str()),
                 Err(error) => write_error(out, format_args!("type @{off:#x}: {error}")),
-            }
+            };
         }
         Err(error) => return write_error(out, format_args!("type: {error}")),
     };

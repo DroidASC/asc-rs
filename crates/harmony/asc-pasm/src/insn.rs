@@ -7,11 +7,11 @@ use std::fmt::{self, Write};
 use asc_abc::{Abc, AbcError, Method, Region};
 use asc_arkisa::{Instruction, OperandKind, Value};
 
+use crate::Options;
 use crate::literal::{method_name, write_literal_array};
 use crate::module::{ModuleOperand, ModuleText};
 use crate::record::RecordInfo;
 use crate::text::{write_error, write_f64, write_i32, write_imm, write_name, write_quoted};
-use crate::Options;
 
 /// Width in bits of the ids of the `deprecated.*` opcodes that predate the
 /// 16-bit region index.

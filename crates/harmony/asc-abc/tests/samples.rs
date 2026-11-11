@@ -10,7 +10,7 @@ mod common;
 use std::time::Instant;
 
 use asc_abc::{Abc, AbcError, ClassEntry, FunctionName, RecordName, Version};
-use common::{load_large_sample, load_large_sample_entry, load_sample, walk, Rng, Stats};
+use common::{Rng, Stats, load_large_sample, load_large_sample_entry, load_sample, walk};
 
 /// Open strictly, check the checksum, and walk everything.
 fn walk_sample(data: &[u8]) -> Stats {

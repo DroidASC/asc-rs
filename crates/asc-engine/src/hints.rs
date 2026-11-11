@@ -2,12 +2,12 @@
 //! to the framework, the classes or members it probably meant, why a search
 //! found nothing. Only computed on those paths, so it may scan the APK.
 
-use crate::{names, skip, Engine, Result};
+use crate::{Engine, Result, names, skip};
 use asc_dex::Dex;
 use asc_findrefs::{MemberQuery, MemberSignature, Query};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Suggestions per hint.
 const MAX_SUGGESTIONS: usize = 5;
@@ -103,11 +103,7 @@ fn closest_members(members: &[String], name: Option<&str>) -> Vec<String> {
                 .iter()
                 .filter_map(|m| {
                     let have = member_name(m).to_ascii_lowercase();
-                    if have == want || have.contains(&want) {
-                        Some((0, m))
-                    } else {
-                        names::edit_distance(&want, &have, 3).map(|k| (k, m))
-                    }
+                    if have == want || have.contains(&want) { Some((0, m)) } else { names::edit_distance(&want, &have, 3).map(|k| (k, m)) }
                 })
                 .collect();
             scored.sort();
@@ -166,11 +162,7 @@ impl Engine {
             );
         }
         let similar = similar_classes(descriptor, classes.iter().map(|c| c.descriptor.as_str()));
-        if similar.is_empty() {
-            String::new()
-        } else {
-            format!("; did you mean {}", similar.join(", "))
-        }
+        if similar.is_empty() { String::new() } else { format!("; did you mean {}", similar.join(", ")) }
     }
 
     /// For "entry … not found": entries with the same file name or a close

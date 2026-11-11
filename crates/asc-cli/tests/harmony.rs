@@ -2,12 +2,13 @@
 //! `.abc` / `.hap` / `.app` files).
 
 use asc_fixture::abc::{
-    annotations_program, call_graph_program, callable_names_program, class_hierarchy_program, make_abc, sample_program, CALLS_APP,
-    CALLS_BOX, CALLS_INDEX, CALLS_UTIL, CLASSES_APP, CLASSES_BASE, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL,
+    CALLS_APP, CALLS_BOX, CALLS_INDEX, CALLS_UTIL, CLASSES_APP, CLASSES_BASE, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL,
+    annotations_program, call_graph_program, callable_names_program, class_hierarchy_program, make_abc, sample_program,
 };
 use asc_fixture::hap::{
-    make_app, make_hap, make_library_hsp, make_routed_hap, resource_program, sample_resources, Compression, Hap, DETAIL_PAGE, LABELS_PAGE,
-    LONG_FILLER_BYTES, LONG_MARKER, LONG_PAGE, SAMPLE_BRAND_ID, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON, SAMPLE_PACK_INFO, SHARED_PAGE,
+    Compression, DETAIL_PAGE, Hap, LABELS_PAGE, LONG_FILLER_BYTES, LONG_MARKER, LONG_PAGE, SAMPLE_BRAND_ID, SAMPLE_MAIN_PAGES,
+    SAMPLE_MODULE_JSON, SAMPLE_PACK_INFO, SHARED_PAGE, make_app, make_hap, make_library_hsp, make_routed_hap, resource_program,
+    sample_resources,
 };
 use asc_fixture::{make_apk, make_dex};
 use std::path::{Path, PathBuf};
@@ -347,8 +348,12 @@ fn findrefs_import_lists_declarations_loads_and_requests() {
     assert_eq!(
         http,
         [
-            format!("ets/modules.abc | {INDEX_PAGE} field moduleRecordIdx | - | regular import 0: import {{ default as http }} from \"@ohos:net.http\""),
-            format!("ets/modules.abc | {INDEX_PAGE}->#~@0>#build+0x0 | Index.build | ldexternalmodulevar 0  ; import {{ default as http }} from \"@ohos:net.http\""),
+            format!(
+                "ets/modules.abc | {INDEX_PAGE} field moduleRecordIdx | - | regular import 0: import {{ default as http }} from \"@ohos:net.http\""
+            ),
+            format!(
+                "ets/modules.abc | {INDEX_PAGE}->#~@0>#build+0x0 | Index.build | ldexternalmodulevar 0  ; import {{ default as http }} from \"@ohos:net.http\""
+            ),
         ]
     );
     assert_eq!(inputs.lines(&["findrefs", &hap, "import", "@ohos:net.http", "--literal"]), http);
@@ -1070,7 +1075,9 @@ fn resources_lists_looks_up_and_searches_the_index() {
     let bare = inputs.file("bare.abc", &abc);
     assert_eq!(
         inputs.error(&["resources", &bare]),
-        format!("Error: no resources.index in {bare} (a bare .abc carries none: pass the .hap / .app it came from, or a directory holding both)\n")
+        format!(
+            "Error: no resources.index in {bare} (a bare .abc carries none: pass the .hap / .app it came from, or a directory holding both)\n"
+        )
     );
     let none = inputs.file("none.hap", &Hap::new().modules_abc(&abc).build());
     assert_eq!(inputs.error(&["resources", &none]), format!("Error: no resources.index in {none} (none.hap: no resources.index)\n"));
@@ -1208,7 +1215,9 @@ fn getmanifest_prints_the_documents() {
     for command in ["getmanifest", "manifest-summary"] {
         assert_eq!(
             inputs.error(&[command, &abc]),
-            format!("Error: no manifest in {abc}: a bare .abc carries no module.json; pass the .hap / .app it came from, or a directory holding both\n")
+            format!(
+                "Error: no manifest in {abc}: a bare .abc carries no module.json; pass the .hap / .app it came from, or a directory holding both\n"
+            )
         );
     }
 }
@@ -1454,12 +1463,16 @@ fn pages_and_routes_are_lines_with_their_records() {
     assert_eq!(
         of_kind("route"),
         [
-            format!("route detail buildFunction=DetailBuilder source=src/main/ets/pages/Detail.ets record={DETAIL_PAGE} abc=entry.hap/ets/modules.abc"),
+            format!(
+                "route detail buildFunction=DetailBuilder source=src/main/ets/pages/Detail.ets record={DETAIL_PAGE} abc=entry.hap/ets/modules.abc"
+            ),
             format!(
                 "route lib/shared buildFunction=SharedBuilder source=src/main/ets/pages/Shared.ets package=@sample/lib record={SHARED_PAGE} \
                  abc=lib.hsp/ets/modules.abc"
             ),
-            format!("route index buildFunction=IndexBuilder source=src/main/ets/pages/Index.ets record={INDEX_PAGE} abc=entry.hap/ets/modules.abc"),
+            format!(
+                "route index buildFunction=IndexBuilder source=src/main/ets/pages/Index.ets record={INDEX_PAGE} abc=entry.hap/ets/modules.abc"
+            ),
             "route gone buildFunction=GoneBuilder source=src/main/ets/pages/Gone.ets record=- (no record \
              com.example.sample/entry/ets/pages/Gone or &entry/src/main/ets/pages/Gone&)"
                 .to_owned(),
@@ -1566,9 +1579,9 @@ fn findrefs_and_listclass_keep_to_an_entry_or_a_package() {
         inputs.lines(&["listclass", &pkgs, "--entry", "a.hap", "--prefix", "entry/src/main/ets/pages/L"]),
         [format!("{LABELS_PAGE} | functions=1 | a.hap/ets/modules.abc")]
     );
-    assert!(inputs
-        .error(&["listclass", &pkgs, "--entry", "nope"])
-        .starts_with("Error: no entry named nope (entries: a.hap/ets/modules.abc, "));
+    assert!(
+        inputs.error(&["listclass", &pkgs, "--entry", "nope"]).starts_with("Error: no entry named nope (entries: a.hap/ets/modules.abc, ")
+    );
     // A lone package is named by its file name; a DEX program has no such entries.
     let lone = inputs.path("pkgs/b.hsp").to_str().unwrap().to_owned();
     assert_eq!(inputs.lines(&["findrefs", &lone, "number", &id, "--entry", "b.hsp"]).len(), 1);

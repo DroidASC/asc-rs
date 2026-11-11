@@ -8,9 +8,9 @@
 
 use serde_json::Value;
 
+use crate::HapError;
 use crate::record;
 use crate::value::{self, Findings, Line, Note, Obj};
-use crate::HapError;
 
 /// A parsed `pkgContextInfo.json`.
 #[derive(Debug, Clone, PartialEq)]

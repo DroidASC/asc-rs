@@ -18,8 +18,8 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 const CD_SIG: &[u8; 4] = b"PK\x01\x02";
@@ -233,11 +233,7 @@ impl Archive {
     /// `label/inner`, so the archive is all before the last `/`.
     fn entry_name(&self, inner: &[u8]) -> String {
         let inner = String::from_utf8_lossy(inner);
-        if self.label.is_empty() {
-            inner.into_owned()
-        } else {
-            format!("{}/{inner}", self.label)
-        }
+        if self.label.is_empty() { inner.into_owned() } else { format!("{}/{inner}", self.label) }
     }
 
     /// The name inside this archive of the program's entry `name`, if it

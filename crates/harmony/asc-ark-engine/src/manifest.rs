@@ -37,10 +37,10 @@ use std::str::FromStr;
 
 use asc_abc::{Abc, Class, ClassEntry};
 use asc_hap::{Ability, HapError, ModuleJson, PackInfo, PageList, PkgContextInfo, RecordNames, Route, RouterMap};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::program::{EntryInfo, EntryStatus, Program, SOURCE_MAPS};
-use crate::{resources, text, Engine, EngineError, Result};
+use crate::{Engine, EngineError, Result, resources, text};
 
 /// The first words of the `pack.info` lines that are about one module;
 /// their second word is the module's name.
@@ -283,11 +283,7 @@ impl ManifestLine {
     /// The line; `with_package` puts the package ahead of it, the way a
     /// findrefs row starts with its entry: `entry.hap | ability …`.
     pub fn line(&self, with_package: bool) -> String {
-        if with_package {
-            format!("{} | {}", self.package, self.text)
-        } else {
-            self.text.clone()
-        }
+        if with_package { format!("{} | {}", self.package, self.text) } else { self.text.clone() }
     }
 }
 

@@ -1,6 +1,6 @@
+use asc_dex::Dex;
 use asc_dex::checksum::{adler32, sha1};
 use asc_dex::encoded::parse_array;
-use asc_dex::Dex;
 use asc_fixture::{make_dex, make_static_field_dex};
 use asc_rebuild::rebuild_class_bytes;
 
@@ -60,14 +60,14 @@ fn missing_class_is_an_error() {
 // Rich fixture: payloads, try/catch, annotations, debug info, MUTF-8
 // ---------------------------------------------------------------------------
 
+use asc_dex::ClassDef;
 use asc_dex::class_data::{ClassData, EncodedMethod};
 use asc_dex::code::CodeItem;
 use asc_dex::debug_info::DebugInfo;
 use asc_dex::encoded::EncodedValue;
-use asc_dex::ClassDef;
 use asc_fixture::{
-    make_many_members_dex, make_rich_dex, make_short_static_values_dex, make_truncated_insn_dex, make_unsorted_static_field_dex,
-    RICH_STRING,
+    RICH_STRING, make_many_members_dex, make_rich_dex, make_short_static_values_dex, make_truncated_insn_dex,
+    make_unsorted_static_field_dex,
 };
 use asc_rebuild::RebuildError;
 
@@ -222,7 +222,7 @@ fn debug_info_is_rewritten_with_new_string_indexes() {
 
 #[test]
 fn annotations_directory_is_rebuilt_for_class_field_method_and_parameters() {
-    use asc_dex::annotations::{parse_annotation_set, parse_annotation_set_ref_list, AnnotationsDirectory};
+    use asc_dex::annotations::{AnnotationsDirectory, parse_annotation_set, parse_annotation_set_ref_list};
     use asc_dex::encoded::parse_annotation_item;
     let out = rebuild_class_bytes(&make_rich_dex(), RICH).unwrap();
     let buf = &out.bytes;

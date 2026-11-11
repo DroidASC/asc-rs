@@ -11,7 +11,7 @@
 //! `pc + op.byte_len() <= code.len()` first (`walk` does this before handing
 //! out a `Step`).
 
-use crate::{opcode, Format, Opcode, FILL_ARRAY_DATA_PAYLOAD, PACKED_SWITCH_PAYLOAD, SPARSE_SWITCH_PAYLOAD};
+use crate::{FILL_ARRAY_DATA_PAYLOAD, Format, Opcode, PACKED_SWITCH_PAYLOAD, SPARSE_SWITCH_PAYLOAD, opcode};
 
 /// Little-endian code unit `word` of the instruction at `pc`.
 ///
@@ -60,11 +60,7 @@ fn fits(code: &[u8], pc: usize, op: &Opcode) -> bool {
 /// Panics when the instruction is truncated (`pc + op.byte_len() > code.len()`).
 #[inline]
 pub fn get_index(code: &[u8], pc: usize, op: &Opcode) -> u32 {
-    if op.format == Format::K31c {
-        fetch32(code, pc, 1)
-    } else {
-        fetch16(code, pc, 1) as u32
-    }
+    if op.format == Format::K31c { fetch32(code, pc, 1) } else { fetch16(code, pc, 1) as u32 }
 }
 
 /// Overwrite the constant-pool index of the instruction at `pc`.
@@ -143,11 +139,7 @@ pub fn vreg_b(code: &[u8], pc: usize, op: &Opcode) -> Option<i64> {
         Format::K12x | Format::K22c | Format::K22s | Format::K22t => (w0 >> 12) as i64,
         Format::K11n => {
             let v = (w0 >> 12) as i64;
-            if v > 7 {
-                v - 16
-            } else {
-                v
-            }
+            if v > 7 { v - 16 } else { v }
         }
         Format::K21c | Format::K21h | Format::K22x | Format::K35c | Format::K3rc | Format::K45cc | Format::K4rcc => {
             fetch16(code, pc, 1) as i64

@@ -9,8 +9,8 @@ use std::fmt::{self, Write};
 
 use asc_abc::{Abc, AbcError, Literal};
 
-use crate::text::{write_error, write_f32, write_f64, write_i32, write_name, write_quoted, ELLIPSIS};
 use crate::Options;
+use crate::text::{ELLIPSIS, write_error, write_f32, write_f64, write_i32, write_name, write_quoted};
 
 /// Write the literal array at file offset `off`, at most
 /// `opts.literal_limit` items of it. A failure becomes an error marker in

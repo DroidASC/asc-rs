@@ -10,7 +10,7 @@
 //! `ms`/`s`/`m`/`h` (a bare number is the key's unit).
 
 use crate::{CacheConfig, Device, MemoryPolicy, Threads};
-use asc_cache::{AutoDisk, DiskCache, DiskCapacity, Tier, DEFAULT_MIN_DEX_BYTES};
+use asc_cache::{AutoDisk, DEFAULT_MIN_DEX_BYTES, DiskCache, DiskCapacity, Tier};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -474,7 +474,7 @@ impl Config {
                         key: name,
                         text: format!("<{}>", other.type_str()),
                         expected: "a string, number or boolean",
-                    })
+                    });
                 }
             };
             self.set(&name, &text, Source::File, &origin)?;

@@ -529,7 +529,12 @@ fn a_conjunction_is_one_row_per_function() {
     assert_eq!(row.matched, [URL, "import:@ohos:net.http#default.createHttp"]);
     // The order of the conditions is the order of the columns, whichever is tested first.
     let swapped = find(&engine, &all(&["call:createHttp$", "string:^https://"]));
-    assert_eq!(swapped, ["#~@0>#load | call +0xe callthis0 v0 ; import:@ohos:net.http#default.createHttp() && string +0x1b lda.str \"https://example.com/api\""]);
+    assert_eq!(
+        swapped,
+        [
+            "#~@0>#load | call +0xe callthis0 v0 ; import:@ohos:net.http#default.createHttp() && string +0x1b lda.str \"https://example.com/api\""
+        ]
+    );
 
     // More hits than a row spells out are counted.
     let many = find(&engine, &all(&["import:@ohos:net", "prop:.", "global:=console"]));
@@ -749,7 +754,7 @@ fn lines_in(engine: &Engine, query: &Query, entry: Option<&str>) -> Vec<String> 
 
 #[test]
 fn long_strings_are_cut_and_show_where_they_match() {
-    use asc_fixture::hap::{routed_program, LONG_FILLER_BYTES, LONG_MARKER, LONG_PAGE};
+    use asc_fixture::hap::{LONG_FILLER_BYTES, LONG_MARKER, LONG_PAGE, routed_program};
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path(), &routed_program().build().bytes);
     let limit = asc_ark_engine::text::ROW_STRING_BYTES;
@@ -822,7 +827,7 @@ fn condition_pair(first: &str, second: &str) -> Query {
 #[test]
 fn a_search_can_be_kept_to_an_entry_or_a_package() {
     use asc_ark_engine::ListOptions;
-    use asc_fixture::hap::{make_hap, Hap};
+    use asc_fixture::hap::{Hap, make_hap};
     let dir = tempfile::tempdir().unwrap();
     let abc = asc_fixture::abc::make_abc();
     std::fs::write(dir.path().join("a.hap"), make_hap(&abc)).unwrap();

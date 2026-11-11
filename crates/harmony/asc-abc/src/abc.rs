@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 
 use crate::class::{Class, ClassEntry, Field, ForeignClass, Method};
-use crate::reader::{entity_pos, read_u32, slice_at, Reader};
-use crate::{AbcError, Annotation, Code, DebugInfo, Header, LiteralArray, ModuleRecord, RegionHeader, Result, StringData, INVALID_OFFSET};
+use crate::reader::{Reader, entity_pos, read_u32, slice_at};
+use crate::{AbcError, Annotation, Code, DebugInfo, Header, INVALID_OFFSET, LiteralArray, ModuleRecord, RegionHeader, Result, StringData};
 
 /// A borrowed ABC (Panda) file. Opening reads the header and checks that the
 /// index tables are in bounds; everything else is parsed on demand.
@@ -63,11 +63,7 @@ impl<'a> Abc<'a> {
     pub fn check_layout(&self) -> Result<()> {
         self.probe_layout().map_err(|err| {
             let computed = self.compute_checksum();
-            if computed == self.header.checksum {
-                err
-            } else {
-                AbcError::Encrypted { stored: self.header.checksum, computed }
-            }
+            if computed == self.header.checksum { err } else { AbcError::Encrypted { stored: self.header.checksum, computed } }
         })
     }
 

@@ -17,8 +17,8 @@
 //! `oracle.rs` compiles the same source again and compares it with the
 //! official disassembler when the tools are there.
 
-use asc_abc::{unmerged, Abc, ElementValue, MethodTag, Version};
-use asc_pasm::{write_record, Options};
+use asc_abc::{Abc, ElementValue, MethodTag, Version, unmerged};
+use asc_pasm::{Options, write_record};
 
 const COMPILED: &[u8] = include_bytes!("es2abc/annotations.api24.abc");
 

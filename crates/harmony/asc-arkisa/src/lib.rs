@@ -17,7 +17,7 @@ mod table;
 mod walk;
 
 pub use decode::{DecodeError, Instruction, Operands, RegRange, Value};
-pub use walk::{walk, Walk};
+pub use walk::{Walk, walk};
 
 /// Prefix byte of a two-byte opcode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -144,11 +144,7 @@ impl Opcode {
     /// Number of opcode bytes before the operands: 2 when prefixed, else 1.
     #[inline]
     pub const fn opcode_len(&self) -> usize {
-        if self.prefix.is_some() {
-            2
-        } else {
-            1
-        }
+        if self.prefix.is_some() { 2 } else { 1 }
     }
 
     #[inline]

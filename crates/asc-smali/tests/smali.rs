@@ -1,6 +1,6 @@
 use asc_dex::Dex;
 use asc_fixture::{make_dex, make_static_field_dex};
-use asc_smali::{disassemble_class, Options};
+use asc_smali::{Options, disassemble_class};
 
 #[test]
 fn single_method_listing_maps_pcs_to_lines() {
@@ -235,7 +235,7 @@ fn abstract_method_keeps_param_and_annotations() {
 
 #[test]
 fn method_filter_keeps_one_exact_signature() {
-    use asc_smali::{disassemble_class_method, normalize_method_signature, SmaliError};
+    use asc_smali::{SmaliError, disassemble_class_method, normalize_method_signature};
     let out = asc_rebuild::rebuild_class_bytes(&make_rich_dex(), RICH).unwrap();
     let dex = Dex::parse(&out.bytes).unwrap();
     let full = disassemble_class(&dex, RICH, Options::default()).unwrap();

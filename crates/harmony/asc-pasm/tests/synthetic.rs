@@ -5,9 +5,9 @@ mod common;
 
 use asc_abc::leb128::write_uleb128;
 use asc_abc::{Abc, ClassEntry};
-use asc_arkisa::{walk, Instruction};
+use asc_arkisa::{Instruction, walk};
 use asc_fixture::abc::{AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcRecord, Asm};
-use asc_pasm::{write_function, write_instruction, write_record, Options, SourceLine};
+use asc_pasm::{Options, SourceLine, write_function, write_instruction, write_record};
 
 const RECORD: &str = "&entry/src/main/ets/pages/Index&";
 

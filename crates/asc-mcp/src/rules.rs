@@ -3,17 +3,17 @@
 
 use crate::multi::{self, Report, Section};
 use crate::{
-    bool_arg, choice_arg, context_arg, describe_query, max_bytes, parse_query, ref_json, result_json, str_arg, usize_arg, Call, Found,
-    OpenApk, Server, ToolError, ToolResult, PER_APK,
+    Call, Found, OpenApk, PER_APK, Server, ToolError, ToolResult, bool_arg, choice_arg, context_arg, describe_query, max_bytes,
+    parse_query, ref_json, result_json, str_arg, usize_arg,
 };
 use asc_engine::{
-    compile_rules, hints, names, Claim, CompiledQuery, DexDedup, FindOptions, HierarchyQuery, Lineage, RefBatch, RefResult, SearchTarget,
+    Claim, CompiledQuery, DexDedup, FindOptions, HierarchyQuery, Lineage, RefBatch, RefResult, SearchTarget, compile_rules, hints, names,
 };
 use asc_findrefs::Query;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Rows per rule of a single-APK rule set.
@@ -62,7 +62,7 @@ pub(crate) fn compound(args: &Value) -> Result<Option<Query>, ToolError> {
                 return Err(ToolError(format!(
                     "`kind` beside `all` / `none` must be a complete query to join them ({}), or be left out",
                     e.0
-                )))
+                )));
             }
         }
     }
@@ -455,7 +455,7 @@ fn rules_section(
 
 pub mod defs {
     use crate::defs::{apk_props, merge, shape};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     pub fn hierarchy() -> Value {
         json!({

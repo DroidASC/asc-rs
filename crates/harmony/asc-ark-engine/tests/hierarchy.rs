@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use asc_ark_engine::{ClassDefinition, ClassNode, Engine, EngineError, HierarchyQuery, Lineage, ParentKind};
-use asc_fixture::abc::{class_hierarchy_program, AbcBuilder, CLASSES_APP, CLASSES_BASE, CLASSES_INDEX};
+use asc_fixture::abc::{AbcBuilder, CLASSES_APP, CLASSES_BASE, CLASSES_INDEX, class_hierarchy_program};
 
 fn open(dir: &Path, builder: &AbcBuilder) -> Engine {
     let path = dir.join("modules.abc");

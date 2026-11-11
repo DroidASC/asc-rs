@@ -2,7 +2,7 @@
 //! prefix: same rows as a full search, and a fall back to it whenever the
 //! prefix cannot tell.
 
-use asc_engine::{names, CacheConfig, Engine, FindOptions};
+use asc_engine::{CacheConfig, Engine, FindOptions, names};
 use asc_findrefs::{ClassQuery, MemberQuery, Query};
 use asc_fixture::{make_apk, make_padded_dex};
 use std::io::Write;

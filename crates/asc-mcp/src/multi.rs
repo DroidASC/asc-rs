@@ -9,9 +9,9 @@
 //! pre-rendered lines; [`Report::page`] emits whole sections up to a byte
 //! budget and returns a cursor for the rest.
 
-use crate::{lock, OpenApk, ToolError};
+use crate::{OpenApk, ToolError, lock};
 use asc_engine::Threads;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -132,12 +132,14 @@ where
             let next = &next;
             let plans = &plans;
             let plan = &plan;
-            s.spawn(move || loop {
-                threads.wait_turn(k, || next.load(Ordering::Relaxed) >= apks.len() || cancel.load(Ordering::Relaxed));
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(apk) = apks.get(i) else { break };
-                let p = if cancel.load(Ordering::Relaxed) { Err("cancelled".to_string()) } else { plan(apk) };
-                *lock(&plans[i]) = Some(p);
+            s.spawn(move || {
+                loop {
+                    threads.wait_turn(k, || next.load(Ordering::Relaxed) >= apks.len() || cancel.load(Ordering::Relaxed));
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(apk) = apks.get(i) else { break };
+                    let p = if cancel.load(Ordering::Relaxed) { Err("cancelled".to_string()) } else { plan(apk) };
+                    *lock(&plans[i]) = Some(p);
+                }
             });
         }
     });
@@ -182,19 +184,21 @@ where
         for w in 0..workers.min(jobs.len()) {
             let (next, jobs, contexts, units, slots, left) = (&next, &jobs, &contexts, &units, &slots, &left);
             let (run, done) = (&run, &done);
-            s.spawn(move || loop {
-                threads.wait_turn(w, || next.load(Ordering::Relaxed) >= jobs.len() || cancel.load(Ordering::Relaxed));
-                let k = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&(_, a, j)) = jobs.get(k) else { break };
-                if !cancel.load(Ordering::Relaxed) {
-                    let ctx = lock(&contexts[a]).clone().expect("a context lives until its last unit");
-                    let r = run(&apks[a], &ctx, &units[a][j]);
-                    lock(&slots[a])[j] = Some(r);
-                }
-                if left[a].fetch_sub(1, Ordering::AcqRel) == 1 {
-                    // Every other unit dropped its reference before counting down.
-                    lock(&contexts[a]).take();
-                    done(&apks[a]);
+            s.spawn(move || {
+                loop {
+                    threads.wait_turn(w, || next.load(Ordering::Relaxed) >= jobs.len() || cancel.load(Ordering::Relaxed));
+                    let k = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(_, a, j)) = jobs.get(k) else { break };
+                    if !cancel.load(Ordering::Relaxed) {
+                        let ctx = lock(&contexts[a]).clone().expect("a context lives until its last unit");
+                        let r = run(&apks[a], &ctx, &units[a][j]);
+                        lock(&slots[a])[j] = Some(r);
+                    }
+                    if left[a].fetch_sub(1, Ordering::AcqRel) == 1 {
+                        // Every other unit dropped its reference before counting down.
+                        lock(&contexts[a]).take();
+                        done(&apks[a]);
+                    }
                 }
             });
         }

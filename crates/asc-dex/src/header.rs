@@ -1,4 +1,4 @@
-use crate::{u32_at, DexError, Result, HEADER_SIZE};
+use crate::{DexError, HEADER_SIZE, Result, u32_at};
 
 /// An `(offset, size)` pair describing one id table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

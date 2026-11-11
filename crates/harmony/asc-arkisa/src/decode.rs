@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::{flag, opcode, prefixed_opcode, Opcode, Operand, OperandKind, Prefix};
+use crate::{Opcode, Operand, OperandKind, Prefix, flag, opcode, prefixed_opcode};
 
 /// Why the bytes at an offset are not an instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

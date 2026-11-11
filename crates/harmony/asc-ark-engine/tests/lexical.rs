@@ -331,11 +331,7 @@ fn unidentified_record(name: &str, with_broken: bool) -> AbcRecord {
         .function(function("#*#uneven", 0, 1, uneven))
         .function(function("#*@0*#child", 0, 0, child))
         .function(function("#*#sound", 0, 0, sound));
-    if with_broken {
-        record.function(function("#*#broken", 0, 0, broken))
-    } else {
-        record
-    }
+    if with_broken { record.function(function("#*#broken", 0, 0, broken)) } else { record }
 }
 
 const TIDY: &str = "&entry/src/main/ets/pages/Tidy&";

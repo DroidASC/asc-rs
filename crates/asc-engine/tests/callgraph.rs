@@ -1,9 +1,9 @@
 //! Call graph walks and findrefs context over a two-DEX APK.
 
 use asc_dex::debug_info::{DebugInfo, DebugOp};
-use asc_engine::{names, CacheConfig, CallQuery, CallRoots, Direction, Engine, FindOptions, RefContext};
+use asc_engine::{CacheConfig, CallQuery, CallRoots, Direction, Engine, FindOptions, RefContext, names};
 use asc_findrefs::Query;
-use asc_fixture::{dbg_special, make_apk, ClassSpec, CodeSpec, DexBuilder, MethodSpec};
+use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec, dbg_special, make_apk};
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
 

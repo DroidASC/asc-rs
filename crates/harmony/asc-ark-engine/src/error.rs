@@ -49,11 +49,7 @@ pub enum EngineError {
 const BARE_ABC_HINT: &str = ": a bare .abc carries no module.json; pass the .hap / .app it came from, or a directory holding both";
 
 fn note_suffix(notes: &[String]) -> String {
-    if notes.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", notes.join("; "))
-    }
+    if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) }
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;

@@ -8,9 +8,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use asc_ark_engine::{ClassQuery, Engine, EngineError, EntryStatus, Format, Query, Stamp};
-use asc_fixture::abc::{make_abc, sample_program, INDEX_PAGE};
+use asc_fixture::abc::{INDEX_PAGE, make_abc, sample_program};
 use asc_fixture::hap::{
-    make_app, make_debug_hap, make_hap, make_library_hsp, unpack, Compression, Hap, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON,
+    Compression, Hap, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON, make_app, make_debug_hap, make_hap, make_library_hsp, unpack,
 };
 
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {

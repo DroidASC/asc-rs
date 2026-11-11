@@ -4,7 +4,7 @@
 //! logical header stores absolute offsets into the container, so a logical DEX
 //! can be exposed as "the full container bytes with this header at offset 0".
 
-use crate::{u32_at, HEADER_SIZE};
+use crate::{HEADER_SIZE, u32_at};
 use std::borrow::Cow;
 
 pub const DEX041_MAGIC: &[u8; 8] = b"dex\n041\0";
@@ -29,11 +29,7 @@ pub fn dex041_logical_offsets(data: &[u8]) -> Vec<usize> {
         offsets.push(off);
         off += file_size;
     }
-    if offsets.is_empty() {
-        vec![0]
-    } else {
-        offsets
-    }
+    if offsets.is_empty() { vec![0] } else { offsets }
 }
 
 /// Produce a buffer that exposes the logical DEX at `header_off` as a regular

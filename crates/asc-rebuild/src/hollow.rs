@@ -1,11 +1,11 @@
 //! Phase 1: pull every structure the class owns out of the original DEX.
 
 use crate::{RebuildError, Result};
-use asc_dex::annotations::{parse_annotation_set, parse_annotation_set_ref_list, AnnotationsDirectory};
+use asc_dex::annotations::{AnnotationsDirectory, parse_annotation_set, parse_annotation_set_ref_list};
 use asc_dex::class_data::ClassData;
 use asc_dex::code::CodeItem;
 use asc_dex::debug_info::DebugInfo;
-use asc_dex::encoded::{parse_annotation_item, parse_array, AnnotationItem, EncodedValue};
+use asc_dex::encoded::{AnnotationItem, EncodedValue, parse_annotation_item, parse_array};
 use asc_dex::{ClassDef, Dex};
 use std::collections::{BTreeMap, HashMap};
 

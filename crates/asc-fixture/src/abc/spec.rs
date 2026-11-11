@@ -1,7 +1,7 @@
 //! What a file is described with: records, fields, functions, code, debug
 //! info, literal arrays, module records and annotations.
 
-use super::{Asm, ACC_ANNOTATION, ACC_PUBLIC, ACC_STATIC, LANG_ECMASCRIPT};
+use super::{ACC_ANNOTATION, ACC_PUBLIC, ACC_STATIC, Asm, LANG_ECMASCRIPT};
 
 /// Type of a field: a primitive, or a record of this file.
 #[derive(Debug, Clone, PartialEq, Eq)]

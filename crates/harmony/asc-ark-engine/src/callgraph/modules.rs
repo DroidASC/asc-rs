@@ -33,16 +33,16 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use asc_abc::{Abc, Class, ClassEntry};
 use asc_hap::{ModuleJson, PkgContextInfo};
 
 use crate::manifest::Document;
 use crate::program::Program;
-use crate::refs::{chunks, run_units, RECORD_CHUNK};
-use crate::{table_bytes, Result};
+use crate::refs::{RECORD_CHUNK, chunks, run_units};
+use crate::{Result, table_bytes};
 
 /// Re-exports followed from one record to the next before an export is
 /// given up.

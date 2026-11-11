@@ -1,10 +1,10 @@
 //! Class enumeration (`listclass`, MCP `listclass`).
 
-use crate::{load_entry, names, Engine, EngineError, Result};
+use crate::{Engine, EngineError, Result, load_entry, names};
 use asc_dex::container::logical_dex_iter;
-use asc_dex::{mutf8, Dex, DexError};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use asc_dex::{Dex, DexError, mutf8};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// A class definition and the (logical) DEX that defines it.
@@ -58,11 +58,7 @@ enum Prefix {
 
 impl Prefix {
     fn new(prefix: &str) -> Prefix {
-        if prefix.is_ascii() {
-            Prefix::Bytes(prefix.as_bytes().to_vec())
-        } else {
-            Prefix::Decoded(prefix.to_string())
-        }
+        if prefix.is_ascii() { Prefix::Bytes(prefix.as_bytes().to_vec()) } else { Prefix::Decoded(prefix.to_string()) }
     }
 
     /// The decoded descriptor when `raw` starts with this prefix.

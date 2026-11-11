@@ -1,7 +1,7 @@
 //! Annotations: `u16 class_idx, u16 count`, `count` elements of
 //! `(u32 name_off, u32 value)`, then `count` one-byte type tags.
 
-use crate::reader::{entity_pos, read_u32, read_u64, Reader};
+use crate::reader::{Reader, entity_pos, read_u32, read_u64};
 use crate::{Abc, AbcError, Result};
 
 /// An annotation attached to a class, field or method.

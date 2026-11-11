@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use asc_arkisa::{DecodeError, OperandKind};
 
 use super::{DefinitionKind, FnId, Scopes, SiteId, StackRef};
-use crate::ops::{base_name, OpTable};
+use crate::ops::{OpTable, base_name};
 use crate::refs::Function;
 use crate::track::Effects;
 

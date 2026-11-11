@@ -23,8 +23,8 @@
 //! fixed `name` such as `apk`.
 
 use crate::{
-    available_memory, CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, MemoryPolicy, RefBatch, RefResult, RefSite, Shape,
-    SharedMemory, TextRows,
+    CachedEntry, DexBytes, FindOptions, LogicalDex, Matched, MemoryPolicy, RefBatch, RefResult, RefSite, Shape, SharedMemory, TextRows,
+    available_memory,
 };
 use asc_cache::{ApkKey, DiskCache, ProcessRegistry};
 use asc_dex::Dex;

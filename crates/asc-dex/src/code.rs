@@ -1,7 +1,7 @@
 //! `code_item` parsing including tries and encoded catch handlers.
 
 use crate::leb128::{read_sleb128, read_uleb128};
-use crate::{u16_at, u32_at, DexError, Result};
+use crate::{DexError, Result, u16_at, u32_at};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TryItem {

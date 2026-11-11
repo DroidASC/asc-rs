@@ -5,7 +5,7 @@
 use std::marker::PhantomData;
 
 use crate::abc::OffsetTable;
-use crate::reader::{entity_pos, read_u16, read_u32, Reader};
+use crate::reader::{Reader, entity_pos, read_u16, read_u32};
 use crate::{AbcError, Result};
 
 /// A fixed-size entry of one of the module record sections.

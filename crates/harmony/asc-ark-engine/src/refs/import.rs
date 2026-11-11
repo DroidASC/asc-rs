@@ -13,10 +13,10 @@ use std::fmt::Write as _;
 use asc_abc::{Abc, Class, ClassEntry, ModuleRecord};
 use asc_arkisa::DecodeError;
 
-use super::{pc_of, Condition, Function, Hit, Pattern, Record, RecordHit, Worker};
-use crate::ops::{immediate, ModuleOperand, OpTable};
+use super::{Condition, Function, Hit, Pattern, Record, RecordHit, Worker, pc_of};
+use crate::ops::{ModuleOperand, OpTable, immediate};
 use crate::program::Program;
-use crate::{text, EngineError, Result};
+use crate::{EngineError, Result, text};
 
 /// The name that stands for a whole module: `import * as ns`, `export *`.
 const NAMESPACE: &str = "*";
@@ -62,11 +62,7 @@ fn name_text(abc: &Abc<'_>, off: u32) -> String {
 
 /// `{ imported as local }`, or `{ name }` when both are the same.
 fn binding_text(imported: &str, local: &str) -> String {
-    if imported == local {
-        format!("{{ {imported} }}")
-    } else {
-        format!("{{ {imported} as {local} }}")
-    }
+    if imported == local { format!("{{ {imported} }}") } else { format!("{{ {imported} as {local} }}") }
 }
 
 impl ImportsWorker<'_, '_> {

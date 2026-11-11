@@ -49,11 +49,11 @@ use asc_arkisa::Prefix;
 
 use crate::callgraph::modules::{Binding, Layout};
 use crate::callgraph::{GraphCache, RecordId};
-use crate::path::{Link, Names, NoLexicals, Origin, Path, PathBuilder, MAX_PATH_LINKS};
-use crate::refs::{chunks, pc_of, run_units, Regions};
-use crate::scopes::{export_group, Exported, ExportedDefinitions, Reader, ScopeTables, Scopes};
+use crate::path::{Link, MAX_PATH_LINKS, Names, NoLexicals, Origin, Path, PathBuilder};
+use crate::refs::{Regions, chunks, pc_of, run_units};
+use crate::scopes::{Exported, ExportedDefinitions, Reader, ScopeTables, Scopes, export_group};
 use crate::track::{Event, Tracker, Watch};
-use crate::{records, table_bytes, Engine, EngineError, Pattern, Result};
+use crate::{Engine, EngineError, Pattern, Result, records, table_bytes};
 
 /// Module-level bindings followed from one to the next before a parent is
 /// left unresolved.

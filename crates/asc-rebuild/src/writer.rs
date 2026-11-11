@@ -1,20 +1,20 @@
 //! Phase 4: serialise the rebuilt DEX.
 
-use crate::collect::{check_walk, UNSUPPORTED_CALL_SITES};
+use crate::collect::{UNSUPPORTED_CALL_SITES, check_walk};
 use crate::hollow::Hollow;
 use crate::tables::Tables;
 use crate::{RebuildError, Result};
 use asc_dalvik::walk::walk_insns;
-use asc_dalvik::{decode, Format, IndexKind, Opcode};
+use asc_dalvik::{Format, IndexKind, Opcode, decode};
 use asc_dex::checksum::seal;
 use asc_dex::class_data::{EncodedField, EncodedMethod};
 use asc_dex::code::CodeItem;
 use asc_dex::encoded::{
-    write_annotation_item, write_array, EncodedValue, IndexRemap, VALUE_BYTE, VALUE_CHAR, VALUE_DOUBLE, VALUE_FLOAT, VALUE_INT, VALUE_LONG,
-    VALUE_SHORT,
+    EncodedValue, IndexRemap, VALUE_BYTE, VALUE_CHAR, VALUE_DOUBLE, VALUE_FLOAT, VALUE_INT, VALUE_LONG, VALUE_SHORT, write_annotation_item,
+    write_array,
 };
 use asc_dex::leb128::{write_sleb128, write_uleb128};
-use asc_dex::{map_type, mutf8, ClassDef, Dex, HEADER_SIZE, NO_INDEX};
+use asc_dex::{ClassDef, Dex, HEADER_SIZE, NO_INDEX, map_type, mutf8};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
@@ -420,11 +420,7 @@ pub(crate) fn write(dex: &Dex<'_>, h: &Hollow<'_>, t: &Tables) -> Result<(Vec<u8
         out.section(map_type::ANNOTATION_SET, h.ann_sets.len(), first);
     }
     let set_off = |old: u32| -> Result<u32> {
-        if old == 0 {
-            Ok(0)
-        } else {
-            ann_set_offs.get(&old).copied().ok_or_else(|| internal("annotation_set", old))
-        }
+        if old == 0 { Ok(0) } else { ann_set_offs.get(&old).copied().ok_or_else(|| internal("annotation_set", old)) }
     };
 
     let mut ann_ref_offs: HashMap<u32, u32> = HashMap::new();

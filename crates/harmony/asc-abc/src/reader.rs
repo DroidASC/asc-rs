@@ -1,6 +1,6 @@
 //! Bounds-checked little-endian reads and a forward cursor.
 
-use crate::{leb128, AbcError, Result, StringData, HEADER_SIZE};
+use crate::{AbcError, HEADER_SIZE, Result, StringData, leb128};
 
 fn array_at<const N: usize>(buf: &[u8], off: usize, what: &'static str) -> Result<[u8; N]> {
     off.checked_add(N)
@@ -38,11 +38,7 @@ pub(crate) fn slice_at<'a>(buf: &'a [u8], off: usize, len: usize, what: &'static
 #[inline]
 pub(crate) fn entity_pos(buf: &[u8], off: u32, what: &'static str) -> Result<usize> {
     let pos = off as usize;
-    if pos > HEADER_SIZE && pos < buf.len() {
-        Ok(pos)
-    } else {
-        Err(AbcError::BadOffset { what, offset: off })
-    }
+    if pos > HEADER_SIZE && pos < buf.len() { Ok(pos) } else { Err(AbcError::BadOffset { what, offset: off }) }
 }
 
 /// File offset of a position inside the buffer. ABC offsets are 32 bits; a

@@ -5,16 +5,15 @@
 //! binary XML file.
 
 use super::Session;
-use crate::{bool_arg, choice_arg, str_arg, usize_arg, Call, ToolError, ToolResult};
+use crate::{Call, ToolError, ToolResult, bool_arg, choice_arg, str_arg, usize_arg};
 use asc_ark_engine::{EngineError, Pattern, ResourceField, ResourceRow, ResourceTables};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Rows of a resource search or lookup, as on the DEX side.
 const LIMIT: usize = 200;
 
 /// What the tool takes on a HarmonyOS program, for the program's introduction.
-pub(super) const USAGE: &str =
-    "# resources: resources.index rows `0x01000000 string/app_name [base] \"value\"` (`PACKAGE | ` ahead in a program of several \
+pub(super) const USAGE: &str = "# resources: resources.index rows `0x01000000 string/app_name [base] \"value\"` (`PACKAGE | ` ahead in a program of several \
      packages): query=ID (0x01000000 or decimal) or NAME (string/app_name, $string:app_name, app.string.app_name), resolve=true \
      follows `$type:id` values; search=REGEX in=name|value|any; xml=\"$profile:main_pages\" (or a path inside the package) prints \
      that text file: page lists, route tables. Code holds a resource as its id (findrefs kind=number) or as the string \

@@ -11,12 +11,12 @@ use asc_abc::{
     Version,
 };
 use asc_fixture::abc::{
-    adler32, make_abc, make_multi_region_abc, sample_program, AbcAnnotation, AbcBuilder, AbcCatch, AbcCode, AbcDebugInfo, AbcElementValue,
-    AbcField, AbcFieldValue, AbcFile, AbcFunction, AbcLayout, AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcTry, AbcType, AnnotationKind,
-    Asm, Catch, MethodRef, Op, RegionHint, ACC_STATIC, ENTRY_ABILITY, INDEX_PAGE, SAMPLE_API_URL, SAMPLE_MAGIC, VERSION_12_0_6_0,
-    VERSION_13_0_1_0, VERSION_9_0_0_0,
+    ACC_STATIC, AbcAnnotation, AbcBuilder, AbcCatch, AbcCode, AbcDebugInfo, AbcElementValue, AbcField, AbcFieldValue, AbcFile, AbcFunction,
+    AbcLayout, AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcTry, AbcType, AnnotationKind, Asm, Catch, ENTRY_ABILITY, INDEX_PAGE,
+    MethodRef, Op, RegionHint, SAMPLE_API_URL, SAMPLE_MAGIC, VERSION_9_0_0_0, VERSION_12_0_6_0, VERSION_13_0_1_0, adler32, make_abc,
+    make_multi_region_abc, sample_program,
 };
-use common::{load_large_sample, load_large_sample_entry, load_sample, walk, Stats};
+use common::{Stats, load_large_sample, load_large_sample_entry, load_sample, walk};
 
 const VERSIONS: [[u8; 4]; 3] = [VERSION_9_0_0_0, VERSION_12_0_6_0, VERSION_13_0_1_0];
 
@@ -724,7 +724,7 @@ fn kitchen_sink(version: [u8; 4]) -> AbcBuilder {
 #[test]
 fn annotation_values_round_trip() {
     use asc_abc::ElementValue;
-    use asc_fixture::abc::{annotations_program, callable_names_program, MARKS_APP, MARKS_ROUTE};
+    use asc_fixture::abc::{MARKS_APP, MARKS_ROUTE, annotations_program, callable_names_program};
     let named = callable_names_program();
     let file = named.build();
     verify(&named, &file);

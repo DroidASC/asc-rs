@@ -3,14 +3,13 @@
 
 use super::Session;
 use crate::rules::{HIERARCHY_DEPTH, HIERARCHY_DIRECTIONS, HIERARCHY_MAX_NODES};
-use crate::{choice_arg, str_arg, usize_arg, Call, ToolError, ToolResult};
+use crate::{Call, ToolError, ToolResult, choice_arg, str_arg, usize_arg};
 use asc_ark_engine::{ClassNode, ClassRow, EngineError, HierarchyQuery, HierarchyTree, Lineage};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 
 /// What the tool takes on a HarmonyOS program, for the program's introduction.
-pub(super) const USAGE: &str =
-    "# hierarchy: class=NAME (EntryAbility) or RECORD->CLASS as rows print it, or \"import:REGEX\" / \"global:REGEX\" for the \
+pub(super) const USAGE: &str = "# hierarchy: class=NAME (EntryAbility) or RECORD->CLASS as rows print it, or \"import:REGEX\" / \"global:REGEX\" for the \
      subclasses of a parent outside the program (import:@ohos:app\\.ability\\.UIAbility, ^global:ViewPU$); direction, depth, max_nodes, \
      `entry`; method=NAME marks `[defines FUNCTION]` from the class's members. Rows: `[external]` / `[unresolved]` are parents that are \
      no class of the program (the path is where tracking stopped), `[reassigned]` a parent read from a binding a decorator reassigns\n";

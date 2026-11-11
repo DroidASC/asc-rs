@@ -1,7 +1,7 @@
 //! Cheap probes that answer questions about a DEX buffer without building
 //! any parser state. Used on the APK scan hot path.
 
-use crate::{u32_at, DexError, Result, HEADER_SIZE};
+use crate::{DexError, HEADER_SIZE, Result, u32_at};
 
 /// Skip a uleb128 (at most `leb128::MAX_LEN` bytes, like the readers).
 fn skip_uleb128(buf: &[u8], off: usize) -> Result<usize> {

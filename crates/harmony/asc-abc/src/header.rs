@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::reader::{read_u32, slice_at};
-use crate::{AbcError, Result, HEADER_SIZE, MAGIC};
+use crate::{AbcError, HEADER_SIZE, MAGIC, Result};
 
 /// File format version, e.g. `12.0.6.0`. Ordered like the runtime orders it
 /// (byte by byte from the major number).

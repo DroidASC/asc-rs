@@ -1,7 +1,7 @@
 use crate::class_data::ClassData;
 use crate::code::CodeItem;
 use crate::header::Header;
-use crate::{leb128, mutf8, u16_at, u32_at, DexError, Result};
+use crate::{DexError, Result, leb128, mutf8, u16_at, u32_at};
 
 /// One entry of the map list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,11 +142,7 @@ impl<'a> Dex<'a> {
 
     #[inline]
     fn check_idx(&self, what: &'static str, index: u32, size: u32) -> Result<()> {
-        if index >= size {
-            Err(DexError::IndexOutOfRange { what, index, size })
-        } else {
-            Ok(())
-        }
+        if index >= size { Err(DexError::IndexOutOfRange { what, index, size }) } else { Ok(()) }
     }
 
     // ---- strings ---------------------------------------------------------

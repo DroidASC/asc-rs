@@ -12,8 +12,8 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::abc::{
-    sample_program, AbcAnnotation, AbcBuilder, AbcCode, AbcField, AbcFieldValue, AbcFunction, AbcLiteral, AbcModule, AbcRecord, AbcType,
-    Asm, Op,
+    AbcAnnotation, AbcBuilder, AbcCode, AbcField, AbcFieldValue, AbcFunction, AbcLiteral, AbcModule, AbcRecord, AbcType, Asm, Op,
+    sample_program,
 };
 
 /// How a zip entry is stored.

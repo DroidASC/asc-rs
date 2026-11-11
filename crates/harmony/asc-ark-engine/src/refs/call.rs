@@ -53,12 +53,12 @@ use std::sync::Arc;
 use asc_abc::{Abc, ModuleRecord};
 use asc_arkisa::DecodeError;
 
-use super::{pc_of, Condition, Env, Function, Hit, Pattern, Record, RecordHit, Regions, Worker};
+use super::{Condition, Env, Function, Hit, Pattern, Record, RecordHit, Regions, Worker, pc_of};
+use crate::Result;
 use crate::callgraph::{GraphCache, RecordId, Slot};
 use crate::path::{Names, Path, PathBuilder};
 use crate::scopes::{RecordScopes, ScopeTables};
 use crate::track::{CallSite, Tracker};
-use crate::Result;
 
 /// Arguments of a call that are printed.
 const MAX_ARGUMENTS: usize = 8;

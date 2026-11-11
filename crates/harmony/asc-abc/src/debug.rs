@@ -2,7 +2,7 @@
 //! line number program (a DWARF-style state machine whose constants live in
 //! a per-method constant pool so that programs can be shared).
 
-use crate::reader::{entity_pos, Reader};
+use crate::reader::{Reader, entity_pos};
 use crate::{Abc, AbcError, Result};
 
 /// A `DebugInfo` item.

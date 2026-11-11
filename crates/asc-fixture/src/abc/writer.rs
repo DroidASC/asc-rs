@@ -12,24 +12,20 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
 
 use asc_abc::leb128::{write_sleb128, write_uleb128};
-use asc_abc::{literal_tag, RegionHeader, HEADER_SIZE, INVALID_OFFSET, MAGIC};
+use asc_abc::{HEADER_SIZE, INVALID_OFFSET, MAGIC, RegionHeader, literal_tag};
 use asc_dex::mutf8;
 
 use super::layout::MethodLayout;
 use super::plan::{Holder, LiteralItem, Plan, Region, RegionStart, Sym};
 use super::{
-    adler32, scramble_body, AbcAnnotation, AbcBuilder, AbcCatch, AbcDebugInfo, AbcElementValue, AbcField, AbcFieldValue, AbcFile,
-    AbcFunction, AbcLayout, AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcRegionLayout, AbcTry, AbcType, MethodRef, RegionHint,
+    AbcAnnotation, AbcBuilder, AbcCatch, AbcDebugInfo, AbcElementValue, AbcField, AbcFieldValue, AbcFile, AbcFunction, AbcLayout,
+    AbcLineOp, AbcLiteral, AbcModule, AbcRecord, AbcRegionLayout, AbcTry, AbcType, MethodRef, RegionHint, adler32, scramble_body,
 };
 
 /// The descriptor of the class called `name`: `L<name>;`, an array type
 /// (`[Lpanda.String;`) being its own.
 fn descriptor(name: &str) -> String {
-    if name.starts_with('[') {
-        name.to_owned()
-    } else {
-        format!("L{name};")
-    }
+    if name.starts_with('[') { name.to_owned() } else { format!("L{name};") }
 }
 
 /// `MethodTag::DEBUG_INFO`: runtime annotations are written before it, the
@@ -177,11 +173,7 @@ impl<'a> Emitter<'a> {
     /// encodings shorter.
     fn string_offset(&mut self, text: &str) -> u32 {
         self.intern(text);
-        if self.final_run {
-            self.offset_of(&Sym::Str(text.to_owned()))
-        } else {
-            0
-        }
+        if self.final_run { self.offset_of(&Sym::Str(text.to_owned())) } else { 0 }
     }
 
     fn run(mut self) -> Emitter<'a> {

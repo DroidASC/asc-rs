@@ -5,7 +5,7 @@ use asc_fixture::abc::{
     annotations_program, call_graph_program, callable_names_program, class_hierarchy_program, make_abc, sample_program,
 };
 use asc_fixture::hap::{
-    library_program, make_app, make_hap, make_library_hsp, make_routed_hap, resource_program, Compression, Hap, SAMPLE_MODULE_JSON,
+    Compression, Hap, SAMPLE_MODULE_JSON, library_program, make_app, make_hap, make_library_hsp, make_routed_hap, resource_program,
 };
 use asc_fixture::{make_apk, make_dex};
 use std::path::{Path, PathBuf};

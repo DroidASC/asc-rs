@@ -1,8 +1,8 @@
 //! Textual rendering of descriptors, literals and encoded values.
 
 use crate::Result;
-use asc_dex::encoded::{EncodedValue, VALUE_BYTE, VALUE_CHAR, VALUE_DOUBLE, VALUE_FLOAT, VALUE_INT, VALUE_LONG, VALUE_SHORT};
 use asc_dex::Dex;
+use asc_dex::encoded::{EncodedValue, VALUE_BYTE, VALUE_CHAR, VALUE_DOUBLE, VALUE_FLOAT, VALUE_INT, VALUE_LONG, VALUE_SHORT};
 
 /// Escape a string for a smali string literal.
 pub fn escape_string(s: &str) -> String {
@@ -54,22 +54,14 @@ pub fn field_signature(dex: &Dex<'_>, field_idx: u32) -> Result<String> {
 
 /// Signed hex literal (`0x1a`, `-0x1a`).
 pub fn hex_i64(v: i64) -> String {
-    if v < 0 {
-        format!("-0x{:x}", (v as i128).unsigned_abs())
-    } else {
-        format!("0x{v:x}")
-    }
+    if v < 0 { format!("-0x{:x}", (v as i128).unsigned_abs()) } else { format!("0x{v:x}") }
 }
 
 fn float_literal(f: f32) -> String {
     if f.is_nan() {
         "NaNf".into()
     } else if f.is_infinite() {
-        if f > 0.0 {
-            "Infinityf".into()
-        } else {
-            "-Infinityf".into()
-        }
+        if f > 0.0 { "Infinityf".into() } else { "-Infinityf".into() }
     } else if f.fract() == 0.0 && f.abs() < 1e16 {
         format!("{f:.1}f")
     } else {
@@ -81,11 +73,7 @@ fn double_literal(f: f64) -> String {
     if f.is_nan() {
         "NaN".into()
     } else if f.is_infinite() {
-        if f > 0.0 {
-            "Infinity".into()
-        } else {
-            "-Infinity".into()
-        }
+        if f > 0.0 { "Infinity".into() } else { "-Infinity".into() }
     } else if f.fract() == 0.0 && f.abs() < 1e16 {
         format!("{f:.1}")
     } else {

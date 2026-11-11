@@ -14,7 +14,7 @@
 //! and reports why through [`Stop`]. This replaces the Python
 //! `DvmInterpreter` traversal, which simply stopped at the first payload.
 
-use crate::{opcode, Instruction, Opcode};
+use crate::{Instruction, Opcode, opcode};
 
 /// One visited instruction. Payload pseudo-instructions are never reported.
 #[derive(Debug, Clone, Copy)]

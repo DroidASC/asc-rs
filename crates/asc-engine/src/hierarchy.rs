@@ -10,8 +10,8 @@
 //! (a framework class) is a node without a definition: its own supertypes are
 //! unknown.
 
-use crate::resources::{file_ident, FileIdent};
-use crate::{cancelled, DexView, Engine, EngineError, Job, Result, WriteJob, NOT_CANCELLED};
+use crate::resources::{FileIdent, file_ident};
+use crate::{DexView, Engine, EngineError, Job, NOT_CANCELLED, Result, WriteJob, cancelled};
 use asc_cache::Tier;
 use asc_dex::Dex;
 use asc_findrefs::ClassRelation;
@@ -239,15 +239,17 @@ impl ClassGraph {
         let errs = Mutex::new(Vec::new());
         std::thread::scope(|s| {
             for _ in 0..threads.min(views.len()).max(1) {
-                s.spawn(|| loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(v) = views.get(i) else { break };
-                    match dex_classes(v) {
-                        Ok(c) => parsed.lock().unwrap().push((i, c)),
-                        Err(e) => errs.lock().unwrap().push(format!("{}: {e}", v.name)),
+                s.spawn(|| {
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(v) = views.get(i) else { break };
+                        match dex_classes(v) {
+                            Ok(c) => parsed.lock().unwrap().push((i, c)),
+                            Err(e) => errs.lock().unwrap().push(format!("{}: {e}", v.name)),
+                        }
                     }
                 });
             }

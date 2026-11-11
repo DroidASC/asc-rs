@@ -720,7 +720,7 @@ fn a_lookup_stops_where_the_classes_do_not_decide() {
 
 #[test]
 fn a_binding_written_twice_is_followed_only_as_a_decorated_class() {
-    use asc_fixture::abc::{class_hierarchy_program, CLASSES_BASE};
+    use asc_fixture::abc::{CLASSES_BASE, class_hierarchy_program};
     // A second ABC file that imports the bindings of the hierarchy program: `Watched` is a class
     // reassigned by a decorator, `Either` is assigned two classes.
     let module = AbcModule::new().import("Watched", "Watched", &request(CLASSES_BASE)).import("Either", "Either", &request(CLASSES_BASE));
@@ -757,7 +757,7 @@ fn a_binding_written_twice_is_followed_only_as_a_decorated_class() {
 
 /// The two packages of the fixture in a directory: `entry.hap` and `lib.hsp`.
 fn packaged(dir: &Path, library_module_json: &str) -> Engine {
-    use asc_fixture::abc::{packaged_entry_program, packaged_library_program, PACKAGED_ENTRY_MODULE_JSON, PACKAGED_ENTRY_PKG_CONTEXT};
+    use asc_fixture::abc::{PACKAGED_ENTRY_MODULE_JSON, PACKAGED_ENTRY_PKG_CONTEXT, packaged_entry_program, packaged_library_program};
     use asc_fixture::hap::{Compression, Hap};
     let entry = Hap::new().modules_abc(&packaged_entry_program().build().bytes).module_json(PACKAGED_ENTRY_MODULE_JSON).entry(
         "pkgContextInfo.json",

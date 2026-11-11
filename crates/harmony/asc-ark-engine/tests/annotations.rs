@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use asc_ark_engine::{Access, ClassQuery, Engine, ListOptions, Pattern, Query, RefContext};
-use asc_fixture::abc::{annotations_program, callable_names_program, MARKS_APP, MARKS_LIB, MARKS_LIB_MARKED, MARKS_ROUTE, NAMED_APP};
+use asc_fixture::abc::{MARKS_APP, MARKS_LIB, MARKS_LIB_MARKED, MARKS_ROUTE, NAMED_APP, annotations_program, callable_names_program};
 
 fn open(dir: &Path, bytes: &[u8]) -> Engine {
     let path = dir.join("modules.abc");
@@ -143,7 +143,9 @@ fn annotation_interfaces_are_records_named_after_their_module() {
     let text = engine.get_class(&ClassQuery { record: "index.Marked", function: None, entry: None }).unwrap().text;
     assert_eq!(
         text,
-        format!(".record {MARKS_LIB_MARKED}\n; annotation interface, package @ohos/lib, 1 field, 0 functions\n.field Lpanda.String; note = \"none\"\n")
+        format!(
+            ".record {MARKS_LIB_MARKED}\n; annotation interface, package @ohos/lib, 1 field, 0 functions\n.field Lpanda.String; note = \"none\"\n"
+        )
     );
 }
 

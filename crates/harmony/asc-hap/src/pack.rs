@@ -3,8 +3,8 @@
 
 use serde_json::Value;
 
-use crate::value::{self, Findings, Line, Note, Obj};
 use crate::HapError;
+use crate::value::{self, Findings, Line, Note, Obj};
 
 /// A parsed `pack.info`.
 #[derive(Debug, Clone, PartialEq)]
@@ -123,12 +123,14 @@ impl PackInfo {
     /// `pack-ability`, `pack-extension` and `pack-form` (each carrying the
     /// module name), then `pack-package`, `unmodelled` and `note`.
     pub fn summary_lines(&self) -> Vec<String> {
-        let mut out = vec![Line::new("pack-app")
-            .word(self.app.bundle_name.as_deref().unwrap_or("-"))
-            .opt("bundleType", self.app.bundle_type.as_deref())
-            .num("versionCode", self.app.version_code)
-            .opt("versionName", self.app.version_name.as_deref())
-            .end()];
+        let mut out = vec![
+            Line::new("pack-app")
+                .word(self.app.bundle_name.as_deref().unwrap_or("-"))
+                .opt("bundleType", self.app.bundle_type.as_deref())
+                .num("versionCode", self.app.version_code)
+                .opt("versionName", self.app.version_name.as_deref())
+                .end(),
+        ];
         for module in &self.modules {
             let name = module.name.as_deref().unwrap_or("-");
             out.push(

@@ -8,11 +8,11 @@
 mod format;
 mod insn;
 
-use asc_dex::annotations::{parse_annotation_set, parse_annotation_set_ref_list, AnnotationsDirectory};
+use asc_dex::annotations::{AnnotationsDirectory, parse_annotation_set, parse_annotation_set_ref_list};
 use asc_dex::class_data::{EncodedField, EncodedMethod};
 use asc_dex::debug_info::DebugInfo;
-use asc_dex::encoded::{parse_annotation_item, parse_array, AnnotationItem, EncodedValue};
-use asc_dex::{access, ClassDef, Dex, NO_INDEX};
+use asc_dex::encoded::{AnnotationItem, EncodedValue, parse_annotation_item, parse_array};
+use asc_dex::{ClassDef, Dex, NO_INDEX, access};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 

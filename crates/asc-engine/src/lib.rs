@@ -42,8 +42,8 @@ mod tiers;
 
 use asc_apk::{Apk, Entry, Limits};
 use asc_cache::{ApkKey, DexData, DiskCache, MemoryCache, Tier};
-use asc_dex::container::{dex041_logical_offsets, logical_dex_buffers, logical_dex_iter};
 use asc_dex::Dex;
+use asc_dex::container::{dex041_logical_offsets, logical_dex_buffers, logical_dex_iter};
 pub use asc_findrefs::CompiledQuery;
 use asc_findrefs::{FindRefs, Hit, Query, RefKind, SearchState};
 use asc_rebuild::Rebuilt;
@@ -51,27 +51,27 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-pub use asc_apk::archive_of;
 pub use asc_apk::Limits as InflateLimits;
+pub use asc_apk::archive_of;
 pub use asc_arsc;
 pub use asc_cache;
 pub use asc_findrefs::{ClassQuery, ClassRelation, FieldAccess, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
-pub use budget::{available_memory, total_memory, Device, MemoryPolicy};
+pub use budget::{Device, MemoryPolicy, available_memory, total_memory};
 pub use callgraph::{CallQuery, CallRoots, CallRow, CallTree, Direction};
-pub use classes::{dex_classes, ClassListing, DexClasses, EntryClasses};
+pub use classes::{ClassListing, DexClasses, EntryClasses, dex_classes};
 pub use compact::TextRows;
-pub use compose::{MatchingMethods, DEFAULT_FAN_OUT};
+pub use compose::{DEFAULT_FAN_OUT, MatchingMethods};
 pub use hierarchy::{HierarchyQuery, HierarchyRow, HierarchyTree, Lineage};
-pub use manifest::{protection_level_name, Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission};
+pub use manifest::{Application, Component, DataSpec, IntentFilter, ManifestSummary, Permission, protection_level_name};
 pub use prebuild::PrebuildReport;
-pub use resources::{parse_id, ResourceField, ResourceRow};
+pub use resources::{ResourceField, ResourceRow, parse_id};
 pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
-pub use tiers::{auto_threads, auto_threads_for, Busy};
+pub use tiers::{Busy, auto_threads, auto_threads_for};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -1703,15 +1703,17 @@ impl Engine {
             for _ in 0..workers {
                 let tx = tx.clone();
                 let (apk, entries, next, key) = (&apk, &entries, &next, key.as_ref());
-                s.spawn(move || loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(entry) = entries.get(i) else { break };
-                    let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe), cancel, cache, stats);
-                    if tx.send(batch).is_err() {
-                        break;
+                s.spawn(move || {
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(entry) = entries.get(i) else { break };
+                        let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe), cancel, cache, stats);
+                        if tx.send(batch).is_err() {
+                            break;
+                        }
                     }
                 });
             }
@@ -1790,50 +1792,52 @@ impl Engine {
         let done = Mutex::new(&mut slots);
         std::thread::scope(|s| {
             for _ in 0..workers {
-                s.spawn(|| loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(entry) = entries.get(i) else { break };
-                    let r = load_entry(&apk, key.as_ref(), entry, cache, &self.stats, Some(cancel))
-                        .map(|(loaded, _)| match loaded {
-                            Loaded::Cached(e) => e
-                                .logical()
-                                .iter()
-                                .enumerate()
-                                .map(|(idx, l)| {
-                                    if let (Some((disk, k)), Ok(dex)) = (l2, Dex::with_name(&l.data, &l.name)) {
-                                        if tiers::load_derived(disk, k, l, &dex) {
-                                            self.stats.derived_hits.fetch_add(1, Ordering::Relaxed);
+                s.spawn(|| {
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(entry) = entries.get(i) else { break };
+                        let r = load_entry(&apk, key.as_ref(), entry, cache, &self.stats, Some(cancel))
+                            .map(|(loaded, _)| match loaded {
+                                Loaded::Cached(e) => e
+                                    .logical()
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, l)| {
+                                        if let (Some((disk, k)), Ok(dex)) = (l2, Dex::with_name(&l.data, &l.name)) {
+                                            if tiers::load_derived(disk, k, l, &dex) {
+                                                self.stats.derived_hits.fetch_add(1, Ordering::Relaxed);
+                                            }
                                         }
-                                    }
-                                    DexView {
-                                        name: l.name.clone(),
-                                        data: Arc::clone(&l.data),
-                                        state: Arc::clone(&l.state),
-                                        entry: Some(Arc::clone(&e)),
-                                        idx,
-                                        mask: l.state.table_mask(),
+                                        DexView {
+                                            name: l.name.clone(),
+                                            data: Arc::clone(&l.data),
+                                            state: Arc::clone(&l.state),
+                                            entry: Some(Arc::clone(&e)),
+                                            idx,
+                                            mask: l.state.table_mask(),
+                                            loaded: Instant::now(),
+                                        }
+                                    })
+                                    .collect(),
+                                borrowed => borrowed
+                                    .into_logical(&entry.name)
+                                    .map(|(name, data)| DexView {
+                                        name,
+                                        data,
+                                        state: Arc::new(SearchState::new()),
+                                        entry: None,
+                                        idx: 0,
+                                        mask: 0,
                                         loaded: Instant::now(),
-                                    }
-                                })
-                                .collect(),
-                            borrowed => borrowed
-                                .into_logical(&entry.name)
-                                .map(|(name, data)| DexView {
-                                    name,
-                                    data,
-                                    state: Arc::new(SearchState::new()),
-                                    entry: None,
-                                    idx: 0,
-                                    mask: 0,
-                                    loaded: Instant::now(),
-                                })
-                                .collect(),
-                        })
-                        .map_err(|e| format!("{}: {e}", entry.name));
-                    done.lock().unwrap()[i] = Some(r);
+                                    })
+                                    .collect(),
+                            })
+                            .map_err(|e| format!("{}: {e}", entry.name));
+                        done.lock().unwrap()[i] = Some(r);
+                    }
                 });
             }
         });

@@ -47,14 +47,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::edges::{frame_function, listed, FnRef, Home, Site, NEW};
+use super::edges::{FnRef, Home, NEW, Site, frame_function, listed};
 use super::modules::RecordId;
 use super::stub::{self, StubKey};
 use super::{EdgeKind, Session, Slot};
 use crate::hierarchy::ClassRef;
 use crate::path::{Link, NoLexicals, Origin, Path, PathBuilder};
 use crate::refs::Function;
-use crate::scopes::{export_group, Reader, Scopes};
+use crate::scopes::{Reader, Scopes, export_group};
 use crate::table_bytes;
 use crate::track::{Event, StringRef, Tracker, Watch};
 

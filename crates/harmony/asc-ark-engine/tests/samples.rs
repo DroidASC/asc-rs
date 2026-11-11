@@ -184,7 +184,10 @@ fn bridge_and_easyhap_string_references() {
     if let Some(path) = sample("Bridge.hap") {
         let hits = find(&open(&path, Format::Hap), &Query::string_regex("flag|Flag").unwrap());
         assert_eq!(hits.len(), 26);
-        assert_eq!(hits[0], "ets/modules.abc | com.hmos.exam5.pkg/entry/ets/pages/Home->#~@0>@2*#^3+0x23 | HomePage.initialRender.<anonymous>^3 | ldobjbyname \"flagText\"");
+        assert_eq!(
+            hits[0],
+            "ets/modules.abc | com.hmos.exam5.pkg/entry/ets/pages/Home->#~@0>@2*#^3+0x23 | HomePage.initialRender.<anonymous>^3 | ldobjbyname \"flagText\""
+        );
         assert!(hits.iter().any(|line| line.ends_with("| createobjectwithbuffer literal@0x5918 [6]=\"flagText\"")));
     }
     // Bytecode 9.0.0.0, inside a stored inner package.
@@ -293,7 +296,9 @@ fn contacts_references_of_every_kind() {
             format!("{utils}->#~@0<#l1Lll1+0x5b | utils.l1Lll1 | callthis0 v9 ; import:@ohos:net.http#default.createHttp()"),
             format!("{utils}->#~@0<#o0O0OOoo+0x5e | utils.o0O0OOoo | callthis0 v8 ; import:@ohos:net.http#default.createHttp()"),
             // The client is followed through the call that made it, to its request and the callback of that.
-            format!("{utils}->#~@0<#o0O0OOoo+0xef | utils.o0O0OOoo | callthis2 v10, v11, v12 ; import:@ohos:net.http#default.createHttp().request(expr, expr)"),
+            format!(
+                "{utils}->#~@0<#o0O0OOoo+0xef | utils.o0O0OOoo | callthis2 v10, v11, v12 ; import:@ohos:net.http#default.createHttp().request(expr, expr)"
+            ),
             format!(
                 "{utils}->#~@0<#o0O0OOoo+0x107 | utils.o0O0OOoo | callthis1 v8, v9 ; import:@ohos:net.http#default.createHttp().request().then(local:#~@0<@3*#)"
             ),
@@ -308,7 +313,9 @@ fn contacts_references_of_every_kind() {
     assert_eq!(find(&engine, &condition("global:=console")).len(), 27);
     assert_eq!(
         find(&engine, &condition("method:=onCreate")),
-        ["ets/modules.abc | &entry/src/main/ets/entryability/EntryAbility&->func_main_0+0x1d | func_main_0 | defineclasswithbuffer literal@0xe309f [1]=method #~@0>#onCreate (EntryAbility.onCreate)"]
+        [
+            "ets/modules.abc | &entry/src/main/ets/entryability/EntryAbility&->func_main_0+0x1d | func_main_0 | defineclasswithbuffer literal@0xe309f [1]=method #~@0>#onCreate (EntryAbility.onCreate)"
+        ]
     );
     // One function that has the URL prefix and creates the HTTP client.
     let both = find(&engine, &Query::All(vec![condition("string:^http://"), condition("call:\\.createHttp$")]));

@@ -11,12 +11,12 @@
 //! cannot answer yet fails with one line that names what it can.
 
 use crate::output::Io;
-use crate::{ClassArgs, Command, Common, FieldAccessArg, Find, EXIT_OK, EXIT_PARTIAL, RESOURCE_SEARCH_ROWS};
+use crate::{ClassArgs, Command, Common, EXIT_OK, EXIT_PARTIAL, FieldAccessArg, Find, RESOURCE_SEARCH_ROWS};
 use asc_ark_engine::{
     Access, CallQuery, CallRoots, ClassQuery, Direction, Document, Engine, EngineError, EntryStatus, HierarchyQuery, Lineage, ListOptions,
     ListingStyle, Manifest, NameFilter, Pattern, Query, RefBatch, RefContext, ResourceField, ResourceTables,
 };
-use asc_mcp::harmony::{function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots, TreeText};
+use asc_mcp::harmony::{TreeText, function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -370,7 +370,9 @@ fn resources(io: &mut Io<'_>, engine: &Engine, given: &Path, asked: &Asked, outp
 fn package_files(io: &mut Io<'_>, engine: &Engine, target: &str, output: Option<&PathBuf>) -> Result<(), String> {
     let files = engine.package_files(target).map_err(|e| match &e {
         EngineError::NotFound { what: "file", .. } => {
-            format!("{e} (give a path inside the package, e.g. resources/base/profile/main_pages.json, or a file resource: $profile:main_pages)")
+            format!(
+                "{e} (give a path inside the package, e.g. resources/base/profile/main_pages.json, or a file resource: $profile:main_pages)"
+            )
         }
         _ => no_resource(&e),
     })?;
@@ -539,7 +541,7 @@ fn search(io: &Io<'_>, find: Find, access: Option<FieldAccessArg>) -> Result<Sea
         Find::String { output, literal: true, value } => return refs(Query::string_literal(value), output),
         Find::String { output, literal: false, value } => return refs(Query::string_regex(&value).map_err(|e| e.to_string())?, output),
         Find::Prop { output, literal, exact, name } => {
-            return refs(Query::Prop { name: name_pattern(&name, literal, exact)?, access }, output)
+            return refs(Query::Prop { name: name_pattern(&name, literal, exact)?, access }, output);
         }
         Find::Global { output, literal, exact, name } => {
             return refs(Query::global(name_pattern(&name, literal, exact)?, access).map_err(|e| e.to_string())?, output);
@@ -569,7 +571,7 @@ fn search(io: &Io<'_>, find: Find, access: Option<FieldAccessArg>) -> Result<Sea
         Find::Number { output, value } => return refs(Query::Number(value.parse().map_err(|e: EngineError| e.to_string())?), output),
         // `call '{RULE}'`: the calls of the functions a rule matches, as in a condition.
         Find::Call { output, literal: false, path } if path.starts_with('{') => {
-            return refs(condition(io, &format!("call:{path}"))?, output)
+            return refs(condition(io, &format!("call:{path}"))?, output);
         }
         Find::Call { output, literal, path } => return refs(Query::Call(pattern(&path, literal, false)?), output),
         Find::All { output, none, conditions } => {

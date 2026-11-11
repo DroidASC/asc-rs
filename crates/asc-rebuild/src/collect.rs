@@ -2,9 +2,9 @@
 
 use crate::hollow::Hollow;
 use crate::{RebuildError, Result};
-use asc_dalvik::walk::{walk_insns, Stop};
-use asc_dalvik::{decode, IndexKind};
-use asc_dex::encoded::{visit_annotation_refs, visit_refs, RefKind};
+use asc_dalvik::walk::{Stop, walk_insns};
+use asc_dalvik::{IndexKind, decode};
+use asc_dex::encoded::{RefKind, visit_annotation_refs, visit_refs};
 use asc_dex::{Dex, NO_INDEX};
 use std::collections::BTreeSet;
 

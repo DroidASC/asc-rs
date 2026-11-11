@@ -33,11 +33,7 @@ pub fn class_inner(descriptor: &str) -> &str {
 
 /// `Lcom/poc/Main;` → `com.poc.Main` (other inputs unchanged).
 pub fn dalvik_to_dot(name: &str) -> String {
-    if name.starts_with('L') && name.ends_with(';') {
-        name[1..name.len() - 1].replace('/', ".")
-    } else {
-        name.to_string()
-    }
+    if name.starts_with('L') && name.ends_with(';') { name[1..name.len() - 1].replace('/', ".") } else { name.to_string() }
 }
 
 /// Normalise a `listclass` prefix: `com.poc` / `com/poc` become `Lcom/poc`,

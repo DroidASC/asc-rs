@@ -8,9 +8,9 @@
 //! no code.
 
 use crate::hierarchy::ClassGraph;
-use crate::{names, Engine, EngineError, Lineage, Result};
+use crate::{Engine, EngineError, Lineage, Result, names};
 use asc_dex::annotations::AnnotationsDirectory;
-use asc_dex::{encoded, Dex};
+use asc_dex::{Dex, encoded};
 use asc_findrefs::{Defined, Query};
 use regex::bytes::Regex;
 use std::collections::{HashMap, HashSet};
@@ -72,7 +72,7 @@ pub(crate) fn defined_methods(dex: &Dex<'_>, d: &Defined) -> Result<Vec<u32>> {
             }
         }
         Defined::Override(_) | Defined::In(_) => {
-            return Err(EngineError::Query("override: / in:{...} must be resolved before a search".into()))
+            return Err(EngineError::Query("override: / in:{...} must be resolved before a search".into()));
         }
     }
     out.sort_unstable();
@@ -124,7 +124,7 @@ impl<'d, 'a> DefinedFilter<'d, 'a> {
                 proto: proto.clone(),
             },
             Defined::Override(_) | Defined::In(_) => {
-                return Err(EngineError::Query("override: / in:{...} must be resolved before a search".into()))
+                return Err(EngineError::Query("override: / in:{...} must be resolved before a search".into()));
             }
         };
         Ok(DefinedFilter { dex, test, defs: None, last: None })
@@ -141,7 +141,7 @@ impl<'d, 'a> DefinedFilter<'d, 'a> {
                     && match proto {
                         Some(want) => asc_smali::proto_descriptor(self.dex, u32::from(id.proto_idx))? == *want,
                         None => true,
-                    })
+                    });
             }
             Test::Class(t) => *t,
         };
@@ -334,7 +334,7 @@ pub(crate) fn parse_flags(value: &str) -> Result<u32> {
             _ => {
                 return Err(EngineError::Query(format!(
                     "flag:{name:?}: use public, private, protected, static, final, synchronized, native, abstract, synthetic, constructor"
-                )))
+                )));
             }
         };
     }

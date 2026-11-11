@@ -35,12 +35,12 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use asc_abc::{Abc, Class, ClassEntry, Code, ElementValue, FieldType, FieldValue, LineOp, Literal, Method, MethodTag, ModuleRecord};
-use asc_arkisa::{walk, Instruction, OperandKind, Value};
+use asc_arkisa::{Instruction, OperandKind, Value, walk};
 use asc_fixture::abc::{
-    call_graph_program, class_calls_program, class_hierarchy_program, packaged_entry_program, packaged_library_program, sample_program,
-    AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcRecord, Asm, Op, INDEX_PAGE, VERSION_13_0_1_0,
+    AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcRecord, Asm, INDEX_PAGE, Op, VERSION_13_0_1_0, call_graph_program,
+    class_calls_program, class_hierarchy_program, packaged_entry_program, packaged_library_program, sample_program,
 };
-use asc_pasm::{write_function, Options};
+use asc_pasm::{Options, write_function};
 
 /// Divergence classes that are not ours to fix, with the reason.
 const KNOWN: &[(&str, &str)] = &[
@@ -147,11 +147,7 @@ fn g6(value: f64) -> String {
     let (mantissa, exponent) = sci.split_once('e').unwrap();
     let exponent: i32 = exponent.parse().unwrap();
     let strip = |digits: &str| {
-        if digits.contains('.') {
-            digits.trim_end_matches('0').trim_end_matches('.').to_owned()
-        } else {
-            digits.to_owned()
-        }
+        if digits.contains('.') { digits.trim_end_matches('0').trim_end_matches('.').to_owned() } else { digits.to_owned() }
     };
     if !(-4..6).contains(&exponent) {
         format!("{}e{}{:02}", strip(mantissa), if exponent < 0 { '-' } else { '+' }, exponent.abs())
@@ -2283,11 +2279,7 @@ fn run(command: &mut std::process::Command) -> Result<String, String> {
     let program = command.get_program().to_string_lossy().into_owned();
     let out = command.output().map_err(|err| format!("{program}: {err}"))?;
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if out.status.success() {
-        Ok(said)
-    } else {
-        Err(format!("{program}: {}: {}", out.status, said.trim()))
-    }
+    if out.status.success() { Ok(said) } else { Err(format!("{program}: {}: {}", out.status, said.trim())) }
 }
 
 /// `$ASC_ES2ABC` is the official compiler (`es2abc`), `$ASC_ARK_DISASM` the

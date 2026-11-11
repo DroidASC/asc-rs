@@ -270,11 +270,7 @@ fn judge(
                     None if regs.as_ref().is_some_and(|r| r.position(*slot).is_none()) => Verdict::Fails,
                     None => {
                         note.push('?');
-                        if matches!(want, CompiledWant::Any) {
-                            Verdict::Holds
-                        } else {
-                            Verdict::Undetermined
-                        }
+                        if matches!(want, CompiledWant::Any) { Verdict::Holds } else { Verdict::Undetermined }
                     }
                     Some(cands) => {
                         render(dex, cands, &mut note)?;

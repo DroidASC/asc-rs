@@ -81,11 +81,7 @@ pub fn quoted_cut(text: &str, limit: usize) -> String {
 /// `abc… (+120 bytes)`. For values that are not shown in quotes (JSON).
 pub fn cut(text: &str, limit: usize) -> Cow<'_, str> {
     let end = shown_bytes(text, limit);
-    if end == text.len() {
-        Cow::Borrowed(text)
-    } else {
-        Cow::Owned(format!("{}… (+{} bytes)", &text[..end], text.len() - end))
-    }
+    if end == text.len() { Cow::Borrowed(text) } else { Cow::Owned(format!("{}… (+{} bytes)", &text[..end], text.len() - end)) }
 }
 
 /// Where a match lies in a string too long to show whole, with the text
@@ -130,11 +126,7 @@ pub fn quoted_match(text: &str, matched: Option<std::ops::Range<usize>>) -> Stri
 /// which would otherwise blur where the pair ends.
 pub fn value(s: &str) -> Cow<'_, str> {
     let plain = !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\\' | '='));
-    if plain {
-        Cow::Borrowed(s)
-    } else {
-        Cow::Owned(quoted(s))
-    }
+    if plain { Cow::Borrowed(s) } else { Cow::Owned(quoted(s)) }
 }
 
 #[cfg(test)]

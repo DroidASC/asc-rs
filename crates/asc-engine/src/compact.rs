@@ -5,7 +5,7 @@
 //!
 //! [`Engine::find_refs_text`]: crate::Engine::find_refs_text
 
-use crate::{matched_name, results_from_hits, rows_compiled, FindOptions, Result};
+use crate::{FindOptions, Result, matched_name, results_from_hits, rows_compiled};
 use asc_dex::Dex;
 use asc_findrefs::{CompiledQuery, FieldAccess, FindRefs, Hit, RefKind};
 use std::collections::hash_map::Entry;

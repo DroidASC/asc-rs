@@ -79,11 +79,7 @@ impl<'v, 'f> Obj<'v, 'f> {
     }
 
     fn child_path(&self, key: &str) -> String {
-        if self.path.is_empty() {
-            key.to_owned()
-        } else {
-            format!("{}.{key}", self.path)
-        }
+        if self.path.is_empty() { key.to_owned() } else { format!("{}.{key}", self.path) }
     }
 
     /// The value under `key`; JSON `null` counts as absent.
@@ -258,29 +254,17 @@ impl Line {
     /// Like [`Line::opt`], but prints nothing when the value is absent.
     #[must_use]
     pub fn opt_present(self, key: &str, value: Option<&str>) -> Self {
-        if value.is_some() {
-            self.opt(key, value)
-        } else {
-            self
-        }
+        if value.is_some() { self.opt(key, value) } else { self }
     }
 
     #[must_use]
     pub fn flag_present(self, key: &str, value: Option<bool>) -> Self {
-        if value.is_some() {
-            self.flag(key, value)
-        } else {
-            self
-        }
+        if value.is_some() { self.flag(key, value) } else { self }
     }
 
     #[must_use]
     pub fn list_present(self, key: &str, values: &[String]) -> Self {
-        if values.is_empty() {
-            self
-        } else {
-            self.list(key, values)
-        }
+        if values.is_empty() { self } else { self.list(key, values) }
     }
 
     pub fn end(self) -> String {

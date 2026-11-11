@@ -6,15 +6,15 @@
 //! per kind, then splits the hits back per part.
 
 use crate::{
-    attach_context, hit_matched, results_from_hits, rows_compiled, search_entry_with, skip, tiers, Engine, FindOptions, Job, RefBatch,
-    RefContext, RefResult, RefSite, RefSummary, Result, Rows, SearchTarget, Shape, WriteJob,
+    Engine, FindOptions, Job, RefBatch, RefContext, RefResult, RefSite, RefSummary, Result, Rows, SearchTarget, Shape, WriteJob,
+    attach_context, hit_matched, results_from_hits, rows_compiled, search_entry_with, skip, tiers,
 };
 use asc_apk::Entry;
 use asc_cache::Tier;
 use asc_findrefs::{CompiledQuery, Compound, Defined, FieldAccess, FindRefs, Query};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 /// Rows of a compound query ([`Query::All`]) over one DEX: one per method
@@ -236,15 +236,17 @@ impl Engine {
             for _ in 0..workers {
                 let tx = tx.clone();
                 let (apk, entries, next, key, run) = (&apk, &entries, &next, key.as_ref(), &run);
-                s.spawn(move || loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(entry) = entries.get(i) else { break };
-                    let batches = search_entry_with(apk, key, entry, searched.len(), run, Some(probe), cancel, cache, stats);
-                    if tx.send(batches).is_err() {
-                        break;
+                s.spawn(move || {
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(entry) = entries.get(i) else { break };
+                        let batches = search_entry_with(apk, key, entry, searched.len(), run, Some(probe), cancel, cache, stats);
+                        if tx.send(batches).is_err() {
+                            break;
+                        }
                     }
                 });
             }

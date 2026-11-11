@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use asc_ark_engine::{CallQuery, CallRoots, Direction, Engine, ListOptions, Pattern, Query, Stamp};
 use asc_fixture::abc::{call_graph_program, make_abc, sample_program};
-use asc_fixture::hap::{make_app, make_hap, Compression, Hap, SAMPLE_MODULE_JSON};
+use asc_fixture::hap::{Compression, Hap, SAMPLE_MODULE_JSON, make_app, make_hap};
 use common::large_sample_dir;
 
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {

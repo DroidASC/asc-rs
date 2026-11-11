@@ -892,11 +892,7 @@ impl DiskCache {
     /// this up front: [`DiskCache::put`] refuses such a directory too, but its
     /// errors are usually swallowed by a background writer.
     pub fn check_usable(&self) -> Result<(), CacheError> {
-        if self.is_cache_dir() {
-            Ok(())
-        } else {
-            Err(self.not_a_cache_dir())
-        }
+        if self.is_cache_dir() { Ok(()) } else { Err(self.not_a_cache_dir()) }
     }
 
     fn not_a_cache_dir(&self) -> CacheError {

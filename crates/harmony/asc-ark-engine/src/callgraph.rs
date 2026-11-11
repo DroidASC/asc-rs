@@ -62,13 +62,13 @@ pub use modules::{FormCount, RequestForm};
 use modules::{Importers, Layout, Packages};
 
 use crate::hierarchy::{self, ClassRef};
-use crate::refs::method::name_matches;
 use crate::refs::CallPaths;
+use crate::refs::method::name_matches;
 use crate::refs::{self, Query};
-use crate::refs::{chunks, run_units, Regions, RECORD_CHUNK};
+use crate::refs::{RECORD_CHUNK, Regions, chunks, run_units};
 use crate::scopes::{ExportedDefinitions, ScopeTables, Scopes};
 use crate::track::Tracker;
-use crate::{records, Engine, EngineError, Pattern, Result};
+use crate::{Engine, EngineError, Pattern, Result, records};
 
 /// Which way to walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

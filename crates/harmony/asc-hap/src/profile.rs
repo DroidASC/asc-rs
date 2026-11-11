@@ -3,9 +3,9 @@
 //! (`"routerMap": "$profile:router_map"`), both JSON files under
 //! `resources/base/profile/`.
 
+use crate::HapError;
 use crate::record;
 use crate::value::{self, Findings, Line, Note, Obj};
-use crate::HapError;
 
 /// A parsed page list: `{"src": ["pages/Index", …]}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

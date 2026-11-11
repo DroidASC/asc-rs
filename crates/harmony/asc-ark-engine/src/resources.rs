@@ -22,11 +22,11 @@ use std::str::FromStr;
 use asc_abc::{Abc, Literal, Method};
 use asc_arkisa::OperandKind;
 use asc_hap::{Resource, ResourceIndex, ResourceRef, ResourceType, ResourceValue};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::program::Program;
 use crate::refs::Pattern;
-use crate::{records, text, ClassSource, Engine, EngineError, Result};
+use crate::{ClassSource, Engine, EngineError, Result, records, text};
 
 /// References a chain follows before it is cut: no well-formed index nests
 /// this deep.
@@ -68,11 +68,7 @@ impl ResourceRow {
     /// ahead of it, the way a findrefs row starts with its entry.
     pub fn line(&self, with_package: bool) -> String {
         let row = format!("{:#010x} {} [{}] {}", self.id, self.name, self.qualifiers, self.value);
-        if with_package {
-            format!("{} | {row}", self.package)
-        } else {
-            row
-        }
+        if with_package { format!("{} | {row}", self.package) } else { row }
     }
 
     pub fn json(&self) -> Value {
@@ -148,11 +144,7 @@ impl ResolvedResource {
             ChainEnd::Cycle(reference) => line.push_str(&format!(" -> {reference} (cycle)")),
             ChainEnd::TooLong => line.push_str(&format!(" -> ... (more than {MAX_CHAIN} references)")),
         }
-        if with_package {
-            format!("{} | {line}", self.package)
-        } else {
-            line
-        }
+        if with_package { format!("{} | {line}", self.package) } else { line }
     }
 }
 
@@ -821,8 +813,7 @@ mod tests {
 
     #[test]
     fn listings_name_resources_by_function_and_offset() {
-        let listing =
-            ".function #~@0>#build  ; Index.build\n  0004  createobjectwithbuffer [ \"id\", 0x1000003 (16777219) ]\n  0008  sta v0\n\
+        let listing = ".function #~@0>#build  ; Index.build\n  0004  createobjectwithbuffer [ \"id\", 0x1000003 (16777219) ]\n  0008  sta v0\n\
                        .end function\n\n.function other\n  0004  createobjectwithbuffer [ \"id\", 1 ]\n";
         let names = HashMap::from([("#~@0>#build".to_owned(), HashMap::from([(4, "string/app_name \"Shop\"".to_owned())]))]);
         let annotated = annotate(listing, &names);

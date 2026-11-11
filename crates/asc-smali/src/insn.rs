@@ -359,11 +359,7 @@ fn reg_list(regs: &[u16]) -> String {
 }
 
 fn range_list(i: &Instruction) -> String {
-    if i.regs.is_empty() {
-        "{}".into()
-    } else {
-        format!("{{v{} .. v{}}}", i.regs[0], i.regs[i.regs.len() - 1])
-    }
+    if i.regs.is_empty() { "{}".into() } else { format!("{{v{} .. v{}}}", i.regs[0], i.regs[i.regs.len() - 1]) }
 }
 
 fn index_operand(names: &mut Names<'_, '_>, i: &Instruction, idx: u32, out: &mut String) -> Result<()> {

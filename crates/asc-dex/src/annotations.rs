@@ -1,7 +1,7 @@
 //! `annotations_directory_item`, `annotation_set_item` and
 //! `annotation_set_ref_list` parsing.
 
-use crate::{u32_at, DexError, Result};
+use crate::{DexError, Result, u32_at};
 
 /// Parsed `annotations_directory_item`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -1,7 +1,7 @@
 //! Call-site constraints (`method:X[argN=...]`, `[ret=...]`) over real code.
 
-use asc_engine::{names, CacheConfig, CallQuery, CallRoots, Direction, Engine};
-use asc_fixture::{make_apk, ClassSpec, CodeSpec, DexBuilder, MethodSpec};
+use asc_engine::{CacheConfig, CallQuery, CallRoots, Direction, Engine, names};
+use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec, make_apk};
 use std::io::Write;
 
 const CALLER: &str = "La/Caller;";

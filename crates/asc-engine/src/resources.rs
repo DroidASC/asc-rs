@@ -140,7 +140,7 @@ impl Engine {
         let data = match self.open()?.read(path) {
             Ok(d) => d,
             Err(asc_apk::ApkError::NotFound(_)) => {
-                return Err(EngineError::Query(format!("entry {path} not found{}", self.entry_not_found_hint(path))))
+                return Err(EngineError::Query(format!("entry {path} not found{}", self.entry_not_found_hint(path))));
             }
             Err(e) => return Err(e.into()),
         };

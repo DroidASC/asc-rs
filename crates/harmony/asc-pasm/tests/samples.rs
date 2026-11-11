@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use asc_abc::{Abc, Class, ClassEntry};
 use asc_arkisa::walk;
-use asc_pasm::{write_function, write_instruction, write_record, Options};
+use asc_pasm::{Options, write_function, write_instruction, write_record};
 use common::{large_sample_dir, load_abc, load_sample};
 
 fn record(abc: &Abc<'_>, name: &str) -> String {
@@ -203,8 +203,11 @@ fn bridge() {
          ; vregs 15, args 5 (a0 func, a1 new.target, a2 this, 2 params), code 196 bytes, 1 try block, line 12\n"
     ));
     assert!(on_create.contains("\n  000b  mov v4, a4\n  .try 0 [000e, 004f) catchall -> L_0051\n  000e  lda v2\n"));
-    assert!(on_create
-        .contains("\n  004b  callthis1 v7, v8\n  .endtry 0\n  004f  jmp L_0095\nL_0051:  ; handler of try 0, 68 bytes\n  0051  sta v6\n"));
+    assert!(
+        on_create.contains(
+            "\n  004b  callthis1 v7, v8\n  .endtry 0\n  004f  jmp L_0095\nL_0051:  ; handler of try 0, 68 bytes\n  0051  sta v6\n"
+        )
+    );
 
     // A method id with its restored name, and the class literal inline.
     let main = function(&ability, "func_main_0");

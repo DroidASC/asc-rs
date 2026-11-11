@@ -29,14 +29,14 @@ mod string;
 pub use abc::{Abc, OffsetTable, Region, Regions};
 pub use annotation::{Annotation, AnnotationElement, ElementValue};
 pub use class::{
-    access, record_field, unmerged, Class, ClassEntry, ClassTag, Field, FieldTag, FieldType, FieldValue, Fields, ForeignClass,
-    FunctionKind, IndexList, Method, MethodTag, Methods, SourceLang,
+    Class, ClassEntry, ClassTag, Field, FieldTag, FieldType, FieldValue, Fields, ForeignClass, FunctionKind, IndexList, Method, MethodTag,
+    Methods, SourceLang, access, record_field, unmerged,
 };
 pub use code::{CatchBlock, Code, TryBlock, TryBlocks};
 pub use debug::{DebugInfo, LineOp, LineOps, LineRow, LineRows, LocalVar};
 pub use error::{AbcError, Result};
 pub use header::{Header, RegionHeader, Version};
-pub use literal::{tag as literal_tag, Literal, LiteralArray, Literals};
+pub use literal::{Literal, LiteralArray, Literals, tag as literal_tag};
 pub use module::{IndirectExport, LocalExport, ModuleEntry, ModuleRecord, NamespaceImport, RegularImport, Section, StarExport};
 pub use name::{FunctionName, RecordKind, RecordName, Scope, ScopeIdent, ScopeKind};
 pub use reader::{read_u16, read_u32, read_u64};

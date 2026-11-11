@@ -1,6 +1,6 @@
 //! MUTF-8 string data and descriptor lookups (MG1937/ASC issue #33).
 
-use asc_dex::{mutf8, Dex, DexError};
+use asc_dex::{Dex, DexError, mutf8};
 use asc_fixture::{ClassSpec, DexBuilder};
 
 /// The DEX attached to the upstream issue: two classes whose names hold

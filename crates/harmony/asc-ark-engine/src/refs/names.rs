@@ -18,17 +18,17 @@
 
 use std::collections::HashMap;
 
-use asc_abc::{record_field, Abc, ClassEntry, ElementValue, FieldType, Literal, MethodTag, RecordKind, RecordName, StringData};
+use asc_abc::{Abc, ClassEntry, ElementValue, FieldType, Literal, MethodTag, RecordKind, RecordName, StringData, record_field};
 use asc_arkisa::{DecodeError, OperandKind};
 use memchr::memmem;
 use regex::Regex;
 
 use super::{
-    chunks, pc_of, run_units, AnnotationHit, Condition, Env, Function, Hit, IdSet, Pattern, Record, RecordHit, Worker, MAX_LITERAL_DEPTH,
+    AnnotationHit, Condition, Env, Function, Hit, IdSet, MAX_LITERAL_DEPTH, Pattern, Record, RecordHit, Worker, chunks, pc_of, run_units,
 };
 use crate::ops::{Access, NameUse, OpTable};
 use crate::track::{Effects, Source, Tracker};
-use crate::{text, Result};
+use crate::{Result, text};
 
 /// A pattern ready to test the strings of a file.
 pub(crate) enum Matcher<'q> {
@@ -49,11 +49,7 @@ fn is_plain(text: &str) -> bool {
 
 impl<'q> Matcher<'q> {
     pub(crate) fn contains(needle: &'q str) -> Matcher<'q> {
-        if is_plain(needle) {
-            Matcher::Bytes(Box::new(memmem::Finder::new(needle.as_bytes())))
-        } else {
-            Matcher::Decoded(needle)
-        }
+        if is_plain(needle) { Matcher::Bytes(Box::new(memmem::Finder::new(needle.as_bytes()))) } else { Matcher::Decoded(needle) }
     }
 
     pub(crate) fn of(pattern: &'q Pattern) -> Matcher<'q> {
@@ -133,11 +129,7 @@ impl Scope {
                 Access::Define => 2,
                 Access::Call => 3,
             };
-            if kept {
-                string | position << ACCESS_SHIFT
-            } else {
-                0
-            }
+            if kept { string | position << ACCESS_SHIFT } else { 0 }
         };
         match (self, NameUse::of(opcode)) {
             (Scope::Text, _) => string | bit(OperandKind::LiteralArrayId, LITERAL_ID, LITERAL_OFFSET),

@@ -20,12 +20,12 @@ use asc_abc::{Abc, ClassEntry, Literal};
 use asc_arkisa::{DecodeError, OperandKind};
 
 use super::{
-    chunks, pc_of, run_units, Condition, Env, Function, Hit, IdSet, ListedFunction, Pattern, Record, RecordHit, Worker, MAX_LITERAL_DEPTH,
-    RECORD_CHUNK,
+    Condition, Env, Function, Hit, IdSet, ListedFunction, MAX_LITERAL_DEPTH, Pattern, RECORD_CHUNK, Record, RecordHit, Worker, chunks,
+    pc_of, run_units,
 };
 use crate::callgraph::{FnRef, Session};
 use crate::ops::OpTable;
-use crate::{records, EngineError, Result};
+use crate::{EngineError, Result, records};
 
 /// A prepared `method:` search of one ABC entry.
 pub(crate) struct Methods<'a> {

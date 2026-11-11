@@ -19,25 +19,25 @@ mod callgraph;
 mod hierarchy;
 mod resources;
 
-pub use callgraph::{function_roots, no_callers_hint, no_leaf_hint, rule_roots, TreeText};
+pub use callgraph::{TreeText, function_roots, no_callers_hint, no_leaf_hint, rule_roots};
 pub use hierarchy::no_class_hint;
 
 use crate::res::{self, Filter};
 use crate::{
-    bool_arg, choice_arg, page_args, page_footer, prepend_notes, str_arg, usize_arg, Call, ToolError, ToolResult, FINDREFS_LIMIT,
-    LISTCLASS_LIMIT,
+    Call, FINDREFS_LIMIT, LISTCLASS_LIMIT, ToolError, ToolResult, bool_arg, choice_arg, page_args, page_footer, prepend_notes, str_arg,
+    usize_arg,
 };
 use asc_ark_engine::{
-    text, Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, ListingStyle, Manifest, ManifestLine,
-    NameFilter, Pattern, Query, RefContext, RefRow, RefSite,
+    Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, ListingStyle, Manifest, ManifestLine,
+    NameFilter, Pattern, Query, RefContext, RefRow, RefSite, text,
 };
-use asc_engine::{names, Threads, MAPPED_CHARGE_DIVISOR};
-use serde_json::{json, Value};
+use asc_engine::{MAPPED_CHARGE_DIVISOR, Threads, names};
+use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// HarmonyOS programs kept open, whatever they hold: each maps its files.
 /// What they hold on the heap is bounded by the memory budget besides.
@@ -751,7 +751,7 @@ impl Search {
             match Search::of_call(&asked).map_err(named)? {
                 Search::Refs(query) => rules.push(Rule { asked, query }),
                 Search::Requests(_) | Search::Rules(_) => {
-                    return Err(ToolError(format!("rule r{}: a rule is one search, not a listing or a rule set", index + 1)))
+                    return Err(ToolError(format!("rule r{}: a rule is one search, not a listing or a rule set", index + 1)));
                 }
             }
         }
