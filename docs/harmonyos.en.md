@@ -20,7 +20,7 @@ format is detected from the file:
   checksum of the body, not by file name; an unpacked hap pairs the same way, with the decrypted file in or
   next to its directory.
 - **Names**: a class is a record (a module: `&entry/src/main/ets/pages/Index&`, libraries carry a version,
-  `&@ohos/lib/Index&1.0.0`, older files have `com.a.b/entry/ets/pages/Index`; a path suffix, `pages/Index`,
+  `&@ohos/lib/Index&1.0.0`, older files have `rs.asc/entry/ets/pages/Index`; a path suffix, `pages/Index`,
   is enough), a method is a function (raw `#~@0>#build` or restored `Index.build`).
 
 | command | Android | HarmonyOS |

@@ -21,8 +21,8 @@ cargo test --workspace
 asc manifest-summary app.apk | grep exported=true          # attack surface
 asc findrefs app.apk string 'https?://' --limit 50         # who uses this string
 asc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
-asc getclass app.apk com.poc.Main --method onCreate        # read smali
-asc callgraph app.apk com.poc.Main onCreate --depth 3      # caller tree
+asc getclass app.apk rs.asc.Main --method onCreate         # read smali
+asc callgraph app.apk rs.asc.Main onCreate --depth 3       # caller tree
 asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 ```
 

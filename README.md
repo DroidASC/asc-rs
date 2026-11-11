@@ -19,8 +19,8 @@ cargo test --workspace
 asc manifest-summary app.apk | grep exported=true          # 暴露面
 asc findrefs app.apk string 'https?://' --limit 50         # 谁用了这个字符串
 asc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
-asc getclass app.apk com.poc.Main --method onCreate        # 读 smali
-asc callgraph app.apk com.poc.Main onCreate --depth 3      # 调用者树
+asc getclass app.apk rs.asc.Main --method onCreate         # 读 smali
+asc callgraph app.apk rs.asc.Main onCreate --depth 3       # 调用者树
 asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 ```
 

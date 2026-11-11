@@ -19,7 +19,10 @@ use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-const EXAMPLES: &str = "global options (accepted by every command, after it too):
+/// Global options: the head of both the short (`-h`) and the long (`--help`) top-level help.
+macro_rules! help_global_options {
+    () => {
+        "global options (accepted by every command, after it too):
   --set KEY=VALUE     any setting of `asc config` (repeatable), e.g. --set memory.max=4G
   --threads N         = --set threads=N
   --no-cache          = --set cache.enabled=off
@@ -28,45 +31,92 @@ const EXAMPLES: &str = "global options (accepted by every command, after it too)
   --memory-mb MIB     = --set memory.max=MIB (mcp and the daemon; one-shot commands keep none)
   --debug             timing and cache statistics on stderr
 
-settings:
+"
+    };
+}
+
+/// Exit status: in both top-level helps.
+macro_rules! help_exit_status {
+    () => {
+        "exit status:
+  0  success
+  1  error (bad arguments, unreadable APK, class not found, output not writable, ...)
+  2  findrefs / callgraph finished, but one or more DEX (or ABC) entries could not be searched (details on stderr)"
+    };
+}
+
+/// `asc -h`: the common points and a few examples per format.
+const HELP_SHORT: &str = concat!(
+    help_global_options!(),
+    "common:
+  Class names: rs.asc.Main or Lrs/asc/Main;. The input is an APK, jar or .dex, or a
+  HarmonyOS .hap / .hsp / .app / .abc; a directory or `,` list is read as one program.
+  Output is one record per line, columns separated by ` | `; `#` lines are headers and hints.
+
+examples (Android):
+  asc manifest-summary app.apk | grep exported=true
+  asc findrefs app.apk string 'https?://' --limit 50
+  asc findrefs app.apk method 'android.webkit.WebView->loadUrl' --context 3
+  asc getclass app.apk rs.asc.Main --method onCreate
+  asc callgraph app.apk rs.asc.Main onCreate --depth 3
+
+examples (HarmonyOS):
+  asc manifest-summary entry.hap | grep exported=true
+  asc getclass entry.hap pages/Index --method Index.build
+  asc findrefs entry.hap call 'import:@ohos:net\\.http.*\\.request$'
+  asc callgraph entry.hap --to 'call:^import:@ohos:net\\.http' --depth 4
+
+",
+    help_exit_status!(),
+    "
+
+`asc --help` adds the settings, every example and the Android / HarmonyOS details;
+`asc <command> --help` shows one command."
+);
+
+/// `asc --help`: everything, the examples grouped by format.
+const HELP_LONG: &str = concat!(
+    help_global_options!(),
+    "settings:
   Threads, memory and disk cache budgets are settings: a flag beats $ASC_<KEY>, which
   beats ~/.config/asc/config.toml ($ASC_CONFIG), which beats the default; the
   automatic defaults follow this machine. `asc config` lists them with their values
   and sources (--json for scripts).
 
 common:
-  Class names accept both com.poc.Main and Lcom/poc/Main;.
-  The APK may also be a jar or a .dex, or several read as one program: a directory (every
-  *.apk, *.jar, *.zip, *.dex below it) or paths joined with `,`. DEX names then start with
-  their archive (services.jar/classes2.dex); archives without classes*.dex are named in a
-  `# warning:` line on stderr (deodex them first).
-  HarmonyOS: a .hap / .hsp, an .app, a bare .abc, or a directory / `,` list of them, is
-  answered by listclass, getclass / disassemble, getmanifest, manifest-summary, callgraph and
-  findrefs string / prop / global / import / method / number / call / all. A class is then a record
-  (pages/Index or its full name), --method a function (Index.build or its raw name); the
-  manifest is module.json, each srcEntry joined to its record; an encrypted (app-store)
-  .abc is named on stderr: supply the decrypted file.
+  Class names accept both rs.asc.Main and Lrs/asc/Main;.
   Commands with -o/--output write to stdout when the option is omitted.
   Output is one record per line, columns separated by ` | `; lines starting with `#`
   are headers, totals and hints. --limit / --max-bytes keep stdout short: the whole
   output then goes to a file the last line names, and --offset shows the next records.
 
-examples:
-  asc getclass app.apk 'Lcom/poc/Main;' -o Main.smali
-  asc getclass app.apk com.poc.Main --threads 16
-  asc getclass app.apk com.poc.Main --dump-dex Main.dex
-  asc disassemble app.apk com.poc.Main --debuginfo
-  asc disassemble app.apk com.poc.Main --method 'run(I)V'
-  asc getclass app.apk com.poc.Main --res-names
+Android:
+  The APK may also be a jar or a .dex, or several read as one program: a directory (every
+  *.apk, *.jar, *.zip, *.dex below it) or paths joined with `,`. DEX names then start with
+  their archive (services.jar/classes2.dex); archives without classes*.dex are named in a
+  `# warning:` line on stderr (deodex them first).
+
+HarmonyOS:
+  A .hap / .hsp, an .app, a bare .abc, or a directory / `,` list of them, is answered by
+  listclass, getclass / disassemble, getmanifest, manifest-summary, resources, xml, callgraph,
+  hierarchy and findrefs string / prop / global / import / method / number / call / all. A
+  class is then a record (pages/Index or its full name), --method a function (Index.build or
+  its raw name); the manifest is module.json, each srcEntry joined to its record; an
+  encrypted (app-store) .abc is named on stderr: supply the decrypted file.
+
+examples (Android):
+  asc getclass app.apk 'Lrs/asc/Main;' -o Main.smali
+  asc getclass app.apk rs.asc.Main --threads 16
+  asc getclass app.apk rs.asc.Main --dump-dex Main.dex
+  asc disassemble app.apk rs.asc.Main --debuginfo
+  asc disassemble app.apk rs.asc.Main --method 'run(I)V'
+  asc getclass app.apk rs.asc.Main --res-names
   asc listclass app.apk -o classes.txt
-  asc listclass app.apk --prefix com.poc
+  asc listclass app.apk --prefix rs.asc
   asc getmanifest app.apk -o AndroidManifest.xml
   asc getmanifest app.apk --resolve
   asc manifest-summary app.apk | grep exported=true
   asc manifest-summary app.apk --json
-  asc manifest-summary entry.hap | grep exported=true
-  asc manifest-summary entry.hap --file pkgContextInfo.json
-  asc manifest-summary entry.hap | grep -E '^(page|route) '
   asc resources app.apk string/app_name
   asc resources app.apk 0x7f0d0001 --resolve
   asc resources app.apk --search 'https?://' --in value
@@ -74,12 +124,12 @@ examples:
   asc xml app.apk res/xml/network_security_config.xml
   asc findrefs app.apk string token -o string_refs.txt
   asc findrefs app.apk string 'a.b(c)' --literal
-  asc findrefs app.apk type com.poc.Main
+  asc findrefs app.apk type rs.asc.Main
   asc findrefs app.apk extends android.app.Activity -o subclasses.txt
   asc findrefs app.apk impl android.os.IInterface
-  asc findrefs app.apk method onCreate --class com.poc.Main
+  asc findrefs app.apk method onCreate --class rs.asc.Main
   asc findrefs app.apk method notify --class MainActivity --fuzzy-class -o method_refs.txt
-  asc findrefs app.apk method run --class com.poc.Main --exact
+  asc findrefs app.apk method run --class rs.asc.Main --exact
   asc findrefs app.apk field apiKey -o field_refs.txt
   asc findrefs app.apk field apiKey --access write
   asc findrefs app.apk string token --no-cache
@@ -87,16 +137,21 @@ examples:
   asc findrefs app.apk method loadUrl --context-method
   asc findrefs app.apk method 'android.provider.Settings$Secure->getString[arg1==\"android_id\"]'
   asc findrefs app.apk method '{literal:device_id}'
-  asc findrefs app.apk rules 'method:{string:^https?://} & !type:Lcom/a/test/'
+  asc findrefs app.apk rules 'method:{string:^https?://} & !type:Lrs/asc/test/'
   asc findrefs app.apk method @methods.txt
   asc findrefs app.apk rules 'override:android.os.IInterface->asBinder'
   asc findrefs app.apk rules 'flag:native & string:AES'
   asc findrefs app.apk rules 'in:{extends:android.app.Service} & annotation:androidx.annotation.RequiresPermission'
-  asc callgraph app.apk com.poc.Main onCreate --depth 3
-  asc callgraph app.apk com.poc.Main 'run(I)V' --callees
+  asc callgraph app.apk rs.asc.Main onCreate --depth 3
+  asc callgraph app.apk rs.asc.Main 'run(I)V' --callees
   asc findrefs system/framework impl com.android.internal.telephony.ITelephony
   asc callgraph framework.jar,services.jar,TeleService.apk android.telephony.TelephonyManager getImei
   asc callgraph app.apk --to 'method:java.lang.Runtime->exec' --from 'method:Intent.getStringExtra' --depth 5
+
+examples (HarmonyOS):
+  asc manifest-summary entry.hap | grep exported=true
+  asc manifest-summary entry.hap --file pkgContextInfo.json
+  asc manifest-summary entry.hap | grep -E '^(page|route) '
   asc listclass entry.hap --prefix entry/src/main/ets/pages
   asc getclass entry.hap pages/Index --method Index.build
   asc findrefs entry.hap string 'https?://'
@@ -115,18 +170,20 @@ examples:
   asc callgraph entry.hap --to 'call:^import:@ohos:net\\.http' --from 'method:=EntryAbility.onCreate' --depth 8
   asc hierarchy entry.hap 'import:@ohos:app\\.ability\\.UIAbility' --method onCreate
   asc hierarchy entry.hap EntryAbility --supers
+
+examples (resident and cache):
   asc mcp --memory-mb 4096
   asc cache stats
   asc daemon status
 
-exit status:
-  0  success
-  1  error (bad arguments, unreadable APK, class not found, output not writable, ...)
-  2  findrefs / callgraph finished, but one or more DEX (or ABC) entries could not be searched (details on stderr)
+",
+    help_exit_status!(),
+    "
 
 Debug output (--debug) goes to stderr so stdout can be redirected.
-On Unix, commands answer through a per-user daemon that keeps APKs resident (same output);
-ASC_DAEMON=off runs each command in its own process.";
+On Unix, commands answer through a per-user daemon that keeps programs resident (same output);
+ASC_DAEMON=off runs each command in its own process."
+);
 
 const EXIT_OK: u8 = 0;
 /// `resources --search` rows printed without --limit / --max-bytes.
@@ -153,7 +210,7 @@ fn run_program(io: &mut Io<'_>, common: &Common, command: Command, format: Progr
 }
 
 #[derive(Parser)]
-#[command(name = "asc", about = "Search and disassemble APK code without preprocessing.", after_help = EXAMPLES, version, disable_version_flag = true)]
+#[command(name = "asc", about = "Search and disassemble APK and HarmonyOS code without preprocessing.", after_help = HELP_SHORT, after_long_help = HELP_LONG, version, disable_version_flag = true)]
 struct Cli {
     /// Print version.
     #[arg(short = 'V', visible_short_alias = 'v', long, action = clap::ArgAction::Version)]
@@ -316,7 +373,9 @@ impl Common {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Locate the target class in APK, extract one DEX in memory, then disassemble.
+    /// Locate a class (HarmonyOS: a record) and disassemble it.
+    ///
+    /// Android: the class is rebuilt into a one-class DEX in memory first.
     Getclass {
         /// Also write the output to this file.
         #[arg(short, long)]
@@ -346,10 +405,10 @@ enum Command {
         lines: bool,
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
-        /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
+        /// The Dalvik format class name to extract (e.g., Lrs/asc/Main; or rs.asc.Main).
         dalvik_class: String,
     },
-    /// Extract a class, rebuild a small DEX, then disassemble it (getclass without debug directives by default).
+    /// Like getclass, without debug directives unless --debuginfo.
     Disassemble {
         /// Write disassembly to this file; default is stdout.
         #[arg(short, long)]
@@ -380,13 +439,13 @@ enum Command {
         lines: bool,
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
-        /// Class name in dotted or Dalvik form, e.g. com.poc.Main or Lcom/poc/Main;.
+        /// Class name in dotted or Dalvik form, e.g. rs.asc.Main or Lrs/asc/Main;.
         dalvik_class: String,
     },
-    /// List classes across all DEX entries; use --prefix to filter by package/class prefix.
+    /// List classes (HarmonyOS: records) across all code entries; use --prefix to filter by package/class prefix.
     #[command(visible_alias = "classes")]
     Listclass {
-        /// Only list classes with this package/class prefix (e.g., com.poc or Lcom/poc).
+        /// Only list classes with this package/class prefix (e.g., rs.asc or Lrs/asc).
         #[arg(long)]
         prefix: Option<String>,
         /// HarmonyOS: also list the pseudo records (compiler annotations,
@@ -404,7 +463,9 @@ enum Command {
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
-    /// Decode AndroidManifest.xml from APK and print it as XML.
+    /// Print the manifest: AndroidManifest.xml decoded to XML (HarmonyOS: module.json).
+    ///
+    /// Android: AndroidManifest.xml of the APK, decoded to XML.
     ///
     /// HarmonyOS: module.json of each package, re-indented.
     #[command(visible_alias = "manifest")]
@@ -423,8 +484,10 @@ enum Command {
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
-    /// Summarize the manifest's attack surface, one record per line:
-    /// package, application flags, permissions, components (exported or not,
+    /// Summarize the manifest's attack surface, one record per line: components
+    /// (exported or not, and why), permissions, deep links and more.
+    ///
+    /// Android: package, application flags, permissions, components (exported or not,
     /// and why), intent filters, deep links, FileProvider paths, network
     /// security config. References are resolved through resources.arsc.
     ///
@@ -459,7 +522,9 @@ enum Command {
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
     },
-    /// Query resources.arsc: one line per resource and configuration,
+    /// Query the resource table (resources.arsc; HarmonyOS: resources.index): one line per resource and configuration.
+    ///
+    /// Android: resources.arsc, one line per resource and configuration,
     /// `0x7f0d0001 string/app_name [zh-rCN] "value"`.
     ///
     /// With no QUERY and no --search, dumps the whole table.
@@ -493,7 +558,9 @@ enum Command {
         /// (string/app_name, $string:app_name, app.string.app_name).
         query: Option<String>,
     },
-    /// Decode any binary XML file of the APK (res/xml/..., layouts) with
+    /// Print a packaged XML or profile file: binary XML decoded (HarmonyOS: a text file as it is).
+    ///
+    /// Android: any binary XML file of the APK (res/xml/..., layouts), with
     /// resource references shown by name.
     ///
     /// HarmonyOS: print a text file of the package as it is: the page list
@@ -511,7 +578,7 @@ enum Command {
         /// package ahead of it, entry.hap/resources/..., for one package of several).
         path: String,
     },
-    /// Find code references for string/type/method/field across all DEX entries in APK.
+    /// Find code references (strings, types, methods, fields; HarmonyOS: strings, properties, imports, calls ...) across all code entries.
     ///
     /// Exits with status 2 when some DEX entries could not be searched; the
     /// results of the other entries are still printed.
@@ -551,7 +618,7 @@ enum Command {
         #[command(subcommand)]
         find: Find,
     },
-    /// Callers (default) or callees of a method, as an indented tree, across all DEX entries.
+    /// Callers (default) or callees of a method (HarmonyOS: a function), as an indented tree, across all code entries.
     ///
     /// One line per call: depth, `<-` (caller) or `->` (callee), signature.
     /// `[no body]` marks methods no DEX of the APK defines (framework / SDK),
@@ -634,7 +701,7 @@ enum Command {
         entry: Option<String>,
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
-        /// Declaring class (com.poc.Main or Lcom/poc/Main;). HarmonyOS: a
+        /// Declaring class (rs.asc.Main or Lrs/asc/Main;). HarmonyOS: a
         /// record (pages/Index), or the whole root as result rows print it
         /// (RECORD->FUNCTION), or a function name alone (Index.build).
         class: Option<String>,
@@ -643,7 +710,7 @@ enum Command {
         #[arg(requires = "class")]
         method: Option<String>,
     },
-    /// Class hierarchy across all DEX entries: transitive subclasses and
+    /// Class hierarchy across all code entries: transitive subclasses and
     /// implementers (default) or supertypes, as an indented tree.
     ///
     /// One line per class: depth, `subclass` / `implementer` (or `extends` /
@@ -681,8 +748,8 @@ enum Command {
         class: String,
     },
     /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
-    /// opened APKs resident across calls.
-    /// Every opened APK shares one `--memory-mb` budget.
+    /// opened programs (APKs, HarmonyOS packages) resident across calls.
+    /// Every opened program shares one `--memory-mb` budget.
     Mcp {
         /// Refuse a single entry that inflates past this many MiB (zip bombs).
         #[arg(long, default_value_t = 1024)]
@@ -690,8 +757,8 @@ enum Command {
         /// Refuse an entry that expands more than this over its compressed size.
         #[arg(long, default_value_t = 100)]
         max_ratio: u64,
-        /// Package prefixes `collapse_sdks` folds, comma separated (com.foo or
-        /// Lcom/foo/), replacing the built-in list.
+        /// Package prefixes `collapse_sdks` folds, comma separated (rs.asc or
+        /// Lrs/asc/), replacing the built-in list.
         #[arg(long, value_delimiter = ',')]
         sdk_prefixes: Option<Vec<String>>,
         /// structuredContent: `compact` leaves out its bulky values (rows,
@@ -705,7 +772,7 @@ enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
-    /// The per-user daemon that keeps APKs resident for one-shot commands.
+    /// The per-user daemon that keeps programs (APKs, HarmonyOS packages) resident for one-shot commands.
     ///
     /// Commands start it on first use and answer through it afterwards, with
     /// the same output as without it; it exits after 15 idle minutes.
@@ -831,7 +898,7 @@ enum Find {
         /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Target class in dotted or Dalvik form, e.g. android.app.Activity or Lcom/poc/Base;.
+        /// Target class in dotted or Dalvik form, e.g. android.app.Activity or Lrs/asc/Base;.
         value: String,
     },
     /// Find classes that implement the target interface.
@@ -847,8 +914,8 @@ enum Find {
         /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Fuzzy method name, or the whole target: Lcom/a/B;->name,
-        /// com.a.B.name, com.a.B#name, B.name (any package); or '{RULE}'
+        /// Fuzzy method name, or the whole target: Lrs/asc/B;->name,
+        /// rs.asc.B.name, rs.asc.B#name, B.name (any package); or '{RULE}'
         /// (calls of the methods whose code matches RULE) or @FILE (of the
         /// methods FILE lists).
         name: Option<String>,
@@ -867,7 +934,7 @@ enum Find {
     ///
     /// Conditions are KIND:VALUE: string:REGEX, literal:TEXT, type:PATTERN,
     /// method:TARGET, field:TARGET. TARGET is [CLASS->]NAME, also written
-    /// com.a.B.name or com.a.B#name (CLASS exact, `~CLASS` fuzzy, without
+    /// rs.asc.B.name or rs.asc.B#name (CLASS exact, `~CLASS` fuzzy, without
     /// package any package; NAME a regex / substring, `=NAME` or a name
     /// with its signature exact). method:{RULE} is a call of any method whose
     /// code matches RULE (a rule as for `rules`), method:@FILE of any method
@@ -1005,8 +1072,8 @@ enum Find {
         /// Also write every result to this file.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Fuzzy field name, or the whole target: Lcom/a/B;->name,
-        /// com.a.B.name, com.a.B#name, B.name (any package).
+        /// Fuzzy field name, or the whole target: Lrs/asc/B;->name,
+        /// rs.asc.B.name, rs.asc.B#name, B.name (any package).
         name: Option<String>,
         /// Dalvik class or fuzzy class pattern.
         #[arg(long = "class")]

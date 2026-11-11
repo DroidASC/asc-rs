@@ -1743,7 +1743,7 @@ pub mod defs {
             "description": "A class as smali. Over the budget: an outline (fields, method signatures and sizes) unless \
                 full=true; then ask for methods.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "class": {"type": "string", "description": "Lcom/a/B; or com.a.B"},
+                "class": {"type": "string", "description": "Lrs/asc/B; or rs.asc.B"},
                 "method": {"type": "string", "description": "Only these methods: a name (every overload) or name(params)ret."},
                 "full": {"type": "boolean", "description": "Whole class even over budget, default false."},
                 "debug_info": {"type": "boolean", "description": ".line / .param, default false."},
@@ -1815,7 +1815,7 @@ pub mod defs {
         json!({
             "description": "Classes the APK defines, optionally under a prefix. With apks / dir: count and first classes per APK.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
-                "prefix": {"type": "string", "description": "com.a or Lcom/a"},
+                "prefix": {"type": "string", "description": "rs.asc or Lrs/asc"},
                 "all": {"type": "boolean", "description": "HarmonyOS: also pseudo records."},
             }), page_props(super::LISTCLASS_LIMIT), many()])},
             "outputSchema": shape_many(&[("apk_id", "string"), ("total", "integer"), ("next_offset", "integer?"), ("classes", "array")]),

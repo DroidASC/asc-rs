@@ -13,7 +13,7 @@
   `callgraph` 退出码 2），不做解密。把解密后的 abc 放在 hap 旁边并传这个目录：代码取自解密文件，`module.json`、
   资源等仍取自 hap（hap 解包成目录时同理，解密文件放在目录里或目录旁）。配对只看文件头（版本、大小、校验和）和正文的校验和，不看文件名。
 - **名字**：类 = record（一个模块：`&entry/src/main/ets/pages/Index&`，三方库带版本 `&@ohos/lib/Index&1.0.0`，旧版本
-  是 `com.a.b/entry/ets/pages/Index`；可以只写路径后缀 `pages/Index`），方法 = 函数（原始名 `#~@0>#build` 或还原名
+  是 `rs.asc/entry/ets/pages/Index`；可以只写路径后缀 `pages/Index`），方法 = 函数（原始名 `#~@0>#build` 或还原名
   `Index.build`）。
 
 | 命令 | Android | HarmonyOS |

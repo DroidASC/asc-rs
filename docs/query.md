@@ -10,11 +10,11 @@ Android（DEX）侧的输出格式和查询写法；HarmonyOS 的对应内容见
 ```
 classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
 classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/Store;->count:I [write]
+classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/asc/Store;->count:I [write]
 ```
 
-- 类名可写 `com.a.B` 或 `Lcom/a/B;`。
-- 成员在 CLI、MCP 和规则里写法统一：`Lcom/a/B;->name(I)V`、`com.a.B->name`、`com.a.B#name`、`com.a.B.name`、
+- 类名可写 `rs.asc.B` 或 `Lrs/asc/B;`。
+- 成员在 CLI、MCP 和规则里写法统一：`Lrs/asc/B;->name(I)V`、`rs.asc.B->name`、`rs.asc.B#name`、`rs.asc.B.name`、
   `B.name`（不带包名的类匹配任意包）。只写名字是 regex / 子串，`=name` 精确匹配。
 - 带签名时只命中该重载：`run(I)V`、只写参数的 `run(I)`、Java 写法 `run(int, String)`，字段 `f:I`。
 - 字段引用按 Dalvik opcode 标记 `[read]`（`iget*` / `sget*`）或 `[write]`（`iput*` / `sput*`）。

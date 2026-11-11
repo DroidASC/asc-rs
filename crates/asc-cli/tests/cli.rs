@@ -288,6 +288,19 @@ fn help_points_to_the_settings() {
 }
 
 #[test]
+fn short_help_is_a_digest_of_the_long_one() {
+    let short = stdout(&asc(&["-h"]));
+    let long = stdout(&asc(&["--help"]));
+    for text in [&short, &long] {
+        assert!(text.contains("examples (Android):") && text.contains("examples (HarmonyOS):"), "{text}");
+        assert!(text.contains("exit status"), "{text}");
+    }
+    assert!(short.contains("`asc --help` adds"), "{short}");
+    assert!(long.contains("settings:") && !short.contains("settings:"), "{short}");
+    assert!(short.lines().count() * 2 < long.lines().count(), "-h {} lines, --help {}", short.lines().count(), long.lines().count());
+}
+
+#[test]
 fn usage_errors_exit_1_not_2() {
     // 2 is reserved for "findrefs finished with unsearchable entries".
     for args in [&[][..], &["findrefs"][..], &["findrefs", "x.apk", "string"][..], &["--bogus"][..]] {

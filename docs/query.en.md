@@ -10,12 +10,12 @@ grep / cut work. A `findrefs` row is `dex | method (full signature) | matched`:
 ```
 classes.dex | LWV/qE;-><clinit>()V | "http://", "http://www."
 classes4.dex | Lcom/…/ConversationView;->onRestoreInstanceState(Landroid/os/Parcelable;)V | Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-classes.dex | Lcom/a/Store;->update()V | Lcom/a/Store;->count:I [read], Lcom/a/Store;->count:I [write]
+classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/asc/Store;->count:I [write]
 ```
 
-- Classes are `com.a.B` or `Lcom/a/B;`.
-- Members are written the same way in the CLI, MCP and rules: `Lcom/a/B;->name(I)V`, `com.a.B->name`,
-  `com.a.B#name`, `com.a.B.name`, `B.name` (a class without a package matches any package). A bare name is a
+- Classes are `rs.asc.B` or `Lrs/asc/B;`.
+- Members are written the same way in the CLI, MCP and rules: `Lrs/asc/B;->name(I)V`, `rs.asc.B->name`,
+  `rs.asc.B#name`, `rs.asc.B.name`, `B.name` (a class without a package matches any package). A bare name is a
   regex / substring; `=name` is exact.
 - A signature picks that overload: `run(I)V`, parameters only `run(I)`, Java style `run(int, String)`;
   fields `f:I`.
