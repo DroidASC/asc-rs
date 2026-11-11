@@ -3,7 +3,8 @@
 asc-rs answers queries against an APK without preprocessing it: the APK is a read-only
 database, and everything a query needs (inflated DEX, locator tables, results) is built
 lazily and cached. The crates follow the data: *format* → *search / rebuild* →
-*orchestration* → *front ends*.
+*orchestration* → *front ends*. HarmonyOS programs (HAP / ABC) have a parallel stack of
+their own below the front ends ([HarmonyOS](#harmonyos-hap--abc)).
 
 ```
                      +-----------+        +-------------+
@@ -17,9 +18,14 @@ lazily and cached. The crates follow the data: *format* → *search / rebuild* �
           +--------------+               +--------------+            +-----------+
                  │                               │                          │
                  └──────────────► asc-engine ◄───┴──────────────────────────┘
-                                     │     (+ asc-axml, asc-arsc, asc-cache)
-                          ┌──────────┤
-                       asc-cli ── asc-mcp
+                                     │     (+ asc-axml, asc-arsc, asc-cache, asc-query)
+                                     │
+   HAP / ABC ── asc-abc, asc-arkisa, asc-pasm, asc-hap ──> asc-ark-engine
+                                     │                         │
+                                     └──────► asc-frontend ◄───┘
+                                                  │
+                                    asc-cli ──────┴────── asc-mcp
+                              (`asc mcp` runs asc-mcp)
 ```
 
 | Crate | Role |
@@ -31,13 +37,24 @@ lazily and cached. The crates follow the data: *format* → *search / rebuild* �
 | `asc-rebuild` | Extract one class and its dependencies into a minimal, valid DEX |
 | `asc-smali` | baksmali-style disassembly of one class or method |
 | `asc-axml`, `asc-arsc` | Binary XML and `resources.arsc` |
-| `asc-cache` | Disk tiers, memory LRU, process registry |
+| `asc-cache` | Disk tiers, memory LRU, process registry, the automatic thread count both engines use |
+| `asc-query` | The rule syntax both engines parse (`&`, `!`, sets, `{@FILE}`, nesting limit, errors with a column) and the escaping of quoted strings in line output |
 | `asc-engine` | Queries over an APK: class lookup, findrefs, rules, call graph, hierarchy, manifest summary, multi-APK sweeps |
-| `asc-cli` | `asc` binary and its daemon |
-| `asc-mcp` | `asc mcp`: resident stdio MCP session |
+| `asc-abc`, `asc-arkisa`, `asc-pasm`, `asc-hap`, `asc-ark-engine` | HarmonyOS: see [HarmonyOS](#harmonyos-hap--abc) |
+| `asc-frontend` | What both front ends share: which engine answers for a program, findrefs arguments as queries, the spill directory, class outlines, HarmonyOS call trees and hints |
+| `asc-cli` | `asc` binary and its daemon; uses asc-mcp only to run `asc mcp` |
+| `asc-mcp` | `asc mcp`: resident stdio MCP session (protocol, argument leniency, reply budgets) |
 | `asc-fixture` | Synthetic DEX / APK fixtures for tests |
 
 ## Query syntax and output
+
+A rule (`string:a & !method:{literal:b}`) is parsed by `asc-query` for both engines: it
+finds the parts (a `&` joins only ahead of `KIND:`, outside `{}` / `()`), the sets
+(`{RULE}`, `{@FILE}`, `=` / `*` in front) and their nesting (8 levels), and reports errors
+with a column. Each engine supplies a `Grammar` (its kinds, which take sets) and maps the
+parsed parts to its own query type (`asc_engine::condition`,
+`asc_ark_engine` `refs::rule`). The front ends turn their arguments into queries through
+`asc_frontend::findrefs`, so a CLI flag and an MCP argument mean the same.
 
 One parser (`asc_engine::names`) reads every way of writing a target, for the CLI, MCP and
 rule sets alike: `Lc;->m(sig)`, `c.B->m`, `c.B#m`, `c.B.m`, `B.m`. A signature after the
@@ -49,8 +66,10 @@ and zero-result replies say what to try next (`asc-engine/src/hints.rs`), comput
 those paths.
 
 Text output is one record per line with ` | ` columns, so an agent can grep and cut:
-`dex | Lcls;->name(params)ret | matched`. Strings are quoted with JSON escapes, so every
-record stays on one line. Row *content* matches the Python ASC semantically
+`dex | Lcls;->name(params)ret | matched`. Strings are quoted with JSON escapes
+(`asc_query::text`), so every record stays on one line; besides control characters the line
+separators, bidi controls and invisible format characters are escaped, so a row cannot
+display other than what it holds. Row *content* matches the Python ASC semantically
 (`benchmark/parity/semantic.py`); the format is asc-rs's own.
 
 ## Search
@@ -145,7 +164,8 @@ records each process's cache bytes and whether it is serving a request.
   25 % / processes, within 64 MiB..`memory.ceiling`. The ceiling defaults to 1/16 of
   physical memory within 2..8 GiB: one server on a large machine keeps a phone's worth of hot
   DEX, while many still split a quarter of it.
-* **Threads.** Without `--threads`, workers = clamp(4 × CPUs / busy processes, 2, CPUs). A
+* **Threads.** Without `--threads`, workers = clamp(4 × CPUs / busy processes, 2, CPUs)
+  (`asc_cache::auto_threads`, for the DEX and the HarmonyOS engine alike). A
   process marks itself busy when a request starts and ends, the registry is re-read every
   100 ms, and multi-APK sweeps re-check the count between work units, so a burst of
   servers waking up together shares the CPUs instead of each taking all of them. The
@@ -186,6 +206,38 @@ output is byte-identical with or without it (`crates/asc-cli/tests/daemon.rs`).
   and a method index for smali; with `spill: never` the text is paged instead, and the
   footer holds the next call's arguments.
 * The CLI has the same window through `--limit` / `--max-bytes` / `--offset`.
+
+## HarmonyOS (HAP / ABC)
+
+The same commands and tools answer for ArkCompiler bytecode; `asc_frontend::format` picks the
+engine from the content of the path (a `PANDA` magic, a zip holding `module.json` /
+`ets/*.abc`), never from a name alone, except that `.apk` / `.dex` / `.jar` / `.aar` /
+`.apex` files are not opened to look.
+
+| Crate | DEX counterpart | Role |
+|---|---|---|
+| `asc-abc` | `asc-dex` | Zero-copy, lazy ABC (Panda file) reader: header, class index, regions, classes, methods, code, literal arrays, module records, debug info; every offset bounds-checked |
+| `asc-arkisa` | `asc-dalvik` | Opcode table generated from the official `isa.yaml` (checked in), operand layouts, linear walk |
+| `asc-pasm` | `asc-smali` | Pandasm-style disassembly of one record or function, rendered on demand |
+| `asc-hap` | `asc-axml`, `asc-arsc` | `module.json`, `pack.info`, `pkgContextInfo.json`, page list and route table, `resources.index`; reads bytes it is given, no IO |
+| `asc-ark-engine` | `asc-engine` | Opens a program (`.hap` / `.hsp` / `.app`, nested zips, bare `.abc`, unpacked or decrypted directories), lists records, disassembles, finds references, resolves call sites, walks call graphs and class hierarchies, reads the manifest and resources |
+
+* **No index, no disk cache.** An ABC file is mapped (inflated once when compressed) and
+  every query reads what it needs; opening takes milliseconds, so the disk tiers take no
+  part. Stored entries are read in place.
+* **Call sites.** An ArkTS call names no callee: `asc-ark-engine` tracks the accumulator and
+  registers inside a function (and closures' captured scopes) to a callee path
+  (`import:@ohos:net.http#default.createHttp().request`), and links paths to functions of the
+  program where it can prove or name-match them; the marks on call graph rows say which.
+* **Resident analyses.** Call graph edges and class definitions are computed on first use
+  and kept on the engine. A resident host (the daemon, an MCP session) charges them, with
+  the engine's heap and 1/8 of its mapped bytes (`Engine::resident_bytes`), against the same
+  memory budget as DEX engines; the program used last gives its analyses back when it alone
+  is over its share (`Engine::shed_analyses`).
+* **Threads** follow the same automatic policy as the DEX side (`asc_cache::Threads`).
+* **Queries** share the rule syntax (`asc-query`) with their own kinds (`prop:`, `global:`,
+  `import:`, `number:`, `call:`; `call:{RULE}` is a set); see `docs/harmonyos.en.md`.
+* The design and measured call resolution precision: `docs/ark-abc-design.md` (Chinese).
 
 ## Resources and the manifest
 
