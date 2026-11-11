@@ -4,8 +4,8 @@
 //!   first) and stops as soon as one defines the requested class.
 //! * [`Engine::find_refs`] runs a reference search over every DEX entry in
 //!   parallel and streams results back as each DEX completes.
-//! * [`Engine::get_class`] rebuilds a minimal DEX containing only the target
-//!   class and renders it as smali.
+//! * [`Engine::get_class`] rebuilds a minimal DEX containing the target and
+//!   its `$` nested classes, then renders the target as smali.
 //! * [`Engine::list_classes`] lists the classes of every DEX entry in order.
 //! * [`Engine::manifest_xml`] decodes the binary `AndroidManifest.xml`.
 //!
@@ -120,7 +120,8 @@ pub struct ClassHit {
 pub struct ClassSource {
     pub dex_name: String,
     pub source: String,
-    /// The minimal single-class DEX, or `None` when the class could not be
+    /// The minimal DEX containing the class and its `$` nested classes,
+    /// or `None` when the class could not be
     /// rebuilt (see `warning`) and `source` was disassembled from the
     /// original DEX instead.
     pub rebuilt: Option<Rebuilt>,

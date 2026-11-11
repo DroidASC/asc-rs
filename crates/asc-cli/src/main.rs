@@ -375,7 +375,7 @@ impl Common {
 enum Command {
     /// Locate a class (HarmonyOS: a record) and disassemble it.
     ///
-    /// Android: the class is rebuilt into a one-class DEX in memory first.
+    /// Android: rebuild the class and its `$` nested classes into a minimal DEX in memory first.
     Getclass {
         /// Also write the output to this file.
         #[arg(short, long)]
@@ -383,7 +383,7 @@ enum Command {
         /// Do not emit .line / .param debug directives.
         #[arg(long)]
         no_debug_info: bool,
-        /// Write the rebuilt single-class DEX to this file.
+        /// Write the rebuilt DEX (the class and its `$` nested classes) to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
         /// Render only these methods (no fields): a name (every overload) or a
@@ -425,7 +425,7 @@ enum Command {
         /// a `$r('app.type.name')` object (from resources.index).
         #[arg(long)]
         res_names: bool,
-        /// Write the rebuilt single-class DEX to this file.
+        /// Write the rebuilt DEX (the class and its `$` nested classes) to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
         /// HarmonyOS: take the record from this ABC entry (ets/modules.abc), when

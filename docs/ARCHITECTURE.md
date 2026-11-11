@@ -83,7 +83,9 @@ record stays on one line. Row *content* matches the Python ASC semantically
 
 ## Class extraction
 
-`getclass` rebuilds the class into a standalone DEX: collect every index it depends on,
+`getclass` rebuilds the class and its `$` nested classes from the same input DEX
+into a standalone DEX: `LA;` includes `LA$a;` and `LA$a$b;`, while `LA$a;`
+includes `LA$a$b;` but not the enclosing `LA;` or siblings. Collect every index they depend on,
 sort the new id tables canonically, rewrite operands and data, seal with checksum and
 signature — the output is spec-valid (`dexdump` and jadx accept it, `--dump-dex` exports it).
 It is rendered as baksmali-style smali. Classes the rebuild refuses (undefined opcodes,

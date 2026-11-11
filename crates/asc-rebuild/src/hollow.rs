@@ -1,4 +1,4 @@
-//! Phase 1: pull every structure the class owns out of the original DEX.
+//! Phase 1: pull the requested class and its nested classes out of the DEX.
 
 use crate::{RebuildError, Result};
 use asc_dex::annotations::{AnnotationsDirectory, parse_annotation_set, parse_annotation_set_ref_list};
@@ -27,9 +27,24 @@ pub(crate) struct Hollow<'a> {
 }
 
 impl<'a> Hollow<'a> {
-    pub fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Hollow<'a>> {
-        let (_, def) =
+    pub fn extract(dex: &Dex<'a>, descriptor: &str) -> Result<Vec<Hollow<'a>>> {
+        let (target, def) =
             dex.find_class_def(&asc_dex::mutf8::encode(descriptor))?.ok_or_else(|| RebuildError::ClassNotFound(descriptor.to_string()))?;
+        let prefix = asc_dex::mutf8::encode(&format!("{}$", descriptor.strip_suffix(';').unwrap_or(descriptor)));
+        let mut classes = Vec::new();
+        // Keep the input class_def order, including any superclass/interface
+        // definitions that precede their users. Only the `$` namespace below
+        // the target is selected; enclosing classes and siblings stay out.
+        for i in 0..dex.class_def_count() {
+            let class = if i == target { def } else { dex.class_def(i)? };
+            if i == target || dex.type_bytes(class.class_idx)?.starts_with(&prefix) {
+                classes.push(Self::from_def(dex, class)?);
+            }
+        }
+        Ok(classes)
+    }
+
+    fn from_def(dex: &Dex<'a>, def: ClassDef) -> Result<Hollow<'a>> {
         let buf = dex.buf();
         let class_data = dex.class_data(def.class_data_off)?;
         let interfaces = dex.type_list(def.interfaces_off)?;

@@ -1,4 +1,4 @@
-//! Phase 2: gather every constant-pool index the class depends on.
+//! Phase 2: gather the selected classes' constant-pool dependencies.
 
 use crate::hollow::Hollow;
 use crate::{RebuildError, Result};
@@ -90,8 +90,16 @@ pub(crate) fn check_walk(method_idx: u32, stop: Stop) -> Result<()> {
     }
 }
 
-pub(crate) fn collect(dex: &Dex<'_>, h: &Hollow<'_>) -> Result<RefSet> {
+pub(crate) fn collect(dex: &Dex<'_>, classes: &[Hollow<'_>]) -> Result<RefSet> {
     let mut refs = RefSet::default();
+    for h in classes {
+        collect_class(h, &mut refs)?;
+    }
+    refs.close(dex)?;
+    Ok(refs)
+}
+
+fn collect_class(h: &Hollow<'_>, refs: &mut RefSet) -> Result<()> {
     let def = &h.def;
     refs.types.insert(def.class_idx);
     if def.superclass_idx != NO_INDEX {
@@ -171,6 +179,5 @@ pub(crate) fn collect(dex: &Dex<'_>, h: &Hollow<'_>) -> Result<RefSet> {
         return Err(RebuildError::Unsupported(UNSUPPORTED_CALL_SITES));
     }
 
-    refs.close(dex)?;
-    Ok(refs)
+    Ok(())
 }
