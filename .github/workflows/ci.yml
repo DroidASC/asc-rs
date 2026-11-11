@@ -19,3 +19,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
       - run: cargo test --workspace --no-default-features
       - run: cargo build --release -p asc-cli --no-default-features
+  # Code under cfg(target_os = "macos") is compiled nowhere else: lint it on
+  # macOS (the release builds for both macOS targets).
+  clippy-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
