@@ -339,14 +339,17 @@ fn truncated_instruction_is_a_bytecode_error() {
 }
 
 #[test]
-fn dangling_try_handler_offset_is_an_internal_error() {
+fn dangling_try_handler_offset_is_malformed_bytecode() {
     let mut data = make_rich_dex();
     let code = code_of(&Dex::parse(&data).unwrap(), RICH, "compute");
     // tries start after the (odd-length, hence padded) instruction array
     let tries = code.offset + CodeItem::HEADER_SIZE + code.insns.len() + 2;
     data[tries + 6..tries + 8].copy_from_slice(&0x77u16.to_le_bytes());
     match rebuild_class_bytes(&data, RICH) {
-        Err(RebuildError::Internal(msg)) => assert!(msg.contains("handler offset 119"), "{msg}"),
+        // An input defect, not a pipeline bug: hosts fall back to disassembling in place.
+        Err(e @ RebuildError::Bytecode { pc: 16, .. }) => {
+            assert!(e.is_input_limitation() && e.to_string().contains("handler offset 119"), "{e}")
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -434,5 +437,23 @@ fn rebuilt_dex_passes_dexdump_verifier_when_available() {
         (make_many_members_dex(3, false), "Lexample/Big;"),
     ] {
         common::assert_verifies(&dexdump, class, &rebuild_class_bytes(&data, class).unwrap().bytes);
+    }
+}
+
+/// Methods sharing a code item share it in the rebuilt DEX too: written once
+/// per method, a class whose every method names one large code item would
+/// grow by the number of methods times the code size.
+#[test]
+fn shared_code_item_is_written_once() {
+    let out = rebuild_class_bytes(&make_dex(), "Lexample/Test;").unwrap();
+    let dex = Dex::parse(&out.bytes).unwrap();
+    let (_, def) = dex.find_class_def(b"Lexample/Test;").unwrap().unwrap();
+    let offs: Vec<u32> = dex.class_data(def.class_data_off).unwrap().methods().map(|m| m.code_off).collect();
+    assert_eq!(offs.len(), 2);
+    assert_eq!(offs[0], offs[1], "both methods name one code item");
+    assert_eq!(dex.map_item(asc_dex::map_type::CODE).unwrap().size, 1);
+    assert_eq!(out.stats.methods_with_code, 2);
+    if let Some(dexdump) = common::dexdump() {
+        common::assert_verifies(&dexdump, "Lexample/Test;", &out.bytes);
     }
 }

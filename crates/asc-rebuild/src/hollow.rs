@@ -9,14 +9,16 @@ use asc_dex::encoded::{AnnotationItem, EncodedValue, parse_annotation_item, pars
 use asc_dex::{ClassDef, Dex, mutf8};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
+use std::rc::Rc;
 
 pub(crate) struct Hollow<'a> {
     pub def: ClassDef,
     pub class_data: ClassData,
     pub interfaces: Vec<u16>,
-    /// Methods with a body, keyed by original method idx.
-    pub code: HashMap<u32, CodeItem<'a>>,
-    pub debug: HashMap<u32, DebugInfo>,
+    /// Methods with a body, keyed by original method idx. Methods may
+    /// share a code item (and so its debug info): it is parsed once.
+    pub code: HashMap<u32, Rc<CodeItem<'a>>>,
+    pub debug: HashMap<u32, Rc<DebugInfo>>,
     pub static_values: Option<Vec<EncodedValue>>,
     pub ann_dir: Option<AnnotationsDirectory>,
     /// annotation_set offset → annotation_item offsets
@@ -106,15 +108,28 @@ impl<'a> Hollow<'a> {
 
         let mut code = HashMap::new();
         let mut debug = HashMap::new();
+        // By code_off: every method of a class may name one code item.
+        let mut parsed: HashMap<u32, (Rc<CodeItem<'a>>, Option<Rc<DebugInfo>>)> = HashMap::new();
         for m in class_data.methods() {
             if m.code_off == 0 {
                 continue;
             }
-            let item = dex.code_item(m.code_off)?;
-            // A malformed debug_info_item is an error, exactly like a
-            // malformed code_item: the rebuild never silently drops data.
-            if item.debug_info_off != 0 {
-                let (info, _) = DebugInfo::parse(buf, item.debug_info_off as usize)?;
+            let (item, info) = match parsed.get(&m.code_off) {
+                Some(found) => found.clone(),
+                None => {
+                    let item = dex.code_item(m.code_off)?;
+                    // A malformed debug_info_item is an error, exactly like a
+                    // malformed code_item: the rebuild never silently drops data.
+                    let info = match item.debug_info_off {
+                        0 => None,
+                        off => Some(Rc::new(DebugInfo::parse(buf, off as usize)?.0)),
+                    };
+                    let found = (Rc::new(item), info);
+                    parsed.insert(m.code_off, found.clone());
+                    found
+                }
+            };
+            if let Some(info) = info {
                 debug.insert(m.method_idx, info);
             }
             code.insert(m.method_idx, item);

@@ -164,7 +164,9 @@ fn write_code_item(out: &mut Out, method_idx: u32, item: &CodeItem<'_>, debug_of
     let mut new_off: HashMap<u16, u16> = HashMap::new();
     write_uleb128(&mut list, item.handlers.len() as u32);
     for h in &item.handlers {
-        new_off.insert(h.offset, list.len() as u16);
+        // Remapped type indexes may take more bytes than the original ones.
+        let off = u16::try_from(list.len()).map_err(|_| RebuildError::TooManyItems { what: "catch handler bytes", count: list.len() })?;
+        new_off.insert(h.offset, off);
         let size = h.catches.len() as i32;
         write_sleb128(&mut list, if h.catch_all_addr.is_some() { -size } else { size });
         for (ty, addr) in &h.catches {
@@ -334,34 +336,51 @@ pub(crate) fn write(dex: &Dex<'_>, classes: &[Hollow<'_>], t: &Tables) -> Result
         }
     }
     methods_sorted.sort_by_key(|x| x.0);
+    // Methods sharing a code item share its debug info and code: one copy
+    // each, by source offset, or a class whose every method names one large
+    // code item would be written once per method.
     let mut debug_offs: HashMap<u32, u32> = HashMap::new();
+    let mut debug_written: HashMap<u32, u32> = HashMap::new();
     let first = out.pos();
-    let mut debug_count = 0;
     for (_, h, m) in &methods_sorted {
-        if let Some(info) = h.debug.get(&m.method_idx) {
-            debug_offs.insert(m.method_idx, out.pos());
-            info.write(&mut out.data, &|s| remap.string(s), &|ty| remap.type_(ty));
-            remap.check()?;
-            debug_count += 1;
-        }
+        let (Some(info), Some(code)) = (h.debug.get(&m.method_idx), h.code.get(&m.method_idx)) else { continue };
+        let off = match debug_written.get(&code.debug_info_off) {
+            Some(&off) => off,
+            None => {
+                let off = out.pos();
+                info.write(&mut out.data, &|s| remap.string(s), &|ty| remap.type_(ty));
+                remap.check()?;
+                debug_written.insert(code.debug_info_off, off);
+                off
+            }
+        };
+        debug_offs.insert(m.method_idx, off);
     }
-    out.section(map_type::DEBUG_INFO, debug_count, first);
+    out.section(map_type::DEBUG_INFO, debug_written.len(), first);
 
     // --- code items ------------------------------------------------------
     let mut code_offs: HashMap<u32, u32> = HashMap::new();
+    let mut code_written: HashMap<usize, u32> = HashMap::new();
     let mut first_code = 0u32;
     for (_, h, m) in &methods_sorted {
-        if let Some(item) = h.code.get(&m.method_idx) {
-            out.align4();
-            if code_offs.is_empty() {
-                first_code = out.pos();
+        let Some(item) = h.code.get(&m.method_idx) else { continue };
+        let off = match code_written.get(&item.offset) {
+            Some(&off) => off,
+            None => {
+                out.align4();
+                let off = out.pos();
+                if code_written.is_empty() {
+                    first_code = off;
+                }
+                write_code_item(&mut out, m.method_idx, item, *debug_offs.get(&m.method_idx).unwrap_or(&0), t)?;
+                code_written.insert(item.offset, off);
+                off
             }
-            code_offs.insert(m.method_idx, out.pos());
-            write_code_item(&mut out, m.method_idx, item, *debug_offs.get(&m.method_idx).unwrap_or(&0), t)?;
-        }
+        };
+        code_offs.insert(m.method_idx, off);
     }
     let methods_with_code = code_offs.len();
-    out.section(map_type::CODE, methods_with_code, first_code);
+    out.section(map_type::CODE, code_written.len(), first_code);
 
     // --- class data ------------------------------------------------------
     let first = out.pos();

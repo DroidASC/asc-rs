@@ -137,7 +137,12 @@ impl RefSet {
             self.methods.insert(m.method_idx);
         }
 
+        // Methods sharing a code item share its references: walk it once.
+        let mut walked = BTreeSet::new();
         for (&method_idx, code) in &h.code {
+            if !walked.insert(code.offset) {
+                continue;
+            }
             let insns = code.insns;
             let mut unsupported = false;
             let walk = walk_insns(insns, |step| {
@@ -160,6 +165,10 @@ impl RefSet {
                 return Err(RebuildError::Unsupported(UNSUPPORTED_CALL_SITES));
             }
             check_walk(method_idx, walk.stop)?;
+            if let Some(t) = code.tries.iter().find(|t| code.handler_for(t).is_none()) {
+                let reason = format!("try item names handler offset {}, which is no handler", t.handler_off);
+                return Err(RebuildError::Bytecode { method_idx, pc: t.start_addr as usize * 2, reason });
+            }
             for handler in &code.handlers {
                 for (t, _) in &handler.catches {
                     self.types.insert(*t);
@@ -167,7 +176,8 @@ impl RefSet {
             }
         }
 
-        for info in h.debug.values() {
+        let mut visited = BTreeSet::new();
+        for info in h.debug.values().filter(|info| visited.insert(std::rc::Rc::as_ptr(info))) {
             let mut strings = |s: u32| {
                 self.strings.insert(s);
             };

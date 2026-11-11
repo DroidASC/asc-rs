@@ -3,6 +3,7 @@
 //! parses again.
 
 use asc_dex::Dex;
+use asc_rebuild::RebuildError;
 use asc_smali::Options;
 
 /// Most classes rebuilt per input: each rebuild copies what the class
@@ -23,7 +24,12 @@ pub fn run(data: &[u8]) {
                 }
             }
         }
-        let Ok(rebuilt) = asc_rebuild::rebuild_class(&dex, &descriptor) else { continue };
+        let rebuilt = match asc_rebuild::rebuild_class(&dex, &descriptor) {
+            Ok(rebuilt) => rebuilt,
+            // Internal means a pipeline bug; malformed input has its own errors.
+            Err(e @ RebuildError::Internal(_)) => panic!("{descriptor}: {e}"),
+            Err(_) => continue,
+        };
         // What the rebuild writes is a well-formed DEX defining the class.
         let again = Dex::parse(&rebuilt.bytes).expect("rebuilt DEX parses");
         let found = again.find_class_def(&asc_dex::mutf8::encode(&descriptor));
