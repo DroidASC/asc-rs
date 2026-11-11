@@ -6,6 +6,7 @@
 //! `asc-smali`) build only the indexes they need.
 
 pub mod annotations;
+pub mod call_site;
 pub mod checksum;
 pub mod class_data;
 pub mod code;
@@ -15,14 +16,17 @@ pub mod encoded;
 pub mod error;
 pub mod header;
 pub mod leb128;
+pub mod map;
 pub mod mutf8;
 pub mod quick;
 
 mod dex;
 
-pub use dex::{ClassDef, Dex, FieldId, MapItem, MethodId, ProtoId, StringItem};
+pub use call_site::{CallSite, MethodHandle, MethodHandleKind};
+pub use dex::{ClassDef, Dex, FieldId, MethodId, ProtoId, StringItem};
 pub use error::{DexError, Result};
 pub use header::{Header, Section};
+pub use map::{MapItem, MapList};
 
 /// Sentinel used by DEX for "no index" (superclass, source file, ...).
 pub const NO_INDEX: u32 = 0xFFFF_FFFF;
