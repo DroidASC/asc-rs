@@ -39,6 +39,7 @@ const LISTING_VALUE_BYTES: usize = text::ROW_STRING_BYTES;
 
 /// One value of one resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResourceRow {
     /// The package whose index has it, as manifest lines name packages.
     pub package: String,
@@ -84,6 +85,7 @@ impl ResourceRow {
 
 /// What a resource search matches against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResourceField {
     /// `type/name` of every resource.
     Name,
@@ -109,6 +111,7 @@ impl FromStr for ResourceField {
 
 /// Where a reference chain stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChainEnd {
     /// At a value that names no other resource.
     Value,
@@ -123,6 +126,7 @@ pub enum ChainEnd {
 
 /// A resource followed through the references its value names.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedResource {
     pub package: String,
     /// `$color:accent`, then what each value named in turn.
@@ -425,6 +429,7 @@ impl<'e> ResourceTables<'e> {
 
 /// A text file of a package.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackageFile {
     pub package: String,
     /// Its path in the package: `resources/base/profile/main_pages.json`.

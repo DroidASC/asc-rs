@@ -21,6 +21,7 @@ const SOURCE_EXTENSIONS: [&str; 3] = [".ets", ".ts", ".js"];
 
 /// Which records [`crate::Engine::list_classes`] keeps, by record name.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum NameFilter {
     /// The name starts with this; the decoration of a normalized name is
     /// optional (`entry/src/main` matches `&entry/src/main/ets/pages/Index&`).
@@ -43,6 +44,7 @@ impl NameFilter {
 
 /// Options of [`crate::Engine::list_classes`].
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ListOptions {
     pub filter: Option<NameFilter>,
     /// Also list pseudo records (the compiler's `_ES…` annotation records
@@ -55,8 +57,29 @@ pub struct ListOptions {
     pub entry: Option<String>,
 }
 
+impl ListOptions {
+    /// The options with [`filter`](#structfield.filter) set.
+    #[must_use]
+    pub fn filter(self, filter: Option<NameFilter>) -> Self {
+        ListOptions { filter, ..self }
+    }
+
+    /// The options with [`all`](#structfield.all) set.
+    #[must_use]
+    pub fn all(self, all: bool) -> Self {
+        ListOptions { all, ..self }
+    }
+
+    /// The options with [`entry`](#structfield.entry) set.
+    #[must_use]
+    pub fn entry(self, entry: Option<String>) -> Self {
+        ListOptions { entry, ..self }
+    }
+}
+
 /// One record of a program.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecordListing {
     /// The ABC entry that defines it.
     pub entry: String,

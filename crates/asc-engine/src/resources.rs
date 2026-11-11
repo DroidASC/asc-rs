@@ -47,6 +47,7 @@ impl AsRef<[u8]> for MappedEntry {
 
 /// One resource matching a [`Engine::search_resources`] query.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ResourceRow {
     pub id: u32,
     /// `type/name` (or `package:type/name` outside the app package).
@@ -76,6 +77,7 @@ impl ResourceRow {
 
 /// What [`Engine::search_resources`] matches against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResourceField {
     /// `type/name` of every resource.
     Name,

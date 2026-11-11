@@ -48,6 +48,7 @@ const PACK_MODULE_LINES: [&str; 4] = ["pack-module", "pack-ability", "pack-exten
 
 /// A metadata document at the root of a package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Document {
     /// `module.json`: the manifest of a module.
     Module,
@@ -122,6 +123,7 @@ pub enum CodeLink {
 
 /// A `srcEntry` of a manifest and the code it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntryCode {
     /// As the manifest writes it: `./ets/entryability/EntryAbility.ets`.
     pub src_entry: String,
@@ -130,6 +132,7 @@ pub struct EntryCode {
 
 /// A page of a module's page list and the code it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PageCode {
     /// As the list writes it: `pages/Index`.
     pub page: String,
@@ -138,6 +141,7 @@ pub struct PageCode {
 
 /// A route of a module's route table and the code of its page.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RouteCode {
     pub route: Route,
     pub link: CodeLink,
@@ -145,6 +149,7 @@ pub struct RouteCode {
 
 /// An ABC entry of a program, as a manifest lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CodeEntry {
     pub info: EntryInfo,
     /// The decrypted file read in place of the entry, which is encrypted
@@ -202,6 +207,7 @@ impl CodeEntry {
 /// How the `pack.info` of a package relates to those of the other
 /// packages of the program.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PackSharing {
     /// No other package has the same bytes (or the package has none).
     #[default]
@@ -216,6 +222,7 @@ pub enum PackSharing {
 
 /// How the records of a package's code spread over its package table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PackageRecords {
     /// Records per package, parallel to [`PkgContextInfo::packages`].
     pub per_package: Vec<usize>,
@@ -229,6 +236,7 @@ pub struct PackageRecords {
 
 /// The metadata of one package and its join to the code.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PackageManifest {
     /// The package as ABC entry names spell it (`entry.hap`,
     /// `shop.app/entry-default.hap`); the file name for a lone file.
@@ -273,6 +281,7 @@ pub struct PackageManifest {
 
 /// One line of a manifest summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ManifestLine {
     /// [`PackageManifest::name`] of the package the line is about.
     pub package: String,
@@ -280,6 +289,11 @@ pub struct ManifestLine {
 }
 
 impl ManifestLine {
+    /// `text` about the package named `package`.
+    pub fn new(package: impl Into<String>, text: impl Into<String>) -> ManifestLine {
+        ManifestLine { package: package.into(), text: text.into() }
+    }
+
     /// The line; `with_package` puts the package ahead of it, the way a
     /// findrefs row starts with its entry: `entry.hap | ability …`.
     pub fn line(&self, with_package: bool) -> String {
@@ -289,6 +303,7 @@ impl ManifestLine {
 
 /// One document of one package, re-indented.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DocumentText {
     pub package: String,
     pub document: Document,
@@ -313,6 +328,7 @@ impl DocumentText {
 /// The manifests of a program: one [`PackageManifest`] per package that has
 /// a metadata document, in program order (an `.app` ahead of its packages).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Manifest {
     pub packages: Vec<PackageManifest>,
     /// The bare `.abc` files that are part of no package (a decrypted file

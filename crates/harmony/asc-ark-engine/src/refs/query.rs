@@ -198,6 +198,7 @@ pub enum FunctionSet {
 /// One line of a function list: `RECORD->FUNCTION` as result rows print
 /// it, or a function name alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ListedFunction {
     /// The canonical record name, or a path suffix of it.
     pub record: Option<String>,

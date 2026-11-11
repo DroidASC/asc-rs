@@ -25,6 +25,7 @@ const SDK_CLEARTEXT_OFF: i64 = 28;
 const FILE_PROVIDER_PATHS: &str = "android.support.FILE_PROVIDER_PATHS";
 
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct ManifestSummary {
     pub package: String,
     pub version_code: Option<String>,
@@ -43,6 +44,7 @@ pub struct ManifestSummary {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Application {
     pub class: Option<String>,
     pub debuggable: bool,
@@ -59,12 +61,14 @@ pub struct Application {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Permission {
     pub name: String,
     pub protection_level: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Component {
     /// `activity`, `activity-alias`, `service`, `receiver` or `provider`.
     pub kind: String,
@@ -93,6 +97,7 @@ pub struct Component {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct IntentFilter {
     pub actions: Vec<String>,
     pub categories: Vec<String>,
@@ -100,6 +105,7 @@ pub struct IntentFilter {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct DataSpec {
     pub scheme: Option<String>,
     pub host: Option<String>,

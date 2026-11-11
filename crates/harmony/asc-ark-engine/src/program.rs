@@ -53,6 +53,7 @@ const ZIP_LOCAL_HEADER: &[u8] = b"PK\x03\x04";
 
 /// What kind of HarmonyOS input a file is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Format {
     /// A bare ABC file.
     Abc,
@@ -298,6 +299,7 @@ pub enum EntryStatus {
 
 /// One ABC entry of a program.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntryInfo {
     /// `ets/modules.abc`, `entry.hap/ets/modules.abc`, or a bare file's name.
     pub name: String,
@@ -309,6 +311,7 @@ pub struct EntryInfo {
 
 /// An encrypted package entry and the decrypted file that is read in its place.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StandIn {
     /// The entry, as rows name it: `entry.hap/ets/modules.abc`.
     pub entry: String,

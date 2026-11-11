@@ -36,6 +36,7 @@ const MAX_LABEL_CLASSES: usize = 3;
 
 /// The methods whose code matches each query of a
 /// [`Engine::matching_methods`] call, and its notes.
+#[non_exhaustive]
 pub struct MatchingMethods {
     /// `Lcls;->name(params)ret` per query.
     pub sets: Vec<BTreeSet<String>>,

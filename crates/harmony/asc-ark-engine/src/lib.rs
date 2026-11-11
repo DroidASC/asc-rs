@@ -77,6 +77,7 @@ fn table_bytes<K, V>(map: &HashMap<K, V>) -> usize {
 
 /// What an [`Engine`] holds in memory, in bytes ([`Engine::memory_use`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MemoryUse {
     /// On the heap for as long as the program is open: Deflate inner
     /// packages of an `.app` and Deflate entries, inflated when it opened.
@@ -107,6 +108,7 @@ impl MemoryUse {
 
 /// What [`Engine::get_class`] disassembles.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct ClassQuery<'q> {
     /// The record: its canonical name (`&entry/src/main/ets/pages/Index&`)
     /// or a path suffix of it (`pages/Index`, `pages/Index.ets`).
@@ -141,6 +143,7 @@ impl<'q> ClassQuery<'q> {
 
 /// How [`Engine::get_class_as`] writes a listing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ListingStyle {
     /// Write `; line N` where the line of the debug info changes, instead
     /// of only the first line of a function in its header. With source
@@ -158,6 +161,7 @@ impl ListingStyle {
 
 /// Disassembly of a record or function.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClassSource {
     /// The ABC entry that defines the record.
     pub entry: String,

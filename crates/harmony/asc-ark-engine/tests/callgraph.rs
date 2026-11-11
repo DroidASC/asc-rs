@@ -155,7 +155,7 @@ fn open(dir: &Path, builder: &AbcBuilder) -> Engine {
 }
 
 fn query(roots: CallRoots, direction: Direction, depth: usize) -> CallQuery {
-    CallQuery { depth, ..CallQuery::new(roots, direction) }
+    CallQuery::new(roots, direction).depth(depth)
 }
 
 /// The tree with the record names shortened to their last path segment.
@@ -198,11 +198,11 @@ fn callees_follow_imports_exports_and_classes() {
         ]
     );
     // Unresolved call sites are counted on the row, and listed on request.
-    let listed = lines(&engine, &CallQuery { unresolved: true, ..query(run.clone(), Direction::Callees, 1) });
+    let listed = lines(&engine, &(query(run.clone(), Direction::Callees, 1)).unresolved(true));
     assert_eq!(listed.len(), 11);
     assert_eq!(listed[8], "  1 -> arg0.then [unresolved]");
     // Without definitions, the closure is not reached.
-    let plain = lines(&engine, &CallQuery { defines: false, ..query(run.clone(), Direction::Callees, 1) });
+    let plain = lines(&engine, &(query(run.clone(), Direction::Callees, 1)).defines(false));
     assert!(plain.len() == 9 && !plain.iter().any(|line| line.contains("cb")), "{plain:?}");
 
     assert_eq!(
@@ -280,7 +280,7 @@ fn callers_come_from_the_records_that_can_import() {
     // The limits.
     let helper = CallRoots::function(&format!("{UTIL}->helper"));
     assert_eq!(lines(&engine, &query(helper.clone(), Direction::Callers, 0)), ["0 Util->#*#helper | helper"]);
-    let capped = engine.call_graph(&CallQuery { max_nodes: 2, ..query(helper, Direction::Callers, 3) }, &AtomicBool::new(false)).unwrap();
+    let capped = engine.call_graph(&(query(helper, Direction::Callers, 3)).max_nodes(2), &AtomicBool::new(false)).unwrap();
     assert!(capped.truncated && capped.rows.len() == 2 && capped.footer().contains("truncated"), "{capped:?}");
 
     // Roots that name nothing, or too much inside one record.
@@ -338,7 +338,7 @@ fn every_call_site_is_an_edge_and_both_directions_agree() {
     let level_one = |engine: &Engine, node: &CallNode, direction| -> HashSet<CallNode> {
         let CallNode::Function { record, function, .. } = node else { return HashSet::new() };
         let roots = CallRoots::Function { record: Some(record.clone()), function: function.clone(), entry: None };
-        let tree = engine.call_graph(&CallQuery { max_nodes: usize::MAX, ..query(roots, direction, 1) }, &AtomicBool::new(false)).unwrap();
+        let tree = engine.call_graph(&(query(roots, direction, 1)).max_nodes(usize::MAX), &AtomicBool::new(false)).unwrap();
         tree.rows.into_iter().filter(|row| row.depth == 1).map(|row| row.node).collect()
     };
     for edge in all.iter().filter(|edge| matches!(edge.to, CallNode::Function { .. })) {
@@ -464,8 +464,7 @@ fn class_lines(engine: &Engine, query: &CallQuery) -> Vec<String> {
 fn calls_go_up_the_parent_classes() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path(), &asc_fixture::abc::class_calls_program());
-    let callees =
-        |root: &str| class_lines(&engine, &CallQuery { unresolved: true, ..query(CallRoots::function(root), Direction::Callees, 1) });
+    let callees = |root: &str| class_lines(&engine, &(query(CallRoots::function(root), Direction::Callees, 1)).unresolved(true));
     // `this.run()` is found two classes up, `this.stop()` one up; `super.run()` is the same
     // function as `this.run()` here, and the proved call is the one the row shows.
     assert_eq!(
@@ -630,7 +629,7 @@ fn callers_of_a_method_come_through_subclasses_and_exported_objects() {
     let level_one = |engine: &Engine, node: &CallNode, direction| -> HashSet<CallNode> {
         let CallNode::Function { record, function, .. } = node else { return HashSet::new() };
         let roots = CallRoots::Function { record: Some(record.clone()), function: function.clone(), entry: None };
-        let tree = engine.call_graph(&CallQuery { max_nodes: usize::MAX, ..query(roots, direction, 1) }, &AtomicBool::new(false)).unwrap();
+        let tree = engine.call_graph(&(query(roots, direction, 1)).max_nodes(usize::MAX), &AtomicBool::new(false)).unwrap();
         tree.rows.into_iter().filter(|row| row.depth == 1).map(|row| row.node).collect()
     };
     for edge in edges(&engine).iter().filter(|edge| matches!(edge.to, CallNode::Function { .. })) {
@@ -691,7 +690,7 @@ fn a_lookup_stops_where_the_classes_do_not_decide() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path(), &builder);
     let callees = |root: &str| {
-        let query = CallQuery { unresolved: true, ..query(CallRoots::function(root), Direction::Callees, 1) };
+        let query = (query(CallRoots::function(root), Direction::Callees, 1)).unresolved(true);
         let tree = engine.call_graph(&query, &AtomicBool::new(false)).unwrap();
         tree.lines(false).into_iter().skip(1).map(|line| line.replace(&format!("{RECORD}->"), "")).collect::<Vec<_>>()
     };
@@ -833,24 +832,24 @@ fn rules_are_roots_ends_and_fences_of_a_walk() {
     let whole = lines(&engine, &query(star.clone(), Direction::Callers, 3));
 
     // `unless` leaves a function out, with what only it reaches.
-    let fenced = CallQuery { unless: vec![rule("method:=helper")], ..query(star.clone(), Direction::Callers, 3) };
+    let fenced = (query(star.clone(), Direction::Callers, 3)).unless(vec![rule("method:=helper")]);
     let rows = lines(&engine, &fenced);
     assert!(rows.len() < whole.len() && !rows.iter().any(|row| row.contains("helper") || row.contains("cb")), "{rows:?}");
     assert_eq!(rows[..2], ["0 Util->#*#star | star", "  1 <- App->#*#run | run unresolved=1"]);
     assert_eq!(tree(&fenced).pruned, 1);
     assert!(tree(&fenced).footer().contains("; 1 functions left out by unless"));
     // By what its code does: the functions that log are `helper` (and `Other`'s, which nothing here reaches).
-    let by_code = CallQuery { unless: vec![rule("global:=console & prop:=log")], ..query(star.clone(), Direction::Callers, 3) };
+    let by_code = (query(star.clone(), Direction::Callers, 3)).unless(vec![rule("global:=console & prop:=log")]);
     assert_eq!(lines(&engine, &by_code), rows);
     // Several rules add up; a root can be left out too.
-    let both = CallQuery { unless: vec![rule("method:=helper"), rule("method:=run")], ..query(star.clone(), Direction::Callers, 3) };
+    let both = (query(star.clone(), Direction::Callers, 3)).unless(vec![rule("method:=helper"), rule("method:=run")]);
     assert_eq!(lines(&engine, &both), ["0 Util->#*#star | star", "  1 <- Util->func_main_0 | func_main_0 [defines]"]);
     assert_eq!(tree(&both).pruned, 2);
-    let no_root = tree(&CallQuery { unless: vec![rule("method:=star")], ..query(star.clone(), Direction::Callers, 3) });
+    let no_root = tree(&(query(star.clone(), Direction::Callers, 3)).unless(vec![rule("method:=star")]));
     assert!(no_root.rows.is_empty() && no_root.pruned == 1, "{no_root:?}");
 
     // `from` keeps the paths that start at a matching function, and ends them there.
-    let from = CallQuery { from: Some(rule("method:=cb")), ..query(star.clone(), Direction::Callers, 3) };
+    let from = (query(star.clone(), Direction::Callers, 3)).from(Some(rule("method:=cb")));
     assert_eq!(
         lines(&engine, &from),
         ["0 Util->#*#star | star", "  1 <- Util->#*#helper | helper", "    2 <- App->#*@0*#cb | run.cb [from]"]
@@ -860,12 +859,12 @@ fn rules_are_roots_ends_and_fences_of_a_walk() {
     assert!(kept.rows[2].from && !kept.rows[1].from);
     assert!(kept.footer().contains("; 1 from functions reached"), "{}", kept.footer());
     // By code: `run` is the function with the unresolved `p.then()`; nothing above it is walked.
-    let by_code = CallQuery { from: Some(rule("prop:=then")), ..query(star.clone(), Direction::Callers, 3) };
+    let by_code = (query(star.clone(), Direction::Callers, 3)).from(Some(rule("prop:=then")));
     let rows = lines(&engine, &by_code);
     assert_eq!(rows[1], "  1 <- App->#*#run | run unresolved=1 [from]");
     assert!(!rows.iter().any(|row| row.contains("App->func_main_0")), "{rows:?}");
     // None reached: no rows, and the footer says how far the walk went.
-    let nowhere = tree(&CallQuery { from: Some(rule("method:=make")), ..query(star.clone(), Direction::Callers, 3) });
+    let nowhere = tree(&(query(star.clone(), Direction::Callers, 3)).from(Some(rule("method:=make"))));
     assert!(nowhere.rows.is_empty());
     assert!(
         nowhere.footer().contains("; 0 from functions reached\n# from: none of the 6 callers walked matches (depth 3)"),
@@ -873,11 +872,9 @@ fn rules_are_roots_ends_and_fences_of_a_walk() {
         nowhere.footer()
     );
     // `from` and `unless` together; `from` is for callers only.
-    let fenced_from =
-        CallQuery { from: Some(rule("method:=run")), unless: vec![rule("method:=helper")], ..query(star.clone(), Direction::Callers, 3) };
+    let fenced_from = (query(star.clone(), Direction::Callers, 3)).from(Some(rule("method:=run"))).unless(vec![rule("method:=helper")]);
     assert_eq!(lines(&engine, &fenced_from), ["0 Util->#*#star | star", "  1 <- App->#*#run | run unresolved=1 [from]"]);
-    let down =
-        engine.call_graph(&CallQuery { from: Some(rule("method:=run")), ..query(star, Direction::Callees, 1) }, &AtomicBool::new(false));
+    let down = engine.call_graph(&(query(star, Direction::Callees, 1)).from(Some(rule("method:=run"))), &AtomicBool::new(false));
     assert!(matches!(down, Err(EngineError::Query(_))), "{down:?}");
 
     // A rule as the roots: the functions it matches, in program order.

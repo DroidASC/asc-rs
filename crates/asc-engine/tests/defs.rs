@@ -68,7 +68,7 @@ fn the_class_graph_is_kept_on_disk_for_later_processes() {
     let cached = || {
         let disk =
             DiskCache::open(dir.path()).with_capacity(1 << 30).with_min_dex_bytes(0).with_min_derived_cost(std::time::Duration::ZERO);
-        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     let specs = ["in:{annotation:example.Marker}", "in:{extends:java.lang.Object} & flag:static", "override:example.Iface->run"];
     let uncached = Engine::new(apk.path()).with_threads(2);

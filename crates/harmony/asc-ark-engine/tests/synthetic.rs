@@ -39,7 +39,7 @@ fn entry_names(engine: &Engine) -> Vec<&str> {
 }
 
 fn record_names(engine: &Engine, all: bool) -> Vec<String> {
-    let options = ListOptions { all, ..ListOptions::default() };
+    let options = ListOptions::default().all(all);
     engine.list_classes(&options).unwrap().into_iter().map(|record| format!("{} | {}", record.entry, record.name)).collect()
 }
 
@@ -101,14 +101,14 @@ fn listing_filters_and_pseudo_records() {
     assert_eq!(entry_names(&engine), ["modules.abc"]);
     assert!(!engine.has_several_entries());
 
-    let all = engine.list_classes(&ListOptions { all: true, ..ListOptions::default() }).unwrap();
+    let all = engine.list_classes(&ListOptions::default().all(true)).unwrap();
     assert_eq!(all.iter().map(|record| record.name.as_str()).collect::<Vec<_>>(), [RECORD_A, "_ESTypeAnnotation", RECORD_B]);
     assert_eq!(all.iter().map(|record| (record.functions, record.foreign)).collect::<Vec<_>>(), [(2, false), (0, true), (3, false)]);
     assert_eq!(all[0].line(false), format!("{RECORD_A} | functions=2"));
     assert_eq!(all[1].line(true), "_ESTypeAnnotation | functions=0 kind=service foreign | modules.abc");
 
     let names = |filter: NameFilter| {
-        let options = ListOptions { filter: Some(filter), ..ListOptions::default() };
+        let options = ListOptions::default().filter(Some(filter));
         engine.list_classes(&options).unwrap().into_iter().map(|record| record.name).collect::<Vec<_>>()
     };
     assert_eq!(names(NameFilter::Prefix("entry/src".into())), [RECORD_A]);
@@ -177,7 +177,7 @@ fn directories_and_lists_are_one_program() {
     assert_eq!(entry_names(&engine), ["entry.hap/ets/modules.abc", "other.app/feature.hap/ets/modules.abc"]);
 
     // The same record in two entries: the entry has to be named.
-    let query = ClassQuery { record: "pages/Index", ..ClassQuery::default() };
+    let query = ClassQuery::new("pages/Index");
     match engine.get_class(&query) {
         Err(EngineError::Ambiguous { what: "record", candidates, .. }) => {
             assert_eq!(
@@ -187,16 +187,16 @@ fn directories_and_lists_are_one_program() {
         }
         other => panic!("expected an ambiguity, got {other:?}"),
     }
-    let source = engine.get_class(&ClassQuery { entry: Some("feature.hap/ets/modules.abc"), ..query }).unwrap();
+    let source = engine.get_class(&query.entry(Some("feature.hap/ets/modules.abc"))).unwrap();
     assert_eq!((source.entry.as_str(), source.record.as_str()), ("other.app/feature.hap/ets/modules.abc", RECORD_A));
-    assert!(matches!(engine.get_class(&ClassQuery { entry: Some("nope.abc"), ..query }), Err(EngineError::NoEntry(_))));
+    assert!(matches!(engine.get_class(&query.entry(Some("nope.abc"))), Err(EngineError::NoEntry(_))));
 }
 
 #[test]
 fn records_and_functions_resolve_by_several_spellings() {
     let dir = tempfile::tempdir().unwrap();
     let engine = Engine::open(write(dir.path(), "modules.abc", &synthetic().0)).unwrap();
-    let get = |record, function| engine.get_class(&ClassQuery { record, function, entry: None });
+    let get = |record, function| engine.get_class(&ClassQuery::new(record).function(function).entry(None));
 
     for spelling in
         [RECORD_A, "pages/Index", "pages/Index.ets", "Index", "/entry/src/main/ets/pages/Index", "L&entry/src/main/ets/pages/Index&;"]
@@ -285,7 +285,7 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     assert_eq!(record_names(&engine, false), [format!("ets/widgets.abc | {RECORD_A}"), format!("ets/widgets.abc | {RECORD_B}")]);
     assert_eq!(find(&engine, &Query::string_literal("jello")).len(), 1);
     assert!(engine.abc("ets/modules.abc").is_none());
-    let missing = engine.get_class(&ClassQuery { record: "nope/Missing", ..ClassQuery::default() }).unwrap_err().to_string();
+    let missing = engine.get_class(&ClassQuery::new("nope/Missing")).unwrap_err().to_string();
     assert!(missing.contains("ets/modules.abc is encrypted"), "{missing}");
 
     // A decrypted dump pairs whatever it is called, and takes the entry's name.

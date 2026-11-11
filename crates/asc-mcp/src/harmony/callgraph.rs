@@ -112,15 +112,13 @@ pub(super) fn callgraph(session: &Session, args: &Value, call: &Call) -> ToolRes
     if from.is_some() && direction == Direction::Callees {
         return Err(ToolError("`from` keeps caller paths: it goes with direction=callers (the default) or `to`".into()));
     }
-    let query = CallQuery {
-        depth: usize_arg(args, "depth")?.unwrap_or(CALLGRAPH_DEPTH),
-        max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES),
-        defines: bool_arg(args, "defines")?.unwrap_or(true),
-        unresolved: bool_arg(args, "unresolved")?.unwrap_or(false),
-        from,
-        unless: unless_arg(args)?,
-        ..CallQuery::new(roots, direction)
-    };
+    let query = (CallQuery::new(roots, direction))
+        .depth(usize_arg(args, "depth")?.unwrap_or(CALLGRAPH_DEPTH))
+        .max_nodes(usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES))
+        .defines(bool_arg(args, "defines")?.unwrap_or(true))
+        .unresolved(bool_arg(args, "unresolved")?.unwrap_or(false))
+        .from(from)
+        .unless(unless_arg(args)?);
     let engine = &session.engine;
     let mut tree = engine.call_graph(&query, &call.cancel).map_err(|e| match &e {
         EngineError::Ambiguous { candidates, .. } if asc_frontend::harmony::several_entries_define(candidates) => {
@@ -178,7 +176,7 @@ mod tests {
 
     fn row(depth: usize, parent: Option<usize>, node: CallNode) -> CallRow {
         let kind = parent.map(|_| EdgeKind::Call);
-        CallRow { depth, parent, node, kind, sites: 1, repeated: false, unresolved: None, from: false, subclasses_skipped: 0 }
+        CallRow::new(depth, parent, node, kind)
     }
 
     #[test]

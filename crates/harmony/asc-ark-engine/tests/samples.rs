@@ -20,7 +20,7 @@ use common::{large_sample_dir, sample};
 
 /// `(all records, pseudo or foreign ones)` per entry.
 fn counts(engine: &Engine) -> Vec<(String, usize, usize)> {
-    let all = engine.list_classes(&ListOptions { all: true, ..ListOptions::default() }).unwrap();
+    let all = engine.list_classes(&ListOptions::default().all(true)).unwrap();
     let modules = engine.list_classes(&ListOptions::default()).unwrap();
     engine
         .entries()
@@ -70,7 +70,7 @@ fn every_sample_opens_and_lists_its_records() {
         assert_eq!(counts(&engine), [(entry.to_owned(), records, pseudo)], "{file}");
         // Every listed record disassembles, and by its canonical name.
         for record in engine.list_classes(&ListOptions::default()).unwrap() {
-            let source = engine.get_class(&ClassQuery { record: &record.name, ..ClassQuery::default() }).unwrap();
+            let source = engine.get_class(&ClassQuery::new(&record.name)).unwrap();
             assert_eq!(source.record, record.name);
             assert!(source.text.contains(".function") || record.functions == 0, "{file} {}", record.name);
         }
@@ -91,7 +91,7 @@ fn contacts_records_resolve_by_every_spelling() {
     let Some(path) = sample("contacts.hap") else { return };
     let engine = open(&path, Format::Hap);
     let canonical = "&entry/src/main/ets/pages/Index&";
-    let get = |record, function| engine.get_class(&ClassQuery { record, function, entry: None });
+    let get = |record, function| engine.get_class(&ClassQuery::new(record).function(function).entry(None));
 
     let whole = get(canonical, None).unwrap();
     assert!(whole.text.starts_with(".record &entry/src/main/ets/pages/Index&"), "{}", &whole.text[..80.min(whole.text.len())]);
@@ -130,9 +130,7 @@ fn contacts_records_resolve_by_every_spelling() {
     assert_eq!(get("pages/setIP", Some("setIP.rerender")).unwrap().function.as_deref(), Some("#~@2>#rerender"));
     assert!(matches!(get("pages/Index", Some("build")), Err(EngineError::NotFound { what: "function", .. })));
 
-    let pages = engine
-        .list_classes(&ListOptions { filter: Some(NameFilter::Prefix("entry/src/main/ets/pages".into())), ..ListOptions::default() })
-        .unwrap();
+    let pages = engine.list_classes(&ListOptions::default().filter(Some(NameFilter::Prefix("entry/src/main/ets/pages".into())))).unwrap();
     assert_eq!(
         pages.iter().map(|record| (record.name.as_str(), record.functions)).collect::<Vec<_>>(),
         [("&entry/src/main/ets/pages/Index&", 18), ("&entry/src/main/ets/pages/setIP&", 36)]
@@ -220,7 +218,7 @@ fn large_sample_package_alone_reports_the_encrypted_entry() {
     let listed = counts(&engine);
     assert!(matches!(&listed[..], [(entry, records, pseudo)] if entry == "ets/widgets.abc" && records > pseudo), "{listed:?}");
     for row in engine.list_classes(&ListOptions::default()).unwrap() {
-        let source = engine.get_class(&ClassQuery { record: &row.name, function: None, entry: None }).unwrap();
+        let source = engine.get_class(&ClassQuery::new(&row.name).function(None).entry(None)).unwrap();
         assert_eq!((source.entry.as_str(), source.record.as_str()), ("ets/widgets.abc", row.name.as_str()));
     }
     let hits = find(&engine, &Query::string_regex(".").unwrap());
@@ -256,9 +254,9 @@ fn large_sample_directory_pairs_the_decrypted_file_with_the_encrypted_entry() {
     let of = |entry: &str| rows.iter().filter(|row| row.entry == entry).map(|row| row.name.as_str()).collect::<Vec<_>>();
     let (main, widgets) = (of("entry.hap/ets/modules.abc"), of("entry.hap/ets/widgets.abc"));
     if let Some(shared) = widgets.iter().find(|record| main.contains(record)) {
-        let query = ClassQuery { record: shared, function: None, entry: None };
+        let query = ClassQuery::new(shared).function(None).entry(None);
         assert!(matches!(engine.get_class(&query), Err(EngineError::Ambiguous { what: "record", .. })));
-        assert_eq!(engine.get_class(&ClassQuery { entry: Some("ets/widgets.abc"), ..query }).unwrap().entry, "entry.hap/ets/widgets.abc");
+        assert_eq!(engine.get_class(&query.entry(Some("ets/widgets.abc"))).unwrap().entry, "entry.hap/ets/widgets.abc");
     }
 
     // The bare decrypted file on its own is a program too.

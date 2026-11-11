@@ -83,6 +83,7 @@ impl Prebuild {
 
 /// What [`Engine::prebuild`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PrebuildReport {
     /// Logical DEX files prepared.
     pub dex: usize,

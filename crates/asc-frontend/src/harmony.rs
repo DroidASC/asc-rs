@@ -387,25 +387,13 @@ mod tests {
     }
 
     fn row(depth: usize, parent: Option<usize>, node: CallNode) -> CallRow {
-        let kind = parent.map(|_| EdgeKind::Call);
-        CallRow { depth, parent, node, kind, sites: 1, repeated: false, unresolved: None, from: false, subclasses_skipped: 0 }
+        CallRow::new(depth, parent, node, parent.map(|_| EdgeKind::Call))
     }
 
     fn tree(rows: Vec<CallRow>) -> CallTree {
-        let functions = rows.iter().filter(|row| matches!(row.node, CallNode::Function { .. })).count();
-        let leaves = rows.len() - functions;
-        CallTree {
-            direction: Direction::Callers,
-            depth: 3,
-            rows,
-            functions,
-            leaves,
-            truncated: false,
-            records_scanned: 1,
-            pruned: 0,
-            reached: None,
-            notes: Vec::new(),
-        }
+        let mut tree = CallTree::new(Direction::Callers, 3, rows);
+        tree.records_scanned = 1;
+        tree
     }
 
     #[test]
@@ -496,7 +484,7 @@ mod tests {
         let mut walked = tree(vec![row(0, None, function("a.abc", "send")), row(1, Some(0), function("a.abc", "onCreate"))]);
         walked.rows[1].from = true;
         walked.pruned = 2;
-        walked.reached = Some(asc_ark_engine::Reached { from: 1, walked: 6 });
+        walked.reached = Some(asc_ark_engine::Reached::new(1, 6));
         let text = TreeText::of(&walked, true);
         assert_eq!(text.lines, ["0 &a/b&->#~@0>#send | B.send", "  1 <- &a/b&->#~@0>#onCreate | B.onCreate [from]"]);
         assert_eq!(
@@ -505,7 +493,7 @@ mod tests {
              2 functions left out by unless; all in a.abc"
         );
         let mut nowhere = tree(Vec::new());
-        nowhere.reached = Some(asc_ark_engine::Reached { from: 0, walked: 6 });
+        nowhere.reached = Some(asc_ark_engine::Reached::new(0, 6));
         let footer = TreeText::of(&nowhere, false).footer;
         assert!(
             footer.contains("; 0 from functions reached\n# from: none of the 6 callers walked matches (depth 3); a path ends"),

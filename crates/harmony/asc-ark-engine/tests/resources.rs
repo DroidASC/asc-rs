@@ -286,7 +286,7 @@ fn listings_name_the_resources_they_build() {
     let abc = resource_program().build().bytes;
     let engine = Engine::open(write(dir.path(), "entry.hap", &make_hap(&abc))).unwrap();
     let named = |function: Option<&str>| {
-        let mut source = engine.get_class(&ClassQuery { record: LABELS_PAGE, function, entry: None }).unwrap();
+        let mut source = engine.get_class(&ClassQuery::new(LABELS_PAGE).function(function).entry(None)).unwrap();
         let plain = source.text.clone();
         engine.annotate_resource_ids(&mut source);
         assert_eq!(source.text.lines().count(), plain.lines().count());
@@ -302,7 +302,7 @@ fn listings_name_the_resources_they_build() {
     // Without an index that reads the listing stays as it is; a bare file takes the index of the one package next to it.
     let unnamed = |path: PathBuf| {
         let engine = Engine::open(path).unwrap();
-        let mut source = engine.get_class(&ClassQuery { record: LABELS_PAGE, function: None, entry: None }).unwrap();
+        let mut source = engine.get_class(&ClassQuery::new(LABELS_PAGE).function(None).entry(None)).unwrap();
         let plain = source.text.clone();
         engine.annotate_resource_ids(&mut source);
         source.text == plain

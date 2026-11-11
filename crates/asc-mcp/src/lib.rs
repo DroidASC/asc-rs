@@ -945,14 +945,12 @@ impl Server {
                 .collect::<Result<_, _>>()?,
             Some(_) => return Err(ToolError("`unless` must be a rule or a list of rules".into())),
         };
-        let q = CallQuery {
-            depth: usize_arg(args, "depth")?.unwrap_or(CALLGRAPH_DEPTH),
-            max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES),
-            virtual_calls: bool_arg(args, "virtual")?.unwrap_or(false),
-            from,
-            unless,
-            ..CallQuery::new(roots, direction)
-        };
+        let q = (CallQuery::new(roots, direction))
+            .depth(usize_arg(args, "depth")?.unwrap_or(CALLGRAPH_DEPTH))
+            .max_nodes(usize_arg(args, "max_nodes")?.unwrap_or(CALLGRAPH_MAX_NODES))
+            .virtual_calls(bool_arg(args, "virtual")?.unwrap_or(false))
+            .from(from)
+            .unless(unless);
         let tree = apk.engine.call_graph_cancellable(&q, &call.cancel)?;
         let mut text = String::new();
         for line in tree.lines() {
@@ -1882,7 +1880,7 @@ mod tests {
             })
             .collect();
         // A one-byte memory cache: room for no class graph but the newest one's.
-        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 1, ..CacheConfig::default() }));
+        let server = Server::new(Options::new(2, false, CacheConfig::default().memory_bytes(1)));
         let hierarchy = |args: Value| {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hierarchy", "arguments": args}});
             server.handle_line(&line.to_string()).unwrap()["result"]["structuredContent"]["apk_id"].clone()
@@ -1904,7 +1902,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.apk");
         std::fs::write(&path, asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_rich_dex())], true)).unwrap();
-        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() }));
+        let server = Server::new(Options::new(2, false, CacheConfig::default().memory_bytes(64 << 20)));
         let hierarchy = |args: Value| {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hierarchy", "arguments": args}});
             server.handle_line(&line.to_string()).unwrap()["result"]["structuredContent"].clone()
@@ -2016,7 +2014,7 @@ mod tests {
         };
 
         // A one-byte memory cache: room for nothing but the program used last.
-        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 1, ..CacheConfig::default() }));
+        let server = Server::new(Options::new(2, false, CacheConfig::default().memory_bytes(1)));
         call_tool(&server, "hierarchy", json!({"apk": apk, "class": "java.lang.Object"}));
         walk(&server, json!({"apk": paths[0]}));
         walk(&server, json!({"apk": paths[1]}));
@@ -2030,7 +2028,7 @@ mod tests {
         // A budget the mapped code fits in but not the analyses of a walk:
         // the program used last stays open and gives them back.
         let held = asc_ark_engine::Engine::open(&paths[0]).unwrap().resident_bytes();
-        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 2 * held + 64, ..CacheConfig::default() }));
+        let server = Server::new(Options::new(2, false, CacheConfig::default().memory_bytes(2 * held + 64)));
         walk(&server, json!({"apk": paths[0]}));
         assert!(analyses(&server, "apk1").unwrap() > 64);
         server.trim_sessions();
@@ -2038,7 +2036,7 @@ mod tests {
         assert_eq!(walk(&server, json!({"apk_id": "apk1"})), "apk1");
 
         // Room for all of it: nothing closes, nothing is given back.
-        let server = Server::new(Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() }));
+        let server = Server::new(Options::new(2, false, CacheConfig::default().memory_bytes(64 << 20)));
         walk(&server, json!({"apk": paths[0]}));
         walk(&server, json!({"apk": paths[1]}));
         server.trim_sessions();

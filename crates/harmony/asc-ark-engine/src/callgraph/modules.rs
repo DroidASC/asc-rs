@@ -92,6 +92,7 @@ impl RequestForm {
 /// How many requests of one form there are and how many name a record of
 /// the program.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FormCount {
     /// Requests, counted once per requesting record.
     pub requests: usize,

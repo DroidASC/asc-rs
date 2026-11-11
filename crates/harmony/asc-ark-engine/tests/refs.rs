@@ -850,17 +850,14 @@ fn a_search_can_be_kept_to_an_entry_or_a_package() {
     assert!(matches!(none, Err(EngineError::NoEntry(name)) if name == "b"));
 
     let listed = |entry: &str| {
-        let options = ListOptions { entry: Some(entry.to_owned()), ..ListOptions::default() };
+        let options = ListOptions::default().entry(Some(entry.to_owned()));
         let mut entries: Vec<String> = engine.list_classes(&options).unwrap().into_iter().map(|record| record.entry).collect();
         entries.dedup();
         entries
     };
     assert_eq!(listed("b.hsp"), ["b.hsp/ets/modules.abc", "b.hsp/ets/widgets.abc"]);
     assert_eq!(listed("c.abc"), ["c.abc"]);
-    assert!(matches!(
-        engine.list_classes(&ListOptions { entry: Some("nope".into()), ..ListOptions::default() }),
-        Err(EngineError::NoEntry(_))
-    ));
+    assert!(matches!(engine.list_classes(&ListOptions::default().entry(Some("nope".into()))), Err(EngineError::NoEntry(_))));
     assert_eq!(
         engine.module_requests_in(None, Some("a.hap")).unwrap().iter().filter(|request| request.entry != "a.hap/ets/modules.abc").count(),
         0
@@ -966,7 +963,7 @@ fn context_is_the_listing_around_each_site() {
     assert!(with(&url, RefContext::Lines(0)).iter().any(|sites| sites.lines().count() == 3 && sites.starts_with(lines[0])));
 
     // The whole function is the listing getclass prints, and is listed once for consecutive rows in it.
-    let listing = engine.get_class(&asc_ark_engine::ClassQuery { record: NET, function: Some("#~@0>#load"), entry: None }).unwrap().text;
+    let listing = engine.get_class(&asc_ark_engine::ClassQuery::new(NET).function(Some("#~@0>#load")).entry(None)).unwrap().text;
     let whole = with(&condition("prop:."), RefContext::Method);
     let in_load: Vec<&String> = whole.iter().filter(|row| row.contains("->#~@0>#load+")).collect();
     assert!(in_load.len() >= 2, "{whole:?}");

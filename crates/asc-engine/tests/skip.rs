@@ -82,7 +82,7 @@ fn late_string_data_or_a_kept_entry_is_searched_whole() {
 
     // A memory cache keeps the inflated entry for later queries: no probe.
     let front = temp_apk(&make_padded_dex(0, PAD), true);
-    let cached = Engine::new(front.path()).with_cache(CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
+    let cached = Engine::new(front.path()).with_cache(CacheConfig::default().memory_bytes(64 << 20));
     assert_eq!(search(&cached, &Query::String("absent".into())), (Vec::new(), 0));
 }
 
@@ -94,7 +94,7 @@ fn rule_sets_skip_an_entry_only_when_no_rule_can_match() {
         let rules: Vec<Query> = rules.iter().map(|r| names::parse_condition(r).unwrap()).collect();
         let before = engine.cache_stats().skipped;
         let mut totals = vec![0; rules.len()];
-        let opts = FindOptions { aggregate: true, ..Default::default() };
+        let opts = FindOptions::default().aggregate(true);
         engine.find_refs_rules(&rules, opts, &AtomicBool::new(false), &mut |i, b| totals[i] += b.results.len()).unwrap();
         (totals, engine.cache_stats().skipped - before)
     };

@@ -63,6 +63,7 @@ impl Lineage {
 
 /// A hierarchy query.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HierarchyQuery {
     /// Dalvik descriptor (`Lcom/poc/Base;`).
     pub class: String,
@@ -76,8 +77,37 @@ pub struct HierarchyQuery {
     pub method: Option<String>,
 }
 
+impl HierarchyQuery {
+    /// The query with [`depth`](#structfield.depth) set.
+    #[must_use]
+    pub fn depth(self, depth: usize) -> Self {
+        HierarchyQuery { depth, ..self }
+    }
+
+    /// The query with [`max_nodes`](#structfield.max_nodes) set.
+    #[must_use]
+    pub fn max_nodes(self, max_nodes: usize) -> Self {
+        HierarchyQuery { max_nodes, ..self }
+    }
+
+    /// The query with [`method`](#structfield.method) set.
+    #[must_use]
+    pub fn method(self, method: Option<String>) -> Self {
+        HierarchyQuery { method, ..self }
+    }
+}
+
+impl HierarchyQuery {
+    /// A walk from `class` (a Dalvik descriptor): 16 levels, at most 2000
+    /// classes, no method marked.
+    pub fn new(class: impl Into<String>, direction: Lineage) -> HierarchyQuery {
+        HierarchyQuery { class: class.into(), direction, depth: 16, max_nodes: 2000, method: None }
+    }
+}
+
 /// One line of the tree, in depth-first order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HierarchyRow {
     /// 0 for the root.
     pub depth: usize,
@@ -97,6 +127,7 @@ pub struct HierarchyRow {
 
 /// Result of [`Engine::hierarchy`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HierarchyTree {
     pub direction: Lineage,
     pub depth: usize,

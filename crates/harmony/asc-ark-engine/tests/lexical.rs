@@ -164,7 +164,7 @@ fn one_writer_resolves_across_functions_and_environments() {
     };
     assert_eq!((found("call:^import:@ohos:net\\.http#default\\."), found("call:^lex\\("), found("call:^this@")), (2, 4, 1));
 
-    let stats = engine.call_resolution(&ResolutionOptions { records: None, samples: true }, &AtomicBool::new(false)).unwrap();
+    let stats = engine.call_resolution(&ResolutionOptions::default().records(None).samples(true), &AtomicBool::new(false)).unwrap();
     assert_eq!((stats.call_sites, stats.captured, stats.captured_resolved), (17, 15, 11));
     let why = |reason| stats.captured_unresolved.get(&reason).copied().unwrap_or(0);
     assert_eq!((why(Unresolved::MultipleWriters), why(Unresolved::NoWriter), why(Unresolved::Outside)), (2, 1, 1));
@@ -371,7 +371,8 @@ fn unidentified_environments_stay_unresolved_and_taint() {
     assert_eq!(of_record(LEX, "#*#sound"), ["lex(0,0)", "lex(0,1)", "lex(0,2)"]);
     assert_eq!(of_record(LEX, "#*@0*#child"), ["local:#*#helper", "lex(1,0)"]);
 
-    let stats = engine.call_resolution(&ResolutionOptions { records: Some("Tidy"), samples: false }, &AtomicBool::new(false)).unwrap();
+    let stats =
+        engine.call_resolution(&ResolutionOptions::default().records(Some("Tidy")).samples(false), &AtomicBool::new(false)).unwrap();
     let why = |reason| stats.captured_unresolved.get(&reason).copied().unwrap_or(0);
     assert_eq!((stats.records, why(Unresolved::NoIdentity), why(Unresolved::Tainted)), (1, 2, 2));
     // `uneven` is not followed; its closure and `helper` (made there too) have unknown chains.
@@ -462,7 +463,7 @@ fn damaged_files_do_not_panic() {
             // A file that no longer opens is fine; one that opens must answer.
             let Ok(engine) = Engine::open(&path) else { continue };
             let _ = engine.find_refs(&Query::condition("call:.").unwrap(), &AtomicBool::new(false), &mut |_| {});
-            let _ = engine.call_resolution(&ResolutionOptions { records: None, samples: true }, &AtomicBool::new(false));
+            let _ = engine.call_resolution(&ResolutionOptions::default().records(None).samples(true), &AtomicBool::new(false));
         }
     }
 }

@@ -301,11 +301,10 @@ pub(crate) fn run(session: &Session, tool: &str, args: &Value, call: &Call) -> T
 fn listclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     let (offset, limit) = page_args(args, LISTCLASS_LIMIT)?;
     let prefix = str_arg(args, "prefix")?;
-    let options = ListOptions {
-        filter: prefix.map(|p| NameFilter::Prefix(p.to_owned())),
-        all: bool_arg(args, "all")?.unwrap_or(false),
-        entry: str_arg(args, "entry")?.map(str::to_owned),
-    };
+    let options = ListOptions::default()
+        .filter(prefix.map(|p| NameFilter::Prefix(p.to_owned())))
+        .all(bool_arg(args, "all")?.unwrap_or(false))
+        .entry(str_arg(args, "entry")?.map(str::to_owned));
     let engine = &session.engine;
     let records = engine.list_classes(&options).map_err(|e| entry_error(engine, e))?;
     let total = records.len();
@@ -317,7 +316,7 @@ fn listclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     // A prefix spelled as on the DEX side (`com.a`) finds nothing: show what names look like.
     let hint = match prefix {
         Some(prefix) if total == 0 => {
-            let every = engine.list_classes(&ListOptions { filter: None, ..options.clone() })?;
+            let every = engine.list_classes(&options.clone().filter(None))?;
             every
                 .first()
                 .map(|first| format!("no record name starts with {prefix:?}; the program has {} records, e.g. {}", every.len(), first.name))
@@ -356,7 +355,7 @@ fn getclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     if bool_arg(args, "resource_names")?.unwrap_or(true) {
         engine.annotate_resource_ids(&mut source);
     }
-    let ClassSource { entry, record, function, text } = source;
+    let ClassSource { entry, record, function, text, .. } = source;
     let mut structured = json!({"apk_id": session.id, "class": record, "entry": entry, "source": text});
     if let Some(function) = function {
         structured["methods"] = json!([function]);
@@ -1080,7 +1079,7 @@ mod tests {
 
     #[test]
     fn the_exported_filter_keeps_whole_component_blocks() {
-        let line = |text: &str| ManifestLine { package: "entry.hap".into(), text: text.into() };
+        let line = |text: &str| ManifestLine::new("entry.hap", text);
         let lines: Vec<ManifestLine> = [
             "bundle com.x versionCode=1",
             "module entry type=entry record=&entry/src/main/ets/Stage&",

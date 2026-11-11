@@ -88,6 +88,7 @@ impl CalleeRoot {
 
 /// A call site whose callee starts at a captured variable that resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedCapture {
     pub entry: String,
     pub record: String,
@@ -114,6 +115,7 @@ pub struct ResolvedCapture {
 
 /// What [`Engine::call_resolution`] counted.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct CallResolution {
     /// Records looked at.
     pub records: usize,
@@ -158,12 +160,27 @@ impl CallResolution {
 
 /// What [`Engine::call_resolution`] looks at.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct ResolutionOptions<'q> {
     /// Only records whose name contains this (`&entry/` for an
     /// application's own code).
     pub records: Option<&'q str>,
     /// Also list every resolved captured callee.
     pub samples: bool,
+}
+
+impl<'q> ResolutionOptions<'q> {
+    /// The options with [`records`](#structfield.records) set.
+    #[must_use]
+    pub fn records(self, records: Option<&'q str>) -> Self {
+        ResolutionOptions { records, ..self }
+    }
+
+    /// The options with [`samples`](#structfield.samples) set.
+    #[must_use]
+    pub fn samples(self, samples: bool) -> Self {
+        ResolutionOptions { samples, ..self }
+    }
 }
 
 /// File offset of the first instruction of the method at `method`; 0 when

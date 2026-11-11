@@ -45,8 +45,7 @@ fn contacts_classes() {
     // that builds its classes in functions (`class NodeError extends Base`, with `Base` a parameter).
     assert_eq!(census(&all), [9, 0, 0, 12, 10]);
     assert!(all.iter().all(|definition| definition.methods.is_some() && !definition.reassigned));
-    let abilities =
-        tree(&engine, &HierarchyQuery { method: Some("onCreate".into()), ..HierarchyQuery::new("Ability", Lineage::Subclasses) });
+    let abilities = tree(&engine, &HierarchyQuery::new("Ability", Lineage::Subclasses).method(Some("onCreate".into())));
     assert_eq!(
         abilities[..5],
         [
@@ -91,11 +90,10 @@ fn large_sample_classes() {
     for definition in all.iter().filter(|definition| definition.kind == ParentKind::Unresolved) {
         assert!(matches!(&definition.parent, Some(ClassNode::Leaf { external: false, .. })), "{definition:?}");
     }
-    let total = engine.list_classes(&asc_ark_engine::ListOptions { all: true, ..Default::default() }).unwrap().len();
+    let total = engine.list_classes(&asc_ark_engine::ListOptions::default().all(true)).unwrap().len();
 
     // A system class.
-    let ability =
-        tree(&engine, &HierarchyQuery { method: Some("onCreate".into()), ..HierarchyQuery::new("UIAbility", Lineage::Subclasses) });
+    let ability = tree(&engine, &HierarchyQuery::new("UIAbility", Lineage::Subclasses).method(Some("onCreate".into())));
     assert_eq!(ability[0], "0 import:@ohos:app.ability.UIAbility#default [external]");
     assert!(ability[1].starts_with("  1 subclass "), "{ability:?}");
     assert!(ability.iter().any(|line| line.starts_with("override ") && line.ends_with(".onCreate")), "{ability:?}");
@@ -108,7 +106,7 @@ fn large_sample_classes() {
         }
     }
     let (parent, direct) = children.iter().max_by_key(|(_, direct)| direct.len()).unwrap();
-    let down = tree(&engine, &HierarchyQuery { depth: 1, ..HierarchyQuery::new(parent.clone(), Lineage::Subclasses) });
+    let down = tree(&engine, &HierarchyQuery::new(parent.clone(), Lineage::Subclasses).depth(1));
     let rows: Vec<&String> = down.iter().filter(|line| line.starts_with("  1 subclass ")).collect();
     assert_eq!(rows.len(), direct.len(), "{down:?}");
     for definition in direct {

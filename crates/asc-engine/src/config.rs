@@ -20,6 +20,7 @@ pub const CONFIG_ENV: &str = "ASC_CONFIG";
 
 /// Where a setting's value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Source {
     Default,
     File,
@@ -40,6 +41,7 @@ impl Source {
 
 /// A count of threads: `auto` or a positive number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Count {
     Auto,
     Fixed(usize),
@@ -47,6 +49,7 @@ pub enum Count {
 
 /// A budget: `auto`, a size, or a percentage of what the key names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Amount {
     Auto,
     Bytes(u64),
@@ -59,6 +62,7 @@ pub struct Bytes(pub u64);
 
 /// The disk cache directory: the platform default or a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CacheDir {
     Default,
     Path(PathBuf),
@@ -284,6 +288,7 @@ impl Value for Millis {
 
 /// A value and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Setting<T> {
     pub value: T,
     pub source: Source,
@@ -291,6 +296,7 @@ pub struct Setting<T> {
 
 /// One row of [`Config::KEYS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Key {
     /// Name in the config file (`section.name`) and in `--set`.
     pub name: &'static str,
@@ -302,6 +308,7 @@ pub struct Key {
 
 /// Why a configuration could not be read.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("{origin}: {key} = {text:?}: expected {expected}")]
     Invalid { origin: String, key: String, text: String, expected: &'static str },
@@ -317,6 +324,7 @@ macro_rules! settings {
     ($($field:ident: $ty:ty = $default:expr, $name:literal, $env:literal, $legacy:expr, $help:literal;)*) => {
         /// The resolved settings ([`Config::resolve`]).
         #[derive(Debug, Clone, PartialEq, Eq)]
+        #[non_exhaustive]
         pub struct Config {
             $(pub $field: Setting<$ty>,)*
             /// The config file read, if any.

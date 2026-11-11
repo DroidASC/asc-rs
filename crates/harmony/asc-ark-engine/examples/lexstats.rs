@@ -35,7 +35,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         engine = engine.with_threads(threads);
     }
     let started = Instant::now();
-    let stats = engine.call_resolution(&ResolutionOptions { records: records.as_deref(), samples }, &AtomicBool::new(false))?;
+    let stats =
+        engine.call_resolution(&ResolutionOptions::default().records(records.as_deref()).samples(samples), &AtomicBool::new(false))?;
     let elapsed = started.elapsed();
     if samples {
         for s in &stats.samples {

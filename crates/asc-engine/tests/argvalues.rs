@@ -159,7 +159,7 @@ fn rows(engine: &Engine, rule: &str) -> Vec<String> {
 #[test]
 fn argument_values_keep_display_and_mark_sites() {
     let apk = temp_apk();
-    let cached = CacheConfig { memory_bytes: 64 << 20, ..Default::default() };
+    let cached = CacheConfig::default().memory_bytes(64 << 20);
     for engine in [Engine::new(apk.path()).with_threads(2), Engine::new(apk.path()).with_threads(2).with_cache(cached)] {
         let get = "method:sys.Secure->getString";
         // `*` keeps every call and shows the candidates.
@@ -214,7 +214,7 @@ fn constraints_compose_with_rules_nesting_and_call_graphs() {
     assert!(matches!(q, asc_findrefs::Query::Virtual { target, .. } if matches!(*target, asc_findrefs::Query::Nested(_))));
     // Callgraph roots by a constrained call.
     let rule = names::parse_rule("method:sys.Secure->getString[arg1==\"android_id\"]").unwrap();
-    let t = engine.call_graph(&CallQuery { depth: 1, ..CallQuery::new(CallRoots::Matching(rule), Direction::Callers) }).unwrap();
+    let t = engine.call_graph(&CallQuery::new(CallRoots::Matching(rule), Direction::Callers).depth(1)).unwrap();
     let mut roots: Vec<String> = t.lines().into_iter().filter(|l| l.starts_with("0 ")).collect();
     roots.sort();
     assert_eq!(roots, ["0 La/Caller;->branchy(I)V", "0 La/Caller;->direct()V"]);
@@ -235,7 +235,7 @@ fn result_cache_keys_on_the_constraints() {
     let dir = tempfile::tempdir().unwrap();
     let cached = || {
         let disk = asc_engine::asc_cache::DiskCache::open(dir.path().join("cache")).with_capacity(1 << 30).with_min_dex_bytes(0);
-        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     let (hit, miss) = ("method:sys.Log->i[arg0==1000]", "method:sys.Log->i[arg0==1]");
     let engine = cached();

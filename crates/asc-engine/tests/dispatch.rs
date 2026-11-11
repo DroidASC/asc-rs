@@ -170,7 +170,7 @@ fn dispatch_nesting_constraints_and_defs_compose_across_jars() {
     let cache_dir = tempfile::tempdir().unwrap();
     let cached = || {
         let disk = asc_engine::asc_cache::DiskCache::open(cache_dir.path().join("c")).with_capacity(1 << 30).with_min_dex_bytes(0);
-        Engine::new(dir.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(dir.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     for engine in [Engine::new(dir.path()).with_threads(2), cached()] {
         // Nested, default dispatch: the interface call in app.jar resolves to
@@ -202,11 +202,11 @@ fn dispatch_nesting_constraints_and_defs_compose_across_jars() {
 
         // Callgraph --to a nested rule, following dispatch, crosses to the
         // caller in the other jar; --unless on the caller prunes it.
-        let to = |unless: Vec<Query>| CallQuery {
-            depth: 3,
-            virtual_calls: true,
-            unless,
-            ..CallQuery::new(CallRoots::Matching(names::parse_rule("method:{literal:android_id}").unwrap()), Direction::Callers)
+        let to = |unless: Vec<Query>| {
+            (CallQuery::new(CallRoots::Matching(names::parse_rule("method:{literal:android_id}").unwrap()), Direction::Callers))
+                .depth(3)
+                .virtual_calls(true)
+                .unless(unless)
         };
         let t = engine.call_graph(&to(Vec::new())).unwrap();
         assert!(t.lines().iter().any(|l| l.contains("Lp/Caller;->call")), "{:?}", t.lines());
@@ -224,7 +224,7 @@ fn a_supertype_with_many_implementers_is_noted_not_followed() {
     let cache_dir = tempfile::tempdir().unwrap();
     let cached = || {
         let disk = asc_engine::asc_cache::DiskCache::open(cache_dir.path().join("c")).with_capacity(1 << 30).with_min_dex_bytes(0);
-        Engine::new(dir.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(dir.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     let want_note = format!(
         "dispatch not followed via Lp/Many;->run()V ({} implementers): name it explicitly, or write method:*{{...}}, to include",
@@ -256,7 +256,7 @@ fn a_supertype_with_many_implementers_is_noted_not_followed() {
             .unwrap();
         assert_eq!((n, summary.notes), (0, vec![want_note.clone()]));
         let rule = names::parse_rule("method:{method:{literal:serial}}").unwrap();
-        let t = engine.call_graph(&CallQuery { depth: 1, ..CallQuery::new(CallRoots::Matching(rule), Direction::Callers) });
+        let t = engine.call_graph(&CallQuery::new(CallRoots::Matching(rule), Direction::Callers).depth(1));
         // Nothing calls run() through Lp/M0; directly: no root left, an error.
         assert!(t.is_err());
         engine.flush_cache_writes();

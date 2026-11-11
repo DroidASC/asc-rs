@@ -459,7 +459,7 @@ fn real_samples_resolve_every_component() {
         assert_eq!(pairs(&joins(&manifest)), records, "{file}");
         // Every record named is one getclass takes.
         for (_, record) in records {
-            let query = asc_ark_engine::ClassQuery { record, ..Default::default() };
+            let query = asc_ark_engine::ClassQuery::new(record);
             assert_eq!(engine.get_class(&query).unwrap().record, *record, "{file}");
         }
         // An .app has a section of its own ahead of its package.
@@ -478,7 +478,7 @@ fn large_sample_resolves_through_the_decrypted_file_only() {
     assert!(resolved.len() > 1 && resolved[0].0 == "module", "{resolved:?}");
     let engine = Engine::open(&dir).unwrap();
     for (name, record) in &resolved {
-        let query = asc_ark_engine::ClassQuery { record, ..Default::default() };
+        let query = asc_ark_engine::ClassQuery::new(record);
         assert_eq!(engine.get_class(&query).unwrap().record, *record, "{name}");
     }
     let all = lines(&paired, None);

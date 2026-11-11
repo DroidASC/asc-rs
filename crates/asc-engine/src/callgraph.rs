@@ -47,6 +47,7 @@ impl Direction {
 
 /// Where a call graph starts.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CallRoots {
     /// The overloads of one method.
     Method {
@@ -61,6 +62,7 @@ pub enum CallRoots {
 
 /// A call graph query.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CallQuery {
     pub roots: CallRoots,
     pub direction: Direction,
@@ -80,6 +82,38 @@ pub struct CallQuery {
 }
 
 impl CallQuery {
+    /// The query with [`depth`](#structfield.depth) set.
+    #[must_use]
+    pub fn depth(self, depth: usize) -> Self {
+        CallQuery { depth, ..self }
+    }
+
+    /// The query with [`max_nodes`](#structfield.max_nodes) set.
+    #[must_use]
+    pub fn max_nodes(self, max_nodes: usize) -> Self {
+        CallQuery { max_nodes, ..self }
+    }
+
+    /// The query with [`virtual_calls`](#structfield.virtual_calls) set.
+    #[must_use]
+    pub fn virtual_calls(self, virtual_calls: bool) -> Self {
+        CallQuery { virtual_calls, ..self }
+    }
+
+    /// The query with [`from`](#structfield.from) set.
+    #[must_use]
+    pub fn from(self, from: Option<Query>) -> Self {
+        CallQuery { from, ..self }
+    }
+
+    /// The query with [`unless`](#structfield.unless) set.
+    #[must_use]
+    pub fn unless(self, unless: Vec<Query>) -> Self {
+        CallQuery { unless, ..self }
+    }
+}
+
+impl CallQuery {
     /// Callers or callees of the overloads of `class`'s `method`: 2 levels,
     /// at most 500 methods, static calls only.
     pub fn method(class: impl Into<String>, method: impl Into<String>, direction: Direction) -> CallQuery {
@@ -93,6 +127,7 @@ impl CallQuery {
 
 /// One line of the tree, in depth-first order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CallRow {
     /// 0 for a root.
     pub depth: usize,
@@ -113,6 +148,7 @@ pub struct CallRow {
 
 /// Result of [`Engine::call_graph`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CallTree {
     pub direction: Direction,
     pub depth: usize,

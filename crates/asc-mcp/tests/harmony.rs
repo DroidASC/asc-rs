@@ -60,7 +60,7 @@ impl Inputs {
 
 /// Replies past their budget are paged, unless `spill_dir` takes them.
 fn opts(spill_dir: Option<&Path>) -> asc_mcp::Options {
-    let mut o = asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() });
+    let mut o = asc_mcp::Options::new(2, false, CacheConfig::default().memory_bytes(64 << 20));
     o.spill_dir = spill_dir.map(Path::to_path_buf);
     o
 }

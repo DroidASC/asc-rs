@@ -1141,7 +1141,7 @@ fn findrefs_rules(
     }
     let mut errors = Vec::new();
     let mut totals = vec![0usize; rules.len()];
-    let opts = FindOptions { aggregate: true, context };
+    let opts = FindOptions::default().aggregate(true).context(context);
     let mut print = |(i, batch): (usize, asc_engine::RefBatch), sink: &mut output::LineSink<_>| {
         if let Some(e) = batch.error {
             errors.push(format!("{}: {e}", batch.entry_name));
@@ -1536,7 +1536,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             // Without a context every row is one line: take them as text.
             let summary = match context {
                 RefContext::None => engine.find_refs_text(&query, cancel, &mut on_batch),
-                _ => engine.find_refs_opts(&query, FindOptions { aggregate: true, context }, cancel, &mut on_batch),
+                _ => engine.find_refs_opts(&query, FindOptions::default().aggregate(true).context(context), cancel, &mut on_batch),
             }
             .map_err(|e| e.to_string())?;
             for b in order.finish() {
@@ -1611,7 +1611,8 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             };
             let unless = unless.iter().map(|u| io.rule(u)).collect::<Result<Vec<_>, _>>()?;
             let engine = io.engine(common, &apk_path);
-            let q = CallQuery { depth, max_nodes, virtual_calls, from, unless, ..CallQuery::new(roots, direction) };
+            let q =
+                CallQuery::new(roots, direction).depth(depth).max_nodes(max_nodes).virtual_calls(virtual_calls).from(from).unless(unless);
             let tree = engine.call_graph_cancellable(&q, io.cancel).map_err(|e| e.to_string())?;
             io.emit_tree(output.as_ref(), &tree.lines(), &tree.footer())?;
             for e in &tree.errors {
@@ -1630,7 +1631,7 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
             }
             let class = names::format_class_name(&class).map_err(|e| e.to_string())?;
             let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
-            let q = HierarchyQuery { class, direction, depth, max_nodes, method };
+            let q = HierarchyQuery::new(class, direction).depth(depth).max_nodes(max_nodes).method(method);
             let tree = io.engine(common, &apk_path).hierarchy_cancellable(&q, io.cancel).map_err(|e| e.to_string())?;
             let rows: Vec<String> = tree.lines().into_iter().chain(tree.definition_lines()).collect();
             io.emit_tree(output.as_ref(), &rows, &tree.footer())?;

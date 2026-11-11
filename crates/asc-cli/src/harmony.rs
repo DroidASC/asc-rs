@@ -51,7 +51,7 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
     let code = match command {
         Command::Listclass { prefix, all, entry, output, apk_path } => {
             let engine = open(io, common, &apk_path)?;
-            let options = ListOptions { filter: prefix.map(NameFilter::Prefix), all, entry };
+            let options = ListOptions::default().filter(prefix.map(NameFilter::Prefix)).all(all).entry(entry);
             listclass(io, &engine, &options, output.as_ref())?;
             EXIT_OK
         }
@@ -172,13 +172,19 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             if unresolved && direction == Direction::Callers {
                 return Err("--unresolved lists callees: add --callees".into());
             }
-            let query = CallQuery { depth, max_nodes, defines: !no_defines, unresolved, from, unless, ..CallQuery::new(roots, direction) };
+            let query = (CallQuery::new(roots, direction))
+                .depth(depth)
+                .max_nodes(max_nodes)
+                .defines(!no_defines)
+                .unresolved(unresolved)
+                .from(from)
+                .unless(unless);
             let engine = open(io, common, &apk_path)?;
             callgraph(io, &engine, &query, to.as_deref(), output.as_ref())?
         }
         Command::Hierarchy { output, supers, depth, max_nodes, method, entry, apk_path, class } => {
             let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
-            let query = HierarchyQuery { class, entry, direction, depth, max_nodes, method };
+            let query = HierarchyQuery::new(class, direction).entry(entry).depth(depth).max_nodes(max_nodes).method(method);
             let engine = open(io, common, &apk_path)?;
             hierarchy(io, &engine, &query, output.as_ref())?
         }

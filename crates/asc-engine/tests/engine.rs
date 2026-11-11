@@ -52,7 +52,7 @@ fn class_relations_and_literals_stream_like_reference_queries() {
     let dex = asc_fixture::make_rich_dex();
     let apk = temp_apk_from(&make_apk(&[("classes.dex", &dex), ("classes2.dex", &make_dex())], true));
     // Cold and warm (memory-cached locator state) must agree.
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(64 << 20);
     let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     let run = |q: &Query| {
         let mut rows = Vec::new();
@@ -157,7 +157,7 @@ fn getclass_warns_about_nested_classes_left_out_of_the_rebuild() {
 fn caches_serve_repeated_queries() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(l1_cache(dir.path())), ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(64 << 20).disk(Some(l1_cache(dir.path())));
     let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     let q = Query::String("token".into());
     let mut sources = Vec::new();
@@ -178,7 +178,7 @@ fn caches_serve_repeated_queries() {
     // Disk writes are asynchronous; a new process would see them once landed.
     engine.flush_cache_writes();
     // A fresh engine (new process equivalent) hits the disk cache.
-    let cfg = asc_engine::CacheConfig { memory_bytes: 0, disk: Some(l1_cache(dir.path())), ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(0).disk(Some(l1_cache(dir.path())));
     let engine2 = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     let mut sources = Vec::new();
     engine2.find_refs(&q, |b| sources.push(b.source)).unwrap();
@@ -192,7 +192,7 @@ fn written_entries_are_remapped_from_the_disk_cache() {
     let apk = temp_apk(true);
     let dex = make_dex();
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(l1_cache(dir.path())), ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(64 << 20).disk(Some(l1_cache(dir.path())));
     let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     let q = Query::String("token".into());
     let lines = |engine: &Engine| {
@@ -209,8 +209,7 @@ fn written_entries_are_remapped_from_the_disk_cache() {
     // The tables built before the swap are kept (charged as on the heap, see
     // the same search with a memory-only cache), the entries now at the
     // file-backed rate.
-    let heap_only =
-        Engine::new(apk.path()).with_threads(2).with_cache(asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
+    let heap_only = Engine::new(apk.path()).with_threads(2).with_cache(asc_engine::CacheConfig::default().memory_bytes(64 << 20));
     assert_eq!(lines(&heap_only), before);
     let tables = heap_only.memory_cache_bytes() - 2 * dex.len();
     assert!(tables > 0);
@@ -233,7 +232,7 @@ fn written_entries_are_remapped_from_the_disk_cache() {
 #[test]
 fn memory_only_cache_keeps_heap_entries() {
     let apk = temp_apk(true);
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(64 << 20);
     let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
     engine.find_refs(&Query::String("token".into()), |_| {}).unwrap();
     engine.flush_cache_writes();
@@ -247,7 +246,7 @@ fn locator_tables_count_against_the_memory_budget() {
     let dex_len = make_dex().len();
     // Room for both inflated entries, but not for their locator tables too.
     let cap = 2 * dex_len + 1;
-    let cfg = asc_engine::CacheConfig { memory_bytes: cap, ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(cap);
     let engine = Engine::new(apk.path()).with_threads(1).with_cache(cfg);
     let q = Query::String("token".into());
     let mut sources = Vec::new();
@@ -257,7 +256,7 @@ fn locator_tables_count_against_the_memory_budget() {
     let used = engine.memory_cache_bytes();
     assert!(used > dex_len && used < 2 * dex_len, "used {used}, dex {dex_len}");
     // Without the tables in the charge both entries would have stayed.
-    let roomy = Engine::new(apk.path()).with_threads(1).with_cache(asc_engine::CacheConfig { memory_bytes: 2 * cap, ..Default::default() });
+    let roomy = Engine::new(apk.path()).with_threads(1).with_cache(asc_engine::CacheConfig::default().memory_bytes(2 * cap));
     roomy.find_refs(&q, |_| {}).unwrap();
     assert!(roomy.memory_cache_bytes() > cap);
     let mut sources = Vec::new();
@@ -279,7 +278,7 @@ fn invalid_pattern_is_reported_once_up_front() {
 fn concurrent_queries_share_one_inflate() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(l1_cache(dir.path())), ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(64 << 20).disk(Some(l1_cache(dir.path())));
     let engine = std::sync::Arc::new(Engine::new(apk.path()).with_threads(2).with_cache(cfg));
     let q = Query::String("token".into());
     let handles: Vec<_> = (0..4)
@@ -306,7 +305,7 @@ fn dropping_the_engine_lands_cache_writes() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
     {
-        let cfg = asc_engine::CacheConfig { memory_bytes: 0, disk: Some(l1_cache(dir.path())), ..Default::default() };
+        let cfg = asc_engine::CacheConfig::default().memory_bytes(0).disk(Some(l1_cache(dir.path())));
         let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
         assert!(engine.get_class("Lexample/Test;").is_ok());
     }
@@ -319,7 +318,7 @@ fn dropping_the_engine_lands_cache_writes() {
 fn engines_share_one_cache_budget() {
     let (a, b) = (temp_apk(true), temp_apk_from(&make_apk(&[("classes.dex", &make_dex())], true)));
     let dir = tempfile::tempdir().unwrap();
-    let cfg = asc_engine::CacheConfig { memory_bytes: 64 << 20, disk: Some(l1_cache(dir.path())), ..Default::default() };
+    let cfg = asc_engine::CacheConfig::default().memory_bytes(64 << 20).disk(Some(l1_cache(dir.path())));
     let shared = asc_engine::SharedCache::new(cfg, |_| {});
     let q = Query::String("token".into());
     let ea = Engine::new(a.path()).with_threads(2).with_shared_cache(&shared);
@@ -354,8 +353,7 @@ fn getclass_keeps_looking_after_a_broken_entry() {
     let bytes = make_apk(&[("classes.dex", &broken), ("classes2.dex", &dex)], false);
     let f = temp_apk_from(&bytes);
     for threads in [1, 2] {
-        let engine =
-            Engine::new(f.path()).with_threads(threads).with_cache(asc_engine::CacheConfig { memory_bytes: 0, ..Default::default() });
+        let engine = Engine::new(f.path()).with_threads(threads).with_cache(asc_engine::CacheConfig::default().memory_bytes(0));
         let hit = engine.get_class_dex("Lexample/Test;").unwrap().expect("class found in classes2.dex");
         assert_eq!(hit.dex_name, "classes2.dex");
         // A class in neither entry surfaces the broken entry's error.
@@ -372,7 +370,7 @@ fn list_classes_follows_central_directory_order() {
     let f = temp_apk_from(&bytes);
     let dir = tempfile::tempdir().unwrap();
     for (threads, memory_bytes) in [(1, 0), (3, 0), (3, 64 << 20)] {
-        let cfg = asc_engine::CacheConfig { memory_bytes, disk: Some(l1_cache(dir.path())), ..Default::default() };
+        let cfg = asc_engine::CacheConfig::default().memory_bytes(memory_bytes).disk(Some(l1_cache(dir.path())));
         let engine = Engine::new(f.path()).with_threads(threads).with_cache(cfg);
         // Twice: the second run is served from the caches.
         for _ in 0..2 {
@@ -446,7 +444,7 @@ fn findrefs_results_are_replayed_from_l3() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
     let q = Query::String("token".into());
-    let cfg = || asc_engine::CacheConfig { disk: Some(tiered_cache(dir.path())), ..Default::default() };
+    let cfg = || asc_engine::CacheConfig::default().disk(Some(tiered_cache(dir.path())));
     let first = Engine::new(apk.path()).with_threads(2).with_cache(cfg());
     let (sources, rows) = rows_of(&first, &q);
     assert_eq!(sources, ["inflate", "inflate"]);
@@ -472,10 +470,10 @@ fn locator_tables_are_mapped_from_l2_by_the_next_process() {
     let apk = temp_apk(true);
     let dir = tempfile::tempdir().unwrap();
     // Without L3, so every run searches.
-    let cfg = |memory_bytes| asc_engine::CacheConfig {
-        memory_bytes,
-        disk: Some(tiered_cache(dir.path()).with_tiers(&[Tier::Dex, Tier::Derived])),
-        ..Default::default()
+    let cfg = |memory_bytes| {
+        asc_engine::CacheConfig::default()
+            .memory_bytes(memory_bytes)
+            .disk(Some(tiered_cache(dir.path()).with_tiers(&[Tier::Dex, Tier::Derived])))
     };
     let q = Query::String("token".into());
     // A one-shot process builds the tables and leaves them in L2.
@@ -511,10 +509,10 @@ fn prebuild_builds_the_tables_of_cached_entries_only() {
     // Nothing to keep the tables in: nothing done.
     assert_eq!(Engine::new(apk.path()).prebuild().unwrap(), Default::default());
     let dir = tempfile::tempdir().unwrap();
-    let cfg = || asc_engine::CacheConfig {
-        memory_bytes: 64 << 20,
-        disk: Some(tiered_cache(dir.path()).with_tiers(&[Tier::Dex, Tier::Derived])),
-        ..Default::default()
+    let cfg = || {
+        asc_engine::CacheConfig::default()
+            .memory_bytes(64 << 20)
+            .disk(Some(tiered_cache(dir.path()).with_tiers(&[Tier::Dex, Tier::Derived])))
     };
     // Not warmed: the entries are not cached, and a prebuild never inflates.
     let cold = Engine::new(apk.path()).with_threads(2).with_cache(cfg());
@@ -552,8 +550,7 @@ fn a_query_during_a_prebuild_gets_the_same_rows() {
     ];
     let expected: Vec<_> = queries.iter().map(|q| rows_of(&Engine::new(apk.path()), q).1).collect();
     for _ in 0..20 {
-        let engine =
-            Engine::new(apk.path()).with_threads(2).with_cache(asc_engine::CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
+        let engine = Engine::new(apk.path()).with_threads(2).with_cache(asc_engine::CacheConfig::default().memory_bytes(64 << 20));
         engine.scan_classes(None, |_, _| {}).unwrap();
         std::thread::scope(|s| {
             s.spawn(|| engine.prebuild().unwrap());

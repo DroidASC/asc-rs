@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 /// Why a mapping file could not be read at all.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProguardError {
     #[error("reading mapping file: {0}")]
     Io(#[from] io::Error),
@@ -29,6 +30,7 @@ pub enum ProguardError {
 
 /// An entry of a mapping file that was read but not used.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProguardWarning {
     /// 1-based line in the mapping file.
     pub line: usize,
@@ -36,6 +38,7 @@ pub struct ProguardWarning {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum WarningKind {
     /// The same DEX name was given a second, different name; the first wins.
     #[error("{key} mapped again to {ignored}; keeping {kept}")]
@@ -56,6 +59,7 @@ impl fmt::Display for ProguardWarning {
 
 /// A parsed mapping file: the names, and what was skipped on the way.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProguardMapping {
     pub mappings: NameMappings,
     pub warnings: Vec<ProguardWarning>,

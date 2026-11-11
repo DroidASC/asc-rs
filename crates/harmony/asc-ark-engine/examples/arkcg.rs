@@ -78,7 +78,7 @@ fn root_of(node: &CallNode) -> Option<CallRoots> {
 
 fn neighbors(engine: &Engine, node: &CallNode, direction: Direction) -> Result<HashSet<CallNode>, Box<dyn Error>> {
     let Some(roots) = root_of(node) else { return Ok(HashSet::new()) };
-    let query = CallQuery { depth: 1, max_nodes: usize::MAX, unresolved: false, ..CallQuery::new(roots, direction) };
+    let query = CallQuery::new(roots, direction).depth(1).max_nodes(usize::MAX).unresolved(false);
     Ok(level_one(&engine.call_graph(&query, &AtomicBool::new(false))?))
 }
 
@@ -192,7 +192,7 @@ fn worst(path: &str, threads: Option<usize>, sample: Option<usize>, max_subclass
         let of_record = functions.get(&(entry.clone(), record.clone()));
         let Some(method) = of_record.and_then(|names| names.iter().find(|name| name.starts_with(&scope))) else { continue };
         let roots = CallRoots::Function { record: Some(record.clone()), function: method.clone(), entry: Some(entry) };
-        let mut query = CallQuery { depth: 1, max_nodes: usize::MAX, ..CallQuery::new(roots, Direction::Callers) };
+        let mut query = CallQuery::new(roots, Direction::Callers).depth(1).max_nodes(usize::MAX);
         query.max_subclasses = max_subclasses.unwrap_or(query.max_subclasses);
         let cold = open()?;
         let started = Instant::now();

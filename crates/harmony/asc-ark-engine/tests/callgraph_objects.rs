@@ -48,14 +48,14 @@ fn lines(engine: &Engine, query: &CallQuery) -> Vec<String> {
 }
 
 fn callees(engine: &Engine, root: &str) -> Vec<String> {
-    lines(engine, &CallQuery { depth: 1, unresolved: true, ..CallQuery::new(CallRoots::function(root), Direction::Callees) })
+    lines(engine, &CallQuery::new(CallRoots::function(root), Direction::Callees).depth(1).unresolved(true))
 }
 
 /// The callers of `root` on an engine that has loaded nothing: the records
 /// the walk picks have to be enough.
 fn cold_callers(builder: &AbcBuilder, root: &str) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
-    lines(&open(dir.path(), builder), &CallQuery { depth: 1, ..CallQuery::new(CallRoots::function(root), Direction::Callers) })
+    lines(&open(dir.path(), builder), &CallQuery::new(CallRoots::function(root), Direction::Callers).depth(1))
 }
 
 fn edges(engine: &Engine) -> Vec<CallEdge> {
@@ -72,7 +72,7 @@ fn both_directions_agree(builder: &AbcBuilder) {
     let level_one = |engine: &Engine, node: &CallNode, direction| -> HashSet<CallNode> {
         let CallNode::Function { record, function, .. } = node else { return HashSet::new() };
         let roots = CallRoots::Function { record: Some(record.clone()), function: function.clone(), entry: None };
-        let query = CallQuery { depth: 1, max_nodes: usize::MAX, ..CallQuery::new(roots, direction) };
+        let query = CallQuery::new(roots, direction).depth(1).max_nodes(usize::MAX);
         engine
             .call_graph(&query, &AtomicBool::new(false))
             .unwrap()
@@ -316,8 +316,7 @@ fn a_callers_walk_looks_through_a_bounded_number_of_subclasses() {
     let callers = |max_subclasses: usize| {
         let dir = tempfile::tempdir().unwrap();
         let engine = open(dir.path(), &program);
-        let query =
-            CallQuery { depth: 1, max_subclasses, ..CallQuery::new(CallRoots::function("base/Base->Base.run"), Direction::Callers) };
+        let query = CallQuery::new(CallRoots::function("base/Base->Base.run"), Direction::Callers).depth(1).max_subclasses(max_subclasses);
         (lines(&engine, &query), engine.call_graph(&query, &AtomicBool::new(false)).unwrap())
     };
     let (all, tree) = callers(CallQuery::new(CallRoots::function("x"), Direction::Callers).max_subclasses);

@@ -90,7 +90,7 @@ fn annotation_rows_have_no_code_to_show_and_stay_out_of_conjunctions() {
     assert_eq!(rows.iter().map(|row| row.lines().count()).collect::<Vec<_>>(), [1, 1, 5]);
     assert!(rows[2].contains("\n  @ pc 0x0\n") && rows[2].contains("\n  >   0000  lda.str \"/pay\"\n"), "{}", rows[2]);
     // The listing of the function is where the whole annotation is read.
-    let listing = engine.get_class(&ClassQuery { record: "pages/Pay", function: Some("Pay.open"), entry: None }).unwrap().text;
+    let listing = engine.get_class(&ClassQuery::new("pages/Pay").function(Some("Pay.open")).entry(None)).unwrap().text;
     assert!(listing.contains(&format!("; @{MARKS_ROUTE}\n; @{MARKS_LIB_MARKED}(note=\"opens /pay\")\n")), "{listing}");
 
     // A conjunction is about the code of a function: `open` loads the string, the constructor only carries it.
@@ -108,7 +108,7 @@ fn annotation_interfaces_are_records_named_after_their_module() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path(), &annotations_program().build().bytes);
     let lines = |all: bool| -> Vec<String> {
-        let options = ListOptions { all, ..ListOptions::default() };
+        let options = ListOptions::default().all(all);
         engine.list_classes(&options).unwrap().iter().map(|record| record.line(false)).collect()
     };
     let listed = [
@@ -125,7 +125,7 @@ fn annotation_interfaces_are_records_named_after_their_module() {
     assert!(all.contains(&"panda.String | functions=0 foreign".to_owned()), "{all:?}");
 
     // A path names the module again, and the interface by what follows it.
-    let resolve = |record: &str| engine.get_class(&ClassQuery { record, function: None, entry: None }).map(|source| source.record);
+    let resolve = |record: &str| engine.get_class(&ClassQuery::new(record).function(None).entry(None)).map(|source| source.record);
     for (query, record) in [
         ("pages/Pay", MARKS_APP),
         ("pages/Pay.ets", MARKS_APP),
@@ -140,7 +140,7 @@ fn annotation_interfaces_are_records_named_after_their_module() {
         assert_eq!(resolve(query).unwrap(), record, "{query}");
     }
     assert!(resolve("Route").is_err() && resolve("pages/Pay.Marked").is_err());
-    let text = engine.get_class(&ClassQuery { record: "index.Marked", function: None, entry: None }).unwrap().text;
+    let text = engine.get_class(&ClassQuery::new("index.Marked").function(None).entry(None)).unwrap().text;
     assert_eq!(
         text,
         format!(
@@ -357,7 +357,7 @@ fn the_official_compiler_names_annotation_interfaces_after_their_module() {
     expected.sort();
     assert_eq!(listed, expected);
 
-    let resolve = |record: &str| engine.get_class(&ClassQuery { record, function: None, entry: None }).map(|source| source.record);
+    let resolve = |record: &str| engine.get_class(&ClassQuery::new(record).function(None).entry(None)).map(|source| source.record);
     assert_eq!(resolve("src/marks").unwrap(), "&@scope/lib/src/marks&1.2.3");
     assert_eq!(resolve("src/marks.Marked").unwrap(), "&@scope/lib/src/marks&1.2.3.Marked");
     assert_eq!(resolve("lib/marks.Bare").unwrap(), "com.other.app&lib/marks&1.0.0-rc.1.Bare");

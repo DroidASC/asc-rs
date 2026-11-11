@@ -104,7 +104,7 @@ fn temp_apk() -> tempfile::NamedTempFile {
 }
 
 fn query(class: &str, method: &str, direction: Direction, depth: usize) -> CallQuery {
-    CallQuery { depth, max_nodes: 100, ..CallQuery::method(class, method, direction) }
+    CallQuery::method(class, method, direction).depth(depth).max_nodes(100)
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn callers_and_callees_cross_dex_files() {
     let apk = temp_apk();
     for engine in [
         Engine::new(apk.path()).with_threads(2),
-        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, ..Default::default() }),
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20)),
     ] {
         for _ in 0..2 {
             let t = engine.call_graph(&query(LIB, "helper", Direction::Callers, 3)).unwrap();
@@ -171,11 +171,13 @@ fn call_graph_limits_and_errors() {
 #[test]
 fn findrefs_context_marks_the_referencing_instructions() {
     let apk = temp_apk();
-    let engine = Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, ..Default::default() });
+    let engine = Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20));
     let run = |q: &Query, context| {
         let mut rows = Vec::new();
         engine
-            .find_refs_opts(q, FindOptions { aggregate: true, context }, &AtomicBool::new(false), &mut |b| rows.extend(b.results))
+            .find_refs_opts(q, FindOptions::default().aggregate(true).context(context), &AtomicBool::new(false), &mut |b| {
+                rows.extend(b.results)
+            })
             .unwrap();
         rows.sort_by_key(|r| r.line());
         rows
@@ -229,7 +231,7 @@ fn programs_of_several_archives_read_as_one() {
     let dir = temp_program();
     let list = format!("{},{}", dir.path().join("app.jar").display(), dir.path().join("lib.jar").display());
     for path in [dir.path().to_path_buf(), list.into()] {
-        let cached = CacheConfig { memory_bytes: 64 << 20, ..Default::default() };
+        let cached = CacheConfig::default().memory_bytes(64 << 20);
         for engine in [Engine::new(&path).with_threads(2), Engine::new(&path).with_threads(2).with_cache(cached)] {
             let t = engine.call_graph(&query(LIB, "helper", Direction::Callers, 3)).unwrap();
             assert_eq!(
@@ -243,7 +245,7 @@ fn programs_of_several_archives_read_as_one() {
                 ]
             );
             let mut rows = Vec::new();
-            let opts = FindOptions { aggregate: true, context: RefContext::Lines(0) };
+            let opts = FindOptions::default().aggregate(true).context(RefContext::Lines(0));
             engine.find_refs_opts(&Query::String("secret".into()), opts, &AtomicBool::new(false), &mut |b| rows.extend(b.results)).unwrap();
             assert_eq!(rows.len(), 1);
             assert!(rows[0].text().starts_with("app.jar/classes.dex | La/Entry;->start()V | \"secret\"\n"), "{}", rows[0].text());
@@ -291,7 +293,7 @@ fn archives_of_a_program_share_their_cache_with_themselves_alone() {
     let cache_dir = tempfile::tempdir().unwrap();
     let cached = |path: &std::path::Path| {
         let disk = asc_engine::asc_cache::DiskCache::open(cache_dir.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
-        Engine::new(path).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(path).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     // Some string of every DEX: no DEX is skipped unread.
     let any = Query::String("[a-z]".into());
@@ -350,7 +352,7 @@ fn nested_conditions_and_method_sets_resolve_across_dex_files() {
     let dir = tempfile::tempdir().unwrap();
     let cached = || {
         let disk = asc_engine::asc_cache::DiskCache::open(dir.path().join("cache")).with_capacity(1 << 30).with_min_dex_bytes(0);
-        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     for engine in [Engine::new(apk.path()).with_threads(2), cached()] {
         // Entry.start (classes.dex) loads "secret"; Lib.sink (classes2.dex) calls it.
@@ -411,7 +413,7 @@ fn conditions_pick_roots_paths_and_pruned_methods() {
     let apk = temp_apk();
     let engine = Engine::new(apk.path()).with_threads(2);
     let rule = |s: &str| names::parse_rule(s).unwrap();
-    let to = |s: &str| CallQuery { depth: 3, ..CallQuery::new(CallRoots::Matching(rule(s)), Direction::Callers) };
+    let to = |s: &str| CallQuery::new(CallRoots::Matching(rule(s)), Direction::Callers).depth(3);
     // Every method calling Ext.call (just helper), and its callers.
     let t = engine.call_graph(&to("method:Lext/Api;->call")).unwrap();
     assert_eq!(
@@ -425,26 +427,26 @@ fn conditions_pick_roots_paths_and_pruned_methods() {
         ]
     );
     // Only the paths from a method loading "secret" (Entry.start), which ends them.
-    let t = engine.call_graph(&CallQuery { from: Some(rule("literal:secret")), ..to("method:Lext/Api;->call") }).unwrap();
+    let t = engine.call_graph(&(to("method:Lext/Api;->call")).from(Some(rule("literal:secret")))).unwrap();
     assert_eq!(t.lines(), ["0 Lb/Lib;->helper(I)V", "  1 <- La/Entry;->start()V [from]"]);
     assert_eq!((t.reached, t.methods), (Some(1), 2));
     assert!(t.footer().contains("1 from methods reached"), "{}", t.footer());
     // From methods out of reach: nothing left.
-    let t = engine.call_graph(&CallQuery { from: Some(rule("method:Lext/Api;->absent")), ..to("method:Lext/Api;->call") });
+    let t = engine.call_graph(&(to("method:Lext/Api;->call")).from(Some(rule("method:Lext/Api;->absent"))));
     assert!(t.unwrap().rows.is_empty());
     // Unless: Entry.start is left out, and sink with it (only reached through it).
-    let t = engine.call_graph(&CallQuery { unless: vec![rule("literal:secret")], ..to("method:Lext/Api;->call") }).unwrap();
+    let t = engine.call_graph(&(to("method:Lext/Api;->call")).unless(vec![rule("literal:secret")])).unwrap();
     assert_eq!(t.lines(), ["0 Lb/Lib;->helper(I)V", "  1 <- La/Other;->other()V"]);
     assert_eq!(t.pruned, 1);
     assert!(t.footer().contains("1 methods left out by unless"), "{}", t.footer());
     // A root matching unless is left out too.
-    let t = engine.call_graph(&CallQuery { unless: vec![rule("method:Lext/Api;->call")], ..to("method:Lext/Api;->call") }).unwrap();
+    let t = engine.call_graph(&(to("method:Lext/Api;->call")).unless(vec![rule("method:Lext/Api;->call")])).unwrap();
     assert!(t.rows.is_empty() && t.pruned == 1);
     // Callees of every method matching a rule.
-    let t = engine.call_graph(&CallQuery { depth: 1, ..CallQuery::new(CallRoots::Matching(rule("literal:secret")), Direction::Callees) });
+    let t = engine.call_graph(&CallQuery::new(CallRoots::Matching(rule("literal:secret")), Direction::Callees).depth(1));
     assert_eq!(t.unwrap().lines(), ["0 La/Entry;->start()V", "  1 -> Lb/Lib;->helper(I)V"]);
     for (q, want) in [
-        (CallQuery { from: Some(rule("literal:secret")), ..CallQuery::method(LIB, "helper", Direction::Callees) }, "callers walk"),
+        (CallQuery::method(LIB, "helper", Direction::Callees).from(Some(rule("literal:secret"))), "callers walk"),
         (to("literal:absent"), "no method's code matches"),
         (to("extends:Ljava/lang/Object;"), "name classes, not code"),
     ] {

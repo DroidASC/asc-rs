@@ -134,6 +134,7 @@ impl CallRoots {
 
 /// A call graph query.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CallQuery {
     pub roots: CallRoots,
     pub direction: Direction,
@@ -159,6 +160,50 @@ pub struct CallQuery {
     /// nearest are taken first; a class with more gets
     /// [`CallRow::subclasses_skipped`].
     pub max_subclasses: usize,
+}
+
+impl CallQuery {
+    /// The query with [`depth`](#structfield.depth) set.
+    #[must_use]
+    pub fn depth(self, depth: usize) -> Self {
+        CallQuery { depth, ..self }
+    }
+
+    /// The query with [`max_nodes`](#structfield.max_nodes) set.
+    #[must_use]
+    pub fn max_nodes(self, max_nodes: usize) -> Self {
+        CallQuery { max_nodes, ..self }
+    }
+
+    /// The query with [`defines`](#structfield.defines) set.
+    #[must_use]
+    pub fn defines(self, defines: bool) -> Self {
+        CallQuery { defines, ..self }
+    }
+
+    /// The query with [`unresolved`](#structfield.unresolved) set.
+    #[must_use]
+    pub fn unresolved(self, unresolved: bool) -> Self {
+        CallQuery { unresolved, ..self }
+    }
+
+    /// The query with [`from`](#structfield.from) set.
+    #[must_use]
+    pub fn from(self, from: Option<Query>) -> Self {
+        CallQuery { from, ..self }
+    }
+
+    /// The query with [`unless`](#structfield.unless) set.
+    #[must_use]
+    pub fn unless(self, unless: Vec<Query>) -> Self {
+        CallQuery { unless, ..self }
+    }
+
+    /// The query with [`max_subclasses`](#structfield.max_subclasses) set.
+    #[must_use]
+    pub fn max_subclasses(self, max_subclasses: usize) -> Self {
+        CallQuery { max_subclasses, ..self }
+    }
 }
 
 impl CallQuery {
@@ -210,6 +255,7 @@ pub enum CallNode {
 
 /// One line of the tree, in depth-first order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CallRow {
     /// 0 for a root.
     pub depth: usize,
@@ -240,8 +286,18 @@ pub struct CallRow {
     pub subclasses_skipped: usize,
 }
 
+impl CallRow {
+    /// A row of `node` at `depth` under row `parent`, linked by one call
+    /// site of `kind`; nothing repeated, skipped or marked. For front ends
+    /// that lay out trees of their own (and their tests).
+    pub fn new(depth: usize, parent: Option<usize>, node: CallNode, kind: Option<EdgeKind>) -> CallRow {
+        CallRow { depth, parent, node, kind, sites: 1, repeated: false, unresolved: None, from: false, subclasses_skipped: 0 }
+    }
+}
+
 /// Result of [`Engine::call_graph`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CallTree {
     pub direction: Direction,
     pub depth: usize,
@@ -263,6 +319,29 @@ pub struct CallTree {
 }
 
 impl CallTree {
+    /// A complete walk `depth` levels in `direction` that found `rows`,
+    /// with the functions and leaves among them counted; no record
+    /// scanned, nothing pruned or left out.
+    pub fn new(direction: Direction, depth: usize, rows: Vec<CallRow>) -> CallTree {
+        let distinct = |function: bool| {
+            let nodes = rows.iter().map(|row| &row.node).filter(|node| matches!(node, CallNode::Function { .. }) == function);
+            nodes.collect::<HashSet<_>>().len()
+        };
+        let (functions, leaves) = (distinct(true), distinct(false));
+        CallTree {
+            direction,
+            depth,
+            rows,
+            functions,
+            leaves,
+            truncated: false,
+            records_scanned: 0,
+            pruned: 0,
+            reached: None,
+            notes: Vec::new(),
+        }
+    }
+
     /// One line per row: indentation and the depth number, an arrow
     /// (`<-` caller, `->` callee), `RECORD->FUNCTION | restored name` or a
     /// leaf's callee path, and flags: `[new]`, `[super]`, `[instance]`,
@@ -365,6 +444,7 @@ impl CallTree {
 
 /// What [`CallQuery::from`] kept of a walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Reached {
     /// The distinct functions the rule matches among those walked: where
     /// the paths of the tree start.
@@ -373,8 +453,16 @@ pub struct Reached {
     pub walked: usize,
 }
 
+impl Reached {
+    /// `from` functions matched among the `walked` ones.
+    pub fn new(from: usize, walked: usize) -> Reached {
+        Reached { from, walked }
+    }
+}
+
 /// One edge of the graph, for [`Engine::call_edges`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CallEdge {
     pub from: CallNode,
     /// Offset of the instruction in the code of `from`.
@@ -387,6 +475,7 @@ pub struct CallEdge {
 
 /// What [`Engine::call_edges`] built.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GraphSize {
     pub records: usize,
     pub functions: usize,

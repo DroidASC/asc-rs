@@ -127,7 +127,7 @@ fn subclasses_of_classes_and_of_parent_paths() {
 
     // Across records: through the re-export, the namespace, and the reassigned binding.
     assert_eq!(
-        lines(&engine, &HierarchyQuery { method: Some("run".into()), ..down("Base") }),
+        lines(&engine, &(down("Base")).method(Some("run".into()))),
         [
             "0 Base->#~@0=#Base | Base [defines #~@0>#run]",
             "  1 subclass App->#~@4=#Derived | Derived [defines #~@4>#run]",
@@ -136,10 +136,7 @@ fn subclasses_of_classes_and_of_parent_paths() {
             "# 3 rows, 3 distinct classes, 0 leaves (subclasses, depth 16); 3 records scanned; 1 subclasses define run",
         ]
     );
-    assert_eq!(
-        lines(&engine, &HierarchyQuery { method: Some("make".into()), ..down("Base") })[0],
-        "0 Base->#~@0=#Base | Base [defines static #~@0<#make]"
-    );
+    assert_eq!(lines(&engine, &(down("Base")).method(Some("make".into())))[0], "0 Base->#~@0=#Base | Base [defines static #~@0<#make]");
     assert_eq!(
         lines(&engine, &down("Watched"))[..2],
         ["0 Base->#~@1=#Watched | Watched", "  1 subclass App->#~@5=#Card | Card [reassigned]"]
@@ -156,13 +153,13 @@ fn subclasses_of_classes_and_of_parent_paths() {
         "  1 subclass App->#~@0=#EntryAbility | EntryAbility [defines #~@0>#onCreate]".to_owned(),
         "override App->#~@0>#onCreate | EntryAbility.onCreate".to_owned(),
     ];
-    let by_path = lines(&engine, &HierarchyQuery { method: Some("onCreate".into()), ..down("import:@ohos:app\\.ability\\.UIAbility") });
+    let by_path = lines(&engine, &(down("import:@ohos:app\\.ability\\.UIAbility")).method(Some("onCreate".into())));
     assert_eq!(by_path[..3], ability);
     assert_eq!(
         by_path[3],
         "# 2 rows, 1 distinct classes, 1 leaves (subclasses, depth 16); 3 records scanned; 1 subclasses define onCreate"
     );
-    let by_name = lines(&engine, &HierarchyQuery { method: Some("onCreate".into()), ..down("UIAbility") });
+    let by_name = lines(&engine, &(down("UIAbility")).method(Some("onCreate".into())));
     assert_eq!(by_name[..3], ability);
     assert!(
         by_name[3].ends_with("\n# no class of the program has that name: the roots are the parent paths that contain it"),
@@ -191,7 +188,7 @@ fn supertypes_end_where_tracking_does() {
     let engine = open(dir.path(), &class_hierarchy_program());
     let up = |class: &str| query(class, Lineage::Supers);
     assert_eq!(
-        lines(&engine, &HierarchyQuery { method: Some("run".into()), ..up("GrandChild") }),
+        lines(&engine, &(up("GrandChild")).method(Some("run".into()))),
         [
             "0 App->#~@3=#GrandChild | GrandChild",
             "  1 extends App->#~@2=#Child | Child [defines #~@2>#run]",
@@ -221,13 +218,13 @@ fn supertypes_end_where_tracking_does() {
 fn walks_are_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path(), &class_hierarchy_program());
-    let shallow = lines(&engine, &HierarchyQuery { depth: 1, ..query("Local", Lineage::Subclasses) });
+    let shallow = lines(&engine, &(query("Local", Lineage::Subclasses)).depth(1));
     assert_eq!(shallow.len(), 4, "{shallow:?}");
     assert!(!shallow.iter().any(|line| line.contains("GrandChild")) && shallow[3].contains("(subclasses, depth 1)"));
-    let small = lines(&engine, &HierarchyQuery { max_nodes: 2, ..query("Local", Lineage::Subclasses) });
+    let small = lines(&engine, &(query("Local", Lineage::Subclasses)).max_nodes(2));
     assert_eq!(small.len(), 3, "{small:?}");
     assert!(small[2].ends_with("; truncated (raise max_nodes or lower depth)"), "{small:?}");
-    let none = lines(&engine, &HierarchyQuery { depth: 0, ..query("GrandChild", Lineage::Supers) });
+    let none = lines(&engine, &(query("GrandChild", Lineage::Supers)).depth(0));
     assert_eq!(
         none,
         ["0 App->#~@3=#GrandChild | GrandChild", "# 1 rows, 1 distinct classes, 0 leaves (supers, depth 0); 1 records scanned"]
@@ -248,7 +245,7 @@ fn what_names_nothing_says_so() {
         "a parent path outside the program has no supertypes here: it is a root for subclasses only"
     );
     assert!(error(&engine, &query("import:(", Lineage::Subclasses)).starts_with("invalid pattern"));
-    let other_entry = HierarchyQuery { entry: Some("other.abc".into()), ..query("pages/App->Local", Lineage::Subclasses) };
+    let other_entry = (query("pages/App->Local", Lineage::Subclasses)).entry(Some("other.abc".into()));
     assert_eq!(error(&engine, &other_entry), "no entry named other.abc");
     let cancelled = engine.hierarchy(&query("Local", Lineage::Subclasses), &AtomicBool::new(true));
     assert!(matches!(cancelled, Err(EngineError::Cancelled)), "{cancelled:?}");
@@ -272,11 +269,11 @@ fn two_entries_are_told_apart() {
             "  1 subclass App->#~@3=#GrandChild | GrandChild [b.abc]",
         ]
     );
-    let one = lines(&engine, &HierarchyQuery { entry: Some("b.abc".into()), ..query("Child", Lineage::Subclasses) });
+    let one = lines(&engine, &(query("Child", Lineage::Subclasses)).entry(Some("b.abc".into())));
     assert_eq!(one[..2], ["0 App->#~@2=#Child | Child", "  1 subclass App->#~@3=#GrandChild | GrandChild"]);
     assert!(one[2].ends_with("; all in b.abc"), "{one:?}");
     // An import resolves in the entry of the importing record first.
-    let derived = lines(&engine, &HierarchyQuery { entry: Some("b.abc".into()), ..query("Derived", Lineage::Supers) });
+    let derived = lines(&engine, &(query("Derived", Lineage::Supers)).entry(Some("b.abc".into())));
     assert!(derived[1].starts_with("  1 extends Base->#~@0=#Base | Base") && derived[2].ends_with("; all in b.abc"), "{derived:?}");
     let ambiguous = error(&engine, &query("pages/App->Child", Lineage::Subclasses));
     assert!(ambiguous.starts_with("record pages/App is ambiguous"), "{ambiguous}");

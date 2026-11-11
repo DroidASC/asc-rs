@@ -22,7 +22,7 @@ fn temp_apk() -> tempfile::NamedTempFile {
 /// Replies past their budget are paged, not written anywhere (see
 /// `spill_opts` for the file).
 fn opts() -> asc_mcp::Options {
-    let mut o = asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, ..CacheConfig::default() });
+    let mut o = asc_mcp::Options::new(2, false, CacheConfig::default().memory_bytes(64 << 20));
     o.spill_dir = None;
     o
 }
@@ -677,7 +677,7 @@ fn a_sweep_reuses_rendered_results_of_earlier_runs() {
     let d = dir.path().to_str().unwrap();
     let opts = || {
         let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
-        asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..CacheConfig::default() })
+        asc_mcp::Options::new(2, false, CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     let q = json!({"dir": d, "kind": "string", "value": "token"});
     let first = session_with(opts(), &[call(1, "findrefs", q.clone())]);
@@ -700,7 +700,7 @@ fn rules_and_single_rule_sweeps_share_rendered_results() {
     let d = dir.path().to_str().unwrap();
     let opts = || {
         let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
-        asc_mcp::Options::new(2, false, CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..CacheConfig::default() })
+        asc_mcp::Options::new(2, false, CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     let token = json!({"kind": "string", "value": "token"});
     let object = json!({"kind": "extends", "value": "java.lang.Object"});

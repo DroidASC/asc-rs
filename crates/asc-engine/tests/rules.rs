@@ -109,10 +109,7 @@ fn temp_apk() -> tempfile::NamedTempFile {
 }
 
 fn engines(apk: &std::path::Path) -> [Engine; 2] {
-    [
-        Engine::new(apk).with_threads(2),
-        Engine::new(apk).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, ..Default::default() }),
-    ]
+    [Engine::new(apk).with_threads(2), Engine::new(apk).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20))]
 }
 
 fn lines(engine: &Engine, q: &Query) -> Vec<String> {
@@ -194,7 +191,7 @@ fn a_rule_set_shares_rendered_results_with_single_queries() {
     let cache = tempfile::tempdir().unwrap();
     let engine = || {
         let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
-        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     let (alone, set) = (cond("string:token"), vec![cond("string:token"), cond("method:run")]);
     let e = engine();
@@ -234,7 +231,7 @@ fn text_rows_are_the_lines_find_refs_gives() {
     let cache = tempfile::tempdir().unwrap();
     let cached = || {
         let disk = asc_engine::asc_cache::DiskCache::open(cache.path()).with_capacity(1 << 30).with_min_dex_bytes(0);
-        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..Default::default() })
+        Engine::new(apk.path()).with_threads(2).with_cache(CacheConfig::default().memory_bytes(64 << 20).disk(Some(disk)))
     };
     // Rows straight from hits, and the ones that go through `RefResult`s:
     // several constants, a nested rule, a class relation, a compound, a definition
@@ -281,7 +278,7 @@ fn text_rows_are_the_lines_find_refs_gives() {
 }
 
 fn hq(class: &str, direction: Lineage, method: Option<&str>) -> HierarchyQuery {
-    HierarchyQuery { class: class.into(), direction, depth: 16, max_nodes: 100, method: method.map(String::from) }
+    HierarchyQuery::new(class, direction).depth(16).max_nodes(100).method(method.map(String::from))
 }
 
 #[test]
@@ -321,7 +318,7 @@ fn hierarchy_walks_subclasses_and_supertypes_across_dex_files() {
         );
         assert_eq!(t.definition_lines()[0], "inherited La/Sub;->run()V classes.dex");
 
-        let t = engine.hierarchy(&HierarchyQuery { depth: 1, ..hq(BASE, Lineage::Subclasses, None) }).unwrap();
+        let t = engine.hierarchy(&(hq(BASE, Lineage::Subclasses, None)).depth(1)).unwrap();
         assert_eq!(t.lines(), ["0 La/Base; classes.dex", "  1 subclass La/Sub; classes.dex"]);
         assert!(t.truncated, "Leaf is one level further down");
         assert!(engine.hierarchy(&hq("La/Missing;", Lineage::Subclasses, None)).is_err());
@@ -332,11 +329,8 @@ fn hierarchy_walks_subclasses_and_supertypes_across_dex_files() {
 fn virtual_dispatch_links_calls_through_supertypes_and_overrides() {
     let apk = temp_apk();
     for engine in engines(apk.path()) {
-        let q = |class: &str, method: &str, direction, virtual_calls| CallQuery {
-            depth: 1,
-            max_nodes: 100,
-            virtual_calls,
-            ..CallQuery::method(class, method, direction)
+        let q = |class: &str, method: &str, direction, virtual_calls| {
+            CallQuery::method(class, method, direction).depth(1).max_nodes(100).virtual_calls(virtual_calls)
         };
         let t = engine.call_graph(&q(SUB, "run", Direction::Callers, false)).unwrap();
         assert_eq!(t.lines(), ["0 La/Sub;->run()V"]);
@@ -361,7 +355,7 @@ fn cancelled_walks_stop_and_leave_nothing_half_built() {
     let cancelled = |r: asc_engine::Result<_>| matches!(r, Err(asc_engine::EngineError::Apk(asc_apk::ApkError::Cancelled)));
     for engine in engines(apk.path()) {
         let raised = AtomicBool::new(true);
-        let call = CallQuery { depth: 1, max_nodes: 100, virtual_calls: true, ..CallQuery::method(CALLER, "go", Direction::Callees) };
+        let call = CallQuery::method(CALLER, "go", Direction::Callees).depth(1).max_nodes(100).virtual_calls(true);
         assert!(cancelled(engine.call_graph_cancellable(&call, &raised).map(drop)));
         assert!(cancelled(engine.hierarchy_cancellable(&hq(API, Lineage::Subclasses, None), &raised).map(drop)));
         assert!(cancelled(engine.get_class_method_cancellable(BASE, Default::default(), None, &raised).map(drop)));
@@ -456,7 +450,7 @@ fn nested_and_callgraph_seed_from_definition_predicates() {
         );
         // callgraph --to seeds the callers walk with every overrider.
         let roots = asc_engine::CallRoots::Matching(rule("override:b.Api->run"));
-        let t = engine.call_graph(&CallQuery { depth: 2, ..CallQuery::new(roots, Direction::Callers) }).unwrap();
+        let t = engine.call_graph(&CallQuery::new(roots, Direction::Callers).depth(2)).unwrap();
         let lines = t.lines();
         assert!(lines.iter().any(|l| l.contains("La/Caller;->call()V")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("La/Caller;->go()V")), "{lines:?}");

@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// The machine's memory and CPUs, as the automatic budgets see them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Device {
     /// Physical memory (lowered to a cgroup v2 `memory.max`), when known.
     pub total_memory: Option<u64>,
@@ -23,6 +24,7 @@ impl Device {
 /// How a memory cache follows the machine: a share of the memory the
 /// user's resident hosts could hold together, split between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MemoryPolicy {
     /// Share of (available memory + what the caches hold), in percent.
     pub percent: u8,

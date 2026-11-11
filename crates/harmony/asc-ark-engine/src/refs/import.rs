@@ -174,6 +174,7 @@ impl<'a> Worker<'a> for ImportsWorker<'_, '_> {
 
 /// One module request of a program and who asks for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RequestListing {
     /// The ABC entry.
     pub entry: String,

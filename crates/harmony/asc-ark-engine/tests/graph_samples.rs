@@ -40,7 +40,7 @@ fn census(edges: &[CallEdge]) -> BTreeMap<(EdgeKind, &'static str), usize> {
 fn level_one(engine: &Engine, node: &CallNode, direction: Direction) -> HashSet<CallNode> {
     let CallNode::Function { entry, record, function, .. } = node else { return HashSet::new() };
     let roots = CallRoots::Function { record: Some(record.clone()), function: function.clone(), entry: Some(entry.clone()) };
-    let query = CallQuery { depth: 1, max_nodes: usize::MAX, ..CallQuery::new(roots, direction) };
+    let query = CallQuery::new(roots, direction).depth(1).max_nodes(usize::MAX);
     let tree = engine.call_graph(&query, &AtomicBool::new(false)).unwrap();
     tree.rows.into_iter().filter(|row| row.depth == 1).map(|row| row.node).collect()
 }
@@ -61,7 +61,7 @@ fn contacts_captured_variables_and_graph() {
     let engine = Engine::open(&path).unwrap();
     let cancel = AtomicBool::new(false);
     // The application's own code: every captured callee resolves.
-    let own = engine.call_resolution(&ResolutionOptions { records: Some("&entry/"), samples: true }, &cancel).unwrap();
+    let own = engine.call_resolution(&ResolutionOptions::default().records(Some("&entry/")).samples(true), &cancel).unwrap();
     assert_eq!((own.call_sites, own.captured, own.captured_resolved), (318, 63, 63));
     assert_eq!((own.before.get(&CalleeRoot::Lexical), own.after.get(&CalleeRoot::Lexical)), (Some(&59), None));
     // This build names its environment slots (`newlexenvwithname`), which says what a slot holds
@@ -70,7 +70,7 @@ fn contacts_captured_variables_and_graph() {
     let through_this: Vec<_> = own.samples.iter().filter(|sample| sample.callee.starts_with("this")).collect();
     assert_eq!(through_this.len(), 40);
     for sample in through_this {
-        let query = ClassQuery { record: &sample.record, function: Some(&sample.writer), entry: None };
+        let query = ClassQuery::new(&sample.record).function(Some(&sample.writer)).entry(None);
         let writer = engine.get_class(&query).unwrap().text;
         let (last, inner) = (format!("\"this\", {} ]", sample.slot), format!("\"this\", {},", sample.slot));
         let named = writer.lines().any(|line| line.contains("newlexenvwithname") && (line.contains(&last) || line.contains(&inner)));
@@ -95,8 +95,7 @@ fn contacts_captured_variables_and_graph() {
     // Calls on what a function of the program returned: the import is of the program, the callee is not told.
     assert_eq!((count(EdgeKind::Call, "unlinked"), count(EdgeKind::ThisClass, "function")), (3, 8));
     // Who reaches the HTTP client: the two helpers, and the page code that calls them.
-    let http =
-        CallQuery { depth: 2, ..CallQuery::new(CallRoots::Leaf(Pattern::regex("^import:@ohos:net\\.http").unwrap()), Direction::Callers) };
+    let http = CallQuery::new(CallRoots::Leaf(Pattern::regex("^import:@ohos:net\\.http").unwrap()), Direction::Callers).depth(2);
     let tree = engine.call_graph(&http, &cancel).unwrap();
     let lines = tree.lines(false);
     assert_eq!(lines.len(), 12, "{lines:?}");
@@ -179,7 +178,7 @@ fn large_sample_captured_variables_and_graph() {
     assert_eq!(found.iter().collect::<HashSet<_>>(), *from);
     let CallNode::Function { entry, record, function, .. } = popular else { unreachable!() };
     let roots = CallRoots::Function { record: Some(record.clone()), function: function.clone(), entry: Some(entry.clone()) };
-    let query = CallQuery { depth: 1, max_nodes: usize::MAX, ..CallQuery::new(roots, Direction::Callers) };
+    let query = CallQuery::new(roots, Direction::Callers).depth(1).max_nodes(usize::MAX);
     let tree = Engine::open(&path).unwrap().call_graph(&query, &cancel).unwrap();
     assert!(!tree.truncated && tree.records_scanned < size.records, "{} of {}", tree.records_scanned, size.records);
     both_directions_agree(&|| Engine::open(&path).unwrap(), &engine, &graph, 20_011);

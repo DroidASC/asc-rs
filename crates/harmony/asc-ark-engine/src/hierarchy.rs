@@ -92,6 +92,7 @@ impl Lineage {
 
 /// A hierarchy query.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HierarchyQuery {
     /// Where the walk starts:
     ///
@@ -120,6 +121,32 @@ pub struct HierarchyQuery {
     pub max_nodes: usize,
     /// Mark the classes whose literal lists a method of this name.
     pub method: Option<String>,
+}
+
+impl HierarchyQuery {
+    /// The query with [`entry`](#structfield.entry) set.
+    #[must_use]
+    pub fn entry(self, entry: Option<String>) -> Self {
+        HierarchyQuery { entry, ..self }
+    }
+
+    /// The query with [`depth`](#structfield.depth) set.
+    #[must_use]
+    pub fn depth(self, depth: usize) -> Self {
+        HierarchyQuery { depth, ..self }
+    }
+
+    /// The query with [`max_nodes`](#structfield.max_nodes) set.
+    #[must_use]
+    pub fn max_nodes(self, max_nodes: usize) -> Self {
+        HierarchyQuery { max_nodes, ..self }
+    }
+
+    /// The query with [`method`](#structfield.method) set.
+    #[must_use]
+    pub fn method(self, method: Option<String>) -> Self {
+        HierarchyQuery { method, ..self }
+    }
 }
 
 impl HierarchyQuery {
@@ -156,6 +183,7 @@ pub enum ClassNode {
 
 /// A method a class defines under the name a query asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DefinedMethod {
     /// Raw function name, in the record of the class.
     pub function: String,
@@ -164,8 +192,16 @@ pub struct DefinedMethod {
     pub is_static: bool,
 }
 
+impl DefinedMethod {
+    /// Raw `function`, `restored` as it reads, static or not.
+    pub fn new(function: impl Into<String>, restored: impl Into<String>, is_static: bool) -> DefinedMethod {
+        DefinedMethod { function: function.into(), restored: restored.into(), is_static }
+    }
+}
+
 /// One line of the tree, in depth-first order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClassRow {
     /// 0 for a root.
     pub depth: usize,
@@ -192,8 +228,29 @@ pub struct ClassRow {
     pub members_unknown: bool,
 }
 
+impl ClassRow {
+    /// A row of `node` at `depth` under row `parent`, with no flag set and
+    /// no method defined. For front ends that lay out trees of their own
+    /// (and their tests).
+    pub fn new(depth: usize, parent: Option<usize>, node: ClassNode) -> ClassRow {
+        ClassRow {
+            depth,
+            parent,
+            node,
+            repeated: false,
+            sendable: false,
+            plain_function: false,
+            no_parent: false,
+            reassigned: false,
+            defines: Vec::new(),
+            members_unknown: false,
+        }
+    }
+}
+
 /// Result of [`Engine::hierarchy`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HierarchyTree {
     pub direction: Lineage,
     pub depth: usize,
@@ -385,6 +442,7 @@ impl ParentKind {
 
 /// One class definition site, for [`Engine::class_definitions`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClassDefinition {
     /// The class: always [`ClassNode::Class`].
     pub class: ClassNode,

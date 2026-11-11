@@ -133,6 +133,7 @@ impl Unresolved {
 
 /// What the pass over one record met.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ScopeStats {
     /// Functions with code.
     pub functions: usize,

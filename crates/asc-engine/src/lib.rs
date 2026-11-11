@@ -75,6 +75,7 @@ pub use sweep::{Claim, DexDedup};
 pub use tiers::Busy;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EngineError {
     #[error(transparent)]
     Apk(#[from] asc_apk::ApkError),
@@ -108,6 +109,7 @@ pub type DexBytes = Arc<DexData>;
 
 /// A DEX (possibly one logical DEX of a 041 container) that defines a class.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ClassHit {
     pub dex_name: String,
     pub dex: DexBytes,
@@ -118,6 +120,7 @@ pub struct ClassHit {
 
 /// Result of a full `getclass`.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ClassSource {
     pub dex_name: String,
     pub source: String,
@@ -141,6 +144,7 @@ pub struct ClassSource {
 /// instead: `method_idx` is its type index, `method` and `signature` its
 /// descriptor, `matched` the target descriptor and `relation` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefResult {
     pub dex_name: String,
     pub method_idx: u32,
@@ -160,6 +164,7 @@ pub struct RefResult {
 
 /// One instruction behind a [`RefResult`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefSite {
     /// Absolute byte offset of the instruction in the DEX.
     pub offset: u32,
@@ -187,10 +192,25 @@ pub enum RefContext {
 
 /// Options of [`Engine::find_refs_opts`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct FindOptions {
     /// One row per method (with every matched constant) instead of one per instruction.
     pub aggregate: bool,
     pub context: RefContext,
+}
+
+impl FindOptions {
+    /// The options with [`aggregate`](#structfield.aggregate) set.
+    #[must_use]
+    pub fn aggregate(self, aggregate: bool) -> Self {
+        FindOptions { aggregate, ..self }
+    }
+
+    /// The options with [`context`](#structfield.context) set.
+    #[must_use]
+    pub fn context(self, context: RefContext) -> Self {
+        FindOptions { context, ..self }
+    }
 }
 
 impl Default for FindOptions {
@@ -201,6 +221,7 @@ impl Default for FindOptions {
 
 /// A constant a [`RefResult`] matched.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Matched {
     /// The value of a string constant.
     String(String),
@@ -263,6 +284,7 @@ impl RefResult {
 
 /// Results for one DEX, delivered as soon as its search completes.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RefBatch {
     pub entry_name: String,
     pub results: Vec<RefResult>,
@@ -297,6 +319,7 @@ impl RefBatch {
 
 /// Summary of a whole `find_refs` run.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RefSummary {
     pub entries: usize,
     pub total_results: usize,
@@ -307,6 +330,7 @@ pub struct RefSummary {
 }
 
 /// Cache configuration for an [`Engine`].
+#[non_exhaustive]
 pub struct CacheConfig {
     /// In-memory LRU capacity for inflated entries (0 disables it).
     pub memory_bytes: usize,
@@ -321,6 +345,38 @@ pub struct CacheConfig {
     pub write_queue_bytes: usize,
     /// Disk writer threads (`None`: [`CacheConfig::auto_writers`]).
     pub writers: Option<usize>,
+}
+
+impl CacheConfig {
+    /// The configuration with [`memory_bytes`](#structfield.memory_bytes) set.
+    #[must_use]
+    pub fn memory_bytes(self, memory_bytes: usize) -> Self {
+        CacheConfig { memory_bytes, ..self }
+    }
+
+    /// The configuration with [`disk`](#structfield.disk) set.
+    #[must_use]
+    pub fn disk(self, disk: Option<DiskCache>) -> Self {
+        CacheConfig { disk, ..self }
+    }
+
+    /// The configuration with [`memory_auto`](#structfield.memory_auto) set.
+    #[must_use]
+    pub fn memory_auto(self, memory_auto: Option<MemoryPolicy>) -> Self {
+        CacheConfig { memory_auto, ..self }
+    }
+
+    /// The configuration with [`write_queue_bytes`](#structfield.write_queue_bytes) set.
+    #[must_use]
+    pub fn write_queue_bytes(self, write_queue_bytes: usize) -> Self {
+        CacheConfig { write_queue_bytes, ..self }
+    }
+
+    /// The configuration with [`writers`](#structfield.writers) set.
+    #[must_use]
+    pub fn writers(self, writers: Option<usize>) -> Self {
+        CacheConfig { writers, ..self }
+    }
 }
 
 impl CacheConfig {
@@ -414,6 +470,7 @@ impl Drop for SharedCache {
 /// One logical DEX of a cached entry with its lazily built locator tables.
 /// The tables are shared with the entry that replaces this one once its
 /// bytes are remapped from the disk cache (same bytes, so still valid).
+#[non_exhaustive]
 pub struct LogicalDex {
     pub name: String,
     pub data: DexBytes,
@@ -422,6 +479,7 @@ pub struct LogicalDex {
 }
 
 /// A cached inflated entry.
+#[non_exhaustive]
 pub struct CachedEntry {
     pub name: String,
     pub data: DexBytes,
@@ -910,6 +968,7 @@ impl Drop for InflightGuard<'_> {
 
 /// Cache activity counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CacheStats {
     pub memory_hits: u64,
     pub disk_hits: u64,
@@ -1015,6 +1074,7 @@ pub struct Engine {
 
 /// An APK opened for a search whose DEX entries are scheduled by the caller,
 /// e.g. across many APKs at once ([`Engine::search_target`]).
+#[non_exhaustive]
 pub struct SearchTarget {
     apk: Apk,
     key: Option<ApkKey>,

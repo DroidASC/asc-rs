@@ -129,7 +129,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         "tree" => {
             let class = args.get(2).ok_or("tree needs a CLASS")?;
             let direction = if supers { Lineage::Supers } else { Lineage::Subclasses };
-            let mut query = HierarchyQuery { method, ..HierarchyQuery::new(class.as_str(), direction) };
+            let mut query = HierarchyQuery::new(class.as_str(), direction).method(method);
             query.depth = depth.unwrap_or(query.depth);
             query.max_nodes = max_nodes.unwrap_or(query.max_nodes);
             let started = Instant::now();

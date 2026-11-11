@@ -9,6 +9,7 @@ use std::time::Instant;
 
 /// A class definition and the (logical) DEX that defines it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClassListing {
     pub descriptor: String,
     pub dex_name: String,
@@ -16,6 +17,7 @@ pub struct ClassListing {
 
 /// The classes one logical DEX defines, in `class_def` order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DexClasses {
     pub dex_name: String,
     pub descriptors: Vec<String>,
@@ -42,6 +44,7 @@ impl DexClasses {
 
 /// The classes of one DEX entry: its logical DEXes, or why it could not be read.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct EntryClasses {
     pub entry_name: String,
     pub result: Result<Vec<DexClasses>>,

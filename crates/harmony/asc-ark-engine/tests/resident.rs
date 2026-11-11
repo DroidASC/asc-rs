@@ -29,16 +29,16 @@ fn touch(path: &Path) {
 
 fn callers_of(function: &str) -> CallQuery {
     let roots = CallRoots::Function { record: None, function: function.to_owned(), entry: None };
-    CallQuery { depth: 4, ..CallQuery::new(roots, Direction::Callers) }
+    CallQuery::new(roots, Direction::Callers).depth(4)
 }
 
 fn callees_of(function: &str) -> CallQuery {
     let roots = CallRoots::Function { record: None, function: function.to_owned(), entry: None };
-    CallQuery { depth: 4, unresolved: true, ..CallQuery::new(roots, Direction::Callees) }
+    CallQuery::new(roots, Direction::Callees).depth(4).unresolved(true)
 }
 
 fn callers_of_leaf(pattern: &str) -> CallQuery {
-    CallQuery { depth: 3, ..CallQuery::new(CallRoots::Leaf(Pattern::regex(pattern).unwrap()), Direction::Callers) }
+    CallQuery::new(CallRoots::Leaf(Pattern::regex(pattern).unwrap()), Direction::Callers).depth(3)
 }
 
 /// The printed tree of `query`.

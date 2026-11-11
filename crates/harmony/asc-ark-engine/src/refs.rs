@@ -92,6 +92,7 @@ pub enum RefSite {
 
 /// One reference: an instruction or record field naming a matched string.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefRow {
     /// Canonical name of the record.
     pub record: String,
@@ -141,6 +142,7 @@ impl RefRow {
 
 /// The rows of one ABC entry, delivered when its search completes.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RefBatch {
     pub entry_name: String,
     /// In file order: records as the class index lists them, then functions,
@@ -154,6 +156,7 @@ pub struct RefBatch {
 
 /// Summary of a whole [`crate::Engine::find_refs`] run.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RefSummary {
     /// Entries searched.
     pub entries: usize,

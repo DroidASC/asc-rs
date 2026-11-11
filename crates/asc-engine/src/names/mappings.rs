@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 /// Why a mapping entry was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum MappingError {
     #[error("not a class descriptor: {0:?} (want Lpkg/Name;)")]
     Class(String),
@@ -35,6 +36,7 @@ pub enum MappingError {
 
 /// A field as `Lowner;->name:Type`. Every part borrows from the signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct FieldRef<'a> {
     pub class: &'a str,
     pub name: &'a str,
@@ -62,6 +64,7 @@ impl fmt::Display for FieldRef<'_> {
 /// A method as `Lowner;->name(args)Ret`; `proto` is `(args)Ret`, which
 /// tells overloads apart. Every part borrows from the signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct MethodRef<'a> {
     pub class: &'a str,
     pub name: &'a str,

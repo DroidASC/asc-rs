@@ -56,7 +56,8 @@ fn row_json(row: &ClassRow) -> Value {
 fn walk(session: &Session, mut query: HierarchyQuery, cancel: &AtomicBool) -> Result<HierarchyTree, EngineError> {
     let engine = &session.engine;
     if let Some(member) = query.method.clone().filter(|_| !query.class.contains("->")) {
-        let whole = HierarchyQuery { class: format!("{}->{member}", query.class), method: None, ..query.clone() };
+        let mut whole = query.clone().method(None);
+        whole.class = format!("{}->{member}", query.class);
         // `class` + `method` of a method the class has also reads as a function of a record: that is not it.
         match engine.hierarchy(&whole, cancel) {
             Ok(tree) if tree.rows.iter().all(|row| row.depth > 0 || !row.plain_function) => return Ok(tree),
@@ -75,14 +76,11 @@ pub(super) fn hierarchy(session: &Session, args: &Value, call: &Call) -> ToolRes
         "subclasses" => Lineage::Subclasses,
         _ => Lineage::Supers,
     };
-    let query = HierarchyQuery {
-        class: class.to_owned(),
-        entry: str_arg(args, "entry")?.map(str::to_owned),
-        direction,
-        depth: usize_arg(args, "depth")?.unwrap_or(HIERARCHY_DEPTH),
-        max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(HIERARCHY_MAX_NODES),
-        method: str_arg(args, "method")?.map(str::to_owned),
-    };
+    let query = HierarchyQuery::new(class, direction)
+        .entry(str_arg(args, "entry")?.map(str::to_owned))
+        .depth(usize_arg(args, "depth")?.unwrap_or(HIERARCHY_DEPTH))
+        .max_nodes(usize_arg(args, "max_nodes")?.unwrap_or(HIERARCHY_MAX_NODES))
+        .method(str_arg(args, "method")?.map(str::to_owned));
     let engine = &session.engine;
     let mut tree = walk(session, query, &call.cancel).map_err(|e| match &e {
         EngineError::Ambiguous { candidates, .. } if asc_frontend::harmony::several_entries_define(candidates) => {
@@ -122,28 +120,18 @@ mod tests {
     fn rows_carry_only_the_flags_that_are_set() {
         let class =
             ClassNode::Class { entry: "ets/modules.abc".into(), record: "&a/b&".into(), function: "#~@0=#B".into(), name: "B".into() };
-        let plain = ClassRow {
-            depth: 1,
-            parent: Some(0),
-            node: class.clone(),
-            repeated: false,
-            sendable: false,
-            plain_function: false,
-            no_parent: false,
-            reassigned: false,
-            defines: Vec::new(),
-            members_unknown: false,
-        };
+        let plain = ClassRow::new(1, Some(0), class.clone());
         assert_eq!(
             row_json(&plain),
             json!({"depth": 1, "parent": 0, "repeated": false, "class": "&a/b&->#~@0=#B", "name": "B", "entry": "ets/modules.abc"})
         );
-        let defined = DefinedMethod { function: "#~@0>#run".into(), restored: "B.run".into(), is_static: false };
-        let flagged = ClassRow { sendable: true, reassigned: true, defines: vec![defined], ..plain.clone() };
+        let mut flagged = plain.clone();
+        (flagged.sendable, flagged.reassigned) = (true, true);
+        flagged.defines = vec![DefinedMethod::new("#~@0>#run", "B.run", false)];
         let value = row_json(&flagged);
         assert_eq!((&value["sendable"], &value["reassigned"]), (&json!(true), &json!(true)));
         assert_eq!(value["defines"], json!([{"function": "#~@0>#run", "name": "B.run", "static": false}]));
-        let leaf = ClassRow { node: ClassNode::Leaf { path: "global:Error".into(), external: true }, depth: 0, parent: None, ..plain };
+        let leaf = ClassRow::new(0, None, ClassNode::Leaf { path: "global:Error".into(), external: true });
         assert_eq!(row_json(&leaf), json!({"depth": 0, "parent": null, "repeated": false, "path": "global:Error", "external": true}));
         assert!(no_class_hint("findrefs method NAME").contains("RECORD->CLASS"));
     }

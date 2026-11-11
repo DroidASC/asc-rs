@@ -336,13 +336,10 @@ impl Server {
             "subclasses" => Lineage::Subclasses,
             _ => Lineage::Supers,
         };
-        let q = HierarchyQuery {
-            class: names::format_class_name(class)?,
-            direction,
-            depth: usize_arg(args, "depth")?.unwrap_or(HIERARCHY_DEPTH),
-            max_nodes: usize_arg(args, "max_nodes")?.unwrap_or(HIERARCHY_MAX_NODES),
-            method: str_arg(args, "method")?.map(String::from),
-        };
+        let q = HierarchyQuery::new(names::format_class_name(class)?, direction)
+            .depth(usize_arg(args, "depth")?.unwrap_or(HIERARCHY_DEPTH))
+            .max_nodes(usize_arg(args, "max_nodes")?.unwrap_or(HIERARCHY_MAX_NODES))
+            .method(str_arg(args, "method")?.map(String::from));
         let tree = apk.engine.hierarchy_cancellable(&q, &call.cancel)?;
         let mut text = String::new();
         for line in tree.lines().into_iter().chain(tree.definition_lines()) {

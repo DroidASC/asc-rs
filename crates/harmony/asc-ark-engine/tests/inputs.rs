@@ -47,7 +47,7 @@ fn string_rows(engine: &Engine, pattern: &str) -> Vec<String> {
 }
 
 fn listing(engine: &Engine, record: &str, function: Option<&str>) -> String {
-    engine.get_class(&ClassQuery { record, function, entry: None }).unwrap().text
+    engine.get_class(&ClassQuery::new(record).function(function).entry(None)).unwrap().text
 }
 
 /// Everything a front end prints of a program, the files `xml` reads included.
@@ -324,9 +324,10 @@ fn every_line_of_a_listing_is_written_when_asked() {
     use asc_ark_engine::ListingStyle;
     let dir = tempfile::tempdir().unwrap();
     let sample = make_abc();
-    let lines = ListingStyle { lines: true };
-    let get =
-        |engine: &Engine, function| engine.get_class_as(&ClassQuery { record: "pages/Index", function, entry: None }, lines).unwrap().text;
+    let lines = ListingStyle::default().lines(true);
+    let get = |engine: &Engine, function| {
+        engine.get_class_as(&ClassQuery::new("pages/Index").function(function).entry(None), lines).unwrap().text
+    };
 
     // Without source maps: the lines of the debug info, where they change, and none in the header.
     let plain = Engine::open(write(dir.path(), "release/entry.hap", &make_hap(&sample))).unwrap();
@@ -367,8 +368,8 @@ fn a_listing_names_each_of_several_sources() {
     let named = "; sources #0 entry/src/main/ets/pages/Index.ets, #2 entry/src/main/ets/pages/Part.ets (by the source map: ";
     assert!(header.starts_with(named) && header.ends_with("\"source #K line N\" is line N of source #K)"), "{header}");
     assert!(record.contains(", line 12 (source #2 line 4)\n"), "{record}");
-    let style = asc_ark_engine::ListingStyle { lines: true };
-    let woven = engine.get_class_as(&ClassQuery { record: "pages/Index", function: Some("Index.build"), entry: None }, style).unwrap().text;
+    let style = asc_ark_engine::ListingStyle::default().lines(true);
+    let woven = engine.get_class_as(&ClassQuery::new("pages/Index").function(Some("Index.build")).entry(None), style).unwrap().text;
     assert!(woven.contains("\n  ; line 12 (source #2 line 4)\n"), "{woven}");
 }
 

@@ -154,14 +154,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             engine.entries().count()
         }
         ("listclass", []) => {
-            let records = engine.list_classes(&ListOptions { filter, all, entry: None })?;
+            let records = engine.list_classes(&ListOptions::default().filter(filter).all(all).entry(None))?;
             for record in &records {
                 writeln!(out, "{}", record.line(several))?;
             }
             records.len()
         }
         ("getclass", [record, function @ ..]) => {
-            let query = ClassQuery { record, function: function.first().map(String::as_str), entry: entry.as_deref() };
+            let query = ClassQuery::new(record).function(function.first().map(String::as_str)).entry(entry.as_deref());
             let source = engine.get_class(&query)?;
             write!(out, "{}", source.text)?;
             source.text.lines().count()

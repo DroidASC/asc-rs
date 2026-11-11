@@ -98,6 +98,7 @@ pub(crate) enum NameUse {
 
 /// What an instruction does with the property or global it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Access {
     Read,
     Write,
