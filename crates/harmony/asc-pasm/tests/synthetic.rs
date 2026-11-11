@@ -7,7 +7,7 @@ use asc_abc::leb128::write_uleb128;
 use asc_abc::{Abc, ClassEntry};
 use asc_arkisa::{walk, Instruction};
 use asc_fixture::abc::{AbcBuilder, AbcCode, AbcDebugInfo, AbcFunction, AbcLineOp, AbcRecord, Asm};
-use asc_pasm::{write_function, write_instruction, write_record, Options};
+use asc_pasm::{write_function, write_instruction, write_record, Options, SourceLine};
 
 const RECORD: &str = "&entry/src/main/ets/pages/Index&";
 
@@ -750,8 +750,9 @@ fn source_lines_follow_the_lines_of_the_debug_info() {
     let abc = Abc::parse(&data).unwrap();
     let class = abc.find_record(RECORD.as_bytes()).unwrap().unwrap().local().unwrap();
     let method = class.methods().unwrap().next().unwrap().unwrap();
-    let header = |lines: &[Option<u32>], whole: bool, every_line: bool| {
-        let source = asc_pasm::SourceLines { file: "src/a file.ets", lines };
+    let files = ["src/a file.ets".to_owned(), "src/unused.ets".to_owned(), "src/part.ets".to_owned()];
+    let listing = |named: &[u32], lines: &[Option<SourceLine>], whole: bool, every_line: bool| {
+        let source = asc_pasm::SourceLines { files: &files, named, lines };
         let opts = Options { source: Some(source), lines: every_line, ..Options::default() };
         let mut text = String::new();
         if whole {
@@ -761,6 +762,10 @@ fn source_lines_follow_the_lines_of_the_debug_info() {
         }
         text
     };
+    let first = |lines: &[Option<u32>]| -> Vec<Option<SourceLine>> {
+        lines.iter().map(|line| line.map(|line| SourceLine { file: 0, line })).collect()
+    };
+    let header = |lines: &[Option<u32>], whole: bool, every_line: bool| listing(&[0], &first(lines), whole, every_line);
     let line_of = |text: &str| text.lines().find(|line| line.starts_with("; vregs")).unwrap().rsplit(", line ").next().unwrap().to_owned();
 
     // Line 4 of the compiled file is line 9 of the source.
@@ -780,4 +785,29 @@ fn source_lines_follow_the_lines_of_the_debug_info() {
     let woven = header(&mapped, true, true);
     let lines: Vec<&str> = woven.lines().filter(|line| line.starts_with("  ; line ")).collect();
     assert_eq!(lines, ["  ; line 4 (source line 9)", "  ; line 5 (source line 10)", "  ; line 7"]);
+
+    // A record made from several files numbers the ones lines come from; each line says which.
+    let at = |file, line| Some(SourceLine { file, line });
+    let several = [None, None, None, None, at(2, 9), at(0, 3), None, at(2, 11)];
+    let record = listing(&[0, 2], &several, true, true);
+    assert_eq!(
+        record.lines().nth(2).unwrap(),
+        "; sources #0 src/a file.ets, #2 src/part.ets (by the source map: \"line N\" of a function is a line of the compiled file, \
+         from 0; \"source #K line N\" is line N of source #K)"
+    );
+    let lines: Vec<&str> = record.lines().filter(|line| line.starts_with("  ; line ")).collect();
+    assert_eq!(lines, ["  ; line 4 (source #2 line 9)", "  ; line 5 (source #0 line 3)", "  ; line 7 (source #2 line 11)"]);
+    assert_eq!(line_of(&listing(&[0, 2], &several, false, false)), "4 (source #2 line 9)");
+    let later = [None, None, None, None, None, at(0, 3)];
+    assert_eq!(line_of(&listing(&[0, 2], &later, false, false)), "4 (source #0 line 3 at line 5)");
+    // Only so many are named.
+    let many: Vec<u32> = (0..12).collect();
+    let files: Vec<String> = many.iter().map(|index| format!("f{index}.ets")).collect();
+    let source = asc_pasm::SourceLines { files: &files, named: &many, lines: &[] };
+    let mut text = String::new();
+    write_record(&mut text, &abc, &class, &Options { source: Some(source), ..Options::default() }).unwrap();
+    assert!(
+        text.lines().nth(2).unwrap().starts_with("; sources #0 f0.ets, #1 f1.ets, ") && text.contains(", #7 f7.ets, … (+4 more) (by "),
+        "{text}"
+    );
 }

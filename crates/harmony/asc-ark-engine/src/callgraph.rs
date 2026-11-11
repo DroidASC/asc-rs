@@ -4,8 +4,9 @@
 //! proved about each call site ([`edges`]): edges to functions of the
 //! program — local, through imports and exports ([`modules`]), by name
 //! inside a class and up its parent classes ([`crate::hierarchy`]) — and
-//! leaves for everything else, external (system APIs, globals) or
-//! unresolved. An edge that is not proved says so by its kind
+//! leaves for everything else: external (system APIs, globals), unlinked
+//! (an import of the program that led to no function) or unresolved
+//! ([`LeafKind`]). An edge that is not proved says so by its kind
 //! ([`EdgeKind`]). A leaf keeps the callee path `findrefs call:` prints, so
 //! "which functions reach `import:@ohos:net.http`" is a callers query whose
 //! root is a pattern over leaves.
@@ -28,15 +29,20 @@
 //!     records that import those. Subclasses are found level by level, each
 //!     level among the records that import the class above (a class names
 //!     its parent through an import): the class definitions of those
-//!     records are worked out ([`crate::hierarchy`]), nothing else;
+//!     records are worked out ([`crate::hierarchy`]), nothing else. At most
+//!     [`CallQuery::max_subclasses`] subclasses of one class are followed,
+//!     the nearest first: the rows of the methods of a class with more say
+//!     how many were left out ([`CallRow::subclasses_skipped`]);
 //!   - an object is exported: `api.m()`, where another record exports
 //!     `api = new C()`, leads to the method of `C`, which the caller need
 //!     not import either. So the callers of an instance method are also
 //!     looked for in the records that import a record with such a binding
-//!     of the class or of a subclass of it.
+//!     of the class or of a subclass of it, or with a function or a static
+//!     property that hands out objects of one ([`made`]).
 //! - callers of a leaf pattern need the edges of every record.
 
 mod edges;
+mod made;
 pub(crate) mod modules;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -46,9 +52,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use asc_abc::{Abc, ClassEntry};
 
-pub use edges::EdgeKind;
 pub(crate) use edges::FnRef;
 use edges::{Edge, RecordEdges, Target};
+pub use edges::{EdgeKind, LeafKind};
+use made::RecordObjects;
 pub(crate) use modules::RecordId;
 pub use modules::{FormCount, RequestForm};
 use modules::{Importers, Layout, Packages};
@@ -144,15 +151,37 @@ pub struct CallQuery {
     /// Leave out every function one of these rules matches, with
     /// everything reached only through it.
     pub unless: Vec<Query>,
+    /// Callers of a method: the subclasses of its class that are looked
+    /// through for call sites that reach it by inheritance (`this.m()` in a
+    /// subclass, `super.m()`, a call on an object of a subclass). The
+    /// nearest are taken first; a class with more gets
+    /// [`CallRow::subclasses_skipped`].
+    pub max_subclasses: usize,
 }
 
 impl CallQuery {
     /// 2 levels, at most 500 nodes, definitions shown, unresolved call
-    /// sites counted.
+    /// sites counted, 512 subclasses followed per class.
     pub fn new(roots: CallRoots, direction: Direction) -> CallQuery {
-        CallQuery { roots, direction, depth: 2, max_nodes: 500, defines: true, unresolved: false, from: None, unless: Vec::new() }
+        CallQuery {
+            roots,
+            direction,
+            depth: 2,
+            max_nodes: 500,
+            defines: true,
+            unresolved: false,
+            from: None,
+            unless: Vec::new(),
+            max_subclasses: DEFAULT_MAX_SUBCLASSES,
+        }
     }
 }
+
+/// Subclasses of one class a callers walk looks through, unless
+/// [`CallQuery::max_subclasses`] says otherwise: more than any class of the
+/// programs measured has (387), so that only a class with a pathological
+/// number of them is cut short.
+const DEFAULT_MAX_SUBCLASSES: usize = 512;
 
 /// What a row of the tree is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -171,9 +200,9 @@ pub enum CallNode {
     Leaf {
         /// The callee path, as `findrefs call:` prints it.
         path: String,
-        /// It starts at an import or a global, as opposed to somewhere
-        /// tracking stopped.
-        external: bool,
+        /// Where the path starts: outside the program, at an import of it,
+        /// or where tracking stopped.
+        kind: LeafKind,
     },
 }
 
@@ -199,6 +228,14 @@ pub struct CallRow {
     pub unresolved: Option<usize>,
     /// [`CallQuery::from`] matches it.
     pub from: bool,
+    /// Callers walk, for a method whose callers were looked for: this many
+    /// subclasses of its class, at least (their own subclasses are not
+    /// counted), were not followed, [`CallQuery::max_subclasses`] being
+    /// reached. The call sites that reach the method through them were not
+    /// looked for: the ones in their subclasses, and the ones on their
+    /// objects in the records that import them. (Their own code is in a
+    /// record that imports a class that was followed, and was read.)
+    pub subclasses_skipped: usize,
 }
 
 /// Result of [`Engine::call_graph`].
@@ -228,10 +265,12 @@ impl CallTree {
     /// (`<-` caller, `->` callee), `RECORD->FUNCTION | restored name` or a
     /// leaf's callee path, and flags: `[new]`, `[super]`, `[instance]`,
     /// `[this-class]`, `[inherited]`, `[reassigned]`, `[defines]` for the
-    /// kind of link ([`EdgeKind`]), `[external]` / `[unresolved]` for a leaf,
+    /// kind of link ([`EdgeKind`]), `[external]` / `[unlinked]` /
+    /// `[unresolved]` for a leaf ([`LeafKind`]),
     /// `x3` for several call sites, `unresolved=N` for the call sites of a
     /// function that lead nowhere, `[ENTRY]` when `with_entry`, `[from]`
-    /// for a function [`CallQuery::from`] matches, and `(repeated)`.
+    /// for a function [`CallQuery::from`] matches, `[N+ subclasses
+    /// skipped]` ([`CallRow::subclasses_skipped`]), and `(repeated)`.
     pub fn lines(&self, with_entry: bool) -> Vec<String> {
         self.rows
             .iter()
@@ -247,9 +286,9 @@ impl CallTree {
                     CallNode::Function { record, function, restored, .. } => {
                         line.push_str(&format!("{record}->{function} | {restored}"));
                     }
-                    CallNode::Leaf { path, external } => {
+                    CallNode::Leaf { path, kind } => {
                         line.push_str(path);
-                        line.push_str(if *external { " [external]" } else { " [unresolved]" });
+                        line.push_str(&format!(" [{}]", kind.label()));
                     }
                 }
                 if let Some(label) = row.kind.and_then(EdgeKind::label) {
@@ -266,6 +305,9 @@ impl CallTree {
                 }
                 if row.from {
                     line.push_str(" [from]");
+                }
+                if row.subclasses_skipped > 0 {
+                    line.push_str(&format!(" [{}+ subclasses skipped]", row.subclasses_skipped));
                 }
                 if row.repeated {
                     line.push_str(" (repeated)");
@@ -294,6 +336,16 @@ impl CallTree {
         }
         if self.truncated {
             footer.push_str("; truncated (raise max_nodes or lower depth)");
+        }
+        let skipped: Vec<&CallRow> = self.rows.iter().filter(|row| row.subclasses_skipped > 0).collect();
+        if !skipped.is_empty() {
+            let subclasses: usize = skipped.iter().map(|row| row.subclasses_skipped).sum();
+            footer.push_str(&format!(
+                "\n# subclasses skipped: {} rows are methods of a class with too many subclasses to look through; callers that reach \
+                 them by inheritance through the {subclasses}+ left out (this.m() / super.m() in their subclasses, a call on an \
+                 object of one in a record that imports it) were not looked for: `hierarchy CLASS --method NAME` lists the subclasses",
+                skipped.len()
+            ));
         }
         if let Some(Reached { from: 0, walked }) = self.reached {
             footer.push_str(&format!(
@@ -350,6 +402,9 @@ pub(crate) struct Slot {
     /// with a binding that is written more than once.
     exported: OnceLock<ExportedDefinitions>,
     edges: OnceLock<RecordEdges>,
+    /// The objects its functions and static properties hand out: asked by
+    /// the call sites on what a function of the record returned.
+    objects: OnceLock<RecordObjects>,
     /// Left by the first `call:` search that went through the whole record.
     call_paths: OnceLock<CallPaths>,
 }
@@ -478,7 +533,7 @@ pub(crate) struct Session<'e> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Node {
     Function(FnRef),
-    Leaf { path: String, external: bool },
+    Leaf { path: String, kind: LeafKind },
 }
 
 /// A link from a node to one next to it.
@@ -494,7 +549,7 @@ fn follows(edge: &Edge, query: &CallQuery) -> bool {
     match (edge.kind, edge.target) {
         (EdgeKind::Defines, _) => query.defines,
         // Upward, an unresolved leaf is only ever a root the query asked for.
-        (_, Target::Leaf { external: false, .. }) => query.unresolved || query.direction == Direction::Callers,
+        (_, Target::Leaf { kind: LeafKind::Unresolved, .. }) => query.unresolved || query.direction == Direction::Callers,
         _ => true,
     }
 }
@@ -649,6 +704,19 @@ impl<'e> Session<'e> {
         }))
     }
 
+    /// The objects record `id`, whose slot is `slot`, hands out.
+    fn objects<'s>(&self, slot: &'s Slot, id: RecordId) -> Option<&'s RecordObjects> {
+        if let Some(objects) = slot.objects.get() {
+            return Some(objects);
+        }
+        let scopes = self.scopes(slot, id)?;
+        Some(slot.objects.get_or_init(|| {
+            let objects = self.build_objects(id, slot, scopes);
+            self.cache.charge(objects.heap_bytes());
+            objects
+        }))
+    }
+
     /// The record that holds the function at `function`.
     fn record_of(&self, function: FnRef) -> Option<RecordId> {
         let method = self.abc(function.entry)?.method(function.method).ok()?;
@@ -691,13 +759,13 @@ impl<'e> Session<'e> {
     fn node_of(&self, edges: &RecordEdges, target: Target) -> Node {
         match target {
             Target::Function(function) => Node::Function(function),
-            Target::Leaf { text, external } => Node::Leaf { path: edges.text(text).to_owned(), external },
+            Target::Leaf { text, kind } => Node::Leaf { path: edges.text(text).to_owned(), kind },
         }
     }
 
     fn describe(&self, node: &Node) -> CallNode {
         match node {
-            Node::Leaf { path, external } => CallNode::Leaf { path: path.clone(), external: *external },
+            Node::Leaf { path, kind } => CallNode::Leaf { path: path.clone(), kind: *kind },
             Node::Function(function) => {
                 let entry = self.engine.program.info(function.entry as usize).map_or("", |info| info.name.as_str()).to_owned();
                 let method = self.abc(function.entry).and_then(|abc| abc.method(function.method).ok());
@@ -784,28 +852,32 @@ impl<'e> Session<'e> {
         Ok(out)
     }
 
-    /// The callers of each node of `frontier`.
+    /// The callers of each node of `frontier`. The methods whose class has
+    /// more subclasses than the walk looks through are added to `skipped`,
+    /// with the number left out.
     fn callers(
         &self,
         frontier: &[Node],
         query: &CallQuery,
         cancel: &AtomicBool,
         scanned: &mut HashSet<RecordId>,
+        skipped: &mut HashMap<Node, usize>,
     ) -> Result<HashMap<Node, Neighbors>> {
         let (records, slots) = if frontier.iter().any(|node| matches!(node, Node::Leaf { .. })) {
+            // Every record is looked at: no subclass is left out.
             let records = self.all_records();
             let slots = self.load(&records, cancel)?;
             (records, slots)
         } else {
-            self.records_that_reach(frontier, cancel)?
+            self.records_that_reach(frontier, query.max_subclasses, cancel, skipped)?
         };
         scanned.extend(records.iter().copied());
         // Looked up per edge: by reference, without building a node for each.
         let wanted_functions: HashSet<FnRef> =
             frontier.iter().filter_map(|node| if let Node::Function(function) = node { Some(*function) } else { None }).collect();
-        let wanted_leaves: HashSet<(&str, bool)> = frontier
+        let wanted_leaves: HashSet<(&str, LeafKind)> = frontier
             .iter()
-            .filter_map(|node| if let Node::Leaf { path, external } = node { Some((path.as_str(), *external)) } else { None })
+            .filter_map(|node| if let Node::Leaf { path, kind } = node { Some((path.as_str(), *kind)) } else { None })
             .collect();
         let mut out: HashMap<Node, Neighbors> = HashMap::new();
         for (id, slot) in records.iter().zip(&slots) {
@@ -815,9 +887,7 @@ impl<'e> Session<'e> {
                 for edge in of_function.iter().filter(|edge| follows(edge, query)) {
                     let is_wanted = match edge.target {
                         Target::Function(function) => wanted_functions.contains(&function),
-                        Target::Leaf { text, external } => {
-                            !wanted_leaves.is_empty() && wanted_leaves.contains(&(edges.text(text), external))
-                        }
+                        Target::Leaf { text, kind } => !wanted_leaves.is_empty() && wanted_leaves.contains(&(edges.text(text), kind)),
                     };
                     if is_wanted {
                         out.entry(self.node_of(edges, edge.target)).or_default().add(Node::Function(caller), edge.kind);
@@ -830,7 +900,15 @@ impl<'e> Session<'e> {
 
     /// The records whose code can have an edge to a function of `frontier`,
     /// in order, with their edges computed: see the module documentation.
-    fn records_that_reach(&self, frontier: &[Node], cancel: &AtomicBool) -> Result<(Vec<RecordId>, Vec<Arc<Slot>>)> {
+    /// At most `max_subclasses` subclasses of each class are followed; the
+    /// methods of a class with more are added to `skipped`.
+    fn records_that_reach(
+        &self,
+        frontier: &[Node],
+        max_subclasses: usize,
+        cancel: &AtomicBool,
+        skipped: &mut HashMap<Node, usize>,
+    ) -> Result<(Vec<RecordId>, Vec<Arc<Slot>>)> {
         let importers = self.importers(cancel)?;
         // The records of `homes` and the records that import them.
         let with_importers = |homes: HashSet<RecordId>| -> HashSet<RecordId> {
@@ -842,6 +920,7 @@ impl<'e> Session<'e> {
         let mut family: HashSet<ClassRef> = HashSet::new();
         let mut instance_methods = false;
         let mut homes: HashSet<RecordId> = HashSet::new();
+        let mut methods: Vec<(&Node, ClassRef)> = Vec::new();
         for node in frontier {
             let Node::Function(function) = node else { continue };
             let Some(home) = self.record_of(*function) else { continue };
@@ -851,29 +930,60 @@ impl<'e> Session<'e> {
             // A constructor is only reached by name: `new`, or `super(...)` of a direct subclass.
             if let Some(membership) = membership.filter(|membership| membership.class != function.method) {
                 instance_methods |= !membership.is_static;
-                family.insert(ClassRef { entry: function.entry, ctor: membership.class });
+                let class = ClassRef { entry: function.entry, ctor: membership.class };
+                family.insert(class);
+                methods.push((node, class));
             }
         }
         let mut records = with_importers(homes);
         // Their subclasses, level by level: a class names its parent through an import, so the
         // subclasses of a level are in the records that import the records of that level.
+        // Each class of a method counts the subclasses followed for it: a subclass is of the
+        // first of them that reaches it.
+        let mut root_of: HashMap<ClassRef, ClassRef> = family.iter().map(|&class| (class, class)).collect();
+        let mut followed: HashMap<ClassRef, usize> = HashMap::new();
+        let mut left_out: HashMap<ClassRef, usize> = HashMap::new();
         let mut level: HashSet<ClassRef> = family.clone();
         while !level.is_empty() {
             let candidates = with_importers(level.iter().filter_map(|class| self.classes().record_of(*class)).collect());
-            records.extend(candidates.iter().copied());
             let mut candidates: Vec<RecordId> = candidates.into_iter().collect();
             candidates.sort_unstable();
             let subclasses = self.classes().subclasses_among(&level, &candidates, cancel)?;
-            level = subclasses.into_iter().filter(|class| family.insert(*class)).collect();
+            records.extend(candidates);
+            level.clear();
+            for (class, parent) in subclasses {
+                let Some(&root) = root_of.get(&parent) else { continue };
+                if family.contains(&class) {
+                    continue;
+                }
+                let count = followed.entry(root).or_default();
+                if *count >= max_subclasses {
+                    *left_out.entry(root).or_default() += 1;
+                    continue;
+                }
+                *count += 1;
+                family.insert(class);
+                root_of.insert(class, root);
+                level.insert(class);
+            }
+        }
+        for (node, class) in methods {
+            if let Some(&count) = left_out.get(&class) {
+                skipped.insert(node.clone(), count);
+            }
         }
         let mut records: Vec<RecordId> = records.into_iter().collect();
         records.sort_unstable();
         let mut slots = self.load(&records, cancel)?;
         if instance_methods {
-            // The records that export an object of one of the classes: whoever imports them can call its methods.
+            // The records that export an object of one of the classes, or hand one out: whoever
+            // imports them can call its methods. A record that hands out an object of a class makes
+            // it: only the ones with a `new` of one of the classes are asked what they return.
+            let constructors: HashSet<FnRef> = family.iter().map(|class| FnRef { entry: class.entry, method: class.ctor }).collect();
             let mut readers: HashSet<RecordId> = HashSet::new();
             for (&id, slot) in records.iter().zip(&slots) {
-                if self.holds_instance_of(id, slot, &family) {
+                let makes_one = || slot.edges.get().is_some_and(|edges| edges.calls_any_of(&constructors));
+                if self.holds_instance_of(id, slot, &family) || (makes_one() && self.hands_out(id, slot, &family)) {
                     readers.extend(importers.importers_of(id));
                 }
             }
@@ -903,9 +1013,9 @@ impl<'e> Session<'e> {
             }
             for (_, of_function) in edges.functions() {
                 for edge in of_function {
-                    let Target::Leaf { text, external } = edge.target else { continue };
-                    if matched.get(text as usize) == Some(&true) && seen.insert((edges.text(text), external)) {
-                        roots.push(Node::Leaf { path: edges.text(text).to_owned(), external });
+                    let Target::Leaf { text, kind } = edge.target else { continue };
+                    if matched.get(text as usize) == Some(&true) && seen.insert((edges.text(text), kind)) {
+                        roots.push(Node::Leaf { path: edges.text(text).to_owned(), kind });
                     }
                 }
             }
@@ -921,7 +1031,8 @@ impl<'e> Session<'e> {
         let record = self.record_of(function).filter(|record| scanned.contains(record))?;
         let slot = self.slot(record);
         let edges = slot.edges.get()?;
-        Some(edges.of(function.method).iter().filter(|edge| matches!(edge.target, Target::Leaf { external: false, .. })).count())
+        let is_unresolved = |edge: &&Edge| matches!(edge.target, Target::Leaf { kind: LeafKind::Unresolved, .. });
+        Some(edges.of(function.method).iter().filter(is_unresolved).count())
     }
 
     fn walk(&self, query: &CallQuery, cancel: &AtomicBool) -> Result<CallTree> {
@@ -974,13 +1085,14 @@ impl<'e> Session<'e> {
             }
         }
         let mut neighbors: HashMap<Node, Neighbors> = HashMap::new();
+        let mut skipped: HashMap<Node, usize> = HashMap::new();
         for level in 0..query.depth {
             if frontier.is_empty() {
                 break;
             }
             let found = match query.direction {
                 Direction::Callees => self.callees(&frontier, query, cancel, &mut scanned)?,
-                Direction::Callers => self.callers(&frontier, query, cancel, &mut scanned)?,
+                Direction::Callers => self.callers(&frontier, query, cancel, &mut scanned, &mut skipped)?,
             };
             let mut next = Vec::new();
             for node in &frontier {
@@ -1027,7 +1139,19 @@ impl<'e> Session<'e> {
             let has_more =
                 neighbors.get(&node).is_some_and(|neighbors| neighbors.0.iter().any(|neighbor| level_of.contains_key(&neighbor.node)));
             let from = is_from(&node);
-            rows.push(CallRow { depth, parent, node: self.describe(&node), kind, sites, repeated: !expand && has_more, unresolved, from });
+            let subclasses_skipped = skipped.get(&node).copied().unwrap_or(0);
+            let node_row = self.describe(&node);
+            rows.push(CallRow {
+                depth,
+                parent,
+                node: node_row,
+                kind,
+                sites,
+                repeated: !expand && has_more,
+                unresolved,
+                from,
+                subclasses_skipped,
+            });
             if !expand {
                 continue;
             }
@@ -1183,6 +1307,7 @@ mod tests {
             repeated,
             unresolved,
             from: false,
+            subclasses_skipped: 0,
         };
         let index = "&entry/src/main/ets/pages/Index&";
         let tree = CallTree {
@@ -1195,16 +1320,33 @@ mod tests {
                 row(
                     1,
                     Some(0),
-                    CallNode::Leaf { path: "import:@ohos:net.http#default.createHttp".into(), external: true },
+                    CallNode::Leaf { path: "import:@ohos:net.http#default.createHttp".into(), kind: LeafKind::External },
                     Some(EdgeKind::Call),
                     1,
                     false,
                     None,
                 ),
-                row(2, Some(1), CallNode::Leaf { path: "this.cfg.get".into(), external: false }, Some(EdgeKind::New), 1, false, None),
+                row(
+                    2,
+                    Some(1),
+                    CallNode::Leaf { path: "this.cfg.get".into(), kind: LeafKind::Unresolved },
+                    Some(EdgeKind::New),
+                    1,
+                    false,
+                    None,
+                ),
+                row(
+                    2,
+                    Some(1),
+                    CallNode::Leaf { path: "import:lib#Store.open().read".into(), kind: LeafKind::Unlinked },
+                    Some(EdgeKind::Call),
+                    2,
+                    false,
+                    None,
+                ),
             ],
             functions: 3,
-            leaves: 2,
+            leaves: 3,
             truncated: true,
             records_scanned: 1,
             pruned: 0,
@@ -1219,12 +1361,13 @@ mod tests {
                 "  1 -> &entry/src/main/ets/pages/Index&->#~@0>#parse | Index.parse [this-class] x3 (repeated)",
                 "  1 -> import:@ohos:net.http#default.createHttp [external]",
                 "    2 -> this.cfg.get [unresolved] [new]",
+                "    2 -> import:lib#Store.open().read [unlinked] x2",
             ]
         );
         assert!(tree.lines(true)[0].ends_with(" unresolved=2 [ets/modules.abc]"));
         assert_eq!(
             tree.footer(),
-            "# 5 rows, 3 distinct functions, 2 leaves (callees, depth 2); 1 records scanned; truncated (raise max_nodes or lower depth)\n# x is encrypted"
+            "# 6 rows, 3 distinct functions, 3 leaves (callees, depth 2); 1 records scanned; truncated (raise max_nodes or lower depth)\n# x is encrypted"
         );
     }
 
@@ -1234,7 +1377,7 @@ mod tests {
         let target = Node::Function(FnRef { entry: 0, method: 8 });
         neighbors.add(target.clone(), EdgeKind::Defines);
         neighbors.add(target.clone(), EdgeKind::ThisClass);
-        neighbors.add(Node::Leaf { path: "?".into(), external: false }, EdgeKind::Call);
+        neighbors.add(Node::Leaf { path: "?".into(), kind: LeafKind::Unresolved }, EdgeKind::Call);
         neighbors.add(target, EdgeKind::Defines);
         assert_eq!(neighbors.0.iter().map(|n| (n.kind, n.sites)).collect::<Vec<_>>(), [(EdgeKind::ThisClass, 3), (EdgeKind::Call, 1)]);
     }

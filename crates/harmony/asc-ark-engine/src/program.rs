@@ -193,7 +193,10 @@ enum Role {
     Maybe,
 }
 
-/// The entries of a zip a program may read, in central directory order.
+/// The entries of a zip a program may read, in central directory order;
+/// the code among them (`ets/*.abc`) in name order, as the directory the
+/// package unpacks into lists it ([`Member::of_package`]): one program
+/// answers in one order whichever way it is given.
 struct Listing {
     entries: Vec<(asc_apk::Entry, Role)>,
     /// Whether the zip is a module package: `module.json` or `ets/*.abc` at
@@ -214,7 +217,7 @@ impl Listing {
             Part::of_name(name).is_some() || is_package(name) || has_archive_extension(name) || total <= SNIFFED_ENTRIES
         })?;
         let sniffs = !is_module && !is_android;
-        let entries = kept
+        let mut entries: Vec<(asc_apk::Entry, Role)> = kept
             .into_iter()
             .filter_map(|entry| {
                 let name = entry.name.as_bytes();
@@ -227,7 +230,22 @@ impl Listing {
                 Some((entry, role))
             })
             .collect();
+        Listing::sort_code(&mut entries);
         Ok(Listing { entries, is_module })
+    }
+
+    /// Put the code entries in name order, in the places code entries have.
+    fn sort_code(entries: &mut [(asc_apk::Entry, Role)]) {
+        let is_code = |(_, role): &(asc_apk::Entry, Role)| *role == Role::Part(Part::Code);
+        if entries.iter().filter(|entry| is_code(entry)).is_sorted_by(|a, b| a.0.name <= b.0.name) {
+            return;
+        }
+        let places: Vec<usize> = (0..entries.len()).filter(|&at| is_code(&entries[at])).collect();
+        let mut code: Vec<(asc_apk::Entry, Role)> = places.iter().map(|&at| entries[at].clone()).collect();
+        code.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        for (at, entry) in places.into_iter().zip(code) {
+            entries[at] = entry;
+        }
     }
 
     /// Whether an entry that is not a package by its name is worth opening
@@ -476,6 +494,8 @@ pub(crate) struct ProgramBytes {
     /// Read in place from the mapped files (code and documents; not the
     /// rest of a package): pages the system reads on demand and may drop again.
     pub(crate) mapped: usize,
+    /// On the heap: the indexes of the source maps queries have read.
+    pub(crate) source_maps: usize,
 }
 
 /// The ABC entries of a program and the mappings they live in.
@@ -575,7 +595,12 @@ impl Program {
             .iter()
             .map(|entry| &entry.source)
             .chain(self.packages.iter().flat_map(|package| package.documents.iter().map(|(_, source)| source)));
-        let mut bytes = ProgramBytes { inflated: self.containers.iter().map(Apk::owned_bytes).sum(), mapped: 0 };
+        let indexed = |package: &Package| package.source_maps.as_ref()?.index.get()?.as_ref().ok().map(SourceMaps::heap_bytes);
+        let mut bytes = ProgramBytes {
+            inflated: self.containers.iter().map(Apk::owned_bytes).sum(),
+            mapped: 0,
+            source_maps: self.packages.iter().filter_map(indexed).sum(),
+        };
         for source in sources {
             match source {
                 Source::Inflated(inflated) => bytes.inflated += inflated.capacity(),
@@ -708,10 +733,7 @@ impl Program {
             Root::Zip(container) => &self.containers[*container],
             Root::Directory(dir) => {
                 let Some(file) = loose_file(dir, path) else { return Ok(None) };
-                return match fs::read(&file) {
-                    Ok(bytes) => Ok(Some(bytes.into())),
-                    Err(source) => Err(EngineError::Io { path: file, source }),
-                };
+                return read_bounded(&file, MAX_INFLATED_BYTES).map(|bytes| Some(bytes.into()));
             }
         };
         // The zip of a package is one archive: an entry is found by its name alone.
@@ -1160,6 +1182,26 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<SourceFile>) -> std::io::Result<
     Ok(())
 }
 
+/// The whole of `file`, which may hold at most `limit` bytes: the bound a
+/// zip entry has, for a file read into memory from an unpacked package.
+/// The size is checked before anything is read, and the read stops at the
+/// limit whatever the size said (a file that grows, a device).
+fn read_bounded(file: &Path, limit: u64) -> Result<Vec<u8>> {
+    let io = |source| EngineError::Io { path: file.to_path_buf(), source };
+    let too_large = |size| EngineError::FileTooLarge { path: file.to_path_buf(), size, limit };
+    let opened = fs::File::open(file).map_err(io)?;
+    let size = opened.metadata().map_err(io)?.len();
+    if size > limit {
+        return Err(too_large(size));
+    }
+    let mut bytes = Vec::new();
+    let read = opened.take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(io)?;
+    if read as u64 > limit {
+        return Err(too_large(read as u64));
+    }
+    Ok(bytes)
+}
+
 /// The file `inner` names inside the unpacked package at `root`: a plain
 /// relative path that, links followed, stays inside the package.
 fn loose_file(root: &Path, inner: &str) -> Option<PathBuf> {
@@ -1175,6 +1217,18 @@ fn loose_file(root: &Path, inner: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loose_file_over_the_limit_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main_pages.json");
+        fs::write(&file, b"0123456789").unwrap();
+        assert_eq!(read_bounded(&file, 10).unwrap(), b"0123456789");
+        let err = read_bounded(&file, 9).unwrap_err();
+        assert!(matches!(err, EngineError::FileTooLarge { size: 10, limit: 9, .. }), "{err}");
+        assert!(err.to_string().ends_with("main_pages.json holds 10 bytes, limit 9"), "{err}");
+        assert!(matches!(read_bounded(&dir.path().join("missing"), 9), Err(EngineError::Io { .. })));
+    }
 
     #[test]
     fn entry_and_package_names() {

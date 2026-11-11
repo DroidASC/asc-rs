@@ -9,6 +9,9 @@
 //!        | TEXT              the kind's own syntax, e.g. a regex
 //! ```
 //!
+//! `KIND` is one of [`Query::KINDS`] or another spelling of one
+//! ([`Query::kind_named`]: `property:`, `functions:`), at every depth.
+//!
 //! A rule of one part without `!` is that condition; several make a
 //! [`Query::All`] whose `!` parts are [`Query::Not`]. A `&` joins two parts
 //! only where `KIND:` or `!KIND:` follows it, outside `{}`: record names and
@@ -86,10 +89,7 @@ fn call(value: &str, dir: Option<&Path>, depth: usize) -> Result<Query> {
 /// One part without its `!`.
 fn condition(spec: &str, dir: Option<&Path>, depth: usize) -> Result<Query> {
     let (kind, value) = spec.split_once(':').ok_or_else(|| unknown(spec))?;
-    let (kind, value) = (kind.trim(), value.trim());
-    if !Query::KINDS.contains(&kind) {
-        return Err(unknown(spec));
-    }
+    let (kind, value) = (Query::kind_named(kind).ok_or_else(|| unknown(spec))?, value.trim());
     if value.is_empty() {
         return Err(EngineError::Query(format!("{kind}: needs a value")));
     }
@@ -166,6 +166,23 @@ mod tests {
         assert_eq!(shape("call:@ohos:net"), "call");
         // A regex keeps its braces.
         assert_eq!(shape("string:^a{2,3}$ & prop:b"), "all(string, prop)");
+    }
+
+    #[test]
+    fn other_spellings_of_a_kind_are_read_at_every_depth() {
+        assert_eq!(Query::kind_named(" Properties "), Some("prop"));
+        assert_eq!(Query::kind_named("calls"), Some("call"));
+        assert_eq!((Query::kind_named("type"), Query::kind_named("s"), Query::kind_named("")), (None, None, None));
+        for kind in Query::KINDS {
+            assert_eq!(Query::kind_named(kind), Some(kind));
+        }
+        let spelled = |rule: &str| format!("{:?}", Query::rule(rule, None).unwrap());
+        assert_eq!(spelled("property:=request & !Strings:a"), spelled("prop:=request & !string:a"));
+        assert_eq!(
+            spelled("call:{functions:=load & !text:a & call:{num:7 & property:b}}"),
+            spelled("call:{method:=load & !string:a & call:{number:7 & prop:b}}")
+        );
+        assert!(shape("call:{field:a}").starts_with("error: \"field:a\" is not a condition"));
     }
 
     #[test]

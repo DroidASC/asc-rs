@@ -23,15 +23,14 @@ fn edges(engine: &Engine) -> (Vec<CallEdge>, GraphSize) {
 }
 
 /// Edges per kind and what they lead to: `function`, `import` (a function
-/// through an import), `external`, `unresolved`.
+/// through an import), `external`, `unlinked`, `unresolved`.
 fn census(edges: &[CallEdge]) -> BTreeMap<(EdgeKind, &'static str), usize> {
     let mut out = BTreeMap::new();
     for edge in edges {
         let to = match (&edge.to, &edge.via) {
             (CallNode::Function { .. }, Some(_)) => "import",
             (CallNode::Function { .. }, None) => "function",
-            (CallNode::Leaf { external: true, .. }, _) => "external",
-            (CallNode::Leaf { external: false, .. }, _) => "unresolved",
+            (CallNode::Leaf { kind, .. }, _) => kind.label(),
         };
         *out.entry((edge.kind, to)).or_default() += 1;
     }
@@ -91,8 +90,10 @@ fn contacts_captured_variables_and_graph() {
     assert_eq!((count(EdgeKind::Call, "function"), count(EdgeKind::Call, "import"), count(EdgeKind::New, "import")), (3_573, 2, 4));
     assert_eq!(
         (count(EdgeKind::Call, "external"), count(EdgeKind::Call, "unresolved"), count(EdgeKind::Defines, "function")),
-        (3_940, 11_891, 5_802)
+        (3_937, 11_887, 5_802)
     );
+    // Calls on what a function of the program returned: the import is of the program, the callee is not told.
+    assert_eq!((count(EdgeKind::Call, "unlinked"), count(EdgeKind::ThisClass, "function")), (3, 8));
     // Who reaches the HTTP client: the two helpers, and the page code that calls them.
     let http =
         CallQuery { depth: 2, ..CallQuery::new(CallRoots::Leaf(Pattern::regex("^import:@ohos:net\\.http").unwrap()), Direction::Callers) };
@@ -199,7 +200,7 @@ fn large_sample_class_edges_and_package_requests() {
     // These kinds are edges to functions: a call site they do not resolve stays a plain leaf.
     let class_kinds = [EdgeKind::Super, EdgeKind::Instance, EdgeKind::ThisClass, EdgeKind::Inherited, EdgeKind::Reassigned];
     for kind in class_kinds {
-        assert_eq!((count(kind, "external"), count(kind, "unresolved")), (0, 0), "{kind:?}");
+        assert_eq!((count(kind, "external"), count(kind, "unlinked"), count(kind, "unresolved")), (0, 0, 0), "{kind:?}");
         assert!(count(kind, "function") + count(kind, "import") > 0, "{kind:?}: {census:?}");
     }
     for edge in graph.iter().filter(|edge| class_kinds.contains(&edge.kind)) {

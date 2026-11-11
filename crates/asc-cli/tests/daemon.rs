@@ -426,6 +426,11 @@ fn daemon_output_is_byte_identical_for_harmony_programs() {
         &["xml", "unpacked", "../debug.hap"],
         &["getclass", "unpacked", "pages/Index"],
         &["getclass", "debug.hap", "pages/Index", "--method", "Index.build"],
+        // Every line of the debug info, with and without a source map.
+        &["getclass", "debug.hap", "pages/Index", "--lines"],
+        &["getclass", "unpacked", "pages/Index", "--method", "Index.build", "--lines"],
+        &["disassemble", "entry.hap", "pages/Index", "--debuginfo"],
+        &["disassemble", "entry.hap", "pages/Index", "--lines", "-o", "lines.pa"],
         &["getclass", "debug.hap", "entryability/EntryAbility"],
         &["findrefs", "unpacked", "string", "testTag"],
         &["callgraph", "unpacked", "pages/Index", "Index.build", "--callees"],

@@ -1,7 +1,7 @@
 //! Annotations: `u16 class_idx, u16 count`, `count` elements of
 //! `(u32 name_off, u32 value)`, then `count` one-byte type tags.
 
-use crate::reader::{entity_pos, read_u32, Reader};
+use crate::reader::{entity_pos, read_u32, read_u64, Reader};
 use crate::{Abc, AbcError, Result};
 
 /// An annotation attached to a class, field or method.
@@ -24,6 +24,47 @@ pub struct AnnotationElement {
     /// Type tag character (`'7'` u32, `'C'` string, `'E'` method …, see
     /// "Tags description" in the format document).
     pub tag: u8,
+}
+
+/// What an annotation element holds, read by its type tag. The elements of
+/// the compiler's own annotations are `u32`; the annotations of a program
+/// (`@interface`, bytecode of API 20 and later) have numbers, strings,
+/// booleans and arrays of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ElementValue {
+    /// Tag `'1'`.
+    Bool(bool),
+    /// Tags `'2'` to `'7'`: an integer of up to 32 bits, as stored.
+    Int(u32),
+    /// Tag `'B'`.
+    F64(f64),
+    /// Tag `'C'`: the offset of a string.
+    String(u32),
+    /// Tags `'K'` to `'Z'` and `'#'`: the offset of the literal array that
+    /// holds the items.
+    Array(u32),
+    /// Any other tag: the stored value as it is.
+    Other(u32),
+}
+
+impl AnnotationElement {
+    /// The value, read the way the type tag says.
+    ///
+    /// # Errors
+    /// `BadOffset` or `Truncated` for a 64-bit value that is not in the file.
+    pub fn typed(&self, abc: &Abc<'_>) -> Result<ElementValue> {
+        Ok(match self.tag {
+            b'1' => ElementValue::Bool(self.value != 0),
+            b'2'..=b'7' => ElementValue::Int(self.value),
+            b'B' => {
+                let bits = read_u64(abc.bytes(), entity_pos(abc.bytes(), self.value, "annotation element value")?)?;
+                ElementValue::F64(f64::from_bits(bits))
+            }
+            b'C' => ElementValue::String(self.value),
+            b'K'..=b'Z' | b'#' => ElementValue::Array(self.value),
+            _ => ElementValue::Other(self.value),
+        })
+    }
 }
 
 impl<'a> Annotation<'a> {

@@ -28,8 +28,8 @@ use crate::{
     LISTCLASS_LIMIT,
 };
 use asc_ark_engine::{
-    text, Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, Manifest, ManifestLine, NameFilter,
-    Pattern, Query, RefContext, RefRow, RefSite,
+    text, Access, ClassQuery, ClassSource, Document, Engine, EngineError, EntryStatus, ListOptions, ListingStyle, Manifest, ManifestLine,
+    NameFilter, Pattern, Query, RefContext, RefRow, RefSite,
 };
 use asc_engine::{names, Threads, MAPPED_CHARGE_DIVISOR};
 use serde_json::{json, Value};
@@ -42,6 +42,10 @@ use std::sync::Arc;
 /// HarmonyOS programs kept open, whatever they hold: each maps its files.
 /// What they hold on the heap is bounded by the memory budget besides.
 const MAX_OPEN: usize = 8;
+/// What `getclass` takes on a HarmonyOS program beyond the record and the
+/// function, for the program's introduction.
+const GETCLASS_USAGE: &str = "# getclass: debug_info=true writes `; line N` where the line of the debug info changes (with \
+                              ets/sourceMaps.map in the package: its source line too)\n";
 /// ABC entries the description of a program lists by name.
 const MAX_ENTRIES_LISTED: usize = 12;
 /// Bytes of function names a "no such function" error lists.
@@ -193,6 +197,7 @@ impl Session {
         text.push_str(resources::USAGE);
         text.push_str(callgraph::USAGE);
         text.push_str(hierarchy::USAGE);
+        text.push_str(GETCLASS_USAGE);
         let entries: Vec<Value> = entries
             .iter()
             .map(|entry| json!({"name": entry.name, "version": version(entry), "size": entry.size, "status": status(&entry.status)}))
@@ -304,7 +309,7 @@ struct Carried {
 /// tool is [`unsupported`].
 const CARRIED: &[Carried] = &[
     Carried { tool: "listclass", run: listclass, dex_only: &[] },
-    Carried { tool: "getclass", run: getclass, dex_only: &["debug_info"] },
+    Carried { tool: "getclass", run: getclass, dex_only: &[] },
     Carried { tool: "getmanifest", run: getmanifest, dex_only: &[] },
     Carried { tool: "manifest_summary", run: manifest_summary, dex_only: &[] },
     Carried { tool: "resources", run: resources::resources, dex_only: &[] },
@@ -432,7 +437,9 @@ fn getclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     let target = Target::parse(class, str_arg(args, "method")?);
     let entry = str_arg(args, "entry")?;
     let engine = &session.engine;
-    let get = |function: Option<&str>| engine.get_class(&ClassQuery { record: target.record, function, entry });
+    // The debug directives of a listing are its `; line N` lines.
+    let style = ListingStyle { lines: bool_arg(args, "debug_info")?.unwrap_or(false) };
+    let get = |function: Option<&str>| engine.get_class_as(&ClassQuery { record: target.record, function, entry }, style);
     let source = match get(target.function) {
         // The function as a findrefs row names it, with the instruction's offset.
         Err(EngineError::NotFound { what: "function", .. }) if target.function.is_some_and(|f| without_pc(f) != f) => {
@@ -501,10 +508,10 @@ impl Spec<'_> {
 /// One kind of reference `findrefs` searches a HarmonyOS program for. A kind
 /// the engine learns is one more row of [`RefKind::ALL`].
 struct RefKind {
-    /// As `kind` and `KIND:VALUE` conditions spell it.
+    /// As `kind` and `KIND:VALUE` conditions spell it: one of
+    /// [`Query::KINDS`]. The other spellings models use are the engine's
+    /// ([`Query::kind_named`]), which reads them inside rules too.
     name: &'static str,
-    /// Other spellings models use; case and a trailing `s` do not matter.
-    aliases: &'static [&'static str],
     /// The query a condition object asks for.
     query: fn(&Spec<'_>) -> Result<Query, EngineError>,
     /// What `value` is, for the program's introduction.
@@ -515,26 +522,22 @@ impl RefKind {
     const ALL: &'static [RefKind] = &[
         RefKind {
             name: "string",
-            aliases: &["str", "text"],
             query: |spec| if spec.literal { Ok(Query::string_literal(&*spec.value)) } else { Query::string_regex(&spec.value) },
             usage: "regex (literal=true: text)",
         },
-        RefKind { name: "literal", aliases: &[], query: |spec| Ok(Query::string_literal(&*spec.value)), usage: "text" },
+        RefKind { name: "literal", query: |spec| Ok(Query::string_literal(&*spec.value)), usage: "text" },
         RefKind {
             name: "prop",
-            aliases: &["property", "propertie"],
             query: |spec| Ok(Query::Prop { name: spec.name(&spec.value)?, access: spec.access }),
             usage: "property name regex (exact / literal), access=read|write|define|call",
         },
         RefKind {
             name: "global",
-            aliases: &[],
             query: |spec| Query::global(spec.name(&spec.value)?, spec.access),
             usage: "global name regex (exact / literal), access=read|write",
         },
         RefKind {
             name: "import",
-            aliases: &[],
             query: |spec| match Query::import(&spec.value, spec.literal)? {
                 Query::Import { request, name, .. } => Ok(Query::Import { request, name, declarations_only: spec.declarations_only }),
                 other => Ok(other),
@@ -544,19 +547,12 @@ impl RefKind {
         },
         RefKind {
             name: "method",
-            aliases: &["function", "func"],
             query: |spec| Query::method(without_pc(&spec.value), |name| name_pattern(name, false, spec.exact)),
             usage: "[RECORD->]FUNCTION, where it is defined (or `class` + `name`; exact)",
         },
-        RefKind {
-            name: "number",
-            aliases: &["num", "int", "const"],
-            query: |spec| Ok(Query::Number(spec.value.parse()?)),
-            usage: "1919810, 0x1d4b42, 1.5 or A..B",
-        },
+        RefKind { name: "number", query: |spec| Ok(Query::Number(spec.value.parse()?)), usage: "1919810, 0x1d4b42, 1.5 or A..B" },
         RefKind {
             name: "call",
-            aliases: &[],
             query: |spec| match (spec.literal, spec.value.starts_with('{')) {
                 (true, _) => Ok(Query::Call(Pattern::contains(&*spec.value))),
                 (false, true) => Query::condition(&format!("call:{}", spec.value)),
@@ -584,11 +580,9 @@ impl RefKind {
     }
 
     fn find(kind: &str) -> Result<&'static RefKind, ToolError> {
-        let spelled = kind.trim().to_ascii_lowercase();
-        let find = |k: &str| RefKind::ALL.iter().find(|kind| kind.name == k || kind.aliases.contains(&k));
-        find(&spelled)
-            .or_else(|| spelled.strip_suffix('s').and_then(find))
-            .ok_or_else(|| unsupported_search(&format!("kind={}", kind.trim())))
+        let named = Query::kind_named(kind);
+        let found = named.and_then(|name| RefKind::ALL.iter().find(|known| known.name == name));
+        found.ok_or_else(|| unsupported_search(&format!("kind={}", kind.trim())))
     }
 }
 
@@ -1204,6 +1198,9 @@ mod tests {
         let nested = asked(json!({"rule": "call:{string:token & !method:=test}"})).unwrap();
         assert!(nested.starts_with("Refs(CallTo(Matching(All([StringRegex(") && nested.contains("Not(Method {"), "{nested}");
         assert_eq!(asked(json!({"kind": "call", "value": "{string:token & !method:=test}"})).unwrap(), nested);
+        // Inside the braces a kind has the spellings it has outside.
+        assert_eq!(asked(json!({"rule": "call:{strings:token & !function:=test}"})).unwrap(), nested);
+        assert_eq!(asked(json!({"kind": "calls", "value": "{Text:token & !Functions:=test}"})).unwrap(), nested);
         // `=NAME` is the exact name wherever a name is given; with `exact` the text is taken as it is.
         assert_eq!(
             asked(json!({"kind": "global", "value": "=console"})),

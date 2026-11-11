@@ -27,13 +27,17 @@
 //!   starts with, and the label is repeated on its own line there;
 //! - module instructions are annotated with the import or export they index;
 //! - registers at or above the function's `vregs` are arguments, `a0` …;
-//! - inline-cache slot operands are left out unless [`Options::ic_slots`].
+//! - inline-cache slot operands are left out unless [`Options::ic_slots`];
+//! - an annotation the program declares stands under the header of the
+//!   function that carries it, `; @RECORD(name=value)`, and the fields of
+//!   an annotation interface show their default values.
 //!
 //! Malformed input never panics and never hides the rest of a record: what
 //! cannot be read is replaced by `<error: …>` where it would have stood, and
 //! an undecodable instruction ends its function's listing with such a
 //! marker.
 
+mod annotation;
 mod function;
 mod insn;
 mod literal;
@@ -41,7 +45,7 @@ mod module;
 mod record;
 mod text;
 
-use std::fmt;
+use std::fmt::{self, Write};
 
 use asc_abc::{Abc, AbcError, Class, Method};
 use asc_arkisa::{Instruction, OperandKind};
@@ -76,25 +80,81 @@ pub struct Options<'a> {
     /// The source the record was compiled from, when a source map says:
     /// the record's header names the file, and the line of a function gets
     /// its line there, `line 116 (source line 21)`, or `(no source line)`
-    /// for a function the build added.
+    /// for a function the build added. A record made from several files
+    /// has them numbered in its header, and a line says which:
+    /// `(source #2 line 21)`.
     pub source: Option<SourceLines<'a>>,
+}
+
+/// A line of one of the source files of a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLine {
+    /// Which of [`SourceLines::files`], by index.
+    pub file: u32,
+    /// The line of that file, counted from 1.
+    pub line: u32,
 }
 
 /// What a source map says of the lines the debug info of a record names:
 /// they are lines of the file the build compiled, not of the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceLines<'a> {
-    /// The source file, as the source map names it.
-    pub file: &'a str,
+    /// The source files, as the source map names them.
+    pub files: &'a [String],
+    /// The files the header of the record names, by index into `files`:
+    /// those some line comes from. With more than one, every source line
+    /// says which file it is a line of.
+    pub named: &'a [u32],
     /// For each line of the compiled file, counted from 0 as the debug
-    /// info counts: the line of `file` it was made from, counted from 1.
-    pub lines: &'a [Option<u32>],
+    /// info counts: the source line it was made from.
+    pub lines: &'a [Option<SourceLine>],
 }
 
 impl SourceLines<'_> {
+    /// Most files the header of a record names; the rest is counted.
+    const MAX_NAMED: usize = 8;
+
     /// The source line behind line `compiled` of the debug info.
-    pub(crate) fn of(&self, compiled: u32) -> Option<u32> {
+    pub(crate) fn of(&self, compiled: u32) -> Option<SourceLine> {
         self.lines.get(usize::try_from(compiled).ok()?).copied().flatten()
+    }
+
+    fn several(&self) -> bool {
+        self.named.len() > 1
+    }
+
+    /// `source line 21`, or `source #2 line 21` when the record has
+    /// several source files.
+    pub(crate) fn write_line<W: Write>(&self, out: &mut W, at: SourceLine) -> fmt::Result {
+        if self.several() {
+            write!(out, "source #{} line {}", at.file, at.line)
+        } else {
+            write!(out, "source line {}", at.line)
+        }
+    }
+
+    /// The header line of a record: the file, or the numbered files, and
+    /// how the lines of the listing are to be read.
+    pub(crate) fn write_header<W: Write>(&self, out: &mut W) -> fmt::Result {
+        let name = |index: u32| self.files.get(index as usize).map_or("", String::as_str);
+        if !self.several() {
+            out.write_str("; source ")?;
+            text::write_name(out, name(self.named.first().copied().unwrap_or(0)))?;
+            return out.write_str(
+                " (by the source map: \"line N\" of a function is a line of the compiled file, from 0; \"source line\" is the line here)\n",
+            );
+        }
+        out.write_str("; sources")?;
+        for (nth, &index) in self.named.iter().take(Self::MAX_NAMED).enumerate() {
+            write!(out, "{} #{index} ", if nth == 0 { "" } else { "," })?;
+            text::write_name(out, name(index))?;
+        }
+        if let Some(more) = self.named.len().checked_sub(Self::MAX_NAMED).filter(|&more| more > 0) {
+            write!(out, ", … (+{more} more)")?;
+        }
+        out.write_str(
+            " (by the source map: \"line N\" of a function is a line of the compiled file, from 0; \"source #K line N\" is line N of source #K)\n",
+        )
     }
 }
 

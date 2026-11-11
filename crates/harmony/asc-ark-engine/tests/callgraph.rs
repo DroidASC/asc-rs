@@ -194,7 +194,7 @@ fn callees_follow_imports_exports_and_classes() {
             "  1 -> import:N:missing/Gone&#gone [external]",
             "  1 -> App->#*@0*#cb | run.cb [defines]",
             // The record resolves, the member is not a method of the class.
-            "  1 -> import:N:lib/Index&#Box.nothing [external]",
+            "  1 -> import:N:lib/Index&#Box.nothing [unlinked]",
         ]
     );
     // Unresolved call sites are counted on the row, and listed on request.
@@ -405,8 +405,8 @@ fn unreadable_code_hides_the_exports_of_its_record() {
     let dir = tempfile::tempdir().unwrap();
     let engine = open(dir.path(), &builder);
     let rows = lines(&engine, &query(CallRoots::function(&format!("{APP}->#*#run")), Direction::Callees, 1));
-    assert!(rows.contains(&"  1 -> import:N:util/Util&#helper [external]".to_owned()), "{rows:?}");
-    assert!(rows.contains(&"  1 -> import:N:lib/Index&#star [external]".to_owned()), "{rows:?}");
+    assert!(rows.contains(&"  1 -> import:N:util/Util&#helper [unlinked]".to_owned()), "{rows:?}");
+    assert!(rows.contains(&"  1 -> import:N:lib/Index&#star [unlinked]".to_owned()), "{rows:?}");
     // The other record is not affected.
     assert!(rows.contains(&"  1 -> Box->#~@0<#make | Box.make".to_owned()), "{rows:?}");
     assert!(!rows.iter().any(|row| row.contains("Util->")), "{rows:?}");
@@ -529,9 +529,9 @@ fn exported_objects_and_decorated_classes_are_followed() {
             // An object of a class of the exporting record.
             "  1 -> Service->#~@0>#ping | Local.ping [instance]",
             // `one = Middle.build()`: what a call returned is not known.
-            "  1 -> import:N:svc/Service&#one.run [external]",
+            "  1 -> import:N:svc/Service&#one.run [unlinked]",
             // No class of the chain lists it.
-            "  1 -> import:N:svc/Service&#api.absent [external]",
+            "  1 -> import:N:svc/Service&#api.absent [unlinked]",
             "  1 -> Base->#~@1=#Tagged | Tagged.constructor [reassigned]",
             "  1 -> Base->#~@1<#create | Tagged.create [reassigned]",
             // `Middle.make()`: a static method of the parent.
@@ -743,7 +743,7 @@ fn a_binding_written_twice_is_followed_only_as_a_decorated_class() {
         [
             "  1 -> Base->#~@1=#Watched | Watched.constructor [reassigned] [a.abc]",
             // Assigned two classes: neither is taken.
-            "  1 -> import:@normalized:N&&&entry/src/main/ets/base/Base&#Either [external] [new]",
+            "  1 -> import:@normalized:N&&&entry/src/main/ets/base/Base&#Either [unlinked] [new]",
         ]
     );
     let callers =

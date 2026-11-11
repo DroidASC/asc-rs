@@ -340,6 +340,10 @@ enum Command {
         /// several define it.
         #[arg(long, value_name = "NAME")]
         entry: Option<String>,
+        /// HarmonyOS: write `; line N` where the line of the debug info changes
+        /// (with ets/sourceMaps.map in the package: its source line too).
+        #[arg(long)]
+        lines: bool,
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// The Dalvik format class name to extract (e.g., Lcom/poc/Main; or com.poc.Main).
@@ -369,6 +373,11 @@ enum Command {
         /// several define it.
         #[arg(long, value_name = "NAME")]
         entry: Option<String>,
+        /// HarmonyOS: write `; line N` where the line of the debug info changes
+        /// (with ets/sourceMaps.map in the package: its source line too).
+        /// `--debuginfo` does the same there.
+        #[arg(long)]
+        lines: bool,
         /// Path to the input APK (or jar, .dex; or a HarmonyOS .hap, .app, .abc); a directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
         /// Class name in dotted or Dalvik form, e.g. com.poc.Main or Lcom/poc/Main;.
@@ -561,15 +570,20 @@ enum Command {
     /// no callee there, so rows say how each link was made: no mark for a
     /// proved call, `[new]`, `[super]` (the parent's constructor or method),
     /// `[this-class]` / `[inherited]` / `[instance]` (a method matched by
-    /// name in the class of the caller, in an ancestor, or in the class an
-    /// exported `new C()` was made of: not guaranteed), `[reassigned]` (a
+    /// name in the class of the caller, in an ancestor, or in the class of
+    /// an object: an exported `new C()`, or what a function such as
+    /// `C.getInstance()` returns: not guaranteed), `[reassigned]` (a
     /// class a decorator assigned again: holds if it kept the class),
     /// `[defines]` (a closure is
     /// created, not called); callees that are no function of the program
-    /// are leaves: `[external]` (the path starts at an import or a global
-    /// and no function of the program was found for it: system APIs, also
-    /// members of call results) or `[unresolved]` (the callee is a value
-    /// tracking lost); `unresolved=N` counts such call sites of a function.
+    /// are leaves: `[external]` (the path starts outside the program: a
+    /// system API, a native library, a global), `[unlinked]` (it starts at
+    /// an import of the program and led to no function: a member of a call
+    /// result, a member no class lists) or `[unresolved]` (the callee is a
+    /// value tracking lost); `unresolved=N` counts such call sites of a
+    /// function. `[N+ subclasses skipped]`: the class of the method has
+    /// more subclasses than a callers walk follows; callers through the
+    /// rest were not looked for.
     /// A callback the system calls has no callers.
     Callgraph {
         /// Write the tree to this file instead of stdout.
@@ -1178,6 +1192,8 @@ struct ClassArgs {
     res_names: bool,
     /// `--entry`: the ABC entry of a HarmonyOS program to look in.
     entry: Option<String>,
+    /// `--lines`: every line change in the listing of a HarmonyOS program.
+    lines: bool,
     apk_path: PathBuf,
     dalvik_class: String,
 }
@@ -1215,6 +1231,9 @@ fn class_methods(
 fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant) -> Result<(), String> {
     if args.entry.is_some() {
         return Err(HARMONY_ONLY_ENTRY.into());
+    }
+    if args.lines {
+        return Err(harmony_only("--lines"));
     }
     let descriptor = names::format_class_name(&args.dalvik_class).map_err(|e| e.to_string())?;
     let engine = io.engine(common, &args.apk_path);
@@ -1266,14 +1285,16 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
         }
     }
     match command {
-        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class } => {
+        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class } => {
             let debug_info = !no_debug_info;
-            let args = ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class };
+            let args =
+                ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
             getclass(io, common, args, t_start)?;
         }
-        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, entry, apk_path, dalvik_class } => {
+        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, entry, lines, apk_path, dalvik_class } => {
             let debug_info = debuginfo;
-            let args = ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class };
+            let args =
+                ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
             getclass(io, common, args, t_start)?;
         }
         Command::Listclass { prefix, all, entry, output, apk_path } => {

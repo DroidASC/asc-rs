@@ -330,7 +330,7 @@ fn what_is_not_supported_yet_says_what_is() {
             "{rule:?} is not a condition: write KIND:VALUE with KIND one of string, literal, prop, global, import, method, number, call"
         )
     };
-    let cases: [(&str, Value, String); 36] = [
+    let cases: [(&str, Value, String); 35] = [
         (
             "getmanifest",
             json!({"resolve": true}),
@@ -438,7 +438,6 @@ fn what_is_not_supported_yet_says_what_is() {
         ),
         ("findrefs", json!({"kind": "method", "name": "build", "class": "Index", "fuzzy_class": true}), "`fuzzy_class` is DEX-only".into()),
         ("findrefs", json!({"kind": "string", "value": "token", "collapse_sdks": true}), "`collapse_sdks` is DEX-only".into()),
-        ("getclass", json!({"class": "pages/Index", "debug_info": true}), "`debug_info` is DEX-only".into()),
     ];
     let calls: Vec<Value> = (cases.iter().zip(1..))
         .map(|((tool, args, _), id)| {
@@ -485,8 +484,9 @@ fn an_encrypted_entry_is_named_in_every_reply_and_left_out() {
         lines[5].starts_with("# resources: ") && lines[6].starts_with("# callgraph: ") && lines[7].starts_with("# hierarchy: "),
         "{lines:?}"
     );
+    assert!(lines[8].starts_with("# getclass: "), "{lines:?}");
     assert_eq!(
-        [&lines[..3], &lines[8..9]].concat(),
+        [&lines[..3], &lines[9..10]].concat(),
         [
             &format!("# apk1: HarmonyOS program, 2 abc entries (tools: {TOOLS}; `class` is a record, `method` a function)"),
             &format!("# abc | ets/modules.abc | 12.0.6.0 | {size} bytes | encrypted"),
@@ -954,7 +954,12 @@ fn the_introduction_says_what_the_tools_take_once() {
     let hap = inputs.sample_hap();
     let replies = session(&[call(1, "listclass", json!({"apk": hap})), call(2, "listclass", json!({"apk": hap}))]);
     let head: Vec<&str> = text(&replies[0]).lines().take_while(|line| line.starts_with('#')).collect();
-    assert_eq!(head.len(), 7, "{head:?}");
+    assert_eq!(head.len(), 8, "{head:?}");
+    assert_eq!(
+        head[7],
+        "# getclass: debug_info=true writes `; line N` where the line of the debug info changes (with ets/sourceMaps.map in the \
+         package: its source line too)"
+    );
     assert_eq!(
         head[2],
         "# findrefs `value` by kind: string: regex (literal=true: text); literal: text; prop: property name regex (exact / literal), \
@@ -992,13 +997,15 @@ fn the_introduction_says_what_the_tools_take_once() {
          matching and what only they reach; in these rules method:NAME is the function of that name (=NAME exact); defines=false \
          leaves out `[defines]` (a closure is created, not called); unresolved=true lists the unresolved call sites of callees; `entry`. \
          Rows: `[super]` proved; `[this-class]` / `[inherited]` / `[instance]` matched by name, `[reassigned]` through a \
-         decorated class: not guaranteed; `[external]` / `[unresolved]` are leaves, no function of the program"
+         decorated class: not guaranteed; leaves are no function of the program: `[external]` starts outside it (system API, \
+         global), `[unlinked]` at an import of it that led to no function, `[unresolved]` at a value tracking lost; \
+         `[N+ subclasses skipped]`: callers through that many subclasses were not looked for"
     );
     assert_eq!(
         head[6],
         "# hierarchy: class=NAME (EntryAbility) or RECORD->CLASS as rows print it, or \"import:REGEX\" / \"global:REGEX\" for the \
          subclasses of a parent outside the program (import:@ohos:app\\.ability\\.UIAbility, ^global:ViewPU$); direction, depth, \
-         max_nodes, `entry`; method=NAME marks `[defines FUNCTION]` from the class literal. Rows: `[external]` / `[unresolved]` are \
+         max_nodes, `entry`; method=NAME marks `[defines FUNCTION]` from the class's members. Rows: `[external]` / `[unresolved]` are \
          parents that are no class of the program (the path is where tracking stopped), `[reassigned]` a parent read from a binding a \
          decorator reassigns"
     );
@@ -1318,7 +1325,7 @@ fn callgraph_walks_both_ways_with_the_arguments_of_the_dex_tool() {
             "  1 -> import:@ohos:net.http#default.createHttp [external]",
             "  1 -> import:N:missing/Gone&#gone [external]",
             "  1 -> App->#*@0*#cb | run.cb [defines]",
-            "  1 -> import:N:lib/Index&#Box.nothing [external]",
+            "  1 -> import:N:lib/Index&#Box.nothing [unlinked]",
             "# 10 rows, 7 distinct functions, 3 leaves (callees, depth 1); 1 records scanned",
         ]
     );
@@ -1583,7 +1590,12 @@ fn unpacked_packages_and_zips_of_packages_open() {
         call(4, "resources", json!({"apk": unpacked, "xml": "$profile:main_pages"})),
         call(5, "listclass", json!({"apk": bundle})),
         call(6, "getclass", json!({"apk": bundle, "class": "pages/Index"})),
+        call(7, "getclass", json!({"apk": unpacked, "class": "pages/Index", "method": "Index.build", "debug_info": true})),
     ]);
+    // `debug_info` is the lines of the debug info, each where it starts.
+    let woven = text(&replies[6]);
+    assert!(woven.contains("\n  ; line 12 (source line 4)\n") && !woven.contains(", line 12"), "{woven}");
+    assert!(!text(&replies[2]).contains("\n  ; line "));
     assert_eq!(ok(&replies[0])["program"]["entries"][0]["name"], "ets/modules.abc");
     assert!(text(&replies[0]).contains("HarmonyOS program, 1 abc entry"), "{}", text(&replies[0]));
     assert!(rows(&replies[1]).contains(&"source-maps ets/sourceMaps.map modules=2"), "{:?}", rows(&replies[1]));
@@ -1624,7 +1636,12 @@ fn rules_exclude_nest_and_fence_as_on_the_dex_side() {
         call(13, "callgraph", json!({"apk_id": "apk1", "from": "method:=cb", "depth": 1})),
         call(14, "callgraph", json!({"apk_id": "apk1", "method": "star", "from": "method:=make"})),
         call(15, "findrefs", json!({"apk_id": "apk1", "rule": "call:{method:=star}", "offset": 1})),
+        call(16, "findrefs", json!({"apk_id": "apk1", "rule": "calls:{Functions:=star}"})),
+        call(17, "callgraph", json!({"apk_id": "apk1", "to": "property:=log", "depth": 1, "defines": false})),
     ]);
+    // Other spellings of a kind are read inside braces as outside, and by every tool that takes a rule.
+    assert_eq!(text(&replies[15]), text(&replies[3]));
+    assert_eq!(text(&replies[16]), text(&replies[11]));
     let both = "App->#*#run+0x6 | run | prop +0x6 ldobjbyname \"make\" [call] && prop +0x3a ldobjbyname \"then\" [call]";
     assert_eq!(short_calls(&replies[1])[0], both);
     assert_eq!(ok(&replies[2])["total"], 0);

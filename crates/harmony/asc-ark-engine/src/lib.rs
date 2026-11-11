@@ -50,7 +50,7 @@ use std::time::Instant;
 pub use asc_abc::RecordKind;
 pub use asc_hap;
 pub use callgraph::{
-    CallEdge, CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EdgeKind, FormCount, GraphSize, Reached, RequestForm,
+    CallEdge, CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EdgeKind, FormCount, GraphSize, LeafKind, Reached, RequestForm,
 };
 pub use error::{EngineError, Result};
 pub use hierarchy::{ClassDefinition, ClassNode, ClassRow, DefinedMethod, HierarchyQuery, HierarchyTree, Lineage, ParentKind};
@@ -84,6 +84,10 @@ pub struct MemoryUse {
     /// the callee paths of call sites). An estimate from
     /// the capacities of the tables, without the allocator's overhead.
     pub analyses: usize,
+    /// On the heap for as long as the program is open, once a listing
+    /// asked: where each module is in `ets/sourceMaps.map` of a debug
+    /// build (the file itself is read in place, or counts as `inflated`).
+    pub source_maps: usize,
     /// The code and documents read in place from the mapped files (the
     /// rest of a package, its libraries and resources, is never touched):
     /// pages the system reads on demand and may drop again. Entries read in
@@ -95,7 +99,7 @@ pub struct MemoryUse {
 impl MemoryUse {
     /// The bytes on the heap: what closing the engine gives back for sure.
     pub fn heap(&self) -> usize {
-        self.inflated + self.analyses
+        self.inflated + self.analyses + self.source_maps
     }
 }
 
@@ -112,6 +116,15 @@ pub struct ClassQuery<'q> {
     /// Look in this ABC entry only (its name, or a suffix of it starting at
     /// a `/`), for a record several entries define.
     pub entry: Option<&'q str>,
+}
+
+/// How [`Engine::get_class_as`] writes a listing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListingStyle {
+    /// Write `; line N` where the line of the debug info changes, instead
+    /// of only the first line of a function in its header. With source
+    /// maps in the package each says its source line too.
+    pub lines: bool,
 }
 
 /// Disassembly of a record or function.
@@ -202,6 +215,7 @@ impl Engine {
         MemoryUse {
             inflated: program.inflated,
             analyses: self.graph_cache().heap_bytes() + self.class_cache().heap_bytes(),
+            source_maps: program.source_maps,
             mapped: program.mapped,
         }
     }
@@ -263,16 +277,25 @@ impl Engine {
     /// candidates) when the record or function name does not pick exactly
     /// one; [`EngineError::Disassembly`] when the record is malformed.
     pub fn get_class(&self, query: &ClassQuery<'_>) -> Result<ClassSource> {
+        self.get_class_as(query, ListingStyle::default())
+    }
+
+    /// As [`Engine::get_class`], written the way `style` says.
+    ///
+    /// # Errors
+    /// As [`Engine::get_class`].
+    pub fn get_class_as(&self, query: &ClassQuery<'_>, style: ListingStyle) -> Result<ClassSource> {
         let located = records::resolve_record(&self.program, query.record, query.entry)?;
         let record = String::from_utf8_lossy(located.class.name()).into_owned();
         // The source of a debug build, when its package packs source maps.
         let map = self.program.module_map(located.entry, &record);
+        let listing = disasm::Listing { map: map.as_ref(), lines: style.lines };
         let (function, text) = match query.function {
-            None => (None, disasm::record_from(&located.abc, &located.class, map.as_ref())?),
+            None => (None, disasm::record_from(&located.abc, &located.class, listing)?),
             Some(name) => {
                 let method = records::resolve_function(&located, name)?;
                 let raw = method.name().map(|name| name.to_str().into_owned()).unwrap_or_default();
-                (Some(raw), disasm::function_from(&located.abc, &located.class, &method, map.as_ref())?)
+                (Some(raw), disasm::function_from(&located.abc, &located.class, &method, listing)?)
             }
         };
         Ok(ClassSource { entry: located.entry.to_owned(), record, function, text })

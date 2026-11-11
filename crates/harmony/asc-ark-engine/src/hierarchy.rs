@@ -31,8 +31,9 @@
 //!
 //! A class is identified by its constructor: `RECORD->#~@0=#Name`, printed
 //! with the class name restored from it. The methods a class defines are
-//! the ones its literal array lists; accessors, fields and methods with
-//! computed names are defined by later instructions and are not seen.
+//! the ones its literal array lists and the methods and accessors the
+//! instructions after the definition add by name ([`crate::scopes`]);
+//! fields and methods with computed names are not seen.
 //!
 //! The classes of a record are worked out when a walk first needs them and
 //! kept for the life of the [`Engine`] (until [`Engine::release_analyses`]):
@@ -183,7 +184,7 @@ pub struct ClassRow {
     /// the class and then a value computed at run time (a class decorator):
     /// the subclass extends the class or what replaced it.
     pub reassigned: bool,
-    /// The methods of the queried name the class literal lists.
+    /// The methods (and accessors) of the queried name the class defines.
     pub defines: Vec<DefinedMethod>,
     /// A method was asked for and the layout of the class literal was not
     /// understood: whether the class defines it is not known.
@@ -797,13 +798,19 @@ impl<'e> Session<'e> {
         }
     }
 
-    /// The classes `records` define with one of `parents` as their parent;
-    /// the definitions of those records are worked out, and their parents
-    /// resolved, on the engine's threads.
+    /// The classes `records` define with one of `parents` as their parent,
+    /// each with that parent, in the order of `records`; the definitions of
+    /// those records are worked out, and their parents resolved, on the
+    /// engine's threads.
     ///
     /// # Errors
     /// [`EngineError::Cancelled`].
-    pub(crate) fn subclasses_among(&self, parents: &HashSet<ClassRef>, records: &[RecordId], cancel: &AtomicBool) -> Result<Vec<ClassRef>> {
+    pub(crate) fn subclasses_among(
+        &self,
+        parents: &HashSet<ClassRef>,
+        records: &[RecordId],
+        cancel: &AtomicBool,
+    ) -> Result<Vec<(ClassRef, ClassRef)>> {
         let units: Vec<Range<usize>> = chunks(records.len(), RECORDS_PER_UNIT).collect();
         let found = run_units(units.len(), self.engine.threads, cancel, |unit| {
             let mut found = Vec::new();
@@ -812,7 +819,7 @@ impl<'e> Session<'e> {
                 for def in &classes.defs {
                     if let Some((Node::Class(parent), _)) = self.parent_node(id, &classes, &def.parent) {
                         if parents.contains(&parent) {
-                            found.push(ClassRef { entry: id.entry, ctor: def.ctor });
+                            found.push((ClassRef { entry: id.entry, ctor: def.ctor }, parent));
                         }
                     }
                 }

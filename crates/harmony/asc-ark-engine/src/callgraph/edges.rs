@@ -48,11 +48,22 @@
 //! A parent link through a reassigned binding makes the edge
 //! [`EdgeKind::Reassigned`] whatever else it is.
 //!
-//! Everything else is a leaf: *external* when the path starts at an import
-//! or a global (`import:@ohos:net.http#default.createHttp`, a system API,
-//! or a program import that did not resolve to a function), *unresolved*
-//! otherwise (`this.cfg.get`, `arg0.then`, `lex(0,1)`, `?`). No call site
-//! is dropped.
+//! - `F().name`, `C.getter().name`, `C.property.name`, where the function
+//!   returns, or the static property holds, objects of one class
+//!   ([`super::made`], the rules are there): [`EdgeKind::Instance`] as
+//!   well, the method `name` of that class or of its nearest ancestor that
+//!   lists it. Here the class of the object is told from the code of the
+//!   record that hands it out, not proved. `C.getter` has to be a static
+//!   method `C` itself lists.
+//!
+//! Everything else is a leaf ([`LeafKind`]): *external* when the path
+//! starts outside the program, at a global or at an import whose request
+//! names no record of it (`import:@ohos:net.http#default.createHttp`, a
+//! system API, a native library); *unlinked* when it starts at an import
+//! of a record of the program and led to no function (a member of what a
+//! call returned, a static member no class of the chain lists, a binding
+//! with several writers); *unresolved* otherwise (`this.cfg.get`,
+//! `arg0.then`, `lex(0,1)`, `?`). No call site is dropped.
 //!
 //! Creating a function object is not calling it, but it is how control
 //! gets into callbacks: every `definefunc` / `definemethod`, class
@@ -83,7 +94,7 @@ const MAX_HOPS: usize = 8;
 /// Parent links followed from a class upward before a member is given up.
 const MAX_ANCESTORS: usize = 32;
 /// `new value(...)`.
-const NEW: Link = Link::Call { construct: true };
+pub(super) const NEW: Link = Link::Call { construct: true };
 
 /// A function of a program: the ABC entry and the offset of its method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -106,10 +117,12 @@ pub enum EdgeKind {
     /// class, or the method of the nearest ancestor that lists the name.
     /// Proved as far as the parent links of the hierarchy are.
     Super,
-    /// `binding.name(...)` on a module-level binding whose one writer
-    /// stores `new C(...)`: the method of `C`, or of its nearest ancestor
-    /// that lists the name. The object is proved to be one that `new C`
-    /// made; the method is matched by name.
+    /// A call on an object of class `C`: the method of `C`, or of its
+    /// nearest ancestor that lists the name, matched by name. The object is
+    /// a module-level binding whose one writer stores `new C(...)` (proved
+    /// to be one that `new C` made), or what a function returned or a
+    /// static property holds (`C.getInstance().name(...)`), its class told
+    /// from the code of the record that hands it out.
     Instance,
     /// `this.name(...)` matched by name against the class of the calling
     /// method: a subclass may override it.
@@ -157,6 +170,37 @@ impl EdgeKind {
     }
 }
 
+/// Why a call site leads to no function of the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum LeafKind {
+    /// The callee path starts outside the program: at a global, or at an
+    /// import whose request names no record of it (a system module, a
+    /// native library, a package that is not there).
+    External,
+    /// The path starts at an import of a record of the program, and what
+    /// follows led to no function: a member of what a call returned, a
+    /// member no class of the chain lists, a binding with several writers.
+    Unlinked,
+    /// Tracking stopped: a parameter, a property of `this`, a value from
+    /// another block.
+    Unresolved,
+}
+
+impl LeafKind {
+    /// Every kind, in order.
+    pub const ALL: [LeafKind; 3] = [LeafKind::External, LeafKind::Unlinked, LeafKind::Unresolved];
+
+    /// The flag a row carries.
+    pub const fn label(self) -> &'static str {
+        match self {
+            LeafKind::External => "external",
+            LeafKind::Unlinked => "unlinked",
+            LeafKind::Unresolved => "unresolved",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Target {
     Function(FnRef),
@@ -164,7 +208,7 @@ pub(crate) enum Target {
     /// [`RecordEdges::texts`].
     Leaf {
         text: u32,
-        external: bool,
+        kind: LeafKind,
     },
 }
 
@@ -213,6 +257,13 @@ impl RecordEdges {
         self.edges.len()
     }
 
+    /// Whether a call site of the record (not a definition) leads to one of `functions`.
+    pub(crate) fn calls_any_of(&self, functions: &HashSet<FnRef>) -> bool {
+        self.edges
+            .iter()
+            .any(|edge| edge.kind != EdgeKind::Defines && matches!(edge.target, Target::Function(to) if functions.contains(&to)))
+    }
+
     /// Bytes this takes on the heap, roughly.
     pub(crate) fn heap_bytes(&self) -> usize {
         self.edges.capacity() * std::mem::size_of::<Edge>()
@@ -243,13 +294,13 @@ impl Texts {
 }
 
 /// The record a callee is resolved in.
-struct Home<'s, 'a> {
-    id: RecordId,
-    abc: Abc<'a>,
-    class: Class<'a>,
-    module: Option<ModuleRecord<'a>>,
-    slot: &'s Slot,
-    scopes: &'s Scopes,
+pub(super) struct Home<'s, 'a> {
+    pub id: RecordId,
+    pub abc: Abc<'a>,
+    pub class: Class<'a>,
+    pub module: Option<ModuleRecord<'a>>,
+    pub slot: &'s Slot,
+    pub scopes: &'s Scopes,
     /// Where the binding behind each import of the record is defined, as
     /// far as call sites asked: per regular import index, and per module
     /// request and member name (a file offset) for namespaces.
@@ -261,6 +312,12 @@ struct Home<'s, 'a> {
     /// The methods looked for in ancestors so far: per class, side (`true`:
     /// static) and name (an offset in the file of the record).
     inherited: RefCell<HashMap<(ClassRef, bool, u32), Option<Found>>>,
+    /// Per module request of the record asked about so far: whether it
+    /// names a record of the program.
+    requests: RefCell<HashMap<u32, bool>>,
+    /// What the functions call sites asked about return, per record and
+    /// method offset ([`super::made`]).
+    pub returned: RefCell<HashMap<(RecordId, u32), Option<super::made::Made>>>,
 }
 
 /// Bindings resolved so far, by what names them; `None` for the ones that
@@ -278,17 +335,17 @@ struct Bound {
 
 /// A method found in a class or one of its ancestors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Found {
-    method: FnRef,
+pub(super) struct Found {
+    pub method: FnRef,
     /// It is listed by an ancestor, not by the class the lookup started at.
     inherited: bool,
     /// A parent link on the way goes through a reassigned binding.
-    reassigned: bool,
+    pub reassigned: bool,
 }
 
 /// What weakens the claim of an edge, collected while its callee is followed.
 #[derive(Debug, Clone, Copy, Default)]
-struct Caveats {
+pub(super) struct Caveats {
     /// A binding on the way is reassigned.
     reassigned: bool,
     /// The value was read from a module-level binding that holds a freshly
@@ -300,17 +357,17 @@ struct Caveats {
 
 /// What a call instruction says besides its callee.
 #[derive(Debug, Clone, Copy)]
-struct Site {
+pub(super) struct Site {
     /// `new callee(...)`.
-    construct: bool,
+    pub construct: bool,
     /// `super(...)` of the running function.
-    own_super: bool,
+    pub own_super: bool,
 }
 
 /// What a call site leads to.
-struct Callee {
-    target: FnRef,
-    kind: EdgeKind,
+pub(super) struct Callee {
+    pub target: FnRef,
+    pub kind: EdgeKind,
     through_import: bool,
 }
 
@@ -327,7 +384,7 @@ fn joined(stored: &Path, links: &[Link]) -> Option<Path> {
 impl<'e> Session<'e> {
     /// The function the callee `path` of a call in `function` (a method
     /// offset of `home`) is, when that can be told.
-    fn callee(&self, home: &Home<'_, 'e>, function: u32, path: &Path, site: Site) -> Option<Callee> {
+    pub(super) fn callee(&self, home: &Home<'_, 'e>, function: u32, path: &Path, site: Site) -> Option<Callee> {
         let Site { construct, own_super } = site;
         let mut path = path.clone();
         // The record the path is read in: `home`, until an import is followed.
@@ -349,14 +406,20 @@ impl<'e> Session<'e> {
                 // a path that starts at the class (so that here such a path is left with the
                 // members the class inherits), or the one of an ancestor.
                 Origin::Definition(Some(class)) => {
+                    let (slot, scopes) = match &abroad {
+                        None => (home.slot, home.scopes),
+                        Some((id, slot)) => (&**slot, self.scopes(slot, *id)?),
+                    };
                     let (is_static, name) = match path.links[..] {
                         [Link::Property(Some(name))] => (true, name),
                         [NEW, Link::Property(Some(name))] => (false, name),
+                        // A method of the object a function returned or a static property holds.
+                        _ if !construct => {
+                            let (target, reassigned) = self.method_of_made(home, at, slot, scopes, class, &path.links)?;
+                            let kind = if caveats.reassigned || reassigned { EdgeKind::Reassigned } else { EdgeKind::Instance };
+                            return Some(Callee { target, kind, through_import: crossed });
+                        }
                         _ => return None,
-                    };
-                    let scopes = match &abroad {
-                        None => home.scopes,
-                        Some((id, slot)) => self.scopes(slot, *id)?,
                     };
                     let found = self.method_of(home, ClassRef { entry: at.entry, ctor: class }, scopes, is_static, name, false)?;
                     let kind = match found {
@@ -409,8 +472,17 @@ impl<'e> Session<'e> {
                     abroad = Some((bound.record, Arc::clone(&bound.slot)));
                 }
                 Origin::This(frame) if !crossed => {
-                    let [Link::Property(Some(name))] = path.links[..] else { return None };
                     let membership = home.scopes.membership(frame_function(frame, function))?;
+                    let [Link::Property(Some(name))] = path.links[..] else {
+                        // In a static method `this` is the class: `this.getInstance().name`.
+                        if construct || !membership.is_static || !matches!(path.links[..], [Link::Property(_), _, ..]) {
+                            return None;
+                        }
+                        let (target, reassigned) =
+                            self.method_of_made(home, home.id, home.slot, home.scopes, membership.class, &path.links)?;
+                        let kind = if reassigned { EdgeKind::Reassigned } else { EdgeKind::Instance };
+                        return Some(Callee { target, kind, through_import: false });
+                    };
                     let class = ClassRef { entry: home.id.entry, ctor: membership.class };
                     let found = self.method_of(home, class, home.scopes, membership.is_static, name, false)?;
                     let kind = match found {
@@ -422,7 +494,8 @@ impl<'e> Session<'e> {
                 }
                 Origin::Super(frame) if !crossed => {
                     let of = frame_function(frame, function);
-                    let membership = home.scopes.membership(of)?;
+                    // An arrow function has the `super` of the method around it.
+                    let membership = home.scopes.membership(home.scopes.home_member(of)?)?;
                     let class = ClassRef { entry: home.id.entry, ctor: membership.class };
                     let (target, reassigned) = match path.links[..] {
                         // `super(...)`: of the constructor that runs, not of a function inside it.
@@ -449,7 +522,15 @@ impl<'e> Session<'e> {
     /// file of `home`, on its static or instance side: its own, or the one
     /// of its nearest ancestor that lists the name; of an ancestor only
     /// with `above`. `scopes` are those of the record of `class`.
-    fn method_of(&self, home: &Home<'_, 'e>, class: ClassRef, scopes: &Scopes, is_static: bool, name: u32, above: bool) -> Option<Found> {
+    pub(super) fn method_of(
+        &self,
+        home: &Home<'_, 'e>,
+        class: ClassRef,
+        scopes: &Scopes,
+        is_static: bool,
+        name: u32,
+        above: bool,
+    ) -> Option<Found> {
         let bytes = home.abc.string(name).ok()?.bytes;
         if !above {
             if let Some(method) = listed(&self.abc(class.entry)?, scopes, class, is_static, bytes)? {
@@ -508,7 +589,14 @@ impl<'e> Session<'e> {
     /// The value of the module-level binding of record `id` whose local
     /// export entries are `group`: what its one writer stores, or the class
     /// a decorator reassigns (and `caveats` then says so).
-    fn stored<'s>(&self, id: RecordId, slot: &'s Slot, scopes: &'s Scopes, group: &[u32], caveats: &mut Caveats) -> Option<Cow<'s, Path>> {
+    pub(super) fn stored<'s>(
+        &self,
+        id: RecordId,
+        slot: &'s Slot,
+        scopes: &'s Scopes,
+        group: &[u32],
+        caveats: &mut Caveats,
+    ) -> Option<Cow<'s, Path>> {
         match scopes.module_binding(group) {
             Ok(written) => Some(Cow::Borrowed(&written.path)),
             Err(Unresolved::MultipleWriters) => {
@@ -592,7 +680,7 @@ impl<'e> Session<'e> {
         Self::read_back(home, of, &stored, links, caveats)
     }
 
-    fn home<'s>(&self, id: RecordId, slot: &'s Slot, scopes: &'s Scopes) -> Option<Home<'s, 'e>> {
+    pub(super) fn home<'s>(&self, id: RecordId, slot: &'s Slot, scopes: &'s Scopes) -> Option<Home<'s, 'e>> {
         let abc = self.abc(id.entry)?;
         let class = abc.class(id.class).ok()?;
         Some(Home {
@@ -606,7 +694,38 @@ impl<'e> Session<'e> {
             namespaces: RefCell::default(),
             foreign: RefCell::default(),
             inherited: RefCell::default(),
+            requests: RefCell::default(),
+            returned: RefCell::default(),
         })
+    }
+
+    /// What kind of leaf `path`, a callee of record `home` that led to no
+    /// function, is.
+    fn leaf_kind(&self, home: &Home<'_, 'e>, path: &Path) -> LeafKind {
+        if !path.is_known() {
+            return LeafKind::Unresolved;
+        }
+        let request = match path.origin {
+            Origin::Global(_) | Origin::GlobalObject => return LeafKind::External,
+            Origin::Import(index) => {
+                let import = home.module.as_ref().and_then(|module| module.regular_imports.get(index as usize));
+                import.map(|import| u32::from(import.module_request_idx))
+            }
+            Origin::Namespace(index) => Some(index),
+            _ => return LeafKind::Unresolved,
+        };
+        // An import that does not read names nothing of the program.
+        let Some(request) = request else { return LeafKind::External };
+        let in_program = *home
+            .requests
+            .borrow_mut()
+            .entry(request)
+            .or_insert_with(|| u16::try_from(request).ok().and_then(|request| self.layout().request(home.id, request)).is_some());
+        if in_program {
+            LeafKind::Unlinked
+        } else {
+            LeafKind::External
+        }
     }
 
     /// The edges of record `id`; `slot` is its slot and `scopes` are its own.
@@ -644,15 +763,9 @@ impl<'e> Session<'e> {
                         Edge { pc: pc_of(insn), kind, target: Target::Function(target), via: through_import.then(|| texts.id(&text)) }
                     }
                     None => {
-                        let named =
-                            matches!(path.origin, Origin::Import(_) | Origin::Namespace(_) | Origin::Global(_) | Origin::GlobalObject);
                         let kind = if site.construct { EdgeKind::New } else { EdgeKind::Call };
-                        Edge {
-                            pc: pc_of(insn),
-                            kind,
-                            target: Target::Leaf { text: texts.id(&text), external: named && path.is_known() },
-                            via: None,
-                        }
+                        let target = Target::Leaf { text: texts.id(&text), kind: self.leaf_kind(&home, &path) };
+                        Edge { pc: pc_of(insn), kind, target, via: None }
                     }
                 };
                 out.edges.push(edge);
@@ -675,7 +788,7 @@ impl<'e> Session<'e> {
 }
 
 /// The function whose frame `frame` is, for a value read in `function`.
-fn frame_function(frame: FrameOf, function: u32) -> u32 {
+pub(super) fn frame_function(frame: FrameOf, function: u32) -> u32 {
     match frame {
         FrameOf::Own => function,
         FrameOf::Captured(outer) => outer,
@@ -687,7 +800,7 @@ fn frame_function(frame: FrameOf, function: u32) -> u32 {
 /// that name, `None` when that is not decided (the literal was not
 /// understood, the class is a plain function, the name is an accessor or
 /// listed twice).
-fn listed(abc: &Abc<'_>, scopes: &Scopes, class: ClassRef, is_static: bool, name: &[u8]) -> Option<Option<FnRef>> {
+pub(super) fn listed(abc: &Abc<'_>, scopes: &Scopes, class: ClassRef, is_static: bool, name: &[u8]) -> Option<Option<FnRef>> {
     let info = scopes.class(class.ctor)?;
     match member_named(abc, if is_static { &info.statics } else { &info.instance }, name) {
         Named::One(member) => Some(Some(FnRef { entry: class.entry, method: member.method })),

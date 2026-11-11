@@ -7,9 +7,10 @@ use asc_abc::{
     record_field, Abc, AbcError, Class, Field, FieldType, FieldValue, FunctionName, LiteralArray, ModuleRecord, RecordKind, RecordName,
 };
 
+use crate::annotation;
 use crate::literal::{method_name, write_literal_array};
 use crate::module::ModuleText;
-use crate::text::{write_count, write_error, write_f32, write_imm, write_name, write_quoted, ELLIPSIS};
+use crate::text::{write_count, write_error, write_f32, write_f64, write_imm, write_name, write_quoted, ELLIPSIS};
 use crate::Options;
 
 /// What rendering the functions of a record needs from the record itself,
@@ -117,11 +118,7 @@ pub(crate) fn write_header<W: Write>(
     write_count(out, class.num_methods, "function")?;
     out.write_char('\n')?;
     if let Some(source) = &opts.source {
-        out.write_str("; source ")?;
-        write_name(out, source.file)?;
-        out.write_str(
-            " (by the source map: \"line N\" of a function is a line of the compiled file, from 0; \"source line\" is the line here)\n",
-        )?;
+        source.write_header(out)?;
     }
 
     match &info.module {
@@ -162,6 +159,9 @@ fn write_type<W: Write>(out: &mut W, abc: &Abc<'_>, field: &Field<'_>) -> fmt::R
     out.write_str(name)
 }
 
+/// The type of a string field.
+const STRING_DESCRIPTOR: &[u8] = b"Lpanda.String;";
+
 /// `[ 0, 1, 0 ]`, bounded like a literal array.
 fn write_phases<W: Write>(out: &mut W, phases: &[u8], opts: &Options) -> fmt::Result {
     out.write_char('[')?;
@@ -200,11 +200,18 @@ fn write_raw_value<W: Write>(out: &mut W, abc: &Abc<'_>, field: &Field<'_>, name
     match field.field_type() {
         Ok(FieldType::F32) => write_f32(out, f32::from_bits(raw)),
         Ok(kind) if kind.is_wide() => match field.wide_value() {
+            Ok(Some(wide)) if kind == FieldType::F64 => write_f64(out, f64::from_bits(wide)),
             Ok(Some(wide)) => write!(out, "{wide:#x}"),
             Ok(None) => write!(out, "@{raw:#x}"),
             Err(error) => write_error(out, error),
         },
-        Ok(FieldType::Reference | FieldType::Any | FieldType::Class(_)) | Err(_) => write!(out, "@{raw:#x}"),
+        // The default value of a field of an annotation interface: a string, or an array.
+        Ok(FieldType::Class(class)) => match abc.string(class) {
+            Ok(descriptor) if descriptor.bytes == STRING_DESCRIPTOR => annotation::write_string(out, abc, raw, opts),
+            Ok(descriptor) if descriptor.bytes.starts_with(b"[") => annotation::write_array(out, abc, raw, opts, 0),
+            Ok(_) | Err(_) => write!(out, "@{raw:#x}"),
+        },
+        Ok(FieldType::Reference | FieldType::Any) | Err(_) => write!(out, "@{raw:#x}"),
         Ok(_) => write_imm(out, i64::from(raw)),
     }
 }

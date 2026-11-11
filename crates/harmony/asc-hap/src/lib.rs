@@ -63,7 +63,7 @@ pub use resource::{
     Attr, IndexFormat, Qualifier, QualifierKey, Qualifiers, Resource, ResourceIndex, ResourceIndexError, ResourceRef, ResourceType,
     ResourceValue, Resources, UnknownResourceType,
 };
-pub use source_map::{ModuleMap, SourceMapError, SourceMaps};
+pub use source_map::{ModuleMap, SourceLine, SourceMapError, SourceMaps};
 pub use value::Note;
 
 /// Why a metadata document could not be read at all.

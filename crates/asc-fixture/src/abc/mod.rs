@@ -36,6 +36,7 @@ mod calls;
 mod classes;
 mod layout;
 mod lineage;
+mod objects;
 mod packages;
 mod plan;
 mod sample;
@@ -47,6 +48,7 @@ pub use calls::{call_graph_program, CALLS_APP, CALLS_BOX, CALLS_INDEX, CALLS_UTI
 pub use classes::{class_hierarchy_program, CLASSES_APP, CLASSES_BASE, CLASSES_INDEX};
 pub use layout::{AbcFile, AbcLayout, AbcRegionLayout};
 pub use lineage::{class_calls_program, LINEAGE_APP, LINEAGE_BASE, LINEAGE_LEAF, LINEAGE_MIDDLE, LINEAGE_SERVICE};
+pub use objects::{handed_objects_program, late_members_program, HANDED_APP, HANDED_KIND, HANDED_STORE, LATE_PANEL, LATE_SUB};
 pub use packages::{
     packaged_entry_program, packaged_library_program, PACKAGED_ENTRY_MODULE_JSON, PACKAGED_ENTRY_PKG_CONTEXT, PACKAGED_INDEX, PACKAGED_KIT,
     PACKAGED_LIBRARY_MODULE_JSON, PACKAGED_OWN, PACKAGED_TOOL,

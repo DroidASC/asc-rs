@@ -5,7 +5,7 @@
 
 use super::{without_pc, Session};
 use crate::{bool_arg, choice_arg, str_arg, usize_arg, Call, ToolError, ToolResult, CALLGRAPH_DEPTH, CALLGRAPH_MAX_NODES, CALL_DIRECTIONS};
-use asc_ark_engine::{CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EngineError, Query};
+use asc_ark_engine::{CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EngineError, LeafKind, Query};
 use serde_json::{json, Value};
 
 /// What the tool takes on a HarmonyOS program, for the program's introduction.
@@ -16,7 +16,10 @@ pub(super) const USAGE: &str =
      the paths from the functions matching (`[from]`; alone: their callees), unless=RULE (or a list) leaves out the functions \
      matching and what only they reach; in these rules method:NAME is the function of that name (=NAME exact); defines=false \
      leaves out `[defines]` (a closure is created, not called); unresolved=true lists the unresolved call sites of callees; `entry`. \
-     Rows: `[super]` proved; `[this-class]` / `[inherited]` / `[instance]` matched by name, `[reassigned]` through a decorated class: not guaranteed; `[external]` / `[unresolved]` are leaves, no function of the program\n";
+     Rows: `[super]` proved; `[this-class]` / `[inherited]` / `[instance]` matched by name, `[reassigned]` through a decorated class: not guaranteed; \
+     leaves are no function of the program: `[external]` starts outside it (system API, global), `[unlinked]` at an import of it that \
+     led to no function, `[unresolved]` at a value tracking lost; `[N+ subclasses skipped]`: callers through that many subclasses \
+     were not looked for\n";
 
 /// The roots `to` names: the callee paths a lone `call:PATTERN` matches,
 /// else the functions the rule matches.
@@ -103,10 +106,16 @@ fn row_json(row: &CallRow) -> Value {
             value["name"] = json!(restored);
             value["entry"] = json!(entry);
         }
-        CallNode::Leaf { path, external } => {
+        CallNode::Leaf { path, kind } => {
             value["callee"] = json!(path);
-            value["external"] = json!(external);
+            value["external"] = json!(*kind == LeafKind::External);
+            if *kind == LeafKind::Unlinked {
+                value["unlinked"] = json!(true);
+            }
         }
+    }
+    if row.subclasses_skipped > 0 {
+        value["subclasses_skipped"] = json!(row.subclasses_skipped);
     }
     if let Some(kind) = row.kind {
         value["kind"] = json!(kind.label().unwrap_or("call"));
@@ -237,7 +246,8 @@ mod tests {
     }
 
     fn row(depth: usize, parent: Option<usize>, node: CallNode) -> CallRow {
-        CallRow { depth, parent, node, kind: parent.map(|_| EdgeKind::Call), sites: 1, repeated: false, unresolved: None, from: false }
+        let kind = parent.map(|_| EdgeKind::Call);
+        CallRow { depth, parent, node, kind, sites: 1, repeated: false, unresolved: None, from: false, subclasses_skipped: 0 }
     }
 
     fn tree(rows: Vec<CallRow>) -> CallTree {
@@ -318,5 +328,35 @@ mod tests {
             footer.contains("; 0 from functions reached\n# from: none of the 6 callers walked matches (depth 3); a path ends"),
             "{footer}"
         );
+    }
+
+    #[test]
+    fn leaves_and_skipped_subclasses_are_said() {
+        let leaf = |path: &str, kind| row(1, Some(0), CallNode::Leaf { path: path.into(), kind });
+        let mut walked = tree(vec![
+            row(0, None, function("a.abc", "send")),
+            leaf("import:@ohos:net.http#default.createHttp", LeafKind::External),
+            leaf("import:lib#Store.open().read", LeafKind::Unlinked),
+            leaf("arg0.then", LeafKind::Unresolved),
+        ]);
+        walked.rows[0].subclasses_skipped = 3;
+        let text = TreeText::of(&walked, true);
+        assert_eq!(
+            text.lines,
+            [
+                "0 &a/b&->#~@0>#send | B.send [3+ subclasses skipped]",
+                "  1 <- import:@ohos:net.http#default.createHttp [external]",
+                "  1 <- import:lib#Store.open().read [unlinked]",
+                "  1 <- arg0.then [unresolved]",
+            ]
+        );
+        // The entry goes on the first line of the footer, what was skipped on its own.
+        let (first, skipped) = text.footer.split_once('\n').unwrap();
+        assert!(first.ends_with("; all in a.abc") && skipped.starts_with("# subclasses skipped: 1 rows are methods"), "{}", text.footer);
+        let rows: Vec<Value> = walked.rows.iter().map(row_json).collect();
+        assert_eq!((rows[0]["subclasses_skipped"].clone(), rows[1].get("subclasses_skipped")), (json!(3), None));
+        assert_eq!((rows[1]["external"].clone(), rows[1].get("unlinked")), (json!(true), None));
+        assert_eq!((rows[2]["external"].clone(), rows[2]["unlinked"].clone()), (json!(false), json!(true)));
+        assert_eq!((rows[3]["external"].clone(), rows[3].get("unlinked")), (json!(false), None));
     }
 }

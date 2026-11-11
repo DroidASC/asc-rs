@@ -308,7 +308,7 @@ fn contacts_references_of_every_kind() {
     assert_eq!(find(&engine, &condition("global:=console")).len(), 27);
     assert_eq!(
         find(&engine, &condition("method:=onCreate")),
-        ["ets/modules.abc | &entry/src/main/ets/entryability/EntryAbility&->func_main_0+0x1d | func_main_0 | defineclasswithbuffer literal@0xe309f [1]=method #~@0>#onCreate"]
+        ["ets/modules.abc | &entry/src/main/ets/entryability/EntryAbility&->func_main_0+0x1d | func_main_0 | defineclasswithbuffer literal@0xe309f [1]=method #~@0>#onCreate (EntryAbility.onCreate)"]
     );
     // One function that has the URL prefix and creates the HTTP client.
     let both = find(&engine, &Query::All(vec![condition("string:^http://"), condition("call:\\.createHttp$")]));

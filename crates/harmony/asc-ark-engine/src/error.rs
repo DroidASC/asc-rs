@@ -8,6 +8,10 @@ use thiserror::Error;
 pub enum EngineError {
     #[error("io error on {path}: {source}")]
     Io { path: PathBuf, source: std::io::Error },
+    /// A file of an unpacked package that is larger than a query reads
+    /// into memory: the bound a zip entry has.
+    #[error("{} holds {size} bytes, limit {limit}", path.display())]
+    FileTooLarge { path: PathBuf, size: u64, limit: u64 },
     #[error(transparent)]
     Archive(#[from] asc_apk::ApkError),
     /// Nothing under the path holds ABC code; `notes` say what was looked at.

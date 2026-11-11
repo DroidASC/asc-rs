@@ -318,3 +318,75 @@ fn source_maps_name_the_source_of_a_listing() {
     assert!(manifest_lines(&broken).iter().any(|line| line.starts_with("note ets/sourceMaps.map: ")), "{:?}", manifest_lines(&broken));
     assert_eq!(listing(&broken, "pages/Index", None), unmapped);
 }
+
+#[test]
+fn every_line_of_a_listing_is_written_when_asked() {
+    use asc_ark_engine::ListingStyle;
+    let dir = tempfile::tempdir().unwrap();
+    let sample = make_abc();
+    let lines = ListingStyle { lines: true };
+    let get =
+        |engine: &Engine, function| engine.get_class_as(&ClassQuery { record: "pages/Index", function, entry: None }, lines).unwrap().text;
+
+    // Without source maps: the lines of the debug info, where they change, and none in the header.
+    let plain = Engine::open(write(dir.path(), "release/entry.hap", &make_hap(&sample))).unwrap();
+    let function = get(&plain, Some("Index.build"));
+    assert!(!function.lines().nth(1).unwrap().contains(", line "), "{function}");
+    assert!(function.contains("\n  ; line 12\n") && !function.contains("source line"), "{function}");
+    // Nothing else of the listing changes.
+    let without: String = function.lines().filter(|line| !line.starts_with("  ; line ")).map(|line| format!("{line}\n")).collect();
+    assert_eq!(without, listing(&plain, "pages/Index", Some("Index.build")).replace(", line 12\n", "\n"));
+    assert!(get(&plain, None).contains(function.trim_end()));
+
+    // With them each line says where it comes from, and the index of the file is counted.
+    let mapped = Engine::open(write(dir.path(), "debug/entry.hap", &make_debug_hap(&sample))).unwrap();
+    assert_eq!(mapped.memory_use().source_maps, 0, "nothing asked for the file yet");
+    assert!(get(&mapped, Some("Index.build")).contains("\n  ; line 12 (source line 4)\n"));
+    let held = mapped.memory_use();
+    assert!(held.source_maps > 0 && held.heap() >= held.source_maps, "{held:?}");
+    // It is not an analysis: it stays for as long as the program is open.
+    mapped.release_analyses();
+    assert_eq!(mapped.memory_use().source_maps, held.source_maps);
+    assert_eq!(plain.memory_use().source_maps, 0);
+}
+
+/// A module made from several source files: the header numbers the ones
+/// lines come from, and every source line says which it is a line of.
+#[test]
+fn a_listing_names_each_of_several_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    // Line 12 of the compiled file is line 4 of the third source, line 13 line 4 of the first.
+    let maps = format!(
+        r#"{{"entry|entry|1.0.0|src/main/ets/pages/Index.ts": {{"version": 3, "sources": ["entry/src/main/ets/pages/Index.ets", "entry/src/main/ets/unused.ets", "entry/src/main/ets/pages/Part.ets"], "names": [], "mappings": "{}AEGA;AFAA"}}}}"#,
+        ";".repeat(12)
+    );
+    let hap = Hap::new().modules_abc(&make_abc()).module_json(SAMPLE_MODULE_JSON).source_maps(&maps).build();
+    let engine = Engine::open(write(dir.path(), "entry.hap", &hap)).unwrap();
+    let record = listing(&engine, "pages/Index", None);
+    let header = record.lines().nth(2).unwrap();
+    let named = "; sources #0 entry/src/main/ets/pages/Index.ets, #2 entry/src/main/ets/pages/Part.ets (by the source map: ";
+    assert!(header.starts_with(named) && header.ends_with("\"source #K line N\" is line N of source #K)"), "{header}");
+    assert!(record.contains(", line 12 (source #2 line 4)\n"), "{record}");
+    let style = asc_ark_engine::ListingStyle { lines: true };
+    let woven = engine.get_class_as(&ClassQuery { record: "pages/Index", function: Some("Index.build"), entry: None }, style).unwrap().text;
+    assert!(woven.contains("\n  ; line 12 (source #2 line 4)\n"), "{woven}");
+}
+
+#[test]
+fn code_of_a_package_is_in_name_order_however_it_is_packed() {
+    let dir = tempfile::tempdir().unwrap();
+    let sample = make_abc();
+    // The zip lists `widgets` ahead of `modules`; a directory lists by name.
+    let hap = Hap::new().abc("widgets", &sample).module_json(SAMPLE_MODULE_JSON).modules_abc(&sample).build();
+    let packed = Engine::open(write(dir.path(), "packed/entry.hap", &hap)).unwrap();
+    let unpacked = dir.path().join("entry");
+    unpack(&hap, &unpacked);
+    let unpacked = Engine::open(&unpacked).unwrap();
+    assert_eq!(entries(&packed), ["ets/modules.abc", "ets/widgets.abc"]);
+    assert_eq!(entries(&unpacked), entries(&packed));
+    assert_eq!(string_rows(&unpacked, "."), string_rows(&packed, "."));
+    // An `.app` keeps its packages in the order it lists them, each with its code by name.
+    let app = make_app(&[("b.hap", &hap), ("a.hap", &hap)], Compression::Stored);
+    let app = Engine::open(write(dir.path(), "shop.app", &app)).unwrap();
+    assert_eq!(entries(&app), ["b.hap/ets/modules.abc", "b.hap/ets/widgets.abc", "a.hap/ets/modules.abc", "a.hap/ets/widgets.abc"]);
+}

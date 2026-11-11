@@ -47,7 +47,8 @@
 //!
 //! The same pass records what else of a record's structure is cheap to see
 //! on the way: where each function is created, the members of each class
-//! literal, and the unique writer of each module-level binding
+//! (those of its literal, and the ones instructions after the definition
+//! add: [`classes`]), and the unique writer of each module-level binding
 //! (`stmodulevar`).
 
 mod classes;
@@ -60,21 +61,25 @@ use std::collections::{HashMap, HashSet};
 use asc_abc::{Abc, Class, FunctionName, Method};
 use asc_arkisa::OperandKind;
 
-use classes::{class_literal, literal_methods};
+use classes::{class_literal, literal_methods, Member};
 pub(crate) use classes::{member_named, ClassInfo, Membership, Named};
 pub(crate) use env::ScopeTables;
 use env::{Found, Sites};
 pub(crate) use exports::{export_group, Exported, ExportedDefinitions};
 pub(crate) use reader::{Reader, RecordScopes};
 
-use crate::path::{Link, Origin, Path, PathBuilder};
+use crate::ops::base_name;
+use crate::path::{Link, NoLexicals, Origin, Path, PathBuilder};
 use crate::refs::{Function, Regions};
 use crate::table_bytes;
-use crate::track::{Event, StoreTarget, Tracker, Watch};
+use crate::track::{Event, Frame, StoreTarget, StringRef, Tracker, ValueId, Watch};
 
 /// Variables followed from one captured variable to the next before the
 /// chain is given up.
 const MAX_CHAIN: usize = 8;
+/// Functions gone through, from an arrow function outward, to the method
+/// whose `super` it uses.
+const MAX_NESTING: usize = 32;
 
 /// Why a captured variable is not resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -176,8 +181,13 @@ impl ScopeStats {
 /// How a function object comes to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DefinitionKind {
-    /// `definefunc` / `definemethod`.
+    /// `definefunc`: a function, or an arrow function, which has the `this`
+    /// and `super` of the function around it.
     Function,
+    /// `definemethod`: a function with a home object of its own (an
+    /// accessor, a method the class literal does not list, an initializer,
+    /// a method of an object literal with a computed name).
+    Method,
     /// The constructor of a class definition: the class itself.
     Class,
     /// A method item of the literal array of a class definition.
@@ -236,16 +246,22 @@ struct Definer {
     stack: Option<StackRef>,
     /// The function does not get the frame's environment.
     sealed: bool,
+    kind: DefinitionKind,
 }
 
 #[derive(Debug)]
 struct FunctionScope {
+    /// Offset of its method.
+    method: u32,
     own: Own,
     /// The chain the function starts with, innermost first.
     captured: Vec<SiteId>,
     tail: Tail,
     definers: Vec<Definer>,
     has_store: bool,
+    /// It has a `definemethod`: the classes it defines may get members
+    /// their literals do not list.
+    defines_methods: bool,
     is_main: bool,
 }
 
@@ -395,11 +411,13 @@ impl Scopes {
             let id = u32::try_from(scopes.functions.len()).unwrap_or(u32::MAX);
             let is_main = method.name().is_ok_and(|name| name.bytes == FunctionName::MAIN.as_bytes());
             scopes.functions.push(FunctionScope {
+                method: method.offset(),
                 own: Own::Flat,
                 captured: Vec::new(),
                 tail: Tail::Unknown,
                 definers: Vec::new(),
                 has_store: false,
+                defines_methods: false,
                 is_main,
             });
             scopes.by_method.entry(method.offset()).or_insert(id);
@@ -421,6 +439,7 @@ impl Scopes {
             let mut found = Found::default();
             let followed = scopes.scan(function, id_u32, tables, &mut sites, &mut found);
             scopes.functions[id].has_store = found.has_store;
+            scopes.functions[id].defines_methods = found.definitions.iter().any(|&(_, kind, ..)| kind == DefinitionKind::Method);
             let own = match followed {
                 Ok(false) => Own::Flat,
                 Ok(true) => {
@@ -445,7 +464,7 @@ impl Scopes {
                     continue;
                 };
                 let stack = scopes.own_stack(id_u32, pc).ok();
-                scopes.functions[child_id as usize].definers.push(Definer { parent: id_u32, stack, sealed });
+                scopes.functions[child_id as usize].definers.push(Definer { parent: id_u32, stack, sealed, kind });
             }
         }
 
@@ -460,6 +479,7 @@ impl Scopes {
 
         let (slot_writers, module_writers) = scopes.collect_writers(&functions, tables, tracker, &mut taints);
         scopes.settle(slot_writers, module_writers, &taints, &sites, &class_of);
+        scopes.add_late_members(&functions, tables, tracker);
         scopes
     }
 
@@ -509,7 +529,11 @@ impl Scopes {
         });
         let is_class = method.is_some() && literal.is_some();
         if let Some(method) = method {
-            let kind = if is_class { DefinitionKind::Class } else { DefinitionKind::Function };
+            let kind = match base_name(insn.opcode) {
+                _ if is_class => DefinitionKind::Class,
+                "definemethod" => DefinitionKind::Method,
+                _ => DefinitionKind::Function,
+            };
             found.definitions.push((pc, kind, method, sealed));
         }
         let Some(literal) = literal else { return };
@@ -818,6 +842,12 @@ impl Scopes {
         }
     }
 
+    /// Whether all the code of the record was read: what is said of its
+    /// stores and returns holds for every function of it.
+    pub(crate) fn all_code_read(&self) -> bool {
+        !self.unread_code
+    }
+
     /// The module-level bindings whose one writer stores a freshly made
     /// object (`new C(...)`), each by one of its local export entries with
     /// the value that is constructed.
@@ -829,6 +859,121 @@ impl Scopes {
             let written = state.as_ref().ok()?;
             (!written.path.cut && written.path.links.last() == Some(&NEW)).then_some((index, &written.path))
         })
+    }
+
+    /// Which side of which class of the record `path` is: the class itself
+    /// (its static side) or its `prototype` (the instance side).
+    fn class_side(&self, abc: &Abc<'_>, path: &Path) -> Option<Membership> {
+        let Origin::Definition(Some(class)) = path.origin else { return None };
+        if path.cut || !self.classes.contains_key(&class) {
+            return None;
+        }
+        match path.links[..] {
+            [] => Some(Membership { class, is_static: true }),
+            [Link::Property(Some(name))] if abc.string(name).is_ok_and(|name| name.bytes == b"prototype") => {
+                Some(Membership { class, is_static: false })
+            }
+            _ => None,
+        }
+    }
+
+    /// Give the classes of the record the members instructions add after
+    /// their definition (see [`classes`]), and those functions their class.
+    fn add_late_members(&mut self, functions: &[Option<Function<'_, '_>>], tables: &ScopeTables, tracker: &mut Tracker) {
+        // A method with the object it is defined for, when that is a class of the record.
+        let mut homes: Vec<(u32, Option<Membership>)> = Vec::new();
+        let mut added: Vec<(Membership, Member)> = Vec::new();
+        let mut path = Path::default();
+        for (id, function) in functions.iter().enumerate() {
+            let Some(function) = function.as_ref().filter(|_| self.functions[id].defines_methods) else { continue };
+            let this = &*self;
+            let offset = function.method.offset();
+            let reader = Reader::new(this, offset);
+            let entity = |entity_id: u32| function.entity(entity_id);
+            let read = |frame: &Frame, value: ValueId, path: &mut Path| match &reader {
+                Some(reader) => PathBuilder { frame, function: offset, entity: &entity, lexicals: reader }.build(value, path),
+                None => PathBuilder { frame, function: offset, entity: &entity, lexicals: &NoLexicals }.build(value, path),
+            };
+            // The function a value is, when it is one the record defines.
+            let defined = |path: &Path| match path.origin {
+                Origin::Definition(Some(method)) if path.links.is_empty() && !path.cut => Some(method),
+                _ => None,
+            };
+            // Code that does not decode: its classes keep the members of their literals.
+            let _ = tracker.run_events(tables.effects(), &function.code, Watch::Objects, |frame, insn, event| match event {
+                Event::Method { home } => {
+                    let Some(child) = insn.method_id().and_then(entity) else { return };
+                    read(frame, home, &mut path);
+                    homes.push((child, this.class_side(&function.abc, &path)));
+                }
+                Event::PropertyStore { object, name, value } if base_name(insn.opcode) == "stownbyname" => {
+                    read(frame, value, &mut path);
+                    let Some(method) = defined(&path) else { return };
+                    read(frame, object, &mut path);
+                    let name = match name {
+                        StringRef::Id(id) => entity(id),
+                        StringRef::Offset(off) => Some(off),
+                    };
+                    if let Some((side, name)) = this.class_side(&function.abc, &path).zip(name) {
+                        added.push((side, Member { name, method, callable: true }));
+                    }
+                }
+                Event::Accessor { object, key, getter, setter } => {
+                    read(frame, object, &mut path);
+                    let Some(side) = this.class_side(&function.abc, &path) else { return };
+                    read(frame, key, &mut path);
+                    let Origin::Str(Some(name)) = path.origin else { return };
+                    if !path.links.is_empty() || path.cut {
+                        return;
+                    }
+                    for accessor in [getter, setter] {
+                        read(frame, accessor, &mut path);
+                        added.extend(defined(&path).map(|method| (side, Member { name, method, callable: false })));
+                    }
+                }
+                _ => {}
+            });
+        }
+        for (method, side) in homes {
+            match side {
+                // A function that is a member of two classes is a member of neither.
+                Some(side) => {
+                    self.members.entry(method).and_modify(|known| *known = known.filter(|known| *known == side)).or_insert(Some(side));
+                }
+                // Defined for something else as well: its class is not known.
+                None => {
+                    self.members.entry(method).and_modify(|known| *known = None);
+                }
+            }
+        }
+        for (side, member) in added {
+            let Some(Some(info)) = self.classes.get_mut(&side.class) else { continue };
+            let members = if side.is_static { &mut info.statics } else { &mut info.instance };
+            if !members.contains(&member) {
+                members.push(member);
+            }
+        }
+    }
+
+    /// The class member whose `this` and `super` the function at `method`
+    /// has: the function itself when it is a member, else the nearest
+    /// member around it that is reached through arrow functions only (a
+    /// function `definefunc` creates at one place; one that uses `super`
+    /// can only be an arrow function).
+    pub(crate) fn home_member(&self, method: u32) -> Option<u32> {
+        let mut id = self.function_id(method)?;
+        for _ in 0..MAX_NESTING {
+            let scope = self.functions.get(id as usize)?;
+            if self.membership(scope.method).is_some() {
+                return Some(scope.method);
+            }
+            let [definer] = scope.definers[..] else { return None };
+            if definer.kind != DefinitionKind::Function {
+                return None;
+            }
+            id = definer.parent;
+        }
+        None
     }
 
     /// The members of the class whose constructor is at method offset `class`.

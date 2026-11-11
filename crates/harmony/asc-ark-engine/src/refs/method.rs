@@ -5,7 +5,8 @@
 //! `defineclasswithbuffer`, `callruntime.definesendableclass`. The methods of
 //! a class and of an object literal are named by `METHOD` / `GETTER` /
 //! `SETTER` / generator items of the literal array such an instruction
-//! refers to.
+//! refers to: a row for such an item names the function by its raw and its
+//! restored name.
 //!
 //! Located first: the functions whose name matches are found by walking the
 //! records once, their offsets become region ids, and the code scan compares
@@ -147,7 +148,9 @@ impl<'a> Methods<'a> {
     }
 
     /// The matching method items of the literal array at `off`, as
-    /// `[1]=method #~@0>#build`.
+    /// `[1]=method #~@0>#build (Index.build)`: the raw name, which
+    /// `getclass` and `callgraph` take, and the restored one, as the rows of
+    /// calls print a function.
     fn literal_hits(&self, off: u32, prefix: &str, depth: usize, matched: &mut Vec<String>, out: &mut Vec<String>) {
         let Ok(array) = self.abc.literal_array(off) else { return };
         for (index, literal) in array.iter().map_while(|literal| literal.ok()).enumerate() {
@@ -164,9 +167,14 @@ impl<'a> Methods<'a> {
                 _ => continue,
             };
             let Some(method_off) = literal.method_off().filter(|off| self.offsets.contains(off)) else { continue };
-            let name =
-                self.abc.method(method_off).and_then(|method| method.name()).map(|name| name.to_str().into_owned()).unwrap_or_default();
-            out.push(format!("{prefix}[{index}]={kind} {name}"));
+            let method = self.abc.method(method_off).ok();
+            let name = method.and_then(|method| method.name().ok()).map(|name| name.to_str().into_owned()).unwrap_or_default();
+            let record = method.and_then(|method| method.class_off().ok()).and_then(|class| self.abc.class(class).ok());
+            // A name that restores to itself is said once.
+            match record.map(|record| record.restore_function_name(&name)).filter(|restored| *restored != name) {
+                Some(restored) => out.push(format!("{prefix}[{index}]={kind} {name} ({restored})")),
+                None => out.push(format!("{prefix}[{index}]={kind} {name}")),
+            }
             matched.push(name);
         }
     }

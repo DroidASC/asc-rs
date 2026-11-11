@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 pub(super) const USAGE: &str =
     "# hierarchy: class=NAME (EntryAbility) or RECORD->CLASS as rows print it, or \"import:REGEX\" / \"global:REGEX\" for the \
      subclasses of a parent outside the program (import:@ohos:app\\.ability\\.UIAbility, ^global:ViewPU$); direction, depth, max_nodes, \
-     `entry`; method=NAME marks `[defines FUNCTION]` from the class literal. Rows: `[external]` / `[unresolved]` are parents that are \
+     `entry`; method=NAME marks `[defines FUNCTION]` from the class's members. Rows: `[external]` / `[unresolved]` are parents that are \
      no class of the program (the path is where tracking stopped), `[reassigned]` a parent read from a binding a decorator reassigns\n";
 
 /// What a class of a HarmonyOS program is named by, for the error of a name

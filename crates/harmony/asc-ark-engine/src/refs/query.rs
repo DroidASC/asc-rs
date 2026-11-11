@@ -339,6 +339,33 @@ impl Query {
     /// The condition kinds [`Query::condition`] takes.
     pub const KINDS: [&'static str; 8] = ["string", "literal", "prop", "global", "import", "method", "number", "call"];
 
+    /// Other spellings of a kind that models and people write, with the
+    /// kind each means: the one table of them, for rules at every depth
+    /// and for the front ends.
+    const KIND_ALIASES: [(&'static str, &'static str); 9] = [
+        ("str", "string"),
+        ("text", "string"),
+        ("property", "prop"),
+        ("propertie", "prop"),
+        ("function", "method"),
+        ("func", "method"),
+        ("num", "number"),
+        ("int", "number"),
+        ("const", "number"),
+    ];
+
+    /// The kind `spelling` means, one of [`Query::KINDS`]: the kind itself
+    /// or another spelling of it (`property`, `function`); case and a
+    /// trailing `s` do not matter. `None` for what is no kind here.
+    pub fn kind_named(spelling: &str) -> Option<&'static str> {
+        let spelled = spelling.trim().to_ascii_lowercase();
+        let find = |word: &str| {
+            let kind = Query::KINDS.iter().find(|kind| **kind == word).copied();
+            kind.or_else(|| Query::KIND_ALIASES.iter().find(|(alias, _)| *alias == word).map(|(_, kind)| *kind))
+        };
+        find(&spelled).or_else(|| spelled.strip_suffix('s').and_then(find))
+    }
+
     /// The kind as rows of a conjunction label it.
     pub(crate) fn kind(&self) -> &'static str {
         match self {

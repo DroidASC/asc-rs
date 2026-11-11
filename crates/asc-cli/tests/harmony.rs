@@ -392,7 +392,10 @@ fn findrefs_method_and_number_find_definitions_and_constants() {
     let build = inputs.lines(&["findrefs", &hap, "method", "Index.build", "--exact"]);
     let [row] = &build[..] else { panic!("one definition expected: {build:?}") };
     assert!(row.starts_with(&format!("ets/modules.abc | {INDEX_PAGE}->func_main_0+0x")), "{row}");
-    assert!(row.contains(" | func_main_0 | defineclasswithbuffer literal@0x") && row.ends_with(" [1]=method #~@0>#build"), "{row}");
+    assert!(
+        row.contains(" | func_main_0 | defineclasswithbuffer literal@0x") && row.ends_with(" [1]=method #~@0>#build (Index.build)"),
+        "{row}"
+    );
     // The raw name, a result row's location, a dotted suffix, --class for the record.
     for name in ["#~@0>#build", &format!("{INDEX_PAGE}->#~@0>#build"), &format!("{INDEX_PAGE}->#~@0>#build+0x12"), "build"] {
         assert_eq!(inputs.lines(&["findrefs", &hap, "method", name, "--exact"]), build, "{name}");
@@ -497,7 +500,7 @@ fn callgraph_walks_callees() {
             "  1 -> import:@ohos:net.http#default.createHttp [external]",
             "  1 -> import:N:missing/Gone&#gone [external]",
             "  1 -> App->#*@0*#cb | run.cb [defines]",
-            "  1 -> import:N:lib/Index&#Box.nothing [external]",
+            "  1 -> import:N:lib/Index&#Box.nothing [unlinked]",
             "# 10 rows, 7 distinct functions, 3 leaves (callees, depth 1); 1 records scanned",
         ]
     );
@@ -814,7 +817,7 @@ fn what_is_not_supported_yet_says_what_is() {
     let searches = "(supported: findrefs string, prop, global, import, method, number, call, all, rules)";
     let conditions = "(supported: string:, literal:, prop:, global:, import:, method:, number:, call:)";
     let not_yet = "is not supported for HarmonyOS programs yet";
-    let cases: [(&[&str], String); 52] = [
+    let cases: [(&[&str], String); 51] = [
         (
             &["getmanifest", "--resolve"],
             "getmanifest --resolve is DEX-only: module.json is printed as it is; manifest-summary puts what a $type:name reference \
@@ -908,7 +911,6 @@ fn what_is_not_supported_yet_says_what_is() {
         ),
         (&["findrefs", "import", "@ohos:net.http#default", "--requests"], "--requests lists module requests: leave out the #NAME".into()),
         (&["getclass", "pages/Index", "--dump-dex", "out.dex"], "--dump-dex is DEX-only".into()),
-        (&["disassemble", "pages/Index", "--debuginfo"], "--debuginfo is DEX-only".into()),
     ];
     for (args, expected) in cases {
         // The program follows the command (and the findrefs kind follows the program).
@@ -1615,6 +1617,20 @@ fn unpacked_packages_zips_of_packages_and_source_maps() {
     let record = inputs.lines(&["getclass", &hap, "entryability/EntryAbility"]);
     assert!(record[2].starts_with("; source entry/src/main/ets/entryability/EntryAbility.ets (by the source map: "), "{record:?}");
     assert!(record.iter().any(|line| line.ends_with(", line 6 (no source line)")), "{record:?}");
+
+    // `--lines`: every change of line where it happens, instead of the first line in the header.
+    let woven = inputs.lines(&["getclass", unpacked, "pages/Index", "--method", "Index.build", "--lines"]);
+    assert!(!woven[1].contains(", line ") && woven.contains(&"  ; line 12 (source line 4)".to_owned()), "{woven:?}");
+    let without: Vec<String> = woven.iter().filter(|line| !line.starts_with("  ; line ")).cloned().collect();
+    assert_eq!(without[2..], function[2..], "nothing else of the listing changes");
+    // `disassemble --debuginfo` asks for the same; an Android program has no such lines.
+    for flag in ["--lines", "--debuginfo"] {
+        assert_eq!(inputs.lines(&["disassemble", &hap, "pages/Index", "--method", "Index.build", flag]), woven, "{flag}");
+    }
+    let apk = inputs.file("app.apk", &make_apk(&[("classes.dex", &make_dex())], true));
+    for command in ["getclass", "disassemble"] {
+        assert!(inputs.error(&[command, &apk, "example.Test", "--lines"]).contains("--lines applies to HarmonyOS programs only"));
+    }
 
     // An `.app` inside a zip: entries carry the whole path.
     let app = make_app(&[("entry.hap", &debug), ("feature.hap", &debug)], Compression::Deflated);

@@ -7,6 +7,7 @@ use std::iter::Peekable;
 use asc_abc::{Abc, CatchBlock, Code, DebugInfo, FunctionKind, LineRows, LocalVar, Method, TryBlock};
 use asc_arkisa::walk;
 
+use crate::annotation::write_annotations;
 use crate::insn::{write_label, InsnPrinter};
 use crate::record::RecordInfo;
 use crate::text::{write_count, write_error, write_name, ELLIPSIS};
@@ -51,11 +52,15 @@ fn write_function_source<W: Write>(out: &mut W, opts: &Options<'_>, method: &Met
         let rows = method.debug_info().ok().flatten()?.line_rows().ok()?;
         rows.take(MAX_SOURCE_ROWS).map_while(Result::ok).find_map(|row| Some((row.line, source.of(row.line)?)))
     };
-    match source.of(first).map(|line| (first, line)).or_else(later) {
-        Some((compiled, line)) if compiled == first => write!(out, " (source line {line})"),
-        Some((compiled, line)) => write!(out, " (source line {line} at line {compiled})"),
-        None => out.write_str(" (no source line)"),
+    let Some((compiled, line)) = source.of(first).map(|line| (first, line)).or_else(later) else {
+        return out.write_str(" (no source line)");
+    };
+    out.write_str(" (")?;
+    source.write_line(out, line)?;
+    if compiled != first {
+        write!(out, " at line {compiled}")?;
     }
+    out.write_char(')')
 }
 
 /// `.function <raw name>  ; <restored name>` and the summary line.
@@ -301,8 +306,10 @@ impl<'a> Lines<'a> {
         if self.written != Some(self.pending) && i32::try_from(self.pending).is_ok() {
             self.written = Some(self.pending);
             write!(out, "  ; line {}", self.pending)?;
-            if let Some(line) = opts.source.and_then(|source| source.of(self.pending)) {
-                write!(out, " (source line {line})")?;
+            if let Some((source, line)) = opts.source.and_then(|source| Some((source, source.of(self.pending)?))) {
+                out.write_str(" (")?;
+                source.write_line(out, line)?;
+                out.write_char(')')?;
             }
             out.write_char('\n')?;
         }
@@ -441,6 +448,7 @@ pub(crate) fn write_function<W: Write>(
         }
     };
     write_header(out, abc, record, method, code.as_ref(), opts)?;
+    write_annotations(out, abc, method, opts)?;
     let Some(code) = code else { return out.write_str(END) };
     if opts.locals {
         // A debug info that cannot be read is reported where the line would stand.

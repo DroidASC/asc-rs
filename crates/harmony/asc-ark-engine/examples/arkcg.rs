@@ -3,12 +3,17 @@
 //!
 //! ```text
 //! arkcg callers|callees <path> <ROOT> [--leaf] [--depth N] [--max-nodes N] [--no-defines] [--unresolved]
+//!                                  [--max-subclasses N]
 //! arkcg edges  <path>              every edge, tab separated: from, pc, kind, to, the callee
 //!                                  path of an edge through an import, the ABC entry of `to`
 //! arkcg build  <path>              build the whole graph: time and size
 //! arkcg forms  <path>              module request forms and how many resolve
 //! arkcg census <path>              edges per kind and target, leaf shares, cold / warm time, memory
 //! arkcg check  <path> [--sample N] [--seed S] [--kind KIND]
+//! arkcg worst  <path> [--sample N] [--max-subclasses N]
+//!                                  the callers of one instance method of every class that has
+//!                                  subclasses (or of the N with most direct ones), each walk on
+//!                                  a fresh engine: the slowest walks and the largest scans
 //! ```
 //!
 //! `ROOT` is `FUNCTION` or `RECORD->FUNCTION`; with `--leaf` a regex over
@@ -33,7 +38,7 @@ use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use asc_ark_engine::{CallNode, CallQuery, CallRoots, CallTree, Direction, Engine, Pattern};
+use asc_ark_engine::{CallNode, CallQuery, CallRoots, CallTree, ClassNode, Direction, Engine, Pattern};
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     let before = args.len();
@@ -53,7 +58,7 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
 fn location(node: &CallNode) -> String {
     match node {
         CallNode::Function { record, function, .. } => format!("{record}->{function}"),
-        CallNode::Leaf { path, external } => format!("{}:{path}", if *external { "external" } else { "unresolved" }),
+        CallNode::Leaf { path, kind } => format!("{}:{path}", kind.label()),
     }
 }
 
@@ -137,6 +142,88 @@ fn check(path: &str, threads: Option<usize>, sample: Option<usize>, seed: u64, k
     Ok(failures)
 }
 
+/// One callers walk of [`worst`].
+struct Walk {
+    micros: u128,
+    records: usize,
+    rows: usize,
+    subclasses: usize,
+    footer: String,
+    root: String,
+}
+
+/// Walk the callers of one instance method of each class that is the parent
+/// of another: where the walk has to look through subclasses.
+fn worst(path: &str, threads: Option<usize>, sample: Option<usize>, max_subclasses: Option<usize>) -> Result<(), Box<dyn Error>> {
+    let open = || -> Result<Engine, Box<dyn Error>> {
+        let engine = Engine::open(path)?;
+        Ok(match threads {
+            Some(threads) => engine.with_threads(threads),
+            None => engine,
+        })
+    };
+    let cancel = AtomicBool::new(false);
+    let full = open()?;
+    // Direct subclasses per parent class of the program: (entry, record, constructor).
+    let mut parents: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    full.class_definitions(&cancel, &mut |definition| {
+        if let Some(ClassNode::Class { entry, record, function, .. }) = definition.parent {
+            *parents.entry((entry, record, function)).or_default() += 1;
+        }
+    })?;
+    // The functions of each record, by name.
+    let mut functions: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut seen = HashSet::new();
+    full.call_edges(&cancel, &mut |edge| {
+        if let CallNode::Function { entry, record, function, .. } = &edge.from {
+            if seen.insert(edge.from.clone()) {
+                functions.entry((entry.clone(), record.clone())).or_default().push(function.clone());
+            }
+        }
+    })?;
+    drop(full);
+    let mut classes: Vec<((String, String, String), usize)> = parents.into_iter().collect();
+    classes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    classes.truncate(sample.unwrap_or(usize::MAX));
+    let mut walks = Vec::new();
+    for ((entry, record, ctor), subclasses) in classes {
+        // `#~@0=#Name` is the constructor of the class whose instance methods are `#~@0>#name`.
+        let Some(scope) = ctor.split_once('=').map(|(scope, _)| format!("{scope}>#")) else { continue };
+        let of_record = functions.get(&(entry.clone(), record.clone()));
+        let Some(method) = of_record.and_then(|names| names.iter().find(|name| name.starts_with(&scope))) else { continue };
+        let roots = CallRoots::Function { record: Some(record.clone()), function: method.clone(), entry: Some(entry) };
+        let mut query = CallQuery { depth: 1, max_nodes: usize::MAX, ..CallQuery::new(roots, Direction::Callers) };
+        query.max_subclasses = max_subclasses.unwrap_or(query.max_subclasses);
+        let cold = open()?;
+        let started = Instant::now();
+        let tree = cold.call_graph(&query, &cancel)?;
+        walks.push(Walk {
+            micros: started.elapsed().as_micros(),
+            records: tree.records_scanned,
+            rows: tree.rows.len(),
+            subclasses,
+            footer: tree.footer().lines().skip(1).collect::<Vec<_>>().join(" "),
+            root: format!("{record}->{method}"),
+        });
+    }
+    let print = |title: &str, walks: &[Walk]| {
+        println!("{title}");
+        for walk in walks.iter().take(8) {
+            println!(
+                "  {:>8} us {:>6} records {:>5} rows {:>4} direct subclasses  {} {}",
+                walk.micros, walk.records, walk.rows, walk.subclasses, walk.root, walk.footer
+            );
+        }
+    };
+    let total: u128 = walks.iter().map(|walk| walk.micros).sum();
+    println!("{} walks, {} us in all, {} us on average", walks.len(), total, total / walks.len().max(1) as u128);
+    walks.sort_by_key(|walk| std::cmp::Reverse(walk.micros));
+    print("slowest:", &walks);
+    walks.sort_by_key(|walk| std::cmp::Reverse(walk.records));
+    print("most records scanned:", &walks);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -156,11 +243,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     let sample = take_value(&mut args, "--sample").map(|n| n.parse::<usize>()).transpose()?;
     let seed = take_value(&mut args, "--seed").map(|n| n.parse::<u64>()).transpose()?.unwrap_or(1);
     let kind = take_value(&mut args, "--kind");
+    let max_subclasses = take_value(&mut args, "--max-subclasses").map(|n| n.parse::<usize>()).transpose()?;
     let (leaf, no_defines, unresolved) =
         (take_flag(&mut args, "--leaf"), take_flag(&mut args, "--no-defines"), take_flag(&mut args, "--unresolved"));
     let [command, path, rest @ ..] = &args[..] else {
-        return Err("usage: arkcg callers|callees|edges|build|forms|census|check <path> ...".into());
+        return Err("usage: arkcg callers|callees|edges|build|forms|census|check|worst <path> ...".into());
     };
+    if command == "worst" {
+        return worst(path, threads, sample, max_subclasses);
+    }
     if command == "check" {
         return match check(path, threads, sample, seed, kind.as_deref())? {
             0 => Ok(()),
@@ -186,6 +277,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             query.max_nodes = max_nodes.unwrap_or(query.max_nodes);
             query.defines = !no_defines;
             query.unresolved = unresolved;
+            query.max_subclasses = max_subclasses.unwrap_or(query.max_subclasses);
             let tree = engine.call_graph(&query, &cancel)?;
             for line in tree.lines(engine.has_several_entries()) {
                 writeln!(out, "{line}")?;
@@ -228,8 +320,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let to = match (&edge.to, &edge.via) {
                     (CallNode::Function { .. }, Some(_)) => "function through an import",
                     (CallNode::Function { .. }, None) => "function",
-                    (CallNode::Leaf { external: true, .. }, _) => "external",
-                    (CallNode::Leaf { external: false, .. }, _) => "unresolved",
+                    (CallNode::Leaf { kind, .. }, _) => kind.label(),
                 };
                 *census.entry((format!("{:?}", edge.kind), to)).or_default() += 1;
             })?;
@@ -240,7 +331,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 format!("{count} ({:.2}%)", count as f64 * 100.0 / total as f64)
             };
             writeln!(out, "records {}, functions {}, edges {}", size.records, size.functions, size.edges)?;
-            writeln!(out, "external {}, unresolved {}", share("external"), share("unresolved"))?;
+            writeln!(out, "external {}, unlinked {}, unresolved {}", share("external"), share("unlinked"), share("unresolved"))?;
             for ((kind, to), count) in &census {
                 writeln!(out, "{kind:<12} {to:<28} {count:>9}")?;
             }

@@ -27,10 +27,10 @@ mod reader;
 mod string;
 
 pub use abc::{Abc, OffsetTable, Region, Regions};
-pub use annotation::{Annotation, AnnotationElement};
+pub use annotation::{Annotation, AnnotationElement, ElementValue};
 pub use class::{
-    access, record_field, Class, ClassEntry, ClassTag, Field, FieldTag, FieldType, FieldValue, Fields, ForeignClass, FunctionKind,
-    IndexList, Method, MethodTag, Methods, SourceLang,
+    access, record_field, unmerged, Class, ClassEntry, ClassTag, Field, FieldTag, FieldType, FieldValue, Fields, ForeignClass,
+    FunctionKind, IndexList, Method, MethodTag, Methods, SourceLang,
 };
 pub use code::{CatchBlock, Code, TryBlock, TryBlocks};
 pub use debug::{DebugInfo, LineOp, LineOps, LineRow, LineRows, LocalVar};

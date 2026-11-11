@@ -1,11 +1,27 @@
-//! Class literals: the methods a class definition lists.
+//! The members of a class: the methods its definition lists, and the ones
+//! instructions after it add.
 //!
 //! The literal array of `defineclasswithbuffer` holds one `name, method,
 //! parameter count` triple per method that has a plain name, the instance
 //! methods first, then the static ones, then the number of instance methods
-//! (`es2panda`; every class literal of the samples has this shape).
-//! Accessors, fields and methods with computed names are defined by
-//! instructions after it and are not in the literal.
+//! (`es2panda`; every class literal of the samples has this shape). It
+//! stops at the first member that is not such a method: from an accessor
+//! or a method with a computed name on, the members of the class body are
+//! defined one by one after the class (checked against what the official
+//! compiler emits):
+//!
+//! - a method: `lda HOME; definemethod M; stownbyname NAME, HOME`, where
+//!   `HOME` is the class (a static method) or its `prototype`;
+//! - an accessor: `definemethod M` for the getter and / or the setter, then
+//!   `definegettersetterbyvalue HOME, NAME, GETTER, SETTER`;
+//! - the field initializers: `definemethod` of `static_initializer` (called
+//!   at once with the class as `this`) and `instance_initializer`.
+//!
+//! [`super::Scopes`] reads those when the home object is tracked to a class
+//! of the record: the named ones become members (an accessor one that is
+//! not callable), and every such function is a method of its class, with
+//! its `this` and `super`. Fields and methods with computed names are not
+//! members.
 
 use asc_abc::{Abc, Literal};
 

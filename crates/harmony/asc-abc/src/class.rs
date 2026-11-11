@@ -34,6 +34,18 @@ pub mod record_field {
     pub const MODULE_REQUEST_PHASE_IDX: &[u8] = b"moduleRequestPhaseIdx";
 }
 
+/// Names of the records of a file compiled from one source without
+/// merging (`es2abc` without `--merge-abc`).
+pub mod unmerged {
+    /// The record that holds every function.
+    pub const GLOBAL: &[u8] = b"_GLOBAL";
+    /// The record whose field, named after the source file, holds the
+    /// offset of the module record.
+    pub const MODULE_RECORD: &[u8] = b"_ESModuleRecord";
+    /// The same for the scope name table (12.0.6.0 and later).
+    pub const SCOPE_NAMES: &[u8] = b"_ESScopeNamesRecord";
+}
+
 /// Source language tag of a class or method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceLang(pub u8);
@@ -387,10 +399,34 @@ impl<'a> Class<'a> {
     /// requests, located by the `moduleRecordIdx` field. `None` for records
     /// without one (pseudo records, CommonJS modules).
     ///
+    /// A file compiled from one source without merging has its functions
+    /// in the record `_GLOBAL` and the offset in the only field of
+    /// `_ESModuleRecord`, named after the source file: that is the module
+    /// record of `_GLOBAL`.
+    ///
     /// # Errors
     /// A malformed member or module record.
     pub fn module_record(&self) -> Result<Option<ModuleRecord<'a>>> {
-        self.field_offset_value(record_field::MODULE_RECORD_IDX)?.filter(|&off| off != 0).map(|off| self.abc.module_record(off)).transpose()
+        let off = self.own_or_unmerged(record_field::MODULE_RECORD_IDX, unmerged::MODULE_RECORD)?;
+        off.filter(|&off| off != 0).map(|off| self.abc.module_record(off)).transpose()
+    }
+
+    /// The offset in field `name` of this record, or, asked of the
+    /// `_GLOBAL` record of an unmerged file, in the only field of the
+    /// record `holder`. Several fields there would be several modules, and
+    /// nothing says which one this is.
+    fn own_or_unmerged(&self, name: &[u8], holder: &[u8]) -> Result<Option<u32>> {
+        if let Some(off) = self.field_offset_value(name)? {
+            return Ok(Some(off));
+        }
+        if self.name() != unmerged::GLOBAL {
+            return Ok(None);
+        }
+        let Some(holder) = self.abc.find_record(holder)?.and_then(ClassEntry::local) else { return Ok(None) };
+        if holder.num_fields != 1 {
+            return Ok(None);
+        }
+        Ok(holder.fields()?.next().transpose()?.and_then(|field| field.raw_value()))
     }
 
     /// The phase of each module request of this record, located by the
@@ -445,12 +481,15 @@ impl<'a> Class<'a> {
 
     /// The scope name table of this record, located by the `scopeNames`
     /// field: a literal array of strings that `@<hex>` in mangled function
-    /// names indexes (see [`crate::FunctionName`]).
+    /// names indexes (see [`crate::FunctionName`]). Of the `_GLOBAL`
+    /// record of an unmerged file it is the one the only field of
+    /// `_ESScopeNamesRecord` locates.
     ///
     /// # Errors
     /// A malformed member or literal array header.
     pub fn scope_names(&self) -> Result<Option<LiteralArray<'a>>> {
-        self.field_offset_value(record_field::SCOPE_NAMES)?.filter(|&off| off != 0).map(|off| self.abc.literal_array(off)).transpose()
+        let off = self.own_or_unmerged(record_field::SCOPE_NAMES, unmerged::SCOPE_NAMES)?;
+        off.filter(|&off| off != 0).map(|off| self.abc.literal_array(off)).transpose()
     }
 }
 

@@ -34,7 +34,7 @@ use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use asc_abc::{Abc, Class, ClassEntry, Code, FieldType, FieldValue, LineOp, Literal, Method, MethodTag, ModuleRecord};
+use asc_abc::{Abc, Class, ClassEntry, Code, ElementValue, FieldType, FieldValue, LineOp, Literal, Method, MethodTag, ModuleRecord};
 use asc_arkisa::{walk, Instruction, OperandKind, Value};
 use asc_fixture::abc::{
     call_graph_program, class_calls_program, class_hierarchy_program, packaged_entry_program, packaged_library_program, sample_program,
@@ -266,6 +266,76 @@ impl<'a> Subject<'a> {
         self.abc.string(off).map_or(b"<bad string>", |string| string.bytes)
     }
 
+    /// The items of the array an annotation value is, `["a", "b"]`, and the
+    /// type its items say it has, `panda.String[]`: an empty one says none.
+    fn array_text(&self, off: u32) -> (String, Vec<u8>) {
+        let mut kind = String::new();
+        let mut text = b"[".to_vec();
+        for (index, literal) in self.abc.literal_array(off).unwrap().iter().enumerate() {
+            let (item_kind, item) = match literal.unwrap() {
+                Literal::Bool(value) => ("u1".to_owned(), format!("{}", u8::from(value)).into_bytes()),
+                Literal::Double(value) => ("f64".to_owned(), g6(value).into_bytes()),
+                Literal::String(off) => ("panda.String".to_owned(), [b"\"", self.string(off), b"\""].concat()),
+                Literal::LiteralArray(off) => self.array_text(off),
+                other => (format!("<{other:?}>"), Vec::new()),
+            };
+            if index > 0 {
+                text.extend_from_slice(b", ");
+            }
+            text.extend_from_slice(&item);
+            kind = format!("{item_kind}[]");
+        }
+        text.push(b']');
+        (kind, text)
+    }
+
+    /// The type and value of an annotation element as the oracle writes
+    /// them: `f64` and `3`, `panda.String[]` and `["x"]`.
+    fn element_text(&self, element: &asc_abc::AnnotationElement) -> (String, Vec<u8>) {
+        match element.typed(&self.abc).unwrap() {
+            ElementValue::Bool(value) => ("u1".to_owned(), format!("{}", u8::from(value)).into_bytes()),
+            ElementValue::Int(value) => ("u32".to_owned(), format!("{value:#x}").into_bytes()),
+            ElementValue::F64(value) => ("f64".to_owned(), g6(value).into_bytes()),
+            ElementValue::String(off) => ("panda.String".to_owned(), [b"\"", self.string(off), b"\""].concat()),
+            ElementValue::Array(off) => self.array_text(off),
+            ElementValue::Other(value) => (format!("<tag {:?}>", char::from(element.tag)), format!("{value:#x}").into_bytes()),
+        }
+    }
+
+    /// The type and default value of a field of an annotation interface as
+    /// the oracle writes them; `None` for a field without a value.
+    fn default_text(&self, field: &asc_abc::Field<'a>) -> Option<(String, Vec<u8>)> {
+        let raw = match field.value()? {
+            FieldValue::Int(value) => u32::from_le_bytes(value.to_le_bytes()),
+            FieldValue::Raw(value) => value,
+        };
+        Some(match field.field_type().unwrap() {
+            FieldType::U1 => ("u1".to_owned(), format!("{raw}").into_bytes()),
+            FieldType::F64 => ("f64".to_owned(), g6(f64::from_bits(field.wide_value().unwrap()?)).into_bytes()),
+            FieldType::Class(off) => match self.string(off) {
+                b"Lpanda.String;" => ("panda.String".to_owned(), [b"\"", self.string(raw), b"\""].concat()),
+                descriptor if descriptor.starts_with(b"[") => {
+                    let depth = descriptor.iter().take_while(|&&b| b == b'[').count();
+                    let item = match &descriptor[depth..] {
+                        b"D" => "f64",
+                        b"Z" => "u1",
+                        b"Lpanda.String;" => "panda.String",
+                        _ => "<unknown>",
+                    };
+                    (format!("{item}{}", "[]".repeat(depth)), self.array_text(raw).1)
+                }
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+
+    /// The module record of `_GLOBAL`, the record of a file that was not merged.
+    fn unmerged_module_record(&self) -> Option<u32> {
+        let global = self.abc.find_record(asc_abc::unmerged::GLOBAL).ok()??.local()?;
+        Some(global.module_record().ok()??.offset())
+    }
+
     /// `{ N [ tag:value, ... ]}` as `Disassembler::SerializeLiteralArray`
     /// writes it; nothing at all for an empty array.
     fn literal_text(&self, off: u32, flags: &mut LiteralFlags) -> Vec<u8> {
@@ -417,11 +487,16 @@ impl<'a> Subject<'a> {
         text
     }
 
-    /// `<record with dots>.<raw name>`, the way the oracle names a function.
+    /// `<record with dots>.<raw name>`, the way the oracle names a function;
+    /// the raw name alone for a function of `_GLOBAL`, the record of a file
+    /// that was not merged (`GetFullMethodName` leaves that one out).
     fn full_method_name(&self, method: &Method<'a>) -> Vec<u8> {
         let mut name: Vec<u8> = match method.class_off().ok().and_then(|off| self.abc.string(off).ok()) {
             Some(descriptor) => {
                 let record = descriptor.bytes.strip_prefix(b"L").and_then(|d| d.strip_suffix(b";")).unwrap_or(descriptor.bytes);
+                if record == asc_abc::unmerged::GLOBAL {
+                    return method.name().map_or(b"<bad name>".to_vec(), |name| name.bytes.to_vec());
+                }
                 record.iter().map(|&b| if b == b'/' { b'.' } else { b }).collect()
             }
             None => b"<bad class>".to_vec(),
@@ -1062,14 +1137,21 @@ impl<'a> Comparer<'a> {
                 Some(FieldValue::Raw(value)) => format!(" = {value:#x}"),
                 None => String::new(),
             };
+            // A field of an annotation interface is written with its type and its default value.
+            let typed = if class.is_annotation() { self.subject.default_text(field) } else { None };
+            let (kind, value) = match &typed {
+                Some((kind, value)) => (kind.as_str(), [b" = ", value.as_slice()].concat()),
+                None => (kind, value.into_bytes()),
+            };
+            let value = value.as_slice();
             let mut expected = format!("\t{kind} ").into_bytes();
             expected.extend_from_slice(field.name().unwrap().bytes);
-            expected.extend_from_slice(value.as_bytes());
+            expected.extend_from_slice(value);
             // `SerializeFields` passes the name through `GetFileNameByPath`.
             let name = field.name().unwrap().bytes;
             let mut shortened = format!("\t{kind} ").into_bytes();
             shortened.extend_from_slice(name.rsplit(|&b| b == b'/').next().unwrap_or(name));
-            shortened.extend_from_slice(value.as_bytes());
+            shortened.extend_from_slice(value);
             let stated = if verbose {
                 rfind(line, b"# offset: 0x").map(|at| (&line[..at], parse_hex(&line[at + 10..])))
             } else {
@@ -1110,9 +1192,12 @@ impl<'a> Comparer<'a> {
             let annotation = abc.annotation(off).unwrap();
             let descriptor = abc.string(annotation.class_off(&abc).unwrap()).unwrap().bytes;
             for element in annotation.elements() {
-                let mut text = b"\tu32 ".to_vec();
+                let (kind, value) = self.subject.element_text(&element);
+                let mut text = format!("\t{kind} ").into_bytes();
                 text.extend_from_slice(abc.string(element.name_off).unwrap().bytes);
-                text.extend_from_slice(format!(" {{ {:#x} }}", element.value).as_bytes());
+                text.extend_from_slice(b" { ");
+                text.extend_from_slice(&value);
+                text.extend_from_slice(b" }");
                 ours.push((descriptor.strip_suffix(b";").unwrap_or(descriptor).to_vec(), text));
             }
         }
@@ -1697,6 +1782,9 @@ impl<'a> Comparer<'a> {
                 }
             } else if let Some(number) = text.strip_prefix("  ; line ") {
                 line = number.parse().ok();
+            } else if text.starts_with("; @") {
+                // An annotation of the program: its values are compared from the file.
+                self.report.count("listing: annotation lines");
             } else if text.starts_with("  .endtry ") || text == ".end function" {
             } else if let Some((pc, rest)) = text.strip_prefix("  ").and_then(|text| text.split_once("  ")) {
                 let _ = rest;
@@ -1802,8 +1890,14 @@ fn compare(data: &[u8], listings: &[PathBuf]) -> Outcome {
             report.check(!seen_methods.contains(off), "function: a second one of its signature is in the oracle", || format!("@{off:#x}"));
         }
     }
-    for classes in subject.records.values() {
+    for (name, classes) in &subject.records {
         let (first, rest) = classes.split_first().unwrap();
+        // `Disassembler::GetRecords` passes over the record of an unmerged file.
+        if name == asc_abc::unmerged::GLOBAL {
+            report.count("records the official tool leaves out (_GLOBAL)");
+            report.check(!seen_classes.contains(first), "record: _GLOBAL is in the oracle", || format!("@{first:#x}"));
+            continue;
+        }
         report.check(seen_classes.contains(first), "record: missing in oracle", || {
             format!("{} @{first:#x}", lossy(subject.classes[first].name()))
         });
@@ -1823,9 +1917,17 @@ fn compare(data: &[u8], listings: &[PathBuf]) -> Outcome {
                 report.check(seen_literals.contains(&off), "literal dump: entry missing in oracle", || format!("@{off:#x}"));
             }
         }
-        // No index in the header: the dump is what the official tool collects.
+        // No index in the header: the dump is what the official tool collects. It finds
+        // module records by the `moduleRecordIdx` field, which an unmerged file has not.
         None if !seen_literals.is_empty() => {
-            for off in subject.module_records.iter().chain(&used_literals) {
+            let unmerged = subject.unmerged_module_record();
+            if let Some(off) = unmerged {
+                report.count("module records the official tool does not find (unmerged, no literal index)");
+                report.check(!seen_literals.contains(&off), "literal dump: the module record of an unmerged file is dumped", || {
+                    format!("@{off:#x}")
+                });
+            }
+            for off in subject.module_records.iter().filter(|off| Some(**off) != unmerged).chain(&used_literals) {
                 report.check(seen_literals.contains(off), "literal dump: entry missing in oracle", || format!("@{off:#x}"));
             }
             for off in &subject.phase_tables {
@@ -2125,6 +2227,176 @@ fn official_tool_agrees_on_fixtures() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(failed.is_empty(), "the official disassembler on fixture files:\n{}", failed.join("\n"));
+}
+
+/// The sources in `tests/es2abc` every compiler target takes. They import
+/// one another by relative path.
+const SOURCES: [&str; 7] = ["classes.ts", "closures.js", "extras.ts", "flow.js", "lib.ts", "main.ts", "other.ts"];
+/// Those and the one that declares annotations, which API 20 brought.
+const ANNOTATED: [&str; 8] = ["annotations.ts", "classes.ts", "closures.js", "extras.ts", "flow.js", "lib.ts", "main.ts", "other.ts"];
+/// The sources that are scripts as well as modules: no `import`, no `export`.
+const SCRIPTS: [&str; 2] = ["closures.js", "flow.js"];
+
+/// `--target-api-version` and `--target-api-sub-version` of the builds:
+/// one per bytecode version the compiler of API 26 writes (9.0.0.0,
+/// 11.0.2.0, 12.0.2.0, 12.0.6.0, 13.0.1.0, 24.0.0.0). A compiler that maps
+/// them otherwise is believed: it is asked which version each one is.
+const TARGETS: [(u32, Option<&str>); 6] = [(9, None), (11, None), (12, Some("beta1")), (12, Some("beta3")), (20, None), (24, None)];
+
+/// How files are built from the sources.
+struct Build {
+    name: &'static str,
+    sources: &'static [&'static str],
+    /// All sources in one file, as an application is packed, or one file
+    /// per source.
+    merged: bool,
+    flags: &'static [&'static str],
+    /// The first API version the compiler takes the flags or the sources for.
+    since: u32,
+}
+
+const MODULE: &str = "--module";
+const BUILDS: [Build; 13] = [
+    Build { name: "merged", sources: &SOURCES, merged: true, flags: &[MODULE], since: 0 },
+    Build { name: "merged-debug", sources: &SOURCES, merged: true, flags: &[MODULE, "--debug-info"], since: 0 },
+    Build { name: "merged-unoptimized", sources: &SOURCES, merged: true, flags: &[MODULE, "--opt-level", "0"], since: 0 },
+    Build { name: "merged-columns", sources: &SOURCES, merged: true, flags: &[MODULE, "--enable-release-column"], since: 0 },
+    Build { name: "single", sources: &SOURCES, merged: false, flags: &[MODULE], since: 0 },
+    Build { name: "single-debug", sources: &SOURCES, merged: false, flags: &[MODULE, "--debug-info"], since: 0 },
+    Build { name: "commonjs", sources: &SCRIPTS, merged: false, flags: &["--commonjs"], since: 0 },
+    Build { name: "script", sources: &SCRIPTS, merged: false, flags: &[], since: 0 },
+    Build { name: "annotated", sources: &ANNOTATED, merged: true, flags: &[MODULE, "--enable-annotations"], since: 20 },
+    Build {
+        name: "annotated-debug",
+        sources: &ANNOTATED,
+        merged: true,
+        flags: &[MODULE, "--enable-annotations", "--debug-info"],
+        since: 20,
+    },
+    Build { name: "annotated-single", sources: &["annotations.ts"], merged: false, flags: &[MODULE, "--enable-annotations"], since: 20 },
+    Build { name: "implements", sources: &SOURCES, merged: true, flags: &[MODULE, "--enable-ets-implements"], since: 20 },
+    Build { name: "callable-names", sources: &SOURCES, merged: true, flags: &[MODULE, "--enable-callable-name"], since: 24 },
+];
+
+/// Run `command`; what it printed when it failed.
+fn run(command: &mut std::process::Command) -> Result<String, String> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let out = command.output().map_err(|err| format!("{program}: {err}"))?;
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if out.status.success() {
+        Ok(said)
+    } else {
+        Err(format!("{program}: {}: {}", out.status, said.trim()))
+    }
+}
+
+/// `$ASC_ES2ABC` is the official compiler (`es2abc`), `$ASC_ARK_DISASM` the
+/// official disassembler. The sources in `tests/es2abc` are compiled on the
+/// spot for every bytecode version the compiler targets, in every way
+/// [`BUILDS`] lists; each file is disassembled by the official tool and
+/// compared like any other listing. Without both variables the test does
+/// nothing.
+#[test]
+fn official_compiler_output_agrees_in_every_version() {
+    let (Some(compiler), Some(tool)) = (std::env::var_os("ASC_ES2ABC"), std::env::var_os("ASC_ARK_DISASM")) else { return };
+    let sources = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/es2abc");
+    let dir = std::env::temp_dir().join(format!("asc-pasm-es2abc-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
+
+    let mut failed = Vec::new();
+    let mut versions = Vec::new();
+    let mut summary = String::new();
+    let mut opcodes = Opcodes::new();
+    for (api, sub) in TARGETS {
+        let target = || {
+            let mut command = std::process::Command::new(&compiler);
+            command.arg("--target-api-version").arg(api.to_string());
+            if let Some(sub) = sub {
+                command.args(["--target-api-sub-version", sub]);
+            }
+            command
+        };
+        let label = format!("api-{api}{}", sub.map_or(String::new(), |sub| format!("-{sub}")));
+        let stated = match run(target().arg("--target-bc-version")) {
+            Ok(stated) => stated.trim().to_owned(),
+            Err(why) => {
+                failed.push(format!("{label}: {why}"));
+                continue;
+            }
+        };
+        versions.push(stated.clone());
+        for build in BUILDS.iter().filter(|build| build.since <= api) {
+            let inputs: Vec<(String, PathBuf, &str)> = if build.merged {
+                // One line per source: path;record;module kind;source file;package;shared.
+                let list = dir.join(format!("{label}-{}.txt", build.name));
+                let line = |file: &&str| {
+                    let stem = file.rsplit_once('.').map_or(*file, |(stem, _)| stem);
+                    format!("{};&entry/src/main/ets/{stem}&;esm;entry/src/main/ets/{file};entry;false\n", sources.join(file).display())
+                };
+                std::fs::write(&list, build.sources.iter().map(line).collect::<String>()).unwrap();
+                vec![(build.name.to_owned(), PathBuf::from(format!("@{}", list.display())), "ts")]
+            } else {
+                let named = |file: &&'static str| {
+                    let (stem, extension) = file.rsplit_once('.').unwrap();
+                    (format!("{}-{stem}", build.name), sources.join(file), extension)
+                };
+                build.sources.iter().map(named).collect()
+            };
+            for (name, input, extension) in inputs {
+                let name = format!("{label}-{name}");
+                let (abc_path, listing) = (dir.join(format!("{name}.abc")), dir.join(format!("{name}.pa")));
+                let mut compile = target();
+                compile.args(["--extension", extension]).args(build.flags);
+                if build.merged {
+                    compile.arg("--merge-abc");
+                }
+                compile.arg("--output").arg(&abc_path).arg(&input);
+                let disassembled =
+                    run(&mut compile).and_then(|_| run(std::process::Command::new(&tool).arg("--verbose").arg(&abc_path).arg(&listing)));
+                if let Err(why) = disassembled {
+                    failed.push(format!("{name}: {why}"));
+                    continue;
+                }
+                let data = std::fs::read(&abc_path).unwrap();
+                let version = Abc::parse(&data).map(|abc| abc.header().version.to_string());
+                if version.as_ref().ok() != Some(&stated) {
+                    failed.push(format!("{name}: the compiler says {stated}, the header reads {version:?}"));
+                    continue;
+                }
+                let outcome = compare(&data, std::slice::from_ref(&listing));
+                println!("==== {name} ({stated})");
+                print!("{}", outcome.report);
+                let (functions, identical) = (outcome.count("functions in oracle"), outcome.count("functions identical"));
+                let unknown: u64 = outcome.divergences.iter().filter(|(.., known)| !known).map(|(_, count, _)| count).sum();
+                writeln!(
+                    summary,
+                    "{name} ({stated}): {functions} functions ({identical} identical), {} instructions ({} identical), {} opcodes, \
+                     {unknown} divergences",
+                    outcome.count("instructions compared"),
+                    outcome.count("instructions identical"),
+                    outcome.opcodes.len(),
+                )
+                .unwrap();
+                if !outcome.unknown().is_empty() {
+                    failed.push(format!("{name}: {:?}", outcome.unknown()));
+                }
+                if functions == 0 || functions != identical {
+                    failed.push(format!("{name}: {functions} functions, {identical} identical"));
+                }
+                for (key, (mnemonic, count)) in outcome.opcodes {
+                    opcodes.entry(key).or_insert((mnemonic, 0)).1 += count;
+                }
+            }
+        }
+    }
+    println!("==== summary\n{summary}");
+    let mut seen = String::new();
+    opcode_lines(&mut seen, &opcodes);
+    print!("{seen}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(failed.is_empty(), "the official compiler's files:\n{}", failed.join("\n"));
+    versions.dedup();
+    assert!(versions.len() > 1, "one bytecode version only: {versions:?}");
 }
 
 #[test]

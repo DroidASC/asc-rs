@@ -321,6 +321,36 @@ impl StoreKind {
     }
 }
 
+/// What an instruction does to an object, or hands back, for [`Watch::Objects`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectOp {
+    /// `return`: the accumulator is the value of the call.
+    Return,
+    /// `definemethod`: the accumulator is the home object of the method.
+    Method,
+    /// `definegettersetterbyvalue object, key, getter, setter`.
+    Accessor,
+    /// A store into a named property of the object in the register operand.
+    Store,
+    /// The same, of `this` (`stthisbyname`; `stsuperbyname` assigns to `this` too).
+    StoreThis,
+}
+
+impl ObjectOp {
+    fn of(opcode: &Opcode) -> Option<ObjectOp> {
+        match base_name(opcode) {
+            "return" => Some(ObjectOp::Return),
+            "definemethod" => Some(ObjectOp::Method),
+            "definegettersetterbyvalue" => Some(ObjectOp::Accessor),
+            "stobjbyname" | "stownbyname" | "stownbynamewithnameset" | "definefieldbyname" | "definepropertybyname" => {
+                Some(ObjectOp::Store)
+            }
+            "stthisbyname" | "stsuperbyname" => Some(ObjectOp::StoreThis),
+            _ => None,
+        }
+    }
+}
+
 /// What a walk reports to its visitor.
 #[derive(Debug)]
 pub(crate) enum Event<'t> {
@@ -336,6 +366,31 @@ pub(crate) enum Event<'t> {
     Class {
         parent: ValueId,
     },
+    /// `return`, with the tracked value it hands back.
+    Return {
+        value: ValueId,
+    },
+    /// `definemethod`: the instruction names the method, `home` is the
+    /// object it is defined for (a class for a static method, the
+    /// `prototype` of one for an instance method).
+    Method {
+        home: ValueId,
+    },
+    /// `definegettersetterbyvalue`: an accessor of `object` under `key`;
+    /// the one that is not defined is `undefined`.
+    Accessor {
+        object: ValueId,
+        key: ValueId,
+        getter: ValueId,
+        setter: ValueId,
+    },
+    /// A store into the property `name` of `object` (`stobjbyname`,
+    /// `stownbyname`, `definefieldbyname`, `stthisbyname` …).
+    PropertyStore {
+        object: ValueId,
+        name: StringRef,
+        value: ValueId,
+    },
 }
 
 /// Which instructions a walk reports.
@@ -345,6 +400,9 @@ pub(crate) enum Watch {
     Stores,
     /// Class definitions.
     Classes,
+    /// What functions return and what is put on objects by name: `return`,
+    /// method and accessor definitions, stores into named properties.
+    Objects,
 }
 
 impl Watch {
@@ -358,6 +416,10 @@ impl Watch {
 
     fn classes(self) -> bool {
         self == Watch::Classes
+    }
+
+    fn objects(self) -> bool {
+        self == Watch::Objects
     }
 }
 
@@ -513,6 +575,23 @@ impl Frame {
         Some(Event::Store { target, value })
     }
 
+    /// What `insn` (of kind `op`) does, for [`Watch::Objects`].
+    fn object_event(&mut self, op: ObjectOp, insn: &Instruction<'_>) -> Option<Event<'static>> {
+        let mut regs = registers(insn, OperandKind::RegIn).map(|reg| self.reg(reg));
+        Some(match op {
+            ObjectOp::Return => Event::Return { value: self.acc },
+            ObjectOp::Method => Event::Method { home: self.acc },
+            ObjectOp::Accessor => Event::Accessor { object: regs.next()?, key: regs.next()?, getter: regs.next()?, setter: regs.next()? },
+            ObjectOp::Store => Event::PropertyStore { object: regs.next()?, name: StringRef::of(insn)?, value: self.acc },
+            ObjectOp::StoreThis => {
+                drop(regs);
+                let name = StringRef::of(insn)?;
+                let object = self.make(Source::This, pc_of(insn));
+                Event::PropertyStore { object, name, value: self.acc }
+            }
+        })
+    }
+
     /// `base[key]` with the key in the accumulator: a property when the key
     /// is a string constant, an indexed element when it is a small integer.
     fn element(&self, base: ValueId) -> Source {
@@ -563,6 +642,7 @@ pub(crate) struct Effects {
     stores: OpTable<Option<StoreKind>>,
     /// Whether the opcode defines a class: its last register is the parent.
     classes: OpTable<bool>,
+    objects: OpTable<Option<ObjectOp>>,
 }
 
 impl Effects {
@@ -572,6 +652,7 @@ impl Effects {
             calls: OpTable::build(CallShape::of),
             stores: OpTable::build(StoreKind::of),
             classes: OpTable::build(defines_class),
+            objects: OpTable::build(ObjectOp::of),
         }
     }
 }
@@ -630,7 +711,11 @@ impl Tracker {
         let bytes = code.instructions();
         let blocks = self.find_blocks(effects, code)?;
         // A function with nothing to report has nothing to show.
-        if !(watch.calls() && blocks.has_call || watch.stores() && blocks.has_store || watch.classes() && blocks.has_class) {
+        let wanted = watch.calls() && blocks.has_call
+            || watch.stores() && blocks.has_store
+            || watch.classes() && blocks.has_class
+            || watch.objects() && blocks.has_object;
+        if !wanted {
             return Ok(());
         }
         let prologue_end = blocks.prologue_end;
@@ -678,6 +763,11 @@ impl Tracker {
             if watch.stores() {
                 if let Some(store) = effects.stores.of(insn.opcode).and_then(|kind| self.frame.store(kind, &insn)) {
                     visit(&self.frame, &insn, store);
+                }
+            }
+            if watch.objects() {
+                if let Some(event) = effects.objects.of(insn.opcode).and_then(|op| self.frame.object_event(op, &insn)) {
+                    visit(&self.frame, &insn, event);
                 }
             }
             self.frame.step(effects.effects.of(insn.opcode), &insn);
@@ -734,7 +824,7 @@ impl Tracker {
         self.opaque.reset(bytes.len());
         self.writes.clear();
         let mut prologue_end = usize::MAX;
-        let (mut has_call, mut has_store, mut has_class) = (false, false, false);
+        let (mut has_call, mut has_store, mut has_class, mut has_object) = (false, false, false, false);
         for block in code.try_blocks().map_while(|block| block.ok()) {
             prologue_end = prologue_end.min(block.start_pc as usize);
             for catch in block.catch_blocks() {
@@ -749,6 +839,7 @@ impl Tracker {
             has_call |= effects.calls.of(opcode).is_some();
             has_store |= effects.stores.of(opcode).is_some();
             has_class |= effects.classes.of(opcode);
+            has_object |= effects.objects.of(opcode).is_some();
             if let Some(target) = insn.jump_target() {
                 self.leaders.insert(target);
                 if target <= insn.pc {
@@ -766,7 +857,7 @@ impl Tracker {
                 self.writes.extend(registers(&insn, OperandKind::RegOut).map(|reg| (insn.pc, reg)));
             }
         }
-        Ok(Blocks { prologue_end, has_call, has_store, has_class })
+        Ok(Blocks { prologue_end, has_call, has_store, has_class, has_object })
     }
 
     /// The operands of call `insn`. Every register operand goes to
@@ -849,6 +940,8 @@ struct Blocks {
     has_store: bool,
     /// Whether it defines a class.
     has_class: bool,
+    /// Whether it has an instruction [`Watch::Objects`] reports.
+    has_object: bool,
 }
 
 /// [`CallSite`] without its argument slice.

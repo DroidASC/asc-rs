@@ -14,7 +14,7 @@ use crate::output::Io;
 use crate::{ClassArgs, Command, Common, FieldAccessArg, Find, EXIT_OK, EXIT_PARTIAL, RESOURCE_SEARCH_ROWS};
 use asc_ark_engine::{
     Access, CallQuery, CallRoots, ClassQuery, Direction, Document, Engine, EngineError, EntryStatus, HierarchyQuery, Lineage, ListOptions,
-    Manifest, NameFilter, Pattern, Query, RefBatch, RefContext, ResourceField, ResourceTables,
+    ListingStyle, Manifest, NameFilter, Pattern, Query, RefBatch, RefContext, ResourceField, ResourceTables,
 };
 use asc_mcp::harmony::{function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots, TreeText};
 use std::path::{Path, PathBuf};
@@ -52,25 +52,19 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             listclass(io, &engine, &options, output.as_ref())?;
             EXIT_OK
         }
-        Command::Getclass { output, no_debug_info: _, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class } => {
-            // `--no-debug-info` holds as it is: the disassembly has no debug directives.
+        Command::Getclass { output, no_debug_info: _, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class } => {
+            // `--no-debug-info` holds as it is: without `--lines` the listing has no line of its own for the debug info.
+            let debug_info = false;
             let args =
-                ClassArgs { output, tee: true, debug_info: false, dump_dex, method_signature, res_names, entry, apk_path, dalvik_class };
+                ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
             getclass(io, common, &args)?;
             EXIT_OK
         }
-        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, entry, apk_path, dalvik_class } => {
-            let args = ClassArgs {
-                output,
-                tee: false,
-                debug_info: debuginfo,
-                dump_dex,
-                method_signature,
-                res_names,
-                entry,
-                apk_path,
-                dalvik_class,
-            };
+        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, entry, lines, apk_path, dalvik_class } => {
+            // The debug directives of a listing are its `; line N` lines.
+            let (debug_info, lines) = (false, lines || debuginfo);
+            let args =
+                ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
             getclass(io, common, &args)?;
             EXIT_OK
         }
@@ -435,13 +429,10 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: &ClassArgs) -> Result<(), St
     if args.dump_dex.is_some() {
         return Err(dex_only("--dump-dex"));
     }
-    if args.debug_info {
-        return Err(dex_only("--debuginfo"));
-    }
     let engine = open(io, common, &args.apk_path)?;
     let target = Target::parse(&args.dalvik_class, args.method_signature.as_deref());
     let query = ClassQuery { record: target.record, function: target.function, entry: args.entry.as_deref() };
-    let mut source = engine.get_class(&query).map_err(|e| match &e {
+    let mut source = engine.get_class_as(&query, ListingStyle { lines: args.lines }).map_err(|e| match &e {
         EngineError::Ambiguous { candidates, .. } if several_entries_define(candidates) => {
             format!("{e}\n(name the entry, the first column, with --entry)")
         }
@@ -513,7 +504,7 @@ fn known_kind(spec: &str) -> Result<(), String> {
     let spec = spec.trim_start().trim_start_matches('!').trim_start();
     let kind = spec.split_once(':').map_or(spec, |(kind, _)| kind).trim();
     // Not `KIND:VALUE` at all: the engine says what is.
-    if Query::KINDS.contains(&kind) || !spec.contains(':') || !kind.bytes().all(|b| b.is_ascii_alphabetic()) {
+    if Query::kind_named(kind).is_some() || !spec.contains(':') || !kind.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Ok(());
     }
     Err(format!(

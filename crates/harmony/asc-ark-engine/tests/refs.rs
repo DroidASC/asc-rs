@@ -370,7 +370,7 @@ fn methods_are_found_where_they_become_functions() {
     assert_eq!(
         find(&engine, &condition("method:.")),
         [
-            &format!("{class} ; literal@0x636 [1]=method #~@0>#load, [4]=getter #~@0>#size"),
+            &format!("{class} ; literal@0x636 [1]=method #~@0>#load (Net.load), [4]=getter #~@0>#size (Net.size)"),
             "func_main_0 | definefunc #*#local, 0  ; local",
             "&entry/src/main/ets/util/Util& func_main_0 | definefunc #*#helper, 1  ; helper",
             // Named by the id of another region's table in the split build.
@@ -378,11 +378,14 @@ fn methods_are_found_where_they_become_functions() {
         ]
     );
     // By raw name, restored name, or a dotted suffix of it; a literal item alone is a row too.
-    let load = ["func_main_0 | defineclasswithbuffer literal@0x636 [1]=method #~@0>#load"];
+    let load = ["func_main_0 | defineclasswithbuffer literal@0x636 [1]=method #~@0>#load (Net.load)"];
     for name in ["method:=#~@0>#load", "method:=Net.load", "method:=load", "method:^Net\\.load$", "method:>#load"] {
         assert_eq!(find(&engine, &condition(name)), load, "{name}");
     }
-    assert_eq!(find(&engine, &condition("method:=Net.size")), ["func_main_0 | defineclasswithbuffer literal@0x636 [4]=getter #~@0>#size"]);
+    assert_eq!(
+        find(&engine, &condition("method:=Net.size")),
+        ["func_main_0 | defineclasswithbuffer literal@0x636 [4]=getter #~@0>#size (Net.size)"]
+    );
     assert_eq!(find(&engine, &condition("method:=Net.constructor")), [class]);
     assert!(find(&engine, &condition("method:=Net")).is_empty(), "a class is named by its constructor");
     assert!(find(&engine, &condition("method:=oad")).is_empty());

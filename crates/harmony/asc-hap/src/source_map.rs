@@ -115,6 +115,16 @@ impl SourceMaps {
         self.slots.iter().map(|slot| slot.key.as_str())
     }
 
+    /// Bytes the index takes on the heap, roughly: its tables by their
+    /// capacity and the keys they own, without the allocator's overhead.
+    pub fn heap_bytes(&self) -> usize {
+        let slots: usize = self.slots.iter().map(|slot| slot.key.capacity() + slot.version.as_ref().map_or(0, String::capacity)).sum();
+        let names: usize = self.by_name.iter().map(|(name, slots)| name.capacity() + slots.capacity() * size_of::<usize>()).sum();
+        // A hash table keeps one control byte per bucket.
+        let buckets = self.by_name.capacity() * (size_of::<(String, Vec<usize>)>() + 1);
+        self.slots.capacity() * size_of::<Slot>() + slots + buckets + names
+    }
+
     fn slot_of(&self, record: &str) -> Option<&Slot> {
         let (name, version) = match record.strip_prefix('&') {
             // `&pkg/path&version`, the version empty for the package that was built.
@@ -264,6 +274,15 @@ impl Scanner<'_> {
     }
 }
 
+/// A line of one of the source files of a module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceLine {
+    /// Which of [`ModuleMap::sources`], by index.
+    pub source: u32,
+    /// The line of that file, counted from 1.
+    pub line: u32,
+}
+
 /// The source map of one module: which source line each line of the
 /// compiled file comes from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -275,9 +294,11 @@ pub struct ModuleMap {
     /// How many identifier names the map carries (`names`): none in the
     /// maps the build tools are known to write.
     pub names: usize,
-    /// Per line of the compiled file, from 0: the line of `sources[0]`,
-    /// from 1, its first mapped position comes from.
-    lines: Vec<Option<u32>>,
+    /// Per line of the compiled file, from 0: the source line its first
+    /// mapped position comes from.
+    lines: Vec<Option<SourceLine>>,
+    /// The sources `lines` name, ascending.
+    mapped: Vec<u32>,
     /// Whether `mappings` stopped at something that is not a mapping; the
     /// lines before it stand.
     pub damaged: bool,
@@ -294,25 +315,30 @@ impl ModuleMap {
             sources.iter().map(|source| source.as_str().unwrap_or_default().to_owned()).collect()
         });
         let names = value.get("names").and_then(Value::as_array).map_or(0, Vec::len);
-        let (lines, damaged) = decode_lines(mappings);
-        Ok(ModuleMap { sources, names, lines, damaged })
+        let (lines, damaged) = decode_lines(mappings, sources.len());
+        let mut mapped: Vec<u32> = lines.iter().flatten().map(|line| line.source).collect();
+        mapped.sort_unstable();
+        mapped.dedup();
+        Ok(ModuleMap { sources, names, lines, mapped, damaged })
     }
 
-    /// The source file the lines of [`ModuleMap::source_line`] are lines of.
-    pub fn source(&self) -> Option<&str> {
-        self.sources.first().map(String::as_str).filter(|source| !source.is_empty())
+    /// The source files some line of the compiled file comes from, by
+    /// index into [`ModuleMap::sources`], ascending. A module bundled from
+    /// several files has more than one; `sources` may also list files no
+    /// line maps to.
+    pub fn mapped_sources(&self) -> &[u32] {
+        &self.mapped
     }
 
-    /// The line of [`ModuleMap::source`], counted from 1, that line
-    /// `compiled` of the compiled file (counted from 0, as the debug info
-    /// of the code counts) was made from; `None` for a line the build
-    /// added, and for one past the end of the map.
-    pub fn source_line(&self, compiled: u32) -> Option<u32> {
+    /// The source line that line `compiled` of the compiled file (counted
+    /// from 0, as the debug info of the code counts) was made from; `None`
+    /// for a line the build added, and for one past the end of the map.
+    pub fn source_line(&self, compiled: u32) -> Option<SourceLine> {
         self.lines.get(usize::try_from(compiled).ok()?).copied().flatten()
     }
 
     /// [`ModuleMap::source_line`] of every line of the compiled file.
-    pub fn source_lines(&self) -> &[Option<u32>] {
+    pub fn source_lines(&self) -> &[Option<SourceLine>] {
         &self.lines
     }
 }
@@ -356,8 +382,8 @@ fn segment(text: &[u8]) -> Option<([i64; 5], usize)> {
 }
 
 /// The source line of the first position of each compiled line that comes
-/// from the first source file, and whether the text broke off.
-fn decode_lines(mappings: &str) -> (Vec<Option<u32>>, bool) {
+/// from one of the `sources` source files, and whether the text broke off.
+fn decode_lines(mappings: &str, sources: usize) -> (Vec<Option<SourceLine>>, bool) {
     let mut lines = Vec::new();
     // Both run on from segment to segment, across lines.
     let (mut source, mut source_line) = (0i64, 0i64);
@@ -371,8 +397,11 @@ fn decode_lines(mappings: &str) -> (Vec<Option<u32>>, bool) {
             }
             source = source.saturating_add(fields[1]);
             source_line = source_line.saturating_add(fields[2]);
-            if first.is_none() && source == 0 {
-                first = u32::try_from(source_line).ok().and_then(|line| line.checked_add(1));
+            if first.is_none() {
+                // A source the map does not list, or a line below zero, maps nowhere.
+                let source = u32::try_from(source).ok().filter(|&source| (source as usize) < sources);
+                let line = u32::try_from(source_line).ok().and_then(|line| line.checked_add(1));
+                first = source.zip(line).map(|(source, line)| SourceLine { source, line });
             }
         }
         lines.push(first);
@@ -396,6 +425,11 @@ mod tests {
       "other/src/main/ets/Old.ts": {"sources": ["other/src/main/ets/Old.ets"], "mappings": "AAAA;A*"}
     }"#;
 
+    /// Lines of the first source file.
+    fn first(lines: &[Option<u32>]) -> Vec<Option<SourceLine>> {
+        lines.iter().map(|line| line.map(|line| SourceLine { source: 0, line })).collect()
+    }
+
     #[test]
     fn modules_are_found_by_record() {
         let maps = SourceMaps::index(TABLE.as_bytes()).unwrap();
@@ -404,25 +438,35 @@ mod tests {
         let module = |record: &str| maps.module(TABLE.as_bytes(), record);
 
         let index = module("&entry/src/main/ets/pages/Index&").unwrap().unwrap();
-        assert_eq!(index.source(), Some("entry/src/main/ets/pages/Index.ets"));
+        assert_eq!((&index.sources[..], index.mapped_sources()), (&["entry/src/main/ets/pages/Index.ets".to_owned()][..], &[0][..]));
         // Two lines the build added, then source lines 1 and 2, a gap, line 5.
-        assert_eq!(index.source_lines(), [None, None, Some(1), Some(2), None, Some(5)]);
-        assert_eq!((index.source_line(3), index.source_line(4), index.source_line(99)), (Some(2), None, None));
+        assert_eq!(index.source_lines(), first(&[None, None, Some(1), Some(2), None, Some(5)]));
+        assert_eq!((index.source_line(3).map(|at| at.line), index.source_line(4), index.source_line(99)), (Some(2), None, None));
         assert!(!index.damaged && index.names == 0);
         // The older record naming has the bundle ahead and no `src/main`.
         assert_eq!(module("com.example.app/entry/ets/pages/Index").unwrap().unwrap(), index);
 
         let lib = module("&@scope/lib/src/main/js/lib&2.0.0").unwrap().unwrap();
-        assert_eq!((lib.source_line(0), lib.names), (Some(3), 1));
-        assert_eq!(module("&@scope/lib/src/main/js/lib&3.1.0").unwrap().unwrap().source(), None);
+        assert_eq!((lib.source_line(0), lib.names), (Some(SourceLine { source: 0, line: 3 }), 1));
+        assert!(module("&@scope/lib/src/main/js/lib&3.1.0").unwrap().unwrap().mapped_sources().is_empty());
         assert!(module("&@scope/lib/src/main/js/lib&9.9.9").is_none());
 
         // The older key is the path alone.
         let old = module("&other/src/main/ets/Old&").unwrap().unwrap();
-        assert_eq!((old.source_lines(), old.damaged), (&[Some(1)][..], true));
+        assert_eq!((old.source_lines(), old.damaged), (&first(&[Some(1)])[..], true));
 
         assert!(matches!(module("&entry/src/main/ets/broken&"), Some(Err(SourceMapError::Module { .. }))));
         assert!(module("&entry/src/main/ets/pages/Missing&").is_none() && module("&nonsense").is_none() && module("").is_none());
+    }
+
+    #[test]
+    fn the_index_knows_what_it_holds() {
+        assert_eq!(SourceMaps::default().heap_bytes(), 0);
+        let maps = SourceMaps::index(TABLE.as_bytes()).unwrap();
+        let keys: usize = maps.keys().map(str::len).sum();
+        // Its keys, twice over (the table by name has them without the extension), and the slots.
+        assert!(maps.heap_bytes() > keys + maps.len() * size_of::<Slot>(), "{}", maps.heap_bytes());
+        assert!(maps.heap_bytes() < 16 * TABLE.len(), "{}", maps.heap_bytes());
     }
 
     #[test]
@@ -451,6 +495,31 @@ mod tests {
         assert_eq!(segment(b"AAAAAA"), None);
         assert_eq!(segment(b"g"), None);
         // A source line that runs below zero maps nowhere.
-        assert_eq!(decode_lines("AADA;AACA"), (vec![None, Some(1)], false));
+        assert_eq!(decode_lines("AADA;AACA", 1), (first(&[None, Some(1)]), false));
+    }
+
+    /// A module made from several files: the second field of a segment
+    /// moves between them, and runs on across lines like the line does.
+    #[test]
+    fn a_line_comes_from_the_source_its_first_segment_names() {
+        let at = |source, line| Some(SourceLine { source, line });
+        // Line 0: source 0 line 1. Line 1: source +1, line +4, then back to source 0.
+        // Line 2: a bare column, then source 1 again. Line 3: source +1, which is not listed.
+        // Line 4: source -2, back in the list.
+        let mappings = "AAAA;ACIA,ADAA;A,ACAA;ACAA;AFCA";
+        let (lines, damaged) = decode_lines(mappings, 2);
+        assert_eq!((lines, damaged), (vec![at(0, 1), at(1, 5), at(1, 5), None, at(0, 6)], false));
+        // A source index below zero maps nowhere either, and does not stop the rest.
+        assert_eq!(decode_lines("ADAA;ACCA", 2).0, vec![None, at(0, 2)]);
+
+        let table = format!(
+            r#"{{"a|a|1.0.0|src/main/ets/bundle.ts": {{"sources": ["a/one.ets", "a/unused.ets", "a/two.ets"], "mappings": "{}"}}}}"#,
+            "AAAA;AECA;ACAA"
+        );
+        let maps = SourceMaps::index(table.as_bytes()).unwrap();
+        let bundle = maps.module(table.as_bytes(), "&a/src/main/ets/bundle&").unwrap().unwrap();
+        assert_eq!(bundle.source_lines(), [at(0, 1), at(2, 2), None]);
+        // What no line names is not a source of the listing.
+        assert_eq!(bundle.mapped_sources(), [0, 2]);
     }
 }
