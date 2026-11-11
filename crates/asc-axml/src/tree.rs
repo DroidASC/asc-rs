@@ -91,6 +91,8 @@ pub fn parse_tree(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Elemen
     let mut resource_ids: Vec<u32> = Vec::new();
     // Open elements; index 0 is a synthetic document node.
     let mut stack: Vec<Element> = vec![Element::default()];
+    // Bytes of names, values and text copied into the tree so far.
+    let (mut copied, budget) = (0usize, output_budget(data));
     let mut p = 8usize;
     while p + 8 <= file_size {
         let kind = u16_at(data, p)?;
@@ -112,6 +114,10 @@ pub fn parse_tree(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Elemen
             }
             RES_XML_START_ELEMENT_TYPE => {
                 let sp = pool.as_ref().ok_or(AxmlError::NoStringPool)?;
+                // The document node does not count.
+                if stack.len() > MAX_DEPTH {
+                    return Err(TOO_DEEP);
+                }
                 let ns = sp.get(u32_at(data, ext)?).unwrap_or("").to_string();
                 let name = sp.get(u32_at(data, ext + 4)?).unwrap_or("").to_string();
                 let attr_start = u16_at(data, ext + 8)? as usize;
@@ -140,6 +146,10 @@ pub fn parse_tree(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Elemen
                         (dtype, dval, format_value_with(dtype, dval, sp, resolver))
                     };
                     let res_id = resource_ids.get(aname_idx as usize).copied();
+                    copied = copied.saturating_add(ans.len() + aname.len() + value.len());
+                    if copied > budget {
+                        return Err(TOO_LARGE);
+                    }
                     attrs.push(Attribute { ns: ans, name: aname, res_id, kind, data: data_value, value });
                 }
                 stack.push(Element { ns, name, attrs, children: Vec::new(), text: String::new() });
@@ -155,6 +165,10 @@ pub fn parse_tree(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Elemen
                 let text = sp.get(u32_at(data, ext)?).unwrap_or("").trim();
                 let cur = stack.last_mut().expect("document node");
                 if !text.is_empty() {
+                    copied = copied.saturating_add(text.len() + 1);
+                    if copied > budget {
+                        return Err(TOO_LARGE);
+                    }
                     if !cur.text.is_empty() {
                         cur.text.push(' ');
                     }

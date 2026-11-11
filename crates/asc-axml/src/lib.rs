@@ -28,6 +28,14 @@ const UTF8_FLAG: u32 = 1 << 8;
 const STRING_POOL_HEADER_SIZE: usize = 28;
 /// Size of `ResXMLTree_attribute`.
 const ATTRIBUTE_SIZE: usize = 20;
+/// Deepest element nesting (and namespace nesting) a document may have. Real
+/// documents nest a few dozen levels; past this one the indentation alone
+/// would grow quadratically and the tree would be dropped recursively.
+const MAX_DEPTH: usize = 512;
+/// How many times its own size the text or tree of a document may grow to.
+/// Every attribute may name the longest string of the pool, so without a
+/// cap a document of a megabyte could expand to gigabytes.
+const MAX_EXPANSION: usize = 64;
 /// `android:` framework package id.
 const ANDROID_PACKAGE_ID: u32 = 0x01;
 const ANDROID_NS_URI: &str = "http://schemas.android.com/apk/res/android";
@@ -125,21 +133,26 @@ impl PoolLayout {
     /// from). `None` past the end; an entry whose offset points outside the
     /// chunk decodes as `""`.
     pub fn get<'a>(&self, data: &'a [u8], idx: u32) -> Option<Cow<'a, str>> {
+        Some(self.decode_at(data, self.entry_offset(data, idx)?))
+    }
+
+    /// Where string `idx` starts: `None` past the end, `Some(None)` for an
+    /// offset outside the chunk (which decodes as `""`).
+    fn entry_offset(&self, data: &[u8], idx: u32) -> Option<Option<usize>> {
         let idx = idx as usize;
         if idx >= self.count {
             return None;
         }
         let rel = u32_at(data, self.offsets_start + idx * 4).ok()? as usize;
-        Some(match self.data_start.checked_add(rel) {
-            Some(off) if off < self.chunk_end => {
-                if self.utf8 {
-                    decode_utf8(data, off, self.chunk_end)
-                } else {
-                    Cow::Owned(decode_utf16(data, off, self.chunk_end))
-                }
-            }
-            _ => Cow::Borrowed(""),
-        })
+        Some(self.data_start.checked_add(rel).filter(|&off| off < self.chunk_end))
+    }
+
+    fn decode_at<'a>(&self, data: &'a [u8], off: Option<usize>) -> Cow<'a, str> {
+        match off {
+            Some(off) if self.utf8 => decode_utf8(data, off, self.chunk_end),
+            Some(off) => Cow::Owned(decode_utf16(data, off, self.chunk_end)),
+            None => Cow::Borrowed(""),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -154,30 +167,64 @@ impl PoolLayout {
 /// Decoded string pool.
 #[derive(Debug, Default)]
 pub struct StringPool {
+    /// The distinct strings, one per entry offset.
     strings: Vec<String>,
+    /// Index into `strings` of each entry.
+    entries: Vec<u32>,
 }
 
 impl StringPool {
     /// Parse the string pool chunk starting at `chunk` and ending (exclusive) at
     /// `chunk_end`, which must already be clamped to `data.len()`.
+    ///
+    /// Entries that share an offset are decoded once. Entries that overlap,
+    /// each one's length running over the next ones, are how a pool of `n`
+    /// bytes would decode to `n * n` bytes: a pool that decodes to more than
+    /// a few times its size is rejected.
     fn parse(data: &[u8], chunk: usize, chunk_end: usize) -> Result<StringPool> {
         let layout = PoolLayout::parse(data, chunk, chunk_end)?;
-        let strings = (0..layout.count as u32).map(|i| layout.get(data, i).unwrap_or_default().into_owned()).collect();
-        Ok(StringPool { strings })
+        // A UTF-16 code unit grows to at most 3 UTF-8 bytes, as does an invalid byte.
+        let budget = (layout.chunk_end - layout.data_start).saturating_mul(3).saturating_add(1 << 16);
+        let mut decoded = 0usize;
+        let mut slots = std::collections::HashMap::new();
+        let mut pool = StringPool { strings: Vec::new(), entries: Vec::with_capacity(layout.count) };
+        for idx in 0..layout.count as u32 {
+            let off = layout.entry_offset(data, idx).flatten();
+            let slot = *slots.entry(off).or_insert_with(|| {
+                let s = layout.decode_at(data, off).into_owned();
+                decoded = decoded.saturating_add(s.len());
+                pool.strings.push(s);
+                u32::try_from(pool.strings.len() - 1).expect("a pool has fewer than 2^32 entries")
+            });
+            if decoded > budget {
+                return Err(AxmlError::Malformed("string pool entries overlap"));
+            }
+            pool.entries.push(slot);
+        }
+        Ok(pool)
     }
 
     pub fn get(&self, idx: u32) -> Option<&str> {
-        self.strings.get(idx as usize).map(|s| s.as_str())
+        let slot = *self.entries.get(idx as usize)?;
+        self.strings.get(slot as usize).map(String::as_str)
     }
 
     pub fn len(&self) -> usize {
-        self.strings.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.strings.is_empty()
+        self.entries.is_empty()
     }
 }
+
+/// The most text or tree that decoding `data` may produce ([`MAX_EXPANSION`]).
+fn output_budget(data: &[u8]) -> usize {
+    data.len().saturating_mul(MAX_EXPANSION).saturating_add(1 << 20)
+}
+
+const TOO_LARGE: AxmlError = AxmlError::Malformed("decoded document out of proportion to its size");
+const TOO_DEEP: AxmlError = AxmlError::Malformed("elements or namespaces nested too deep");
 
 /// Decode a UTF-8 pool entry at `off`; never reads past `end` (`<= data.len()`).
 fn decode_utf8(data: &[u8], mut off: usize, end: usize) -> Cow<'_, str> {
@@ -389,6 +436,7 @@ pub fn decode_with(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Strin
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     let mut stack: Vec<String> = Vec::new(); // open element qualified names
     let mut open_tag_unclosed = false; // last emitted start tag has not been closed with '>' yet
+    let budget = output_budget(data);
 
     let mut p = 8usize;
     while p + 8 <= file_size {
@@ -414,6 +462,9 @@ pub fn decode_with(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Strin
             }
             RES_XML_START_NAMESPACE_TYPE => {
                 let sp = pool.as_ref().ok_or(AxmlError::NoStringPool)?;
+                if namespaces.len() >= MAX_DEPTH {
+                    return Err(TOO_DEEP);
+                }
                 let prefix = sp.get(u32_at(data, ext)?).unwrap_or("").to_string();
                 let uri = sp.get(u32_at(data, ext + 4)?).unwrap_or("").to_string();
                 namespaces.push((prefix.clone(), uri.clone()));
@@ -424,6 +475,9 @@ pub fn decode_with(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Strin
             }
             RES_XML_START_ELEMENT_TYPE => {
                 let sp = pool.as_ref().ok_or(AxmlError::NoStringPool)?;
+                if stack.len() >= MAX_DEPTH {
+                    return Err(TOO_DEEP);
+                }
                 if open_tag_unclosed {
                     out.push_str(">\n");
                 }
@@ -475,6 +529,9 @@ pub fn decode_with(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Strin
                     out.push_str("=\"");
                     escape_attr(&value, &mut out);
                     out.push('"');
+                    if out.len() > budget {
+                        return Err(TOO_LARGE);
+                    }
                 }
                 stack.push(qname);
                 open_tag_unclosed = true;
@@ -506,6 +563,9 @@ pub fn decode_with(data: &[u8], resolver: Option<&dyn Resolver>) -> Result<Strin
                 out.push('\n');
             }
             _ => {}
+        }
+        if out.len() > budget {
+            return Err(TOO_LARGE);
         }
         p = chunk_end;
     }
@@ -922,6 +982,69 @@ mod tests {
         // Chunk size lying beyond the file is clamped rather than trusted.
         let mut doc = build(&strings, &body);
         doc[el + 4..el + 8].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        assert!(decode(&doc).is_ok());
+    }
+
+    /// Run `f` on a thread with a small stack, as a worker thread of a host
+    /// would: a recursion as deep as the document fails there first.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new().stack_size(256 << 10).spawn(f).unwrap().join().unwrap()
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected() {
+        // 100k open elements: quadratic indentation in the text, and a tree
+        // that would be dropped one recursion per level.
+        let element = start_element(NONE, 0, &[]);
+        let doc = build(&["a"], &element.repeat(100_000));
+        let (text, tree) = on_small_stack(move || (decode(&doc).map(|_| ()), parse_tree(&doc, None).map(|_| ())));
+        assert!(matches!(text, Err(AxmlError::Malformed(_))), "{text:?}");
+        assert!(matches!(tree, Err(AxmlError::Malformed(_))), "{tree:?}");
+        // As deep as the limit is still a document.
+        let doc = build(&["a"], &element.repeat(MAX_DEPTH));
+        assert_eq!(parse_tree(&doc, None).unwrap().name, "a");
+        assert!(decode(&doc).unwrap().ends_with("</a>\n"));
+        // Namespaces that are never closed.
+        let doc = build(&["a"], &start_namespace(0, 0).repeat(MAX_DEPTH + 1));
+        assert!(matches!(decode(&doc), Err(AxmlError::Malformed(_))));
+    }
+
+    #[test]
+    fn repeated_long_strings_cannot_blow_up_the_output() {
+        // 16k attributes all naming one 32k-unit string: 1.5 GB of text from
+        // a 400 KB document.
+        let long = "x".repeat(0x7fff);
+        let attrs = vec![attr(NONE, 0, 1, TYPE_STRING, 1); 0x4000];
+        let doc = build(&["a", &long], &start_element(NONE, 0, &attrs));
+        assert!(matches!(decode(&doc), Err(AxmlError::Malformed(_))));
+        assert!(matches!(parse_tree(&doc, None), Err(AxmlError::Malformed(_))));
+        // A long string named a few times is fine.
+        let attrs = vec![attr(NONE, 0, 1, TYPE_STRING, 1); 8];
+        let doc = build(&["a", &long], &start_element(NONE, 0, &attrs));
+        assert_eq!(parse_tree(&doc, None).unwrap().attrs.len(), 8);
+    }
+
+    #[test]
+    fn overlapping_pool_entries_are_rejected() {
+        // Every entry starts one code unit into the previous one and reads
+        // to the end of the pool (each unit, 0x7fff, doubles as a length):
+        // n entries over n units decode to n * n units.
+        let n = 0x4000usize;
+        let mut pool = pool_chunk(&["a"], false);
+        let strings_start = STRING_POOL_HEADER_SIZE + n * 4;
+        pool[8..12].copy_from_slice(&(n as u32).to_le_bytes());
+        pool[20..24].copy_from_slice(&(strings_start as u32).to_le_bytes());
+        pool.truncate(STRING_POOL_HEADER_SIZE);
+        pool.extend((0..n as u32).flat_map(|i| (i * 2).to_le_bytes()));
+        pool.extend(std::iter::repeat_n(0x7fffu16.to_le_bytes(), n).flatten());
+        let size = pool.len() as u32;
+        pool[4..8].copy_from_slice(&size.to_le_bytes());
+        let doc = document(&[&pool, &start_element(NONE, 0, &[])]);
+        assert!(matches!(decode(&doc), Err(AxmlError::Malformed("string pool entries overlap"))));
+        // Entries sharing one offset decode once and are fine.
+        let mut shared = pool.clone();
+        shared[STRING_POOL_HEADER_SIZE..strings_start].fill(0);
+        let doc = document(&[&shared, &start_element(NONE, 0, &[])]);
         assert!(decode(&doc).is_ok());
     }
 }
