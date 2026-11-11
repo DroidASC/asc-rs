@@ -8,6 +8,12 @@ fn skip_uleb128(buf: &[u8], off: usize) -> Result<usize> {
     Ok(off + crate::leb128::uleb128_len(buf, off)?)
 }
 
+/// End of a table of `size` items of `item` bytes at `off`; `None` when the
+/// sum does not fit in `usize` (possible on 32-bit targets).
+fn table_end(off: usize, size: usize, item: usize) -> Option<usize> {
+    off.checked_add(size.checked_mul(item)?)
+}
+
 fn string_data_bytes(buf: &[u8], str_off: usize) -> Result<&[u8]> {
     let ptr = skip_uleb128(buf, str_off)?;
     let rest = buf.get(ptr..).ok_or(DexError::Truncated { what: "string_data", offset: ptr })?;
@@ -35,10 +41,10 @@ pub fn find_type_idx(buf: &[u8], target: &[u8]) -> Result<Option<u32>> {
     if string_ids_size == 0 || type_ids_size == 0 {
         return Ok(None);
     }
-    if string_ids_off + string_ids_size * 4 > buf.len() {
+    if table_end(string_ids_off, string_ids_size, 4).is_none_or(|end| end > buf.len()) {
         return Err(DexError::BadRange { what: "string_ids", offset: string_ids_off });
     }
-    if type_ids_off + type_ids_size * 4 > buf.len() {
+    if table_end(type_ids_off, type_ids_size, 4).is_none_or(|end| end > buf.len()) {
         return Err(DexError::BadRange { what: "type_ids", offset: type_ids_off });
     }
     let (mut left, mut right) = (0i64, type_ids_size as i64 - 1);
@@ -74,10 +80,9 @@ pub fn class_defs_contain_type_idx(buf: &[u8], type_idx: u32) -> Result<bool> {
     if size == 0 {
         return Ok(false);
     }
-    let end = off + (size << 5);
-    if end > buf.len() {
+    let Some(end) = table_end(off, size, 32).filter(|&end| end <= buf.len()) else {
         return Err(DexError::BadRange { what: "class_defs", offset: off });
-    }
+    };
     let needle = type_idx.to_le_bytes();
     let region = &buf[off..end];
     Ok(region.as_chunks::<32>().0.iter().any(|c| c[..4] == needle))
@@ -109,9 +114,9 @@ pub fn probe_needed_len(buf: &[u8]) -> Option<usize> {
     let type_ids_off = u32_at(buf, 0x44).ok()? as usize;
     let class_defs_size = u32_at(buf, 0x60).ok()? as usize;
     let class_defs_off = u32_at(buf, 0x64).ok()? as usize;
-    let string_ids_end = string_ids_off.checked_add(string_ids_size.checked_mul(4)?)?;
-    let type_ids_end = type_ids_off.checked_add(type_ids_size.checked_mul(4)?)?;
-    let class_defs_end = class_defs_off.checked_add(class_defs_size.checked_mul(32)?)?;
+    let string_ids_end = table_end(string_ids_off, string_ids_size, 4)?;
+    let type_ids_end = table_end(type_ids_off, type_ids_size, 4)?;
+    let class_defs_end = table_end(class_defs_off, class_defs_size, 32)?;
     let tables_end = string_ids_end.max(type_ids_end).max(class_defs_end);
     if tables_end > buf.len() {
         return None;
@@ -134,7 +139,7 @@ pub fn leading_string_data_off(buf: &[u8]) -> Option<usize> {
     }
     let count = (u32_at(buf, 0x38).ok()? as usize).min(SAMPLE);
     let off = u32_at(buf, 0x3C).ok()? as usize;
-    if count == 0 || off.checked_add(count * 4)? > buf.len() {
+    if count == 0 || table_end(off, count, 4)? > buf.len() {
         return None;
     }
     let mut max = 0;
@@ -158,7 +163,7 @@ pub fn id_tables_needed_len(buf: &[u8]) -> Option<usize> {
     for (at, item) in tables {
         let size = u32_at(buf, at).ok()? as usize;
         let off = u32_at(buf, at + 4).ok()? as usize;
-        tables_end = tables_end.max(off.checked_add(size.checked_mul(item)?)?);
+        tables_end = tables_end.max(table_end(off, size, item)?);
     }
     if tables_end > buf.len() {
         return None;
@@ -190,5 +195,12 @@ mod tests {
         let late = asc_fixture::make_padded_dex(4096, 0);
         assert!(leading_string_data_off(&late).unwrap() >= 4096);
         assert_eq!(id_tables_needed_len(&late).unwrap(), needed + 4096);
+    }
+
+    #[test]
+    fn table_end_rejects_sums_past_usize() {
+        assert_eq!(table_end(8, 3, 4), Some(20));
+        assert_eq!(table_end(usize::MAX - 3, 1, 4), None, "offset + bytes overflows");
+        assert_eq!(table_end(0, usize::MAX / 2, 4), None, "size * item overflows");
     }
 }
