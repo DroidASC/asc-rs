@@ -132,10 +132,10 @@ fn write_insns(out: &mut Out, method_idx: u32, insns: &[u8], t: &Tables) -> Resu
     let dst = &mut out.data[start..];
     let mut first_err: Option<RebuildError> = None;
     let walk = walk_insns(insns, |step| {
-        if first_err.is_none() {
-            if let Err(e) = rewrite_one(insns, dst, step.pc, step.opcode, t) {
-                first_err = Some(e);
-            }
+        if first_err.is_none()
+            && let Err(e) = rewrite_one(insns, dst, step.pc, step.opcode, t)
+        {
+            first_err = Some(e);
         }
     });
     if let Some(e) = first_err {

@@ -160,12 +160,12 @@ impl ApkKey {
 fn fnv64(bytes: &[u8]) -> u64 {
     const PRIME: u64 = 0x0100_0000_01b3;
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut chunks = bytes.chunks_exact(8);
-    for c in &mut chunks {
-        h ^= u64::from_le_bytes(c.try_into().expect("8-byte chunk"));
+    let (chunks, rest) = bytes.as_chunks::<8>();
+    for c in chunks {
+        h ^= u64::from_le_bytes(*c);
         h = h.wrapping_mul(PRIME);
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         h ^= b as u64;
         h = h.wrapping_mul(PRIME);
     }
@@ -821,12 +821,11 @@ impl DiskCache {
         // One statvfs per write: with the automatic budget, never write into
         // the reserve the file system needs (another program may have filled
         // the disk since the last eviction).
-        if matches!(self.cap, DiskCapacity::Auto(_)) {
-            if let Some((free, total)) = disk_space(&self.dir) {
-                if free.saturating_sub(len) < auto_disk_reserve(total) {
-                    return Err(CacheError::LowDiskSpace { path: self.dir.clone(), bytes: len });
-                }
-            }
+        if matches!(self.cap, DiskCapacity::Auto(_))
+            && let Some((free, total)) = disk_space(&self.dir)
+            && free.saturating_sub(len) < auto_disk_reserve(total)
+        {
+            return Err(CacheError::LowDiskSpace { path: self.dir.clone(), bytes: len });
         }
         let parent = path.parent().expect("cache path has a parent");
         fs::create_dir_all(parent).map_err(io_err(parent))?;

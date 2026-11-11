@@ -295,17 +295,17 @@ impl<'a> RecordName<'a> {
         if name.starts_with("_ES") {
             return RecordName::Service(name);
         }
-        if let Some((bundle, rest)) = name.split_once('&') {
-            if let Some((module_path, version)) = rest.rsplit_once('&') {
-                if let Some(interface) = interface_after(version) {
-                    return RecordName::Annotation { module: &name[..name.len() - interface.len() - 1], interface };
-                }
-                // A scoped package (`@ohos/crypto-js`) spans two segments.
-                let package_segments = if module_path.starts_with('@') { 2 } else { 1 };
-                let split = module_path.match_indices('/').nth(package_segments - 1).map_or(module_path.len(), |(i, _)| i);
-                let (package, path) = module_path.split_at(split);
-                return RecordName::Normalized { bundle, package, path: path.strip_prefix('/').unwrap_or(path), version };
+        if let Some((bundle, rest)) = name.split_once('&')
+            && let Some((module_path, version)) = rest.rsplit_once('&')
+        {
+            if let Some(interface) = interface_after(version) {
+                return RecordName::Annotation { module: &name[..name.len() - interface.len() - 1], interface };
             }
+            // A scoped package (`@ohos/crypto-js`) spans two segments.
+            let package_segments = if module_path.starts_with('@') { 2 } else { 1 };
+            let split = module_path.match_indices('/').nth(package_segments - 1).map_or(module_path.len(), |(i, _)| i);
+            let (package, path) = module_path.split_at(split);
+            return RecordName::Normalized { bundle, package, path: path.strip_prefix('/').unwrap_or(path), version };
         }
         if name.starts_with('@') && !name.contains('/') {
             return RecordName::SystemModule(name);

@@ -68,7 +68,7 @@ pub fn class_defs_contain_type_idx(buf: &[u8], type_idx: u32) -> Result<bool> {
     }
     let needle = type_idx.to_le_bytes();
     let region = &buf[off..end];
-    Ok(region.chunks_exact(32).any(|c| c[..4] == needle))
+    Ok(region.as_chunks::<32>().0.iter().any(|c| c[..4] == needle))
 }
 
 /// Whether the DEX buffer *defines* (not merely references) the class with

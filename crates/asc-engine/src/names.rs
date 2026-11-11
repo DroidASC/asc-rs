@@ -166,10 +166,10 @@ pub fn member_query(kind: &str, class: Option<&str>, fuzzy_class: bool, name: Op
     let mut exact_name = exact_name;
     let mut signature = None;
     // `class: "Lc;->m"`: the whole target, read as one below.
-    if let (Some(c), None) = (class, name) {
-        if c.contains("->") || c.contains('#') {
-            (class, name) = (None, Some(c));
-        }
+    if let (Some(c), None) = (class, name)
+        && (c.contains("->") || c.contains('#'))
+    {
+        (class, name) = (None, Some(c));
     }
     if let Some(n) = name {
         let t = MemberTarget::parse(n);

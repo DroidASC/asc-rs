@@ -684,10 +684,10 @@ impl ResTable {
                     c.present(data, |i| {
                         let Some(Ok(raw)) = c.read(data, i) else { return };
                         let mut emit = |v: &Value| {
-                            if v.kind == TYPE_STRING {
-                                if let Some(s) = self.string(v.data) {
-                                    f(base | i as u32, &c.config, &s);
-                                }
+                            if v.kind == TYPE_STRING
+                                && let Some(s) = self.string(v.data)
+                            {
+                                f(base | i as u32, &c.config, &s);
                             }
                         };
                         match &raw.value {

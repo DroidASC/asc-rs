@@ -62,10 +62,10 @@ pub(crate) fn defined_methods(dex: &Dex<'_>, d: &Defined) -> Result<Vec<u32>> {
                     if name.is_some_and(|n| dex.string_bytes(id.name_idx).map(|b| b != n.as_bytes()).unwrap_or(true)) {
                         continue;
                     }
-                    if let Some(want) = proto {
-                        if asc_smali::proto_descriptor(dex, id.proto_idx as u32)? != *want {
-                            continue;
-                        }
+                    if let Some(want) = proto
+                        && asc_smali::proto_descriptor(dex, id.proto_idx as u32)? != *want
+                    {
+                        continue;
                     }
                     out.push(m.method_idx);
                 }

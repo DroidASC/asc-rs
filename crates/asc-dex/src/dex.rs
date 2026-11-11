@@ -255,7 +255,7 @@ impl<'a> Dex<'a> {
         let size = u32_at(self.buf, off as usize)? as usize;
         let start = off as usize + 4;
         let bytes = self.buf.get(start..start + size * 2).ok_or(DexError::BadRange { what: "type_list", offset: off as usize })?;
-        Ok(bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+        Ok(bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
     }
 
     /// Parameter type indexes of proto `idx`.

@@ -150,10 +150,10 @@ pub fn axml(root: &El) -> Vec<u8> {
     let mut strings = Strings(Vec::new());
     fn collect<'a>(el: &El<'a>, out: &mut Vec<(&'a str, u32)>) {
         for a in &el.attrs {
-            if let Some(id) = a.res_id {
-                if !out.iter().any(|(n, _)| *n == a.name) {
-                    out.push((a.name, id));
-                }
+            if let Some(id) = a.res_id
+                && !out.iter().any(|(n, _)| *n == a.name)
+            {
+                out.push((a.name, id));
             }
         }
         el.children.iter().for_each(|c| collect(c, out));

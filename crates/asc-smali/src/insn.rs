@@ -183,11 +183,11 @@ pub(crate) fn method_body(
     }
 
     let mut lines: BTreeMap<usize, u32> = BTreeMap::new();
-    if opts.line_numbers {
-        if let Some(d) = debug {
-            for (addr, line) in d.positions() {
-                lines.entry(addr as usize * 2).or_insert(line);
-            }
+    if opts.line_numbers
+        && let Some(d) = debug
+    {
+        for (addr, line) in d.positions() {
+            lines.entry(addr as usize * 2).or_insert(line);
         }
     }
 
@@ -200,11 +200,11 @@ pub(crate) fn method_body(
                 let _ = writeln!(out, "    {l}");
             }
         }
-        if let Some(&line) = lines.get(&pc) {
-            if last_line != Some(line) {
-                let _ = writeln!(out, "    .line {line}");
-                last_line = Some(line);
-            }
+        if let Some(&line) = lines.get(&pc)
+            && last_line != Some(line)
+        {
+            let _ = writeln!(out, "    .line {line}");
+            last_line = Some(line);
         }
         if let Some(m) = marks.as_deref_mut() {
             m.push((pc, out.len()));

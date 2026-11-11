@@ -1265,10 +1265,10 @@ impl Engine {
         let mut opened = self.opened.lock().unwrap();
         // Nothing to compare with on the first open: opening reads the
         // version anyway, so do not walk a program's directories twice.
-        if let Some(apk) = opened.as_ref() {
-            if *apk.version() == Apk::version_of(&self.apk_path)? {
-                return Ok(apk.clone().with_limits(self.limits));
-            }
+        if let Some(apk) = opened.as_ref()
+            && *apk.version() == Apk::version_of(&self.apk_path)?
+        {
+            return Ok(apk.clone().with_limits(self.limits));
         }
         let apk = Apk::open(&self.apk_path)?.with_limits(self.limits);
         *opened = Some(apk.clone());
@@ -1338,10 +1338,10 @@ impl Engine {
         self.cache.as_ref()?;
         let ident = apk.stamp().ok()?;
         let mut cached = self.key_cache.lock().unwrap();
-        if let Some((len, mtime, key)) = cached.as_ref() {
-            if (*len, *mtime) == ident {
-                return Some(key.clone());
-            }
+        if let Some((len, mtime, key)) = cached.as_ref()
+            && (*len, *mtime) == ident
+        {
+            return Some(key.clone());
         }
         let key = ApkKey::for_apk(apk).ok()?;
         *cached = Some((ident.0, ident.1, key.clone()));
@@ -1526,10 +1526,10 @@ impl Engine {
             }
             // The best hit wins once every DEX the class loader reads before it has answered.
             let best = hits.iter().map(|(rank, _)| *rank).min();
-            if let Some(best) = best.filter(|_| !exhaustive) {
-                if ranks.iter().zip(&answered).all(|(&rank, &done)| done || rank >= best) {
-                    break;
-                }
+            if let Some(best) = best.filter(|_| !exhaustive)
+                && ranks.iter().zip(&answered).all(|(&rank, &done)| done || rank >= best)
+            {
+                break;
             }
         }
         stop.store(true, Ordering::Relaxed);
@@ -1596,10 +1596,11 @@ impl Engine {
             }
             Err(e) => return Err(e),
         };
-        if self.debug {
-            if let Some(r) = &rebuilt {
-                let t = r.timings;
-                self.log(format!(
+        if self.debug
+            && let Some(r) = &rebuilt
+        {
+            let t = r.timings;
+            self.log(format!(
                     "[DEBUG] Hollower Time: {} us\n[DEBUG] Collect Time: {} us\n[DEBUG] Remapper Time: {} us\n[DEBUG] Builder Time: {} us\n[DEBUG] Total Extraction Time: {} us",
                     t.hollow_us,
                     t.collect_us,
@@ -1607,7 +1608,6 @@ impl Engine {
                     t.build_us,
                     t.total_us()
                 ));
-            }
         }
         Ok(ClassSource { dex_name: hit.dex_name, source, rebuilt, warning, scan_us, also_defined_in: hit.also_defined_in })
     }
@@ -1806,10 +1806,10 @@ impl Engine {
                                     .iter()
                                     .enumerate()
                                     .map(|(idx, l)| {
-                                        if let (Some((disk, k)), Ok(dex)) = (l2, Dex::with_name(&l.data, &l.name)) {
-                                            if tiers::load_derived(disk, k, l, &dex) {
-                                                self.stats.derived_hits.fetch_add(1, Ordering::Relaxed);
-                                            }
+                                        if let (Some((disk, k)), Ok(dex)) = (l2, Dex::with_name(&l.data, &l.name))
+                                            && tiers::load_derived(disk, k, l, &dex)
+                                        {
+                                            self.stats.derived_hits.fetch_add(1, Ordering::Relaxed);
                                         }
                                         DexView {
                                             name: l.name.clone(),
@@ -1937,27 +1937,26 @@ fn load_ranks(entries: &[Entry]) -> Vec<usize> {
 
 fn lookup_cached(cache: &EngineCache, key: Option<&ApkKey>, entry: &Entry, stats: &Stats) -> Option<(Arc<CachedEntry>, Source)> {
     let key = key?;
-    if let Some(mem) = &cache.memory {
-        if let Some(e) = mem.lock().unwrap().get(key, &entry.name) {
-            stats.memory_hits.fetch_add(1, Ordering::Relaxed);
-            return Some((e, Source::Memory));
-        }
+    if let Some(mem) = &cache.memory
+        && let Some(e) = mem.lock().unwrap().get(key, &entry.name)
+    {
+        stats.memory_hits.fetch_add(1, Ordering::Relaxed);
+        return Some((e, Source::Memory));
     }
-    if entry.method == asc_apk::METHOD_DEFLATE {
-        if let Some(disk) = &cache.disk {
-            if let Some(data) = disk.get(key, &entry.name, entry.uncomp_size) {
-                stats.disk_hits.fetch_add(1, Ordering::Relaxed);
-                let e = Arc::new(CachedEntry::new(&entry.name, Arc::new(data)));
-                if let Some(mem) = &cache.memory {
-                    // The declared size may be 0 (undeclared) and omits a
-                    // container's logical copies; charge what will be resident.
-                    let size = e.charged_bytes();
-                    mem.lock().unwrap().insert(key, &entry.name, Arc::clone(&e), size);
-                    cache.charged();
-                }
-                return Some((e, Source::Disk));
-            }
+    if entry.method == asc_apk::METHOD_DEFLATE
+        && let Some(disk) = &cache.disk
+        && let Some(data) = disk.get(key, &entry.name, entry.uncomp_size)
+    {
+        stats.disk_hits.fetch_add(1, Ordering::Relaxed);
+        let e = Arc::new(CachedEntry::new(&entry.name, Arc::new(data)));
+        if let Some(mem) = &cache.memory {
+            // The declared size may be 0 (undeclared) and omits a
+            // container's logical copies; charge what will be resident.
+            let size = e.charged_bytes();
+            mem.lock().unwrap().insert(key, &entry.name, Arc::clone(&e), size);
+            cache.charged();
         }
+        return Some((e, Source::Disk));
     }
     None
 }
@@ -2002,14 +2001,12 @@ fn load_entry<'a>(
         };
         let e = Arc::new(CachedEntry::new(&entry.name, Arc::new(data)));
         let mut remap = None;
-        if keep_in_memory {
-            if let Some(mem) = &c.memory {
-                // Account for the container copies too, so the LRU cap holds.
-                let size = e.charged_bytes();
-                mem.lock().unwrap().insert(k, &entry.name, Arc::clone(&e), size);
-                c.charged();
-                remap = Some(Arc::downgrade(&e));
-            }
+        if keep_in_memory && let Some(mem) = &c.memory {
+            // Account for the container copies too, so the LRU cap holds.
+            let size = e.charged_bytes();
+            mem.lock().unwrap().insert(k, &entry.name, Arc::clone(&e), size);
+            c.charged();
+            remap = Some(Arc::downgrade(&e));
         }
         // Small entries are cheaper to inflate again than to write.
         if source == Source::Inflate && c.disk.as_ref().is_some_and(|d| d.admits_dex(e.data.len() as u64)) {
@@ -2171,17 +2168,17 @@ pub(crate) fn search_entry_with(
             let l2 = cache.and_then(|c| c.disk.as_deref().filter(|d| d.uses(Tier::Derived)).map(|d| (c, d))).zip(key);
             for (i, l) in e.logical().iter().enumerate() {
                 let r = Dex::with_name(&l.data, &l.name).map_err(EngineError::from).and_then(|dex| {
-                    if let Some(((_, disk), k)) = l2 {
-                        if tiers::load_derived(disk, k, l, &dex) {
-                            stats.derived_hits.fetch_add(1, Ordering::Relaxed);
-                        }
+                    if let Some(((_, disk), k)) = l2
+                        && tiers::load_derived(disk, k, l, &dex)
+                    {
+                        stats.derived_hits.fetch_add(1, Ordering::Relaxed);
                     }
                     let (mask, t) = (l.state.table_mask(), Instant::now());
                     let rows = run(&FindRefs::with_state(&dex, &l.state));
-                    if let Some(((c, disk), k)) = l2 {
-                        if let Some(job) = tiers::derived_job(disk, e, i, mask, t.elapsed()) {
-                            c.put_async(WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Derived(job) });
-                        }
+                    if let Some(((c, disk), k)) = l2
+                        && let Some(job) = tiers::derived_job(disk, e, i, mask, t.elapsed())
+                    {
+                        c.put_async(WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Derived(job) });
                     }
                     rows
                 });

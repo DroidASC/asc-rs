@@ -394,7 +394,7 @@ impl<'a> OffsetTable<'a> {
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = u32> + DoubleEndedIterator + 'a + use<'a> {
-        self.bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        self.bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
     }
 
     /// Index of the first entry equal to `off`.

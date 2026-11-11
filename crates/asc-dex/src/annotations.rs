@@ -42,7 +42,7 @@ pub fn parse_annotation_set(buf: &[u8], off: usize) -> Result<Vec<u32>> {
     let size = u32_at(buf, off)? as usize;
     let start = off + 4;
     let bytes = buf.get(start..start + size * 4).ok_or(DexError::BadRange { what: "annotation_set_item", offset: off })?;
-    Ok(bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Ok(bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
 /// Parse an `annotation_set_ref_list`: a list of `annotation_set_item` offsets.

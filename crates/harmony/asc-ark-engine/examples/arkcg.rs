@@ -175,10 +175,10 @@ fn worst(path: &str, threads: Option<usize>, sample: Option<usize>, max_subclass
     let mut functions: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut seen = HashSet::new();
     full.call_edges(&cancel, &mut |edge| {
-        if let CallNode::Function { entry, record, function, .. } = &edge.from {
-            if seen.insert(edge.from.clone()) {
-                functions.entry((entry.clone(), record.clone())).or_default().push(function.clone());
-            }
+        if let CallNode::Function { entry, record, function, .. } = &edge.from
+            && seen.insert(edge.from.clone())
+        {
+            functions.entry((entry.clone(), record.clone())).or_default().push(function.clone());
         }
     })?;
     drop(full);

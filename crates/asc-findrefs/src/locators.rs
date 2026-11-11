@@ -89,13 +89,14 @@ impl StringLocator {
             let abs = self.strdata_start + m.start();
             // Sorted positions of the strings starting at or before the match.
             let p = self.offsets.partition_point(|&[off, _]| (off as usize) <= abs);
-            if let Some((from, to)) = p.checked_sub(1).and_then(|q| self.extent(buf, q, shape.extent)) {
-                if from <= abs && abs + m.len() <= to {
-                    out.insert(self.offsets[p - 1][1]);
-                    // The string matched: its rest cannot add anything.
-                    at = start_of(p).max(m.end()).max(m.start() + 1);
-                    continue;
-                }
+            if let Some((from, to)) = p.checked_sub(1).and_then(|q| self.extent(buf, q, shape.extent))
+                && from <= abs
+                && abs + m.len() <= to
+            {
+                out.insert(self.offsets[p - 1][1]);
+                // The string matched: its rest cannot add anything.
+                at = start_of(p).max(m.end()).max(m.start() + 1);
+                continue;
             }
             // A match across strings: match each string it touched alone.
             let last = abs + m.len().max(1) - 1;
@@ -168,10 +169,8 @@ impl StringLocator {
                 continue;
             }
             out.push(self.offsets[offset_pos][1]);
-            if skip_rest {
-                if let Some(&[next, _]) = self.offsets.get(offset_pos + 1) {
-                    at = at.max((next as usize).saturating_sub(self.strdata_start));
-                }
+            if skip_rest && let Some(&[next, _]) = self.offsets.get(offset_pos + 1) {
+                at = at.max((next as usize).saturating_sub(self.strdata_start));
             }
         }
         // Physical string-data order is unrelated to string index order.
@@ -483,10 +482,10 @@ fn exact_name_matches(dex: &Dex<'_>, name_idx: u32, name: &str, bytes: &[u8]) ->
 /// lists may lie beyond it.
 fn method_has_signature(dex: &Dex<'_>, id: u32, params: &[CompiledType], ret: Option<&CompiledType>) -> Result<bool> {
     let proto = dex.proto_id(dex.method_id(id)?.proto_idx as u32)?;
-    if let Some(ret) = ret {
-        if !ret.matches(dex.type_bytes(proto.return_type_idx)?) {
-            return Ok(false);
-        }
+    if let Some(ret) = ret
+        && !ret.matches(dex.type_bytes(proto.return_type_idx)?)
+    {
+        return Ok(false);
     }
     let have = dex.type_list(proto.parameters_off)?;
     if have.len() != params.len() {

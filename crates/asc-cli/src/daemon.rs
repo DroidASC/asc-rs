@@ -554,10 +554,10 @@ impl Engines for Daemon {
         // Unlike the DEX engine, this one reads its files once, when it
         // opens: one whose files changed since is replaced, and a command
         // still running on it finishes on the files it mapped.
-        if let Some(Resident::Harmony(engine)) = open {
-            if engine.is_current() {
-                return Ok(engine);
-            }
+        if let Some(Resident::Harmony(engine)) = open
+            && engine.is_current()
+        {
+            return Ok(engine);
         }
         // Opened outside the pool lock (it checksums the code to pair
         // decrypted files): other requests go on meanwhile. Two requests
@@ -655,10 +655,12 @@ fn retire_older_builds(dir: &Path, id: &Identity) {
         let Ok(text) = fs::read_to_string(&path) else { continue };
         let lines: Vec<&str> = text.lines().collect();
         let [_, exe, build, config] = lines[..] else { continue };
-        if Path::new(exe) == id.exe && config == id.config && build != id.build {
-            if let Some(mut stream) = connect(&path.with_extension("sock")) {
-                let _ = send_frame(&mut stream, REQ_QUIT, &[]);
-            }
+        if Path::new(exe) == id.exe
+            && config == id.config
+            && build != id.build
+            && let Some(mut stream) = connect(&path.with_extension("sock"))
+        {
+            let _ = send_frame(&mut stream, REQ_QUIT, &[]);
         }
     }
 }

@@ -465,10 +465,11 @@ impl Engine {
         let apk = self.open()?;
         let ident = file_ident(&apk);
         let mut slot = self.class_graph.lock().unwrap();
-        if let Some((id, g)) = slot.as_ref() {
-            if ident.is_some() && *id == ident {
-                return Ok(g.clone());
-            }
+        if let Some((id, g)) = slot.as_ref()
+            && ident.is_some()
+            && *id == ident
+        {
+            return Ok(g.clone());
         }
         let disk = self.cache.as_ref().and_then(|c| c.disk.as_deref()).filter(|d| d.uses(Tier::Derived));
         let key = disk.and_then(|_| self.apk_key(&apk));
@@ -487,11 +488,12 @@ impl Engine {
         let errors_before = errors.len();
         let g = Arc::new(ClassGraph::build(views, self.threads(), errors, cancel).ok_or_else(cancelled)?);
         let cost = t0.elapsed();
-        if let (Some(disk), Some(key)) = (disk, key) {
-            if errors.len() == errors_before && disk.admits_derived(cost) {
-                let job = WriteJob { key, apk: Arc::from(apk.path()), kind: Job::Graph { graph: g.clone(), cost } };
-                self.cache.as_ref().expect("a disk implies a cache").put_async(job);
-            }
+        if let (Some(disk), Some(key)) = (disk, key)
+            && errors.len() == errors_before
+            && disk.admits_derived(cost)
+        {
+            let job = WriteJob { key, apk: Arc::from(apk.path()), kind: Job::Graph { graph: g.clone(), cost } };
+            self.cache.as_ref().expect("a disk implies a cache").put_async(job);
         }
         *slot = Some((ident, g.clone()));
         Ok(g)

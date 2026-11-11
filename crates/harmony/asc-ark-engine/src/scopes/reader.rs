@@ -106,10 +106,11 @@ impl<'s, 'a> RecordScopes<'s, 'a> {
     /// [`Scopes::reduce`], which only builds the scopes for a path that
     /// starts at a definition and goes on.
     pub(crate) fn reduce(&self, path: &mut Path) {
-        if matches!(path.origin, Origin::Definition(Some(_))) && !path.links.is_empty() {
-            if let Some(scopes) = self.get() {
-                scopes.reduce(&self.abc, path);
-            }
+        if matches!(path.origin, Origin::Definition(Some(_)))
+            && !path.links.is_empty()
+            && let Some(scopes) = self.get()
+        {
+            scopes.reduce(&self.abc, path);
         }
     }
 }

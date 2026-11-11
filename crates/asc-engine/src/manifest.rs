@@ -305,13 +305,13 @@ impl Reader<'_> {
         if let Some(i) = a.as_int() {
             return Some(i);
         }
-        if let (Some(id), Some(t)) = (a.reference(), self.table) {
-            if let Some(v) = resolve_simple(t, id) {
-                return match v.kind {
-                    TYPE_STRING => t.string(v.data).and_then(|s| s.trim().parse().ok()),
-                    _ => Some(v.data as i32 as i64),
-                };
-            }
+        if let (Some(id), Some(t)) = (a.reference(), self.table)
+            && let Some(v) = resolve_simple(t, id)
+        {
+            return match v.kind {
+                TYPE_STRING => t.string(v.data).and_then(|s| s.trim().parse().ok()),
+                _ => Some(v.data as i32 as i64),
+            };
         }
         // A codename such as "Tiramisu" in a preview build.
         a.value.parse().ok()
@@ -470,12 +470,12 @@ impl Engine {
                 for m in el.children_named("meta-data") {
                     let name = r.str_attr(m, "name").unwrap_or_default();
                     let value = m.android("value").or(m.android("resource")).map(|a| r.string(a));
-                    if name == FILE_PROVIDER_PATHS {
-                        if let Some(path) = m.android("resource").and_then(|a| r.xml_path(a)) {
-                            match apk.read(&path).map_err(crate::EngineError::from).and_then(|d| Ok(asc_axml::parse_tree(&d, resolver)?)) {
-                                Ok(doc) => c.provider_paths = provider_paths(&doc),
-                                Err(e) => r.warnings.push(format!("{FILE_PROVIDER_PATHS} {path}: {e}")),
-                            }
+                    if name == FILE_PROVIDER_PATHS
+                        && let Some(path) = m.android("resource").and_then(|a| r.xml_path(a))
+                    {
+                        match apk.read(&path).map_err(crate::EngineError::from).and_then(|d| Ok(asc_axml::parse_tree(&d, resolver)?)) {
+                            Ok(doc) => c.provider_paths = provider_paths(&doc),
+                            Err(e) => r.warnings.push(format!("{FILE_PROVIDER_PATHS} {path}: {e}")),
                         }
                     }
                     c.meta_data.push((name, value.unwrap_or_default()));

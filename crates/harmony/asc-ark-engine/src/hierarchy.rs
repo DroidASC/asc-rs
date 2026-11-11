@@ -817,10 +817,10 @@ impl<'e> Session<'e> {
             for &id in &records[units[unit].clone()] {
                 let classes = self.record(id);
                 for def in &classes.defs {
-                    if let Some((Node::Class(parent), _)) = self.parent_node(id, &classes, &def.parent) {
-                        if parents.contains(&parent) {
-                            found.push((ClassRef { entry: id.entry, ctor: def.ctor }, parent));
-                        }
+                    if let Some((Node::Class(parent), _)) = self.parent_node(id, &classes, &def.parent)
+                        && parents.contains(&parent)
+                    {
+                        found.push((ClassRef { entry: id.entry, ctor: def.ctor }, parent));
                     }
                 }
             }
@@ -842,10 +842,10 @@ impl<'e> Session<'e> {
         let classes = self.record(home);
         let mut out: Vec<(Node, bool)> = Vec::new();
         for def in classes.of(class.ctor) {
-            if let Some((node, reassigned)) = self.parent_node(home, &classes, &def.parent) {
-                if !out.iter().any(|(known, _)| *known == node) {
-                    out.push((node, reassigned));
-                }
+            if let Some((node, reassigned)) = self.parent_node(home, &classes, &def.parent)
+                && !out.iter().any(|(known, _)| *known == node)
+            {
+                out.push((node, reassigned));
             }
         }
         out

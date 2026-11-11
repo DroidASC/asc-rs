@@ -584,10 +584,10 @@ const THREADS_EVERY: Duration = Duration::from_millis(100);
 pub fn auto_threads() -> usize {
     static LAST: Mutex<Option<(Instant, usize)>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap();
-    if let Some((at, threads)) = *last {
-        if at.elapsed() < THREADS_EVERY {
-            return threads;
-        }
+    if let Some((at, threads)) = *last
+        && at.elapsed() < THREADS_EVERY
+    {
+        return threads;
     }
     let others = match &REGISTRATION.lock().unwrap().registry {
         Some(registry) => registry.others(),

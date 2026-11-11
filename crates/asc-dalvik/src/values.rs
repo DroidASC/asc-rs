@@ -541,10 +541,10 @@ impl Analyzer {
             _ => (Slot::UNKNOWN, Slot::UNKNOWN),
         };
         state[a] = low;
-        if width == Width::Wide {
-            if let Some(h) = state.get_mut(a + 1) {
-                *h = high;
-            }
+        if width == Width::Wide
+            && let Some(h) = state.get_mut(a + 1)
+        {
+            *h = high;
         }
     }
 }

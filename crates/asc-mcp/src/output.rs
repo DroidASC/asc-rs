@@ -230,13 +230,11 @@ pub fn fit(tool: &str, args: &Value, text: String, mut structured: Value, spill:
         Spill::Auto => over || full.is_some(),
     };
     let mut warning = None;
-    if to_file {
-        if let Some(dir) = spill {
-            let content = full.as_deref().unwrap_or(&text);
-            match dir.write(content) {
-                Ok(path) => return Ok(spilled(&req, &text, content, &path, structured)),
-                Err(e) => warning = Some(format!("# Warning: cannot write the full output to {}: {e}\n", dir.dir().display())),
-            }
+    if to_file && let Some(dir) = spill {
+        let content = full.as_deref().unwrap_or(&text);
+        match dir.write(content) {
+            Ok(path) => return Ok(spilled(&req, &text, content, &path, structured)),
+            Err(e) => warning = Some(format!("# Warning: cannot write the full output to {}: {e}\n", dir.dir().display())),
         }
     }
     if over {
@@ -456,10 +454,10 @@ pub fn method_index(text: &str) -> Vec<(String, usize, usize)> {
         if let Some(rest) = t.strip_prefix(".method ") {
             let sig = rest.split_whitespace().last().unwrap_or(rest).to_string();
             open = Some((sig, i + 1));
-        } else if t.starts_with(".end method") {
-            if let Some((sig, a)) = open.take() {
-                out.push((sig, a, i + 1));
-            }
+        } else if t.starts_with(".end method")
+            && let Some((sig, a)) = open.take()
+        {
+            out.push((sig, a, i + 1));
         }
     }
     out

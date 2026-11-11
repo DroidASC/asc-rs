@@ -126,7 +126,7 @@ impl<'a> IndexList<'a> {
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = u16> + 'a + use<'a> {
-        self.bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))
+        self.bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c))
     }
 }
 

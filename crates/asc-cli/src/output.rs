@@ -341,31 +341,31 @@ impl<W: Write> LineSink<W> {
             full.push_str(line);
             full.push('\n');
         }
-        if let Some(out) = self.stdout.as_mut().filter(|_| to_stdout) {
-            if let Err(e) = writeln!(out, "{line}") {
-                self.stdout = None;
-                if e.kind() != ErrorKind::BrokenPipe {
-                    self.fail(format!("cannot write to stdout: {e}"));
-                }
+        if let Some(out) = self.stdout.as_mut().filter(|_| to_stdout)
+            && let Err(e) = writeln!(out, "{line}")
+        {
+            self.stdout = None;
+            if e.kind() != ErrorKind::BrokenPipe {
+                self.fail(format!("cannot write to stdout: {e}"));
             }
         }
-        if let Some((path, f)) = self.file.as_mut() {
-            if let Err(e) = writeln!(f, "{line}") {
-                let msg = format!("cannot write {}: {e}", path.display());
-                self.file = None;
-                self.fail(msg);
-            }
+        if let Some((path, f)) = self.file.as_mut()
+            && let Err(e) = writeln!(f, "{line}")
+        {
+            let msg = format!("cannot write {}: {e}", path.display());
+            self.file = None;
+            self.fail(msg);
         }
     }
 
     /// Flush stdout after a batch so results stream while the search runs.
     pub(crate) fn flush_stdout(&mut self) {
-        if let Some(out) = self.stdout.as_mut() {
-            if let Err(e) = out.flush() {
-                self.stdout = None;
-                if e.kind() != ErrorKind::BrokenPipe {
-                    self.fail(format!("cannot write to stdout: {e}"));
-                }
+        if let Some(out) = self.stdout.as_mut()
+            && let Err(e) = out.flush()
+        {
+            self.stdout = None;
+            if e.kind() != ErrorKind::BrokenPipe {
+                self.fail(format!("cannot write to stdout: {e}"));
             }
         }
     }
@@ -397,21 +397,20 @@ impl<W: Write> LineSink<W> {
     }
 
     pub(crate) fn finish(mut self) -> Result<(), String> {
-        if let Some(hint) = self.hint() {
-            if let Some(out) = self.stdout.as_mut() {
-                if let Err(e) = writeln!(out, "{hint}") {
-                    self.stdout = None;
-                    if e.kind() != ErrorKind::BrokenPipe {
-                        self.fail(format!("cannot write to stdout: {e}"));
-                    }
-                }
+        if let Some(hint) = self.hint()
+            && let Some(out) = self.stdout.as_mut()
+            && let Err(e) = writeln!(out, "{hint}")
+        {
+            self.stdout = None;
+            if e.kind() != ErrorKind::BrokenPipe {
+                self.fail(format!("cannot write to stdout: {e}"));
             }
         }
         self.flush_stdout();
-        if let Some((path, mut f)) = self.file.take() {
-            if let Err(e) = f.flush() {
-                self.fail(format!("cannot write {}: {e}", path.display()));
-            }
+        if let Some((path, mut f)) = self.file.take()
+            && let Err(e) = f.flush()
+        {
+            self.fail(format!("cannot write {}: {e}", path.display()));
         }
         match self.error.take() {
             Some(e) => Err(e),

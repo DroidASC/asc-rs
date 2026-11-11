@@ -67,8 +67,11 @@ impl AnnotationElement {
     }
 }
 
+/// Bytes of one annotation element: name offset and value, a `u32` each.
+const ELEMENT_SIZE: usize = 8;
+
 impl<'a> Annotation<'a> {
-    const ELEMENT_SIZE: usize = 8;
+    const ELEMENT_SIZE: usize = ELEMENT_SIZE;
 
     pub(crate) fn parse(buf: &'a [u8], off: u32) -> Result<Annotation<'a>> {
         let mut r = Reader::new(buf, entity_pos(buf, off, "annotation")?);
@@ -96,7 +99,9 @@ impl<'a> Annotation<'a> {
 
     pub fn elements(&self) -> impl Iterator<Item = AnnotationElement> + 'a + use<'a> {
         self.elements
-            .chunks_exact(Self::ELEMENT_SIZE)
+            .as_chunks::<ELEMENT_SIZE>()
+            .0
+            .iter()
             .zip(self.tags)
             .filter_map(|(raw, &tag)| Some(AnnotationElement { name_off: read_u32(raw, 0).ok()?, value: read_u32(raw, 4).ok()?, tag }))
     }

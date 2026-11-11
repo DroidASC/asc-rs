@@ -111,10 +111,10 @@ fn summary_head(s: &ManifestSummary) -> String {
 /// The summary JSON, with only exported components under [`Filter::Exported`].
 fn summary_json(s: &ManifestSummary, filter: Filter) -> Value {
     let mut v = s.json();
-    if filter == Filter::Exported {
-        if let Some(list) = v["components"].as_array_mut() {
-            list.retain(|c| c["exported"] == true);
-        }
+    if filter == Filter::Exported
+        && let Some(list) = v["components"].as_array_mut()
+    {
+        list.retain(|c| c["exported"] == true);
     }
     v
 }

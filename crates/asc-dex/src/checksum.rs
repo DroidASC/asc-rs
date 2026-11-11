@@ -19,7 +19,7 @@ pub fn adler32(data: &[u8]) -> u32 {
 fn sha1_block(h: &mut [u32; 5], block: &[u8]) {
     debug_assert_eq!(block.len(), 64);
     let mut w = [0u32; 80];
-    for (i, word) in block.chunks_exact(4).enumerate() {
+    for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
         w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
     }
     for i in 16..80 {
@@ -54,11 +54,10 @@ fn sha1_block(h: &mut [u32; 5], block: &[u8]) {
 /// is made.
 pub fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
-    let mut blocks = data.chunks_exact(64);
-    for block in &mut blocks {
+    let (blocks, rem) = data.as_chunks::<64>();
+    for block in blocks {
         sha1_block(&mut h, block);
     }
-    let rem = blocks.remainder();
     // Padding: 0x80, zeros up to 56 mod 64, then the 64-bit big-endian bit length.
     let mut tail = [0u8; 128];
     tail[..rem.len()].copy_from_slice(rem);
@@ -66,7 +65,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
     let tail_len = if rem.len() < 56 { 64 } else { 128 };
     let bit_len = (data.len() as u64).wrapping_mul(8);
     tail[tail_len - 8..tail_len].copy_from_slice(&bit_len.to_be_bytes());
-    for block in tail[..tail_len].chunks_exact(64) {
+    for block in tail[..tail_len].as_chunks::<64>().0 {
         sha1_block(&mut h, block);
     }
     let mut out = [0u8; 20];

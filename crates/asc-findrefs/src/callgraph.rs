@@ -78,10 +78,10 @@ impl CallGraph {
             let Some(code) = buf.get(off as usize..off as usize + size) else { continue };
             scratch.clear();
             walk_insns(code, |step| {
-                if is_method_invoke(step.opcode.value) {
-                    if let Some(b) = code.get(step.pc + 2..step.pc + 4) {
-                        scratch.push(u16::from_le_bytes([b[0], b[1]]));
-                    }
+                if is_method_invoke(step.opcode.value)
+                    && let Some(b) = code.get(step.pc + 2..step.pc + 4)
+                {
+                    scratch.push(u16::from_le_bytes([b[0], b[1]]));
                 }
             });
             scratch.sort_unstable();
@@ -191,10 +191,10 @@ impl CallGraph {
     pub fn from_bytes(b: &[u8]) -> Option<CallGraph> {
         let l = Layout::parse(b)?;
         let u32s = |off: usize, len: usize| -> Vec<u32> {
-            b[off..off + 4 * len].chunks_exact(4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]])).collect()
+            b[off..off + 4 * len].as_chunks::<4>().0.iter().map(|s| u32::from_le_bytes(*s)).collect()
         };
-        let u16s = |off: usize| -> Vec<u16> { b[off..off + 2 * l.e].chunks_exact(2).map(|s| u16::from_le_bytes([s[0], s[1]])).collect() };
-        let has_body = b[l.has_body..l.has_body + 8 * l.words].chunks_exact(8).map(|s| u64::from_le_bytes(s.try_into().unwrap())).collect();
+        let u16s = |off: usize| -> Vec<u16> { b[off..off + 2 * l.e].as_chunks::<2>().0.iter().map(|s| u16::from_le_bytes(*s)).collect() };
+        let has_body = b[l.has_body..l.has_body + 8 * l.words].as_chunks::<8>().0.iter().map(|s| u64::from_le_bytes(*s)).collect();
         let g = CallGraph {
             callee_start: u32s(l.callee_start, l.n + 1).into(),
             callees: u16s(l.callees).into(),

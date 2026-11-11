@@ -150,10 +150,10 @@ impl Sites {
 
     pub(super) fn union(&mut self, a: SiteId, b: SiteId) {
         let (a, b) = (self.find(a), self.find(b));
-        if a != b {
-            if let Some(parent) = self.parent.get_mut(a.max(b) as usize) {
-                *parent = a.min(b);
-            }
+        if a != b
+            && let Some(parent) = self.parent.get_mut(a.max(b) as usize)
+        {
+            *parent = a.min(b);
         }
     }
 }

@@ -51,11 +51,11 @@ impl<'a> ClassText<'a> {
                 fields.push(t);
             } else if t.starts_with(".method ") {
                 open = Some((pos, t));
-            } else if t == ".end method" {
-                if let Some((start, declaration)) = open.take() {
-                    let signature = declaration.split_whitespace().last().unwrap_or(declaration);
-                    methods.push(MethodBlock { signature, declaration, text: &smali[start..pos + line.len()] });
-                }
+            } else if t == ".end method"
+                && let Some((start, declaration)) = open.take()
+            {
+                let signature = declaration.split_whitespace().last().unwrap_or(declaration);
+                methods.push(MethodBlock { signature, declaration, text: &smali[start..pos + line.len()] });
             }
             pos += line.len();
         }

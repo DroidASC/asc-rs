@@ -43,7 +43,7 @@ impl Builder {
     }
 
     fn section(&mut self, kind: u16, size: u32, data: &[u8], align: usize) -> u32 {
-        while self.buf.len() % align != 0 {
+        while !self.buf.len().is_multiple_of(align) {
             self.buf.push(0);
         }
         let off = self.buf.len() as u32;
@@ -57,7 +57,7 @@ impl Builder {
     }
 
     fn finish(mut self, ids: [(u32, u32); 6], data_off: u32) -> Vec<u8> {
-        while self.buf.len() % 4 != 0 {
+        while !self.buf.len().is_multiple_of(4) {
             self.buf.push(0);
         }
         let map_off = self.buf.len() as u32;
@@ -662,7 +662,7 @@ impl Ids {
             if let Some(&o) = lists.get(list) {
                 return Some(o);
             }
-            while tl.len() % 4 != 0 {
+            while !tl.len().is_multiple_of(4) {
                 tl.push(0);
             }
             let o = tl.len() as u32;
@@ -759,7 +759,7 @@ impl Ids {
         let mut ref_patches: Vec<(usize, u32)> = Vec::new(); // (position in `ref_lists`, set offset within `sets`)
         let mut item_count = 0u32;
         let mut emit_set = |anns: &[AnnotationItem], items: &mut Vec<u8>, sets: &mut Vec<u8>| -> u32 {
-            while sets.len() % 4 != 0 {
+            while !sets.len().is_multiple_of(4) {
                 sets.push(0);
             }
             let off = sets.len() as u32;

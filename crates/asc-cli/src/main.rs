@@ -1284,10 +1284,10 @@ fn class_methods(
 ) -> Result<asc_engine::ClassSource, String> {
     // `name(params)ret`: what the engine renders on its own.
     let full_signature = |m: &&str| m.split_once(')').is_some_and(|(head, ret)| head.contains('(') && !ret.trim().is_empty());
-    if let Some(m) = method.filter(full_signature) {
-        if let Ok(src) = engine.get_class_method_cancellable(descriptor, opts, Some(m), cancel) {
-            return Ok(src);
-        }
+    if let Some(m) = method.filter(full_signature)
+        && let Ok(src) = engine.get_class_method_cancellable(descriptor, opts, Some(m), cancel)
+    {
+        return Ok(src);
     }
     let mut src = engine.get_class_method_cancellable(descriptor, opts, None, cancel).map_err(|e| e.to_string())?;
     if let Some(m) = method {
@@ -1538,11 +1538,11 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 if let Some(e) = batch.error {
                     errors.push(format!("{}: {e}", batch.entry_name));
                 }
-                if let Some(text) = &batch.text {
-                    if !sink.block(text.as_str(), text.len()) {
-                        for line in text.lines() {
-                            sink.line(line);
-                        }
+                if let Some(text) = &batch.text
+                    && !sink.block(text.as_str(), text.len())
+                {
+                    for line in text.lines() {
+                        sink.line(line);
                     }
                 }
                 for r in &batch.results {

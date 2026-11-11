@@ -650,10 +650,10 @@ impl<'e> Session<'e> {
     ) {
         let Some(edges) = self.edges(slot, id) else { return };
         for edge in edges.of(method) {
-            if let (Target::Function(callee), false) = (edge.target, edge.kind == EdgeKind::Defines) {
-                if wanted.contains(&callee) {
-                    out.push((edge.pc, edge.kind, callee));
-                }
+            if let (Target::Function(callee), false) = (edge.target, edge.kind == EdgeKind::Defines)
+                && wanted.contains(&callee)
+            {
+                out.push((edge.pc, edge.kind, callee));
             }
         }
     }

@@ -259,7 +259,7 @@ fn decode_utf16(data: &[u8], mut off: usize, end: usize) -> String {
     }
     let end = end.min(data.len());
     let stop = len.saturating_mul(2).saturating_add(off).min(end);
-    let units: Vec<u16> = data[off.min(stop)..stop].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = data[off.min(stop)..stop].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     String::from_utf16_lossy(&units)
 }
 

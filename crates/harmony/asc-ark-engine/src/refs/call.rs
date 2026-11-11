@@ -290,10 +290,10 @@ impl CallsWorker<'_, '_, '_> {
 
     /// Done with the record: leave what was collected in the cache.
     fn leave(&mut self) {
-        if let Known::Collecting(slot, collected) = std::mem::replace(&mut self.known, Known::Unasked) {
-            if let Some(paths) = collected.finish() {
-                self.calls.cache.keep_call_paths(&slot, paths);
-            }
+        if let Known::Collecting(slot, collected) = std::mem::replace(&mut self.known, Known::Unasked)
+            && let Some(paths) = collected.finish()
+        {
+            self.calls.cache.keep_call_paths(&slot, paths);
         }
     }
 }

@@ -692,10 +692,10 @@ impl<'a> Scanner<'_, 'a> {
         let function = Function { abc: self.abc, method, code, region, table: self.regions.0[region].table };
         let mut failed = None;
         self.annotated.clear();
-        if plan.is_lone {
-            if let Some(worker) = self.workers.first_mut() {
-                worker.annotations(&function, &mut self.annotated);
-            }
+        if plan.is_lone
+            && let Some(worker) = self.workers.first_mut()
+        {
+            worker.annotations(&function, &mut self.annotated);
         }
         self.hits.iter_mut().for_each(Vec::clear);
         for &index in &plan.order {

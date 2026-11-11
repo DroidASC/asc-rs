@@ -100,7 +100,7 @@ fn parse_size(text: &str) -> Option<u64> {
 }
 
 fn show_size(bytes: u64) -> String {
-    match SIZE_UNITS[1..].iter().rev().find(|(_, s)| bytes >= 1 << s && bytes % (1 << s) == 0) {
+    match SIZE_UNITS[1..].iter().rev().find(|(_, s)| bytes >= 1 << s && bytes.is_multiple_of(1 << s)) {
         Some((u, s)) => format!("{}{}", bytes >> s, u.to_ascii_uppercase()),
         None => format!("{bytes}B"),
     }
@@ -125,9 +125,9 @@ fn parse_duration(text: &str, bare: Duration) -> Option<Duration> {
 fn show_duration(d: Duration) -> String {
     let ms = d.as_millis();
     match () {
-        _ if ms > 0 && ms % 3_600_000 == 0 => format!("{}h", ms / 3_600_000),
-        _ if ms > 0 && ms % 60_000 == 0 => format!("{}m", ms / 60_000),
-        _ if ms % 1000 == 0 => format!("{}s", ms / 1000),
+        _ if ms > 0 && ms.is_multiple_of(3_600_000) => format!("{}h", ms / 3_600_000),
+        _ if ms > 0 && ms.is_multiple_of(60_000) => format!("{}m", ms / 60_000),
+        _ if ms.is_multiple_of(1000) => format!("{}s", ms / 1000),
         _ => format!("{ms}ms"),
     }
 }

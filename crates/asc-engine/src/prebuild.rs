@@ -153,14 +153,14 @@ impl Engine {
                                     break;
                                 }
                             }
-                            if let Some((disk, k)) = l2 {
-                                if let Some(job) = tiers::derived_job(disk, &e, i, mask, t.elapsed()) {
-                                    cache.put_async(WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Derived(job) });
-                                    // Built tables stay on the heap until the writer maps them:
-                                    // building far ahead of it only adds up heap.
-                                    while cache.derived_pending.load(Ordering::Relaxed) > MAX_PENDING_WRITES && !self.prebuild.cancelled() {
-                                        std::thread::sleep(YIELD_POLL);
-                                    }
+                            if let Some((disk, k)) = l2
+                                && let Some(job) = tiers::derived_job(disk, &e, i, mask, t.elapsed())
+                            {
+                                cache.put_async(WriteJob { key: k.clone(), apk: Arc::from(apk.path()), kind: Job::Derived(job) });
+                                // Built tables stay on the heap until the writer maps them:
+                                // building far ahead of it only adds up heap.
+                                while cache.derived_pending.load(Ordering::Relaxed) > MAX_PENDING_WRITES && !self.prebuild.cancelled() {
+                                    std::thread::sleep(YIELD_POLL);
                                 }
                             }
                             let mut tally = tally.lock().unwrap();

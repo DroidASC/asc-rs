@@ -55,11 +55,11 @@ pub fn normalize(tool: &str, args: &Value) -> Option<Value> {
 fn rename(args: &mut Map<String, Value>, aliases: &[(&str, &str)]) -> bool {
     let mut changed = false;
     for (alias, canonical) in aliases {
-        if !args.contains_key(*canonical) {
-            if let Some(v) = args.remove(*alias) {
-                args.insert((*canonical).to_string(), v);
-                changed = true;
-            }
+        if !args.contains_key(*canonical)
+            && let Some(v) = args.remove(*alias)
+        {
+            args.insert((*canonical).to_string(), v);
+            changed = true;
         }
     }
     changed

@@ -129,11 +129,11 @@ pub fn disassemble_method(dex: &Dex<'_>, method_idx: u32, opts: Options) -> Resu
     let mut positions = Vec::new();
     if m.code_off != 0 {
         let code = dex.code_item(m.code_off)?;
-        if code.debug_info_off != 0 {
-            if let Ok((d, _)) = DebugInfo::parse(dex.buf(), code.debug_info_off as usize) {
-                positions = d.positions();
-                positions.sort_by_key(|&(pc, _)| pc);
-            }
+        if code.debug_info_off != 0
+            && let Ok((d, _)) = DebugInfo::parse(dex.buf(), code.debug_info_off as usize)
+        {
+            positions = d.positions();
+            positions.sort_by_key(|&(pc, _)| pc);
         }
     }
     let marks = w.marks.take().unwrap_or_default();

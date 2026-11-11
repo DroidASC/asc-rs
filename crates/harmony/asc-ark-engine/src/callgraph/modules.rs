@@ -357,11 +357,11 @@ impl Layout<'_, '_> {
     /// the record it names.
     fn target(&self, entry: u32, request: &str, from: &str) -> (RequestForm, Option<RecordId>) {
         let spelled = Spelled::of(request, from);
-        if spelled.may_name_a_package(request) {
-            if let Some(point) = self.packages.entry_point(self.program, entry, request) {
-                // The table decides: a package whose entry file is not in the program is outside it.
-                return (spelled.form, self.find_record(entry, &point.module, &point.record));
-            }
+        if spelled.may_name_a_package(request)
+            && let Some(point) = self.packages.entry_point(self.program, entry, request)
+        {
+            // The table decides: a package whose entry file is not in the program is outside it.
+            return (spelled.form, self.find_record(entry, &point.module, &point.record));
         }
         let found = spelled.record.as_deref().and_then(|name| self.find_record(entry, spelled.module, name));
         (spelled.form, found)

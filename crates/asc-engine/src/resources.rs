@@ -90,10 +90,11 @@ impl Engine {
     pub fn resources(&self) -> Result<Option<Arc<ResTable>>> {
         let apk = self.open()?;
         let ident = file_ident(&apk);
-        if let Some(cached) = &*self.resources.lock().unwrap() {
-            if ident.is_some() && cached.ident == ident {
-                return Ok(cached.table.clone());
-            }
+        if let Some(cached) = &*self.resources.lock().unwrap()
+            && ident.is_some()
+            && cached.ident == ident
+        {
+            return Ok(cached.table.clone());
         }
         let mut inflated = 0;
         let t0 = std::time::Instant::now();

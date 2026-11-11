@@ -765,15 +765,15 @@ impl Tracker {
                 let parent = registers(&insn, OperandKind::RegIn).last().map_or(ValueId::UNKNOWN, |reg| self.frame.reg(reg));
                 visit(&self.frame, &insn, Event::Class { parent });
             }
-            if watch.stores() {
-                if let Some(store) = effects.stores.of(insn.opcode).and_then(|kind| self.frame.store(kind, &insn)) {
-                    visit(&self.frame, &insn, store);
-                }
+            if watch.stores()
+                && let Some(store) = effects.stores.of(insn.opcode).and_then(|kind| self.frame.store(kind, &insn))
+            {
+                visit(&self.frame, &insn, store);
             }
-            if watch.objects() {
-                if let Some(event) = effects.objects.of(insn.opcode).and_then(|op| self.frame.object_event(op, &insn)) {
-                    visit(&self.frame, &insn, event);
-                }
+            if watch.objects()
+                && let Some(event) = effects.objects.of(insn.opcode).and_then(|op| self.frame.object_event(op, &insn))
+            {
+                visit(&self.frame, &insn, event);
             }
             self.frame.step(effects.effects.of(insn.opcode), &insn);
             if let Some(target) = insn.jump_target().filter(|&target| target > insn.pc && !self.opaque.contains(target)) {

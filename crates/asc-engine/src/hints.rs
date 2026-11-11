@@ -275,12 +275,12 @@ impl Engine {
         });
         let mut members = members.into_inner().expect("hint members mutex poisoned");
         let whole = whole.into_inner().expect("hint entries mutex poisoned");
-        if !whole.is_empty() {
-            if let Ok((views, _)) = self.load_views(Some(&whole), &crate::NOT_CANCELLED) {
-                for v in &views {
-                    if let Ok(dex) = Dex::with_name(&v.data, &v.name) {
-                        members.extend(class_members(&dex, class, methods).unwrap_or_default());
-                    }
+        if !whole.is_empty()
+            && let Ok((views, _)) = self.load_views(Some(&whole), &crate::NOT_CANCELLED)
+        {
+            for v in &views {
+                if let Ok(dex) = Dex::with_name(&v.data, &v.name) {
+                    members.extend(class_members(&dex, class, methods).unwrap_or_default());
                 }
             }
         }

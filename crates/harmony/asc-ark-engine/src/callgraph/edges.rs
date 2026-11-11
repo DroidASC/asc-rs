@@ -532,10 +532,8 @@ impl<'e> Session<'e> {
         above: bool,
     ) -> Option<Found> {
         let bytes = home.abc.string(name).ok()?.bytes;
-        if !above {
-            if let Some(method) = listed(&self.abc(class.entry)?, scopes, class, is_static, bytes)? {
-                return Some(Found { method, inherited: false, reassigned: false });
-            }
+        if !above && let Some(method) = listed(&self.abc(class.entry)?, scopes, class, is_static, bytes)? {
+            return Some(Found { method, inherited: false, reassigned: false });
         }
         // The ancestors are the same for every call site of the record that asks.
         let key = (class, is_static, name);

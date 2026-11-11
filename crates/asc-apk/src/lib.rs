@@ -678,10 +678,10 @@ impl Apk {
             }
             #[cfg(feature = "libdeflate")]
             METHOD_DEFLATE if entry.uncomp_size > 0 => {
-                if let Some(c) = cancel {
-                    if c.load(Ordering::Relaxed) {
-                        return Err(ApkError::Cancelled);
-                    }
+                if let Some(c) = cancel
+                    && c.load(Ordering::Relaxed)
+                {
+                    return Err(ApkError::Cancelled);
                 }
                 let mut out = vec![0u8; entry.uncomp_size as usize];
                 let n = libdeflater::Decompressor::new()
@@ -710,10 +710,10 @@ impl Apk {
             }
             m => return Err(ApkError::UnsupportedMethod(m)),
         };
-        if let Some(c) = cancel {
-            if c.load(Ordering::Relaxed) {
-                return Err(ApkError::Cancelled);
-            }
+        if let Some(c) = cancel
+            && c.load(Ordering::Relaxed)
+        {
+            return Err(ApkError::Cancelled);
         }
         if entry.uncomp_size != 0 && out.len() as u64 != entry.uncomp_size {
             return Err(ApkError::SizeMismatch { name: entry.name.clone(), expected: entry.uncomp_size as usize, actual: out.len() });
@@ -832,10 +832,10 @@ impl Apk {
             if status == flate2::Status::StreamEnd {
                 return Ok(Prefix::Complete(out));
             }
-            if let Some(limit) = target {
-                if out.len() >= limit {
-                    return Ok(Prefix::Partial(out));
-                }
+            if let Some(limit) = target
+                && out.len() >= limit
+            {
+                return Ok(Prefix::Partial(out));
             }
             if written == 0 && d.total_in() as usize == consumed {
                 return Err(ApkError::Inflate { name: entry.name.clone(), source: std::io::Error::other("deflate made no progress") });
@@ -853,10 +853,10 @@ struct CancelReader<'a> {
 
 impl Read for CancelReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if let Some(c) = self.cancel {
-            if c.load(Ordering::Relaxed) {
-                return Err(std::io::Error::other("cancelled"));
-            }
+        if let Some(c) = self.cancel
+            && c.load(Ordering::Relaxed)
+        {
+            return Err(std::io::Error::other("cancelled"));
         }
         let remaining = &self.data[self.pos..];
         let n = remaining.len().min(buf.len()).min(DEFLATE_CHUNK);
