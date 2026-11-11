@@ -161,7 +161,7 @@ fn cgroup_limit_from(max: &str, current: &str) -> Option<(u64, u64)> {
 mod apple {
     use std::os::raw::c_uint;
 
-    extern "C" {
+    unsafe extern "C" {
         // Declared here: libc marks it deprecated in favour of the mach2 crate.
         fn mach_host_self() -> c_uint;
     }

@@ -210,7 +210,7 @@ pub(crate) fn lower_priority() {
     #[cfg(target_vendor = "apple")]
     {
         const QOS_CLASS_UTILITY: std::os::raw::c_uint = 0x11;
-        extern "C" {
+        unsafe extern "C" {
             fn pthread_set_qos_class_self_np(
                 qos_class: std::os::raw::c_uint,
                 relative_priority: std::os::raw::c_int,
