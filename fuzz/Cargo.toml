@@ -1,0 +1,120 @@
+[package]
+name = "asc-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "cargo-fuzz targets for the untrusted-input parsers of asc-rs."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+asc-dex = { path = "../crates/asc-dex" }
+asc-dalvik = { path = "../crates/asc-dalvik" }
+asc-findrefs = { path = "../crates/asc-findrefs" }
+asc-rebuild = { path = "../crates/asc-rebuild" }
+asc-smali = { path = "../crates/asc-smali" }
+asc-axml = { path = "../crates/asc-axml" }
+asc-arsc = { path = "../crates/asc-arsc" }
+asc-apk = { path = "../crates/asc-apk" }
+asc-abc = { path = "../crates/harmony/asc-abc" }
+asc-arkisa = { path = "../crates/harmony/asc-arkisa" }
+asc-pasm = { path = "../crates/harmony/asc-pasm" }
+asc-hap = { path = "../crates/harmony/asc-hap" }
+# Seeds (`gen-seeds`) and the ABC walk shared with asc-abc's tests.
+asc-fixture = { path = "../crates/asc-fixture" }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+# Its own workspace: cargo-fuzz needs nightly and sanitizer flags, so the main
+# workspace excludes this directory.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "dex"
+path = "fuzz_targets/dex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dalvik"
+path = "fuzz_targets/dalvik.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "findrefs"
+path = "fuzz_targets/findrefs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rebuild"
+path = "fuzz_targets/rebuild.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "axml"
+path = "fuzz_targets/axml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "arsc"
+path = "fuzz_targets/arsc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apk"
+path = "fuzz_targets/apk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "abc"
+path = "fuzz_targets/abc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "arkisa"
+path = "fuzz_targets/arkisa.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pasm"
+path = "fuzz_targets/pasm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hap_json"
+path = "fuzz_targets/hap_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hap_resources"
+path = "fuzz_targets/hap_resources.rs"
+test = false
+doc = false
+bench = false

@@ -22,6 +22,8 @@ members = [
     "crates/harmony/asc-ark-engine",
     "crates/harmony/asc-hap",
 ]
+# cargo-fuzz harness: nightly-only, its own workspace (see fuzz/README.md).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.1"

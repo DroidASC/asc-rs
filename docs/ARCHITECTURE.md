@@ -204,3 +204,11 @@ permissions and the effective cleartext policy.
 `cargo test --workspace` runs unit tests per crate and integration tests on synthetic
 fixtures, covering shared code items, map-less DEX, rebuilt DEX validity, stored and
 Deflate APKs, cache consistency, daemon parity and MCP schemas.
+
+Every parser of untrusted input (DEX, Dalvik code, binary XML, `resources.arsc`, zip
+archives, ABC, ArkCompiler code, `resources.index` and the HAP JSON documents) has a
+"malformed input never panics" test: deterministic mutants of the fixtures
+(`asc_fixture::mutate`, fixed seeds) parsed and walked as deep as the API reaches. The same
+walks run under libFuzzer from `fuzz/`, a nightly-only cargo-fuzz crate outside the
+workspace (`fuzz/README.md`); every input it found is kept as a regression test in the crate
+it broke.
