@@ -15,7 +15,7 @@ split memory and threads.
 
 | setting | default |
 |---|---|
-| `threads` (`--threads`) | auto: the logical CPUs; with other busy processes 4 × CPUs / busy processes, at least 2 |
+| `threads` (`--threads`) | auto: the logical CPUs; with other busy processes 4 × CPUs / busy processes, at least 2; for APKs and HarmonyOS programs alike |
 | `memory.max` (`--memory-mb`) | auto = 25%: (available memory + what resident processes hold) × 25% / resident processes; or `4G`, `40%` |
 | `memory.ceiling` | auto: 1/16 of physical memory within 2G..8G (2G on a 12 GB machine, 6G on 96 GB) |
 | `memory.split` | on: split between resident processes |

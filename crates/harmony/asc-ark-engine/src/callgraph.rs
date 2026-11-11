@@ -610,7 +610,7 @@ impl<'e> Session<'e> {
             return Ok(importers);
         }
         // Two walks may both build it; the first to finish is kept.
-        let built = Importers::build(self.layout(), self.engine.threads, cancel)?;
+        let built = Importers::build(self.layout(), self.engine.threads(), cancel)?;
         Ok(cache.importers.get_or_init(|| {
             cache.charge(built.heap_bytes());
             built
@@ -631,7 +631,7 @@ impl<'e> Session<'e> {
     }
 
     pub(crate) fn threads(&self) -> usize {
-        self.engine.threads
+        self.engine.threads()
     }
 
     pub(crate) fn cache(&self) -> &GraphCache {
@@ -748,7 +748,7 @@ impl<'e> Session<'e> {
     /// Compute the edges of `records` on the engine's threads.
     fn load(&self, records: &[RecordId], cancel: &AtomicBool) -> Result<Vec<Arc<Slot>>> {
         let units: Vec<Range<usize>> = chunks(records.len(), 4).collect();
-        let loaded = run_units(units.len(), self.engine.threads, cancel, |unit| {
+        let loaded = run_units(units.len(), self.engine.threads(), cancel, |unit| {
             records[units[unit].clone()]
                 .iter()
                 .map(|&id| {
@@ -806,7 +806,7 @@ impl<'e> Session<'e> {
             let classes: Vec<u32> =
                 abc.class_index().map_err(|source| EngineError::Abc { entry: info.name.clone(), source })?.iter().collect();
             let units: Vec<Range<usize>> = chunks(classes.len(), RECORD_CHUNK).collect();
-            let matched = run_units(units.len(), self.engine.threads, cancel, |unit| {
+            let matched = run_units(units.len(), self.engine.threads(), cancel, |unit| {
                 let mut out = Vec::new();
                 for &off in &classes[units[unit].clone()] {
                     let Ok(ClassEntry::Local(class)) = abc.class_entry(off) else { continue };

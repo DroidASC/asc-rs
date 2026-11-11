@@ -16,7 +16,7 @@ pub struct Device {
 
 impl Device {
     pub fn probe() -> Device {
-        Device { total_memory: total_memory(), available_memory: available_memory(), cpus: crate::tiers::cpus() }
+        Device { total_memory: total_memory(), available_memory: available_memory(), cpus: asc_cache::cpus() }
     }
 }
 

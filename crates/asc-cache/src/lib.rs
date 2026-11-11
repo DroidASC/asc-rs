@@ -40,13 +40,16 @@
 //! * [`MemoryCache`] is a byte-bounded LRU of inflated entries for hosts that
 //!   stay alive between queries (MCP servers, the daemon).
 //! * [`ProcessRegistry`] lets resident hosts of one user see each other, so
-//!   their memory budgets add up to one machine-wide budget.
+//!   their memory budgets add up to one machine-wide budget, and
+//!   [`auto_threads`] splits the CPUs between the busy ones.
 
 mod lock;
 mod procs;
+mod threads;
 
 pub use lock::LockExt;
 pub use procs::{ProcessRegistry, ProcessUsage};
+pub use threads::{Threads, auto_threads, auto_threads_for, cpus};
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

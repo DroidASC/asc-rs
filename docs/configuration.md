@@ -12,7 +12,7 @@ agent）。优先级：命令行（`--set KEY=VALUE`）> 环境变量（`$ASC_<K
 
 | 设置 | 默认 |
 |---|---|
-| `threads`（`--threads`） | auto：逻辑 CPU；有其他忙碌进程时 4 × CPU / 忙碌进程数，至少 2 |
+| `threads`（`--threads`） | auto：逻辑 CPU；有其他忙碌进程时 4 × CPU / 忙碌进程数，至少 2；APK 与 HarmonyOS 程序相同 |
 | `memory.max`（`--memory-mb`） | auto = 25%：(可用内存 + 常驻进程已占) × 25% / 常驻进程数；也可写 `4G` 或 `40%` |
 | `memory.ceiling` | auto：物理内存的 1/16，在 2G..8G 之间（12 GB 机器 2G，96 GB 机器 6G） |
 | `memory.split` | on：在常驻进程间平分 |

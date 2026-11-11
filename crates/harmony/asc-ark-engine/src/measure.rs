@@ -190,7 +190,7 @@ impl Engine {
             let classes: Vec<u32> =
                 abc.class_index().map_err(|source| EngineError::Abc { entry: entry.to_owned(), source })?.iter().collect();
             let units: Vec<Range<usize>> = chunks(classes.len(), RECORD_CHUNK).collect();
-            let counted = run_units(units.len(), self.threads, cancel, |unit| {
+            let counted = run_units(units.len(), self.threads(), cancel, |unit| {
                 let mut out = CallResolution::default();
                 let mut tracker = Tracker::default();
                 let mut scopes = RecordScopes::new(abc, &regions, &tables);

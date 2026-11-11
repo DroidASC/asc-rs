@@ -475,7 +475,7 @@ static REGISTRATION: Mutex<Registration> = Mutex::new(Registration { caches: 0, 
 
 /// Marks this process busy in the user's process registry while a request
 /// (an MCP tool call, a daemon command) runs, so the others split the CPUs
-/// with it from its first moment ([`auto_threads`]) and take them back as soon
+/// with it from its first moment ([`auto_threads`](crate::auto_threads)) and take them back as soon
 /// as it ends. Nested and concurrent requests count once.
 #[must_use = "the process is busy only while the guard lives"]
 pub struct Busy(());
@@ -563,89 +563,9 @@ impl Drop for MemoryBudget {
     }
 }
 
-/// Busy for [`auto_threads`], for an entry that does not say ([`Busy`]
-/// came later): one updated this recently. Memory caches republish at most
-/// every [`REBALANCE_EVERY`] while they load entries, and not at all when
-/// idle (an MCP server waiting for an agent's next call).
-const BUSY_WINDOW: Duration = Duration::from_secs(5);
-
-/// How often [`auto_threads`] re-reads the registry: a burst of scans
-/// started together by several agents lasts about a second. A read checks
-/// every entry's process: about 1 ms for 31 servers on macOS, which callers
-/// wait for (letting them go on with the last count made 16 servers' cold
-/// sweep 10 % slower).
-const THREADS_EVERY: Duration = Duration::from_millis(100);
-
-/// Worker threads of a search whose caller fixed none: this machine's CPUs
-/// split between this process and the user's other busy registered ones
-/// ([`auto_threads_for`]). Re-read at most once per [`THREADS_EVERY`], so
-/// a sweep follows the others starting and finishing their scans
-/// ([`crate::Threads::wait_turn`]).
-pub fn auto_threads() -> usize {
-    static LAST: Mutex<Option<(Instant, usize)>> = Mutex::new(None);
-    let mut last = LAST.lock_or_default();
-    if let Some((at, threads)) = *last
-        && at.elapsed() < THREADS_EVERY
-    {
-        return threads;
-    }
-    let others = match &REGISTRATION.lock().expect("process registration mutex poisoned").registry {
-        Some(registry) => registry.others(),
-        // One-shot commands keep no memory cache and do not register; they
-        // still give way to the resident hosts.
-        None => ProcessRegistry::default_dir().map(|d| ProcessRegistry::others_in(&d)).unwrap_or_default(),
-    };
-    let busy = others.iter().filter(|o| o.busy.unwrap_or(o.idle < BUSY_WINDOW)).count();
-    let cpus = cpus();
-    let threads = auto_threads_for(cpus, busy);
-    *last = Some((Instant::now(), threads));
-    threads
-}
-
-/// This machine's CPUs.
-pub(crate) fn cpus() -> usize {
-    std::thread::available_parallelism().map_or(8, |n| n.get())
-}
-
-/// Workers the busy processes may start together, per CPU. An exact split
-/// (1) leaves CPUs idle while the processes holding the largest APKs finish
-/// alone: 8 servers scanning 312 APKs on 16 CPUs took 223 ms with 2 workers
-/// each, 180 ms with 8 and 176 ms with 16, for 13 % more memory at 8.
-const OVERSUBSCRIBE: usize = 4;
-
-/// [`OVERSUBSCRIBE`] x `cpus` workers split evenly between this process and
-/// `busy_others`, at most `cpus` and at least 2 (where there are 2): a scan
-/// on one thread gives up its overlap of inflating one entry while searching
-/// another. Up to 4 busy processes each keep every CPU.
-pub fn auto_threads_for(cpus: usize, busy_others: usize) -> usize {
-    (cpus * OVERSUBSCRIBE / (busy_others + 1)).clamp(cpus.min(2), cpus)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn threads_split_between_busy_processes() {
-        assert_eq!(auto_threads_for(32, 0), 32);
-        assert_eq!(auto_threads_for(32, 3), 32, "4 busy processes keep every CPU");
-        assert_eq!(auto_threads_for(32, 7), 16);
-        assert_eq!(auto_threads_for(32, 15), 8);
-        assert_eq!(auto_threads_for(32, 255), 2, "never below 2");
-        assert_eq!(auto_threads_for(1, 3), 1, "nor above the CPUs");
-        assert!(auto_threads() >= 1);
-    }
-
-    #[test]
-    fn workers_wait_for_their_turn() {
-        use crate::Threads;
-        Threads::Auto.wait_turn(0, || panic!("the first worker always runs"));
-        Threads::Fixed(1).wait_turn(5, || panic!("fixed counts never hold a worker back"));
-        let asked = std::sync::atomic::AtomicUsize::new(0);
-        // Past every CPU a worker waits until the search tells it to stop.
-        Threads::Auto.wait_turn(Threads::Auto.most(), || asked.fetch_add(1, Ordering::Relaxed) >= 2);
-        assert_eq!(asked.load(Ordering::Relaxed), 3);
-    }
 
     #[test]
     fn results_roundtrip_and_errors_are_not_kept() {

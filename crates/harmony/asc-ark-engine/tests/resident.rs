@@ -124,6 +124,17 @@ fn the_stamp_follows_every_file_of_a_program() {
 }
 
 #[test]
+fn threads_follow_the_shared_policy_unless_fixed() {
+    let dir = tempfile::tempdir().unwrap();
+    let abc = write(dir.path(), "modules.abc", &call_graph_program().build().bytes);
+    // Without a count: the share the DEX engine would take now, not every CPU of the machine.
+    let auto = Engine::open(&abc).unwrap();
+    assert!((1..=asc_ark_engine::Threads::Auto.most()).contains(&auto.threads()), "{}", auto.threads());
+    assert_eq!(Engine::open(&abc).unwrap().with_threads(3).threads(), 3);
+    assert_eq!(Engine::open(&abc).unwrap().with_threads(0).threads(), 1);
+}
+
+#[test]
 fn memory_use_tells_inflated_from_mapped_and_analyses() {
     let dir = tempfile::tempdir().unwrap();
     let abc = call_graph_program().build().bytes;

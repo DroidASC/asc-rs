@@ -331,13 +331,10 @@ impl Common {
         engine
     }
 
-    /// The engine of a HarmonyOS program: opened here, with `--threads` when given.
+    /// The engine of a HarmonyOS program: opened here, with the threads of
+    /// the DEX engine (`--threads`, else the automatic share).
     fn harmony_engine(&self, path: &Path) -> Result<asc_ark_engine::Engine, asc_ark_engine::EngineError> {
-        let engine = asc_ark_engine::Engine::open(path)?;
-        Ok(match self.config().fixed_threads() {
-            Some(threads) => engine.with_threads(threads),
-            None => engine,
-        })
+        Ok(asc_ark_engine::Engine::open(path)?.with_threads(self.config().threads()))
     }
 
     fn disk_cache(&self) -> Option<DiskCache> {

@@ -285,10 +285,7 @@ impl Sessions {
     /// programs beyond [`MAX_OPEN`]. `reopened`: the id was handed out
     /// before, so the program needs no introduction.
     pub(crate) fn open(&mut self, id: String, path: PathBuf, threads: Threads, reopened: bool) -> Result<Arc<Session>, ToolError> {
-        let mut engine = Engine::open(&path)?;
-        if let Threads::Fixed(threads) = threads {
-            engine = engine.with_threads(threads);
-        }
+        let engine = Engine::open(&path)?.with_threads(threads);
         while self.open.len() >= MAX_OPEN {
             let oldest = self.open.iter().min_by_key(|session| session.used()).cloned().expect("MAX_OPEN is not zero");
             self.close(&oldest);

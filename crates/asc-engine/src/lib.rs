@@ -58,6 +58,7 @@ pub use asc_apk::Limits as InflateLimits;
 pub use asc_apk::archive_of;
 pub use asc_arsc;
 pub use asc_cache;
+pub use asc_cache::{Threads, auto_threads, auto_threads_for};
 pub use asc_findrefs::{ClassQuery, ClassRelation, FieldAccess, MemberQuery};
 pub use asc_smali::Options as SmaliOptions;
 pub use budget::{Device, MemoryPolicy, available_memory, total_memory};
@@ -71,7 +72,7 @@ pub use prebuild::PrebuildReport;
 pub use resources::{ResourceField, ResourceRow, parse_id};
 pub use rules::compile_rules;
 pub use sweep::{Claim, DexDedup};
-pub use tiers::{Busy, auto_threads, auto_threads_for};
+pub use tiers::Busy;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -743,7 +744,7 @@ impl EngineCache {
     fn spawn_writers(&self, disk: &Arc<DiskCache>) -> Option<Writer> {
         let (tx, rx) = mpsc::channel::<(WriteJob, usize)>();
         let rx = Arc::new(Mutex::new(rx));
-        let count = self.writers.unwrap_or_else(|| CacheConfig::auto_writers(tiers::cpus())).max(1);
+        let count = self.writers.unwrap_or_else(|| CacheConfig::auto_writers(asc_cache::cpus())).max(1);
         let handles: Vec<_> = (0..count)
             .map_while(|_| {
                 let (rx, disk, memory) = (Arc::clone(&rx), Arc::clone(disk), self.memory.clone());
@@ -1042,63 +1043,6 @@ struct Stats {
     derived_hits: AtomicUsize,
     inflates: AtomicUsize,
     skipped: AtomicUsize,
-}
-
-/// Worker threads of a search.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Threads {
-    /// [`auto_threads`], read again by every search.
-    #[default]
-    Auto,
-    Fixed(usize),
-}
-
-/// How often a worker [`Threads::wait_turn`] holds back looks again.
-const TURN_POLL: Duration = Duration::from_millis(10);
-
-impl Threads {
-    /// The thread count for a search starting now (at least 1).
-    pub fn count(self) -> usize {
-        match self {
-            Threads::Auto => auto_threads(),
-            Threads::Fixed(n) => n.max(1),
-        }
-    }
-
-    /// The most workers [`Threads::wait_turn`] ever lets run at once.
-    pub fn most(self) -> usize {
-        match self {
-            Threads::Auto => tiers::cpus(),
-            Threads::Fixed(n) => n.max(1),
-        }
-    }
-
-    /// For a long search that starts [`Threads::most`] workers: hold worker
-    /// `k` back (between units of work) while [`auto_threads`] allows fewer
-    /// than `k + 1`, or until `stop()`. The count shrinks as other processes
-    /// start scans and grows back as they finish, which a count read once at
-    /// the start cannot follow: every process of a burst would see the others
-    /// idle and take every CPU.
-    pub fn wait_turn(self, k: usize, stop: impl Fn() -> bool) {
-        if self == Threads::Auto {
-            while k >= auto_threads() && !stop() {
-                std::thread::sleep(TURN_POLL);
-            }
-        }
-    }
-}
-
-impl From<usize> for Threads {
-    fn from(n: usize) -> Threads {
-        Threads::Fixed(n)
-    }
-}
-
-/// `None` (no `--threads`) is [`Threads::Auto`].
-impl From<Option<usize>> for Threads {
-    fn from(n: Option<usize>) -> Threads {
-        n.map_or(Threads::Auto, Threads::Fixed)
-    }
 }
 
 impl Engine {

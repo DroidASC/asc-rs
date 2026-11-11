@@ -649,7 +649,7 @@ impl<'e> Session<'e> {
     /// The class definitions of `records`, worked out on the engine's threads.
     fn load(&self, records: &[RecordId], cancel: &AtomicBool) -> Result<Vec<Arc<RecordClasses>>> {
         let units: Vec<Range<usize>> = chunks(records.len(), RECORDS_PER_UNIT).collect();
-        let loaded = run_units(units.len(), self.engine.threads, cancel, |unit| {
+        let loaded = run_units(units.len(), self.engine.threads(), cancel, |unit| {
             records[units[unit].clone()].iter().map(|&id| self.record(id)).collect::<Vec<_>>()
         })?;
         Ok(loaded.into_iter().flatten().collect())
@@ -813,7 +813,7 @@ impl<'e> Session<'e> {
         cancel: &AtomicBool,
     ) -> Result<Vec<(ClassRef, ClassRef)>> {
         let units: Vec<Range<usize>> = chunks(records.len(), RECORDS_PER_UNIT).collect();
-        let found = run_units(units.len(), self.engine.threads, cancel, |unit| {
+        let found = run_units(units.len(), self.engine.threads(), cancel, |unit| {
             let mut found = Vec::new();
             for &id in &records[units[unit].clone()] {
                 let classes = self.record(id);
@@ -937,7 +937,7 @@ impl<'e> Session<'e> {
                 let all: Vec<RecordId> = self.all_records().into_iter().filter(is_entry).collect();
                 // Only the records with a function of that name are analysed: read from the method names alone.
                 let units: Vec<Range<usize>> = chunks(all.len(), crate::refs::RECORD_CHUNK).collect();
-                let named = run_units(units.len(), self.engine.threads, cancel, |unit| {
+                let named = run_units(units.len(), self.engine.threads(), cancel, |unit| {
                     all[units[unit].clone()].iter().copied().filter(|id| self.has_function_named(*id, name)).collect::<Vec<_>>()
                 })?;
                 named.into_iter().flatten().collect()

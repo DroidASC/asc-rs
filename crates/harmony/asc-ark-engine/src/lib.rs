@@ -49,6 +49,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub use asc_abc::RecordKind;
+pub use asc_cache::Threads;
 pub use asc_hap;
 pub use callgraph::{
     CallEdge, CallNode, CallQuery, CallRoots, CallRow, CallTree, Direction, EdgeKind, FormCount, GraphSize, LeafKind, Reached, RequestForm,
@@ -143,7 +144,7 @@ pub struct ClassSource {
 /// A HarmonyOS program opened for queries.
 pub struct Engine {
     program: Program,
-    threads: usize,
+    threads: Threads,
     /// What call graph walks and `call:` searches computed so far; replaced
     /// by an empty one to release it ([`Engine::release_analyses`]).
     graph: Mutex<Arc<callgraph::GraphCache>>,
@@ -157,7 +158,7 @@ impl Drop for Engine {
     fn drop(&mut self) {
         // Only freed: a poisoned cache is as good as any for that.
         let graph = std::mem::take(self.graph.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner));
-        callgraph::GraphCache::discard(graph, self.threads);
+        callgraph::GraphCache::discard(graph, self.threads());
     }
 }
 
@@ -174,20 +175,22 @@ impl Engine {
     /// ([`EngineError::NoCode`]). An encrypted or damaged entry is not an
     /// error: see [`Engine::entries`] and [`Engine::notes`].
     pub fn open(path: impl AsRef<Path>) -> Result<Engine> {
-        let threads = std::thread::available_parallelism().map_or(1, usize::from);
-        Ok(Engine { program: Program::open(path.as_ref())?, threads, graph: Mutex::default(), classes: Mutex::default() })
+        Ok(Engine { program: Program::open(path.as_ref())?, threads: Threads::Auto, graph: Mutex::default(), classes: Mutex::default() })
     }
 
-    /// Search with at most `threads` threads (at least one). The default is
-    /// the machine's available parallelism.
+    /// Search with `threads` worker threads: a fixed count (at least one),
+    /// or [`Threads::Auto`] (the default), the CPUs this process gets next to
+    /// the user's other busy asc processes, as the DEX engine counts them
+    /// ([`asc_cache::auto_threads`]).
     #[must_use]
-    pub fn with_threads(mut self, threads: usize) -> Engine {
-        self.threads = threads.max(1);
+    pub fn with_threads(mut self, threads: impl Into<Threads>) -> Engine {
+        self.threads = threads.into();
         self
     }
 
+    /// The worker threads of a search starting now.
     pub fn threads(&self) -> usize {
-        self.threads
+        self.threads.count()
     }
 
     /// The path the program was opened from.
@@ -230,7 +233,7 @@ impl Engine {
         let released = std::mem::take(&mut *self.graph.lock_or_default());
         let classes = std::mem::take(&mut *self.classes.lock_or_default());
         let bytes = released.heap_bytes() + classes.heap_bytes();
-        callgraph::GraphCache::discard(released, self.threads);
+        callgraph::GraphCache::discard(released, self.threads());
         bytes
     }
 
@@ -338,7 +341,7 @@ impl Engine {
         // The function sets of its `call:{...}` conditions come first, from the whole program.
         let prepared = refs::Prepared::new(self, query, cancel)?;
         let graph = prepared.graph();
-        let scope = refs::Scope { cache: &cache, graph: graph.as_ref(), workers: self.threads, cancel };
+        let scope = refs::Scope { cache: &cache, graph: graph.as_ref(), workers: self.threads(), cancel };
         for (index, abc) in self.program.readable().filter(|(index, _)| selected.contains(index)) {
             let name = self.program.info(index).map_or("", |info| info.name.as_str());
             let entry = refs::Entry { name, index: u32::try_from(index).unwrap_or(u32::MAX), abc };
