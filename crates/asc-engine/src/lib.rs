@@ -1022,6 +1022,8 @@ pub struct Engine {
     class_graph: Mutex<Option<hierarchy::CachedGraph>>,
     /// Held while the class graph is built, outside `class_graph`'s lock.
     graph_build: Mutex<()>,
+    /// The names decompiled source shows ([`Engine::with_name_mappings`]).
+    name_mappings: Arc<names::NameMappings>,
 }
 
 /// An APK opened for a search whose DEX entries are scheduled by the caller,
@@ -1119,6 +1121,7 @@ impl Engine {
             prebuild: prebuild::Prebuild::default(),
             class_graph: Mutex::new(None),
             graph_build: Mutex::new(()),
+            name_mappings: Arc::default(),
         }
     }
 

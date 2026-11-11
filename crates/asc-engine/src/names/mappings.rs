@@ -3,15 +3,20 @@
 //! member notation, the one `findrefs` prints (`Lowner;->name:Type`,
 //! `Lowner;->name(args)Ret`).
 //!
-//! asc is the only source of names; backends apply these as user renames and
-//! do no deobfuscation of their own. asc has no rename store yet, so
-//! [`Engine::name_mappings`] is the identity (empty) for now.
+//! Keys are always the names as they are in the DEX (obfuscated, if the
+//! program is); values are the names to show instead, which come only from
+//! a mapping file the user supplies (R8 / ProGuard `mapping.txt`, see
+//! [`NameMappings::from_proguard`]). asc keeps no renames of its own and
+//! derives no deobfuscation aliases; without a mapping file every name stays
+//! as it is. Only decompiled source uses these names: query outputs
+//! (`findrefs`, smali, …) keep the DEX's own descriptors.
 
 use super::dalvik_types;
 use crate::Engine;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// Why a mapping entry was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -24,6 +29,8 @@ pub enum MappingError {
     Method(String),
     #[error("not a usable new name: {0:?}")]
     NewName(String),
+    #[error("not a usable new class name: {0:?} (want Lpkg/Name;)")]
+    NewClass(String),
 }
 
 /// A field as `Lowner;->name:Type`. Every part borrows from the signature.
@@ -84,7 +91,7 @@ impl fmt::Display for MethodRef<'_> {
 
 /// `Lpkg/Name;`, `LName;`, `Lpkg/Outer$Inner;`: a class (not array or
 /// primitive) descriptor whose path segments are simple names.
-fn is_class_descriptor(s: &str) -> bool {
+pub(super) fn is_class_descriptor(s: &str) -> bool {
     s.strip_prefix('L').and_then(|d| d.strip_suffix(';')).is_some_and(|inner| inner.split('/').all(is_simple_name))
 }
 
@@ -102,11 +109,20 @@ fn is_new_name(s: &str) -> bool {
     is_simple_name(s) && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// Resolves the names asc decided on, in process (the embedded decompiler)
-/// or behind a protocol (external backends get [`NameMappings`] as JSON).
+/// A new class name is a whole descriptor (the package may change too) whose
+/// every segment is a usable new name; `$` (nesting) is just a character.
+fn is_new_class(s: &str) -> bool {
+    s.strip_prefix('L').and_then(|d| d.strip_suffix(';')).is_some_and(|inner| inner.split('/').all(is_new_name))
+}
+
+/// Resolves the names decompiled source shows, in process (the embedded
+/// decompiler) or behind a protocol (external backends get [`NameMappings`]
+/// as JSON). Keys are the names in the DEX (`Lz/c;`, `Lz/c;->a(I)V`);
 /// `None` keeps the name the program has.
 pub trait NameResolver {
-    /// The new simple name of the class `descriptor` (`Lpkg/Name;`).
+    /// The full new descriptor of the class `descriptor`: `Lz/c;` →
+    /// `Lcom/example/Cart;`. The package may differ from the DEX's; for a
+    /// nested class the value is the whole binary name (`…/Cart$Line;`).
     fn class(&self, descriptor: &str) -> Option<&str>;
     /// The new name of the field `Lowner;->name:Type`.
     fn field(&self, signature: &str) -> Option<&str>;
@@ -114,9 +130,10 @@ pub trait NameResolver {
     fn method(&self, signature: &str) -> Option<&str>;
 }
 
-/// The §6.2 `mappings` object: `classes` maps a descriptor to the class's new
-/// simple name (its package stays), `fields` and `methods` map a member
-/// signature to the member's new name. Keys are checked on insertion and
+/// The §6.2 `mappings` object: `classes` maps a descriptor to the class's
+/// full new descriptor, `fields` and `methods` map a member signature to the
+/// member's new simple name. Keys use the DEX's own names throughout, so a
+/// member of a renamed class is still keyed by the old class descriptor. Keys are checked on insertion and
 /// kept sorted, so iteration, serialisation and [`NameMappings::hash`] do
 /// not depend on insertion order. The default (empty) value is the identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -153,12 +170,16 @@ impl NameMappings {
         self.classes.is_empty() && self.fields.is_empty() && self.methods.is_empty()
     }
 
-    /// Rename the class `descriptor`; returns the name it replaced.
-    pub fn insert_class(&mut self, descriptor: &str, new_name: &str) -> Result<Option<String>, MappingError> {
+    /// Rename the class `descriptor` to the descriptor `new_descriptor`
+    /// (`Lz/c;` → `Lcom/example/Cart;`); returns the name it replaced.
+    pub fn insert_class(&mut self, descriptor: &str, new_descriptor: &str) -> Result<Option<String>, MappingError> {
         if !is_class_descriptor(descriptor) {
             return Err(MappingError::Class(descriptor.to_string()));
         }
-        Ok(self.classes.insert(descriptor.to_string(), checked_new_name(new_name)?))
+        if !is_new_class(new_descriptor) {
+            return Err(MappingError::NewClass(new_descriptor.to_string()));
+        }
+        Ok(self.classes.insert(descriptor.to_string(), new_descriptor.to_string()))
     }
 
     /// Rename the field `signature` (`Lowner;->name:Type`); returns the name
@@ -179,7 +200,7 @@ impl NameMappings {
         Ok(self.methods.insert(signature.to_string(), checked_new_name(new_name)?))
     }
 
-    /// Descriptor → new simple name, sorted by descriptor.
+    /// Descriptor → new descriptor, sorted by the DEX's descriptor.
     pub fn classes(&self) -> &BTreeMap<String, String> {
         &self.classes
     }
@@ -215,7 +236,7 @@ impl NameMappings {
     /// length-prefixed so no two different mappings feed the same bytes.
     pub fn hash(&self) -> MappingsHash {
         let mut h = Sha256::new();
-        h.update(b"asc-name-mappings/1");
+        h.update(b"asc-name-mappings/2");
         for (tag, map) in [(b'c', &self.classes), (b'f', &self.fields), (b'm', &self.methods)] {
             h.update([tag]);
             h.update((map.len() as u64).to_le_bytes());
@@ -249,13 +270,21 @@ impl NameResolver for NameMappings {
 }
 
 impl Engine {
+    /// Show the names of `mappings` in decompiled source (typically read
+    /// from the user's `mapping.txt` with [`NameMappings::from_proguard_file`]).
+    /// Shared, since one mapping file serves many engines.
+    pub fn with_name_mappings(mut self, mappings: impl Into<Arc<NameMappings>>) -> Engine {
+        self.name_mappings = mappings.into();
+        self
+    }
+
     /// The names this program's classes and members go by in decompiled
-    /// output. asc keeps no user renames or deobfuscation aliases yet, so
-    /// this is the identity: every class and member keeps its own name
-    /// (backends still escape names their language cannot spell). Narrow
-    /// it to a request with [`NameMappings::restricted_to`].
-    pub fn name_mappings(&self) -> NameMappings {
-        NameMappings::default()
+    /// output: the set given to [`Engine::with_name_mappings`], or the
+    /// identity (empty) when there is none, in which case every class and
+    /// member keeps its own name (backends still escape names their language
+    /// cannot spell). Narrow it to a request with [`NameMappings::restricted_to`].
+    pub fn name_mappings(&self) -> &NameMappings {
+        &self.name_mappings
     }
 }
 
@@ -308,31 +337,35 @@ mod tests {
     #[test]
     fn nested_classes_keep_their_descriptor() {
         let mut m = NameMappings::new();
-        m.insert_class("Lbin/mt/json/JSONObject$Member;", "Entry").unwrap();
-        m.insert_class("Ll/ۢۤܺ;", "LinkedTable").unwrap();
-        assert_eq!(m.class("Lbin/mt/json/JSONObject$Member;"), Some("Entry"));
+        m.insert_class("Lbin/mt/json/JSONObject$Member;", "Lbin/mt/json/JSONObject$Entry;").unwrap();
+        m.insert_class("Ll/ۢۤܺ;", "Lbin/mt/json/LinkedTable;").unwrap();
+        assert_eq!(m.class("Lbin/mt/json/JSONObject$Member;"), Some("Lbin/mt/json/JSONObject$Entry;"));
         assert_eq!(m.class("Lbin/mt/json/JSONObject;"), None);
-        assert_eq!(m.class("Ll/ۢۤܺ;"), Some("LinkedTable"));
+        // The package may change: mapping files name the original class in full.
+        assert_eq!(m.class("Ll/ۢۤܺ;"), Some("Lbin/mt/json/LinkedTable;"));
     }
 
     #[test]
     fn bad_keys_and_names_are_refused() {
         let mut m = NameMappings::new();
-        assert_eq!(m.insert_class("com.a.B", "X"), Err(MappingError::Class("com.a.B".into())));
-        assert_eq!(m.insert_class("[La;", "X"), Err(MappingError::Class("[La;".into())));
+        assert_eq!(m.insert_class("com.a.B", "LX;"), Err(MappingError::Class("com.a.B".into())));
+        assert_eq!(m.insert_class("[La;", "LX;"), Err(MappingError::Class("[La;".into())));
+        for bad in ["X", "com.a.X", "Lcom/a/X", "Lcom//X;", "L;", "Lcom/a b;", "[LX;", "I"] {
+            assert_eq!(m.insert_class("La;", bad), Err(MappingError::NewClass(bad.into())), "{bad:?}");
+        }
         assert_eq!(m.insert_method("Lc;-><init>()V", "make"), Err(MappingError::Method("Lc;-><init>()V".into())));
         for bad in ["", "a b", "a.b", "La;", "x\n"] {
             assert_eq!(m.insert_field("Lc;->f:I", bad), Err(MappingError::NewName(bad.into())), "{bad:?}");
         }
         assert!(m.is_empty());
-        assert_eq!(m.insert_class("La;", "X"), Ok(None));
-        assert_eq!(m.insert_class("La;", "Y"), Ok(Some("X".into())));
+        assert_eq!(m.insert_class("La;", "Lp/X;"), Ok(None));
+        assert_eq!(m.insert_class("La;", "Lq/Y$Z;"), Ok(Some("Lp/X;".into())));
     }
 
     fn sample(order: &[usize]) -> NameMappings {
         let entries: [(&str, &str); 6] = [
-            ("c:Lb;", "Bee"),
-            ("c:La$1;", "Anon"),
+            ("c:Lb;", "Lcom/x/Bee;"),
+            ("c:La$1;", "Lcom/x/Aye$1;"),
             ("f:Lb;->x:I", "size"),
             ("f:La;->x:I", "count"),
             ("m:La;->x(I)V", "put"),
@@ -365,13 +398,13 @@ mod tests {
     fn hash_is_pinned_and_tells_contents_apart() {
         // Pinned: the hash is part of on-disk cache keys, so changing the
         // encoding must be deliberate (bump the `asc-name-mappings/N` tag).
-        assert_eq!(NameMappings::new().hash().to_string(), "5a1f74a718b37e00d19efbcb64086fe1fc78c7028ccd37b95fb03a42162ee45f");
-        assert_eq!(sample(&[0, 1, 2, 3, 4, 5]).hash().to_string(), "852084a994dc2e8a05524e3db77809f6434a302fcbced103079c25cf8bf64c7e");
+        assert_eq!(NameMappings::new().hash().to_string(), "eb2a94d4e5862de88b4a5b6162d60ce874a1b831bf01c074921ec976becdad4e");
+        assert_eq!(sample(&[0, 1, 2, 3, 4, 5]).hash().to_string(), "6eb831a95f17919d15479902c0e6f8d04471980d53733d9be3650064ef0cea5c");
         // The same strings in another section, or split differently, differ.
         let mut class = NameMappings::new();
-        class.insert_class("La;", "ab").unwrap();
+        class.insert_class("La;", "Lab;").unwrap();
         let mut other = NameMappings::new();
-        other.insert_class("La;", "a").unwrap();
+        other.insert_class("La;", "La;").unwrap();
         assert_ne!(class.hash(), other.hash());
         let mut field = NameMappings::new();
         field.insert_field("La;->f:I", "x").unwrap();
@@ -393,9 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn engine_mappings_are_the_identity_for_now() {
-        let m = Engine::new("unused.apk").name_mappings();
-        assert!(m.is_empty());
-        assert_eq!(m.class("La;"), None);
+    fn engine_mappings_are_the_identity_unless_supplied() {
+        let engine = Engine::new("unused.apk");
+        assert!(engine.name_mappings().is_empty());
+        assert_eq!(engine.name_mappings().class("La;"), None);
+        let supplied = Arc::new(sample(&[0, 1, 2, 3, 4, 5]));
+        let engine = Engine::new("unused.apk").with_name_mappings(Arc::clone(&supplied));
+        assert_eq!(engine.name_mappings(), &*supplied);
+        assert_eq!(engine.name_mappings().class("Lb;"), Some("Lcom/x/Bee;"));
     }
 }

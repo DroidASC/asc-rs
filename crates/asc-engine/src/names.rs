@@ -5,8 +5,10 @@ use crate::{EngineError, Result};
 use asc_findrefs::{ClassQuery, MemberQuery, MemberSignature, Query, TypeMatch};
 
 mod mappings;
+mod proguard;
 
 pub use mappings::{FieldRef, MappingError, MappingsHash, MethodRef, NameMappings, NameResolver};
+pub use proguard::{ProguardError, ProguardMapping, ProguardWarning, WarningKind};
 
 /// Turn `com.poc.Main` / `com/poc/Main` / `Lcom/poc/Main;` into a Dalvik descriptor.
 /// Array descriptors (`[Ljava/lang/Object;`, whose methods such as `clone`

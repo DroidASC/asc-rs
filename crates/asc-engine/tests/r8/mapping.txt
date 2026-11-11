@@ -1,0 +1,105 @@
+# compiler: R8
+# compiler_version: 9.2.4-dev
+# min_api: 21
+# compiler_hash: 084a89126ae0596c599143df57a654646af28313
+# common_typos_disable
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+# pg_map_id: 8e8250843db5f6b05befcef828180528978c2306cec150949309c25cae25e7fd
+# pg_map_hash: SHA-256 8e8250843db5f6b05befcef828180528978c2306cec150949309c25cae25e7fd
+com.example.shop.Main -> com.example.shop.Main:
+# {"id":"sourceFile","fileName":"Main.java"}
+    1:4:void main(java.lang.String[]):9:12 -> main
+    5:12:void main(java.lang.String[]):14:21 -> main
+    13:13:java.lang.String com.example.shop.util.Pricing.format(long,com.example.shop.model.Cart):50:50 -> main
+    13:13:void main(java.lang.String[]):21 -> main
+    14:19:void main(java.lang.String[]):21:26 -> main
+    20:20:com.example.shop.model.Cart$Line$Tag com.example.shop.model.Cart$Line$Tag.of(int):105:105 -> main
+    20:20:void main(java.lang.String[]):26 -> main
+    21:21:void main(java.lang.String[]):26:26 -> main
+com.example.shop.model.Cart -> z.d:
+# {"id":"sourceFile","fileName":"Cart.java"}
+    java.util.List items -> a
+      # {"id":"com.android.tools.r8.residualsignature","signature":"Ljava/util/ArrayList;"}
+    java.util.List lines -> b
+      # {"id":"com.android.tools.r8.residualsignature","signature":"Ljava/util/ArrayList;"}
+    int capacity -> c
+    1:3:void <init>(int):12:12 -> <init>
+    4:10:void <init>(int):7:7 -> <init>
+    11:17:void <init>(int):8:8 -> <init>
+    18:20:void <init>(int):13:13 -> <init>
+    1:3:void add(java.lang.String,int):26:26 -> a
+    4:14:void add(java.lang.String,int):27:27 -> a
+    1:3:void add(com.example.shop.model.Item):17:17 -> b
+      # {"id":"com.android.tools.r8.residualsignature","signature":"(Lz/e;)V"}
+    4:9:void add(com.example.shop.model.Item):18:18 -> b
+    1:2:void checkCapacity():31:32 -> c
+    1:8:java.lang.String describe(int):45:45 -> d
+    9:16:java.lang.String describe(int):46:46 -> d
+    17:31:java.lang.String describe(int):47:47 -> d
+    32:36:java.lang.String describe(int):49:49 -> d
+    1:5:java.lang.String describe(java.lang.String):53:53 -> e
+    6:22:java.lang.String describe(java.lang.String):54:54 -> e
+    23:43:java.lang.String describe(java.lang.String):55:55 -> e
+    44:48:java.lang.String describe(java.lang.String):57:57 -> e
+    1:1:com.example.shop.model.Item[] items():37:37 -> f
+      # {"id":"com.android.tools.r8.residualsignature","signature":"()[Lz/e;"}
+    1:1:com.example.shop.model.Cart$Line[] lines():41:41 -> g
+      # {"id":"com.android.tools.r8.residualsignature","signature":"()[Lz/c;"}
+    1:6:java.lang.Runnable watcher(java.lang.String[]):61:61 -> h
+com.example.shop.model.Cart$1 -> z.a:
+# {"id":"sourceFile","fileName":"Cart.java"}
+    java.lang.String[] val$args -> a
+    com.example.shop.model.Cart this$0 -> b
+      # {"id":"com.android.tools.r8.residualsignature","signature":"Lz/d;"}
+    1:8:void <init>(com.example.shop.model.Cart,java.lang.String[]):61:61 -> <init>
+      # {"id":"com.android.tools.r8.residualsignature","signature":"(Lz/d;[Ljava/lang/String;)V"}
+    1:2:void run():64:65 -> run
+    3:3:java.util.List com.example.shop.model.Cart.access$000(com.example.shop.model.Cart):6:6 -> run
+    3:3:void run():65 -> run
+    4:4:void run():65:65 -> run
+    5:5:java.util.List com.example.shop.model.Cart.access$100(com.example.shop.model.Cart):6:6 -> run
+    5:5:void run():65 -> run
+    6:6:void run():65:65 -> run
+com.example.shop.model.Cart$Line -> z.c:
+# {"id":"sourceFile","fileName":"Cart.java"}
+    com.example.shop.model.Cart owner -> a
+      # {"id":"com.android.tools.r8.residualsignature","signature":"Lz/d;"}
+    java.lang.String name -> b
+    int quantity -> c
+    1:3:void <init>(com.example.shop.model.Cart,java.lang.String,int):76:76 -> <init>
+      # {"id":"com.android.tools.r8.residualsignature","signature":"(Lz/d;Ljava/lang/String;I)V"}
+    4:5:void <init>(com.example.shop.model.Cart,java.lang.String,int):77:77 -> <init>
+    6:7:void <init>(com.example.shop.model.Cart,java.lang.String,int):78:78 -> <init>
+    8:10:void <init>(com.example.shop.model.Cart,java.lang.String,int):79:79 -> <init>
+    1:7:long cost(com.example.shop.model.Item[],int):83:89 -> a
+      # {"id":"com.android.tools.r8.residualsignature","signature":"([Lz/e;)J"}
+com.example.shop.model.Cart$Line$Tag -> z.b:
+# {"id":"sourceFile","fileName":"Cart.java"}
+    java.lang.String label -> a
+    1:3:void <init>(java.lang.String):100:100 -> <init>
+    4:6:void <init>(java.lang.String):101:101 -> <init>
+com.example.shop.model.Item -> z.e:
+# {"id":"sourceFile","fileName":"Item.java"}
+    java.lang.String name -> a
+    int price -> b
+    1:3:void <init>(java.lang.String,int):8:8 -> <init>
+    4:5:void <init>(java.lang.String,int):9:9 -> <init>
+    6:8:void <init>(java.lang.String,int):10:10 -> <init>
+    1:1:int price():14:14 -> a
+    2:2:int price():17:17 -> a
+    3:3:int price():15:15 -> a
+    1:1:java.lang.String toString():22:22 -> toString
+com.example.shop.util.Pricing -> z.f:
+# {"id":"sourceFile","fileName":"Pricing.java"}
+    int calls -> a
+    1:2:long audit(com.example.shop.model.Cart$Line[],com.example.shop.model.Item[]):39:40 -> a
+      # {"id":"com.android.tools.r8.residualsignature","signature":"([Lz/c;[Lz/e;)J"}
+    3:3:long audit(com.example.shop.model.Cart$Line[],com.example.shop.model.Item[]):42:42 -> a
+    4:4:long audit(com.example.shop.model.Cart$Line[],com.example.shop.model.Item[]):44:44 -> a
+    1:3:long total(com.example.shop.model.Cart$Line[]):26:28 -> b
+      # {"id":"com.android.tools.r8.residualsignature","signature":"([Lz/c;)J"}
+    4:5:long total(com.example.shop.model.Cart$Line[]):30:31 -> b
+    1:3:long total(com.example.shop.model.Item[],boolean):13:15 -> c
+      # {"id":"com.android.tools.r8.residualsignature","signature":"([Lz/e;Z)J"}
+    4:5:long total(com.example.shop.model.Item[],boolean):17:18 -> c
+    6:6:long total(com.example.shop.model.Item[],boolean):21:21 -> c
