@@ -410,3 +410,5 @@ ABC 主体（P1、P2、P4）约 6–7k 行；P3 约 3–5 个 PR。
 - 待办：不带 callable-name 的调用行在 `ldobjbyname` 上，比调用点早几个字节；桩前有默认参数初始化、或 record 内带桩函数
   不足 3 个的不认；转发型 / 访问器型单例 getter、箭头函数里的 `super()`、命名空间成员调用仍是叶子；
   `hierarchy` 的 `[unresolved]` 与调用图的 `[unlinked]` 未统一。“路由名 → 导航调用点”用 `findrefs string` 回答，不设原语。
+- skill 拆分（2026-11-10）：仍是一个 skill，`SKILL.md` 只留共享约定和按输入格式分流，Android / 鸿蒙用法移到同目录的
+  `android.md` / `harmony.md`，按需读取（内容只搬不改）；一次任务加载的正文从 20.7 KB 降到约 13 / 11.6 KB。
