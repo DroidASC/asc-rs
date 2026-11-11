@@ -196,9 +196,9 @@ impl FindRefs<'_, '_, '_> {
                 rest = tail;
                 let Some(start) = start.filter(|&s| s != u32::MAX) else { continue };
                 let code = start.checked_sub(16).and_then(|off| dex.code_item(off).ok());
-                let catches = code.as_ref().map(catches_of).unwrap_or_default();
-                let mut values = code.as_ref().and_then(|c| {
-                    an.analyze(MethodCode { insns: c.insns, registers: c.registers_size, ins: c.ins_size, catches: &catches })
+                let catches = code.as_ref().and_then(catches_of);
+                let mut values = code.as_ref().zip(catches.as_deref()).and_then(|(c, catches)| {
+                    an.analyze(MethodCode { insns: c.insns, registers: c.registers_size, ins: c.ins_size, catches })
                 });
                 for hit in group {
                     let pc = (hit.offset - start) as usize;
@@ -224,17 +224,29 @@ fn owner(hit: &Hit) -> Option<u32> {
     hit.methods.as_ref().and_then(|m| m.ids().first().copied())
 }
 
-/// The try ranges of `code` with each of their handlers, in byte offsets.
-fn catches_of(code: &asc_dex::code::CodeItem<'_>) -> Vec<Catch> {
+/// Most distinct `(try range, handler)` pairs of a method that is analyzed.
+/// Real methods have a few dozen; try items sharing one handler of many
+/// catches would otherwise multiply into billions.
+const MAX_CATCHES: usize = 1 << 16;
+
+/// The distinct try ranges of `code` with each of their handlers, in byte
+/// offsets; `None` past [`MAX_CATCHES`].
+fn catches_of(code: &asc_dex::code::CodeItem<'_>) -> Option<Vec<Catch>> {
     let mut out = Vec::new();
     for t in &code.tries {
-        let Some(h) = code.handlers.iter().find(|h| h.offset == t.handler_off) else { continue };
+        let Some(h) = code.handler_for(t) else { continue };
         let (start, end) = (t.start_addr as usize * 2, (t.start_addr as usize + usize::from(t.insn_count)) * 2);
-        for addr in h.catches.iter().map(|&(_, a)| a).chain(h.catch_all_addr) {
-            out.push(Catch { start, end, handler: addr as usize * 2 });
+        let mut handlers: Vec<u32> = h.catches.iter().map(|&(_, a)| a).chain(h.catch_all_addr).collect();
+        handlers.sort_unstable();
+        handlers.dedup();
+        if out.len() + handlers.len() > MAX_CATCHES {
+            return None;
         }
+        out.extend(handlers.into_iter().map(|addr| Catch { start, end, handler: addr as usize * 2 }));
     }
-    out
+    out.sort_unstable_by_key(|c| (c.start, c.end, c.handler));
+    out.dedup();
+    Some(out)
 }
 
 /// The note of a site every constraint lets through (`[arg1="x"]`, `?`
@@ -406,4 +418,40 @@ fn render(dex: &Dex<'_>, cands: &Candidates, out: &mut String) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asc_dex::code::{CatchHandler, CodeItem, TryItem};
+
+    fn code(tries: Vec<TryItem>, handlers: Vec<CatchHandler>) -> CodeItem<'static> {
+        let tries_size = u16::try_from(tries.len()).unwrap();
+        CodeItem {
+            offset: 0,
+            registers_size: 1,
+            ins_size: 0,
+            outs_size: 0,
+            tries_size,
+            debug_info_off: 0,
+            insns: &[],
+            tries,
+            handlers,
+            end: 0,
+        }
+    }
+
+    #[test]
+    fn catches_are_distinct_and_bounded() {
+        // Two typed catches and the catch-all land on one handler: one pair.
+        let handler = CatchHandler { offset: 1, catches: vec![(1, 8), (2, 8)], catch_all_addr: Some(8) };
+        let try_item = TryItem { start_addr: 0, insn_count: 4, handler_off: 1 };
+        let item = code(vec![try_item; 2], vec![handler]);
+        assert_eq!(catches_of(&item), Some(vec![Catch { start: 0, end: 8, handler: 16 }]));
+        // 65535 try items sharing a handler of 64 catches: 4M pairs from a
+        // code item of half a megabyte.
+        let handler = CatchHandler { offset: 1, catches: (0..64).map(|k| (k, k)).collect(), catch_all_addr: None };
+        let tries = (0..u16::MAX).map(|k| TryItem { start_addr: u32::from(k), insn_count: 1, handler_off: 1 }).collect();
+        assert_eq!(catches_of(&code(tries, vec![handler])), None);
+    }
 }
