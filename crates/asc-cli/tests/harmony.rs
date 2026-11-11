@@ -1444,7 +1444,16 @@ fn a_harmony_program_goes_to_the_daemon() {
     let out = run(&["listclass", &apk]);
     assert_eq!(stdout(&out), "Lexample/Test;\n", "{}", stderr(&out));
     assert_eq!(sockets(), 1, "the APK command went to a daemon of its own");
-    let status = stdout(&run(&["daemon", "status"]));
+    // A request counts as running until the daemon has also trimmed its pool,
+    // which ends after the client got its output: wait for the count to drop.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        let status = stdout(&run(&["daemon", "status"]));
+        if status.contains("(0 running)") || std::time::Instant::now() > deadline {
+            break status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert!(status.contains(", 2 requests (0 running), 2 APKs open, "), "{status}");
     assert!(run(&["daemon", "stop"]).status.success());
 }
