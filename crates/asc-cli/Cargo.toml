@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "asc-rs command line: getclass / getmanifest / findrefs over an APK without preprocessing."
+readme = "../../README.en.md"
+keywords = ["android", "dex", "apk", "smali", "reverse-engineering"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "asc"
@@ -24,3 +27,9 @@ serde_json.workspace = true
 asc-fixture.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+# `cargo binstall asc-cli` fetches the archives built by the Release workflow.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/asc-v{ version }-{ target }.tar.gz"
+bin-dir = "asc-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
