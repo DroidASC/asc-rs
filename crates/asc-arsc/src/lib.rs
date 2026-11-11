@@ -269,7 +269,8 @@ pub struct Package {
     type_names: PoolLayout,
     keys: PoolLayout,
     type_id_offset: u32,
-    /// Indexed by type id (1..=255).
+    /// Indexed by type id (1..=255); grown to the highest id seen, so a
+    /// package with few types does not pay for all 255.
     groups: Vec<TypeGroup>,
     pub libraries: Vec<Library>,
     pub overlayables: Vec<Overlayable>,
@@ -281,6 +282,15 @@ impl Package {
         self.groups.get(type_id as usize).filter(|g| !g.chunks.is_empty() || g.spec.is_some())
     }
 
+    /// The group of `type_id`, growing `groups` to hold it.
+    fn group_mut(&mut self, type_id: u8) -> &mut TypeGroup {
+        let i = type_id as usize;
+        if self.groups.len() <= i {
+            self.groups.resize_with(i + 1, TypeGroup::default);
+        }
+        &mut self.groups[i]
+    }
+
     /// `(config, type flags, entry count)` of every value chunk of `type_id`.
     pub fn type_chunks(&self, type_id: u8) -> Vec<(Config, u8, u32)> {
         self.group(type_id).map_or_else(Vec::new, |g| g.chunks.iter().map(|c| (c.config, c.flags, c.entry_count)).collect())
@@ -288,7 +298,7 @@ impl Package {
 
     /// Type ids that have a spec or at least one value chunk.
     pub fn type_ids(&self) -> impl Iterator<Item = u8> + '_ {
-        (1..=255u8).filter(|&t| self.group(t).is_some())
+        (1..=u8::MAX).take(self.groups.len().saturating_sub(1)).filter(|&t| self.group(t).is_some())
     }
 }
 
@@ -731,7 +741,7 @@ fn parse_package(data: &[u8], c: Chunk, warnings: &mut Vec<String>) -> Option<Pa
         type_names: PoolLayout::default(),
         keys: PoolLayout::default(),
         type_id_offset,
-        groups: (0..256).map(|_| TypeGroup::default()).collect(),
+        groups: Vec::new(),
         libraries: Vec::new(),
         overlayables: Vec::new(),
         staged_aliases: Vec::new(),
@@ -763,7 +773,7 @@ fn parse_package(data: &[u8], c: Chunk, warnings: &mut Vec<String>) -> Option<Pa
             if count > fits {
                 warnings.push(format!("{label}: type spec {t} claims {count} entries, chunk holds {fits}"));
             }
-            let group = &mut pkg.groups[t as usize];
+            let group = pkg.group_mut(t);
             if group.spec.is_some() {
                 warnings.push(format!("{label}: duplicate type spec {t}"));
             } else {
@@ -771,7 +781,7 @@ fn parse_package(data: &[u8], c: Chunk, warnings: &mut Vec<String>) -> Option<Pa
             }
         }
         RES_TABLE_TYPE_TYPE => match parse_type(data, ch) {
-            Ok((t, chunk)) => pkg.groups[t as usize].chunks.push(chunk),
+            Ok((t, chunk)) => pkg.group_mut(t).chunks.push(chunk),
             Err(e) => warnings.push(format!("{label}: type chunk at {:#x}: {e}", ch.start)),
         },
         RES_TABLE_LIBRARY_TYPE => {

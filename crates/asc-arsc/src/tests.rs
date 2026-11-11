@@ -374,3 +374,15 @@ fn mutated_tables_never_panic() {
         }
     }
 }
+
+#[test]
+fn type_groups_grow_to_the_highest_type_id() {
+    let t = ResTable::parse(sample()).unwrap();
+    let pkg = &t.packages()[0];
+    assert_eq!(pkg.groups.len(), 5, "types 1..=4 plus the unused slot 0");
+    assert_eq!(pkg.type_ids().collect::<Vec<_>>(), [1, 2, 3, 4]);
+
+    // A package chunk with no types allocates no groups at all.
+    let empty = ResTable::parse(table(&["s"], &[package(0x7f, "p", &[], &[], &[])])).unwrap();
+    assert!(empty.packages()[0].groups.is_empty());
+}
