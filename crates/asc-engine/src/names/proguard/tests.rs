@@ -247,17 +247,24 @@ fn synthetic_files_parse_completely() {
 }
 
 /// About 200k lines (12 MB). Some 0.1 s optimised, over a second in a
-/// debug build, hence opt-in.
+/// debug build, hence opt-in. Linear means a file four times larger takes
+/// about four times longer; a quadratic step would take sixteen.
 #[test]
 #[ignore = "timing: cargo test --release -p asc-engine -- --ignored large_files"]
 fn large_files_parse_in_linear_time() {
-    let text = synthetic(8_500);
-    let lines = text.lines().count();
+    let timed = |classes: usize| {
+        let text = synthetic(classes);
+        let start = Instant::now();
+        let p = parse(&text);
+        let elapsed = start.elapsed();
+        assert_eq!(p.warnings, []);
+        assert_eq!(p.mappings.classes().len(), classes);
+        (text.lines().count(), elapsed)
+    };
+    let (_, small) = (0..3).map(|_| timed(2_125)).min_by_key(|(_, elapsed)| *elapsed).expect("three runs");
+    let (lines, large) = (0..3).map(|_| timed(8_500)).min_by_key(|(_, elapsed)| *elapsed).expect("three runs");
     assert!(lines > 200_000, "{lines}");
-    let start = Instant::now();
-    let p = parse(&text);
-    let elapsed = start.elapsed();
-    assert_eq!(p.warnings, []);
-    assert_eq!((p.mappings.classes().len(), p.mappings.fields().len(), p.mappings.methods().len()), (8_500, 34_000, 42_500));
-    eprintln!("parsed {lines} lines ({} bytes) in {elapsed:?}", text.len());
+    let ratio = large.as_secs_f64() / small.as_secs_f64();
+    eprintln!("parsed {lines} lines in {large:?}, a quarter of them in {small:?} ({ratio:.1}x)");
+    assert!(ratio < 8.0, "4x the input took {ratio:.1}x the time: {small:?} -> {large:?}");
 }

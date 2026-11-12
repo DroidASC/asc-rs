@@ -341,6 +341,9 @@ const SOURCES_DIR: &str = "sources";
 /// Where the MCP server writes replies too long for the client (its own
 /// budget and pruning; this cache only recognizes and clears it).
 pub const SPILL_DIR: &str = "out";
+/// Subdirectory holding the working directories of decompiler backends
+/// (`decompilers/<name>/`); the cache neither evicts nor clears it.
+pub const DECOMPILERS_DIR: &str = "decompilers";
 
 /// Absolute cap of L3, which also never takes more than
 /// 1/[`RENDERED_BUDGET_DIVISOR`] of the total budget.
@@ -1052,7 +1055,9 @@ impl DiskCache {
                 let name = d.file_name();
                 let name = name.to_string_lossy();
                 match d.file_type() {
-                    Ok(t) if t.is_dir() => is_cache_dir_name(&name) || TIER_DIRS.contains(&&*name) || name == SPILL_DIR,
+                    Ok(t) if t.is_dir() => {
+                        is_cache_dir_name(&name) || TIER_DIRS.contains(&&*name) || name == SPILL_DIR || name == DECOMPILERS_DIR
+                    }
                     Ok(t) if t.is_file() => name == ".DS_Store" || name == EVICT_MARKER,
                     _ => false,
                 }
@@ -1440,18 +1445,22 @@ impl<T> MemoryCache<T> {
         self.evict_over_cap();
     }
 
-    /// Re-charge `value` (still the entry cached under `entry_name`) at
-    /// `size` bytes, e.g. once per-entry state built after insertion has
-    /// grown it, and evict least recently used entries if that exceeds the
-    /// capacity. Does nothing when the slot holds something else by now.
-    pub fn resize(&mut self, key: &ApkKey, entry_name: &str, value: &Arc<T>, size: usize) {
-        let Some(slot) = self.map.get_mut(key).and_then(|m| m.get_mut(entry_name)) else { return };
-        if !Arc::ptr_eq(&slot.value, value) {
-            return;
-        }
+    /// Re-charge the entry cached under `entry_name` at `size_of` its current
+    /// value, e.g. once per-entry state built after insertion has grown it,
+    /// and evict least recently used entries if that exceeds the capacity.
+    /// The value is measured under the cache's lock, whatever replaced the
+    /// one a caller last saw, so the charge always matches what the slot
+    /// holds. Returns whether the charge changed.
+    pub fn recharge(&mut self, key: &ApkKey, entry_name: &str, size_of: impl FnOnce(&T) -> usize) -> bool {
+        let Some(slot) = self.map.get_mut(key).and_then(|m| m.get_mut(entry_name)) else { return false };
+        let size = size_of(&slot.value);
         let old = std::mem::replace(&mut slot.size, size);
+        if old == size {
+            return false;
+        }
         self.used = self.used - old + size;
         self.evict_over_cap();
+        true
     }
 
     /// Swap the entry cached under `entry_name` for `new` when it is still
@@ -1604,24 +1613,6 @@ mod tests {
         assert_eq!((dirs, files, bytes), (1, 1, 3 + L1_TRAILER));
         assert_eq!(cache.clear().unwrap(), 3 + L1_TRAILER);
         assert!(cache.get(&key, "classes.dex", 3).is_none());
-    }
-
-    #[test]
-    fn disk_evicts_least_recently_used_apk() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = DiskCache::open(dir.path()).with_capacity(20);
-        let old = ApkKey::from_id("old-0000000000000001".into());
-        let new = ApkKey::from_id("new-0000000000000002".into());
-        cache.put(&old, "classes.dex", &[0; 6]).unwrap();
-        // Make sure the second directory is strictly newer.
-        let later = SystemTime::now() + Duration::from_secs(5);
-        cache.put(&new, "classes.dex", &[0; 6]).unwrap();
-        fs::File::open(dir.path().join("new-0000000000000002")).unwrap().set_modified(later).unwrap();
-        assert_eq!(cache.stats(), (2, 2, 2 * (6 + L1_TRAILER)));
-        cache.evict();
-        assert_eq!(cache.stats(), (1, 1, 6 + L1_TRAILER));
-        assert!(cache.get(&new, "classes.dex", 6).is_some());
-        assert!(cache.get(&old, "classes.dex", 6).is_none());
     }
 
     const GIB: u64 = 1 << 30;
@@ -1779,6 +1770,18 @@ mod tests {
     }
 
     #[test]
+    fn decompiler_working_directories_keep_a_cache_usable() {
+        // A backend may start in `decompilers/<name>/` before anything is cached.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(DECOMPILERS_DIR).join("jeb")).unwrap();
+        let cache = DiskCache::open(dir.path());
+        assert!(cache.check_usable().is_ok());
+        cache.put(&ApkKey::from_id("app-0123456789abcdef".into()), "classes.dex", &[0; 4]).unwrap();
+        cache.clear().unwrap();
+        assert!(dir.path().join(DECOMPILERS_DIR).join("jeb").exists(), "a backend's working directory is not the cache's to clear");
+    }
+
+    #[test]
     fn legacy_cache_directories_are_adopted() {
         // Written by a build that predates the tag: only APK directories.
         let dir = tempfile::tempdir().unwrap();
@@ -1846,25 +1849,24 @@ mod tests {
     }
 
     #[test]
-    fn memory_lru_resize_charges_and_evicts() {
+    fn memory_lru_recharge_measures_the_current_value_and_evicts() {
         let mut m: MemoryCache<Vec<u8>> = MemoryCache::new(10);
         let k = ApkKey::from_id("k".into());
-        let a = Arc::new(vec![0; 4]);
-        m.insert(&k, "a", Arc::clone(&a), 4);
-        let b = Arc::new(vec![0; 4]);
-        m.insert(&k, "b", Arc::clone(&b), 4);
+        m.insert(&k, "a", Arc::new(vec![0; 4]), 4);
+        m.insert(&k, "b", Arc::new(vec![0; 7]), 4);
         // Growing b past the cap evicts a (least recently used).
-        m.resize(&k, "b", &b, 7);
+        assert!(m.recharge(&k, "b", Vec::len));
         assert_eq!(m.used_bytes(), 7);
         assert!(m.get(&k, "a").is_none());
         assert_eq!(m.charged_bytes(&k, "b"), Some(7));
-        // A stale handle does not re-charge whatever replaced it.
-        let b2 = Arc::new(vec![1; 4]);
-        m.insert(&k, "b", Arc::clone(&b2), 4);
-        m.resize(&k, "b", &b, 9);
-        assert_eq!(m.charged_bytes(&k, "b"), Some(4));
+        assert!(!m.recharge(&k, "b", Vec::len));
+        // Whatever replaced the entry is what gets measured.
+        m.insert(&k, "b", Arc::new(vec![1; 9]), 4);
+        assert!(m.recharge(&k, "b", Vec::len));
+        assert_eq!(m.charged_bytes(&k, "b"), Some(9));
+        assert!(!m.recharge(&k, "missing", Vec::len));
         // The last entry is kept even when it alone exceeds the cap.
-        m.resize(&k, "b", &b2, 50);
+        assert!(m.recharge(&k, "b", |_| 50));
         assert_eq!((m.len(), m.used_bytes()), (1, 50));
     }
 

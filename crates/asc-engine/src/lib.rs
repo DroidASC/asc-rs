@@ -590,7 +590,8 @@ impl CachedEntry {
     }
 
     /// The same entry over `data` (identical bytes from another source, e.g.
-    /// the disk cache mapping), keeping the locator tables already built.
+    /// the disk cache mapping), sharing the locator tables (built so far and
+    /// later) of the logical DEX files listed so far.
     /// A container's normalised logical copies are owned and are kept as is.
     fn with_data(&self, data: DexBytes) -> CachedEntry {
         let logical = OnceLock::new();
@@ -973,12 +974,17 @@ fn remap_entry(
     if *mapped != **entry.data {
         return;
     }
+    // A query may still be about to search the entry: list its logical DEX
+    // files now (or wait for the query listing them) so the swapped entry
+    // shares the locator tables that query builds, instead of starting
+    // without any while the query fills the superseded entry's.
+    entry.logical();
     let new = Arc::new(entry.with_data(Arc::new(mapped)));
-    // Now file-backed: charged less.
-    let size = new.charged_bytes();
     let mut memory = lock_memory(memory);
-    if memory.replace(&key, &name, &entry, Arc::clone(&new)) {
-        memory.resize(&key, &name, &new, size);
+    if memory.replace(&key, &name, &entry, new) {
+        // Now file-backed: charged less. Measured under the lock, so a query
+        // recharging concurrently charges the tables it built either way.
+        memory.recharge(&key, &name, CachedEntry::charged_bytes);
     }
 }
 
@@ -2353,18 +2359,13 @@ pub(crate) fn search_entry_with(
 }
 
 /// Charge the in-memory cache for the locator tables a search just built for
-/// `e`, evicting other entries if that exceeds the capacity.
-fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &Arc<CachedEntry>) {
-    let (Some(mem), Some(key)) = (cache.and_then(|c| c.memory.as_ref()), key) else { return };
-    let size = e.charged_bytes();
-    {
-        let mut mem = lock_memory(mem);
-        if !mem.charged_bytes(key, &e.name).is_some_and(|old| old != size) {
-            return;
-        }
-        mem.resize(key, &e.name, e, size);
-    }
-    if let Some(c) = cache {
+/// `e`, evicting other entries if that exceeds the capacity. A writer may
+/// have swapped `e` for a remapped copy sharing those tables meanwhile, so
+/// whatever is cached under its name now is what gets measured.
+fn recharge(cache: Option<&EngineCache>, key: Option<&ApkKey>, e: &CachedEntry) {
+    let (Some(c), Some(key)) = (cache, key) else { return };
+    let Some(mem) = &c.memory else { return };
+    if lock_memory(mem).recharge(key, &e.name, CachedEntry::charged_bytes) {
         c.charged();
     }
 }
@@ -2742,5 +2743,58 @@ mod tests {
         let other = l1_cache(&dir.path().join("other"));
         run_job(&other, None, job(&entries[1]).defer().unwrap(), &mut WriterState::default());
         assert!(other.get(&key, &entries[1].name, entries[1].uncomp_size).is_none());
+    }
+
+    /// Whichever of a query's search and the writer's remap of the entry it
+    /// just inflated runs first, the cached entry ends up mapped, keeping the
+    /// tables the search built, and charged exactly for what it holds.
+    #[test]
+    fn a_remap_racing_a_search_keeps_and_charges_its_tables() {
+        #[derive(Debug, Clone, Copy)]
+        enum Order {
+            RemapFirst,
+            SearchFirst,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (apk_path, disk, _) = multi_dex_apk(dir.path(), 1);
+        let key = ApkKey::for_apk(&Apk::open(&apk_path).unwrap()).unwrap();
+        let engine = Engine::new(&apk_path).with_cache(CacheConfig { memory_bytes: 64 << 20, disk: Some(disk), ..CacheConfig::default() });
+        let cache = engine.cache.as_deref().unwrap();
+        let (memory, disk) = (cache.memory.as_ref().unwrap(), cache.disk.as_deref().unwrap());
+        let search = |e: &Arc<CachedEntry>| {
+            for l in e.logical() {
+                let dex = Dex::with_name(&l.data, &l.name).unwrap();
+                let fr = FindRefs::with_state(&dex, &l.state);
+                prebuild::TABLES.iter().for_each(|build| build(&fr).unwrap());
+            }
+            recharge(Some(cache), Some(&key), e);
+        };
+        for (dex, order) in [asc_fixture::make_dex(), asc_fixture::make_dex041_container()]
+            .into_iter()
+            .flat_map(|dex| [Order::RemapFirst, Order::SearchFirst].map(|order| (dex.clone(), order)))
+        {
+            lock_memory(memory).clear();
+            let name = "classes.dex";
+            let e = Arc::new(CachedEntry::new(name, Arc::new(DexData::Owned(dex))));
+            lock_memory(memory).insert(&key, name, Arc::clone(&e), e.charged_bytes());
+            disk.put(&key, name, &e.data).unwrap();
+            let remap = || remap_entry(disk, Some(memory), key.clone(), name.into(), Arc::clone(&e.data), Some(Arc::downgrade(&e)));
+            match order {
+                Order::RemapFirst => {
+                    remap();
+                    search(&e);
+                }
+                Order::SearchFirst => {
+                    search(&e);
+                    remap();
+                }
+            }
+            let memory = lock_memory(memory);
+            let current = memory.peek(&key, name).unwrap();
+            assert!(current.is_mapped(), "{order:?}: not remapped");
+            assert_eq!(current.state_bytes(), e.state_bytes(), "{order:?}: the remapped entry lost the search's tables");
+            assert!(current.state_bytes() > 0);
+            assert_eq!(memory.used_bytes(), current.charged_bytes(), "{order:?}: charged for something else than what is cached");
+        }
     }
 }

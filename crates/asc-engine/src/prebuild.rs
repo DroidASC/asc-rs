@@ -30,7 +30,7 @@ const MAX_PENDING_WRITES: usize = 2;
 /// The tables a prebuild prepares, in order (every search needs the
 /// instruction table; strings and types back most member queries too). The
 /// call graph is left to the first walk: it is large and rarely needed.
-const TABLES: [fn(&FindRefs<'_, '_, '_>) -> asc_findrefs::Result<()>; 5] = [
+pub(crate) const TABLES: [fn(&FindRefs<'_, '_, '_>) -> asc_findrefs::Result<()>; 5] = [
     |f| f.insn_locator().map(drop),
     |f| f.string_locator().map(drop),
     |f| f.type_locator().map(drop),

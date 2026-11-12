@@ -159,9 +159,8 @@ pub(crate) fn write_derived(disk: &DiskCache, memory: Option<&SharedMemory>, key
     let still_ours = current.logical.get().and_then(|l| l.get(job.logical)).is_some_and(|l| Arc::ptr_eq(&l.state, &job.state));
     if still_ours {
         let new = Arc::new(current.with_state(job.logical, Arc::new(mapped)));
-        let size = new.charged_bytes();
-        if mem.replace(key, &job.entry, &current, Arc::clone(&new)) {
-            mem.resize(key, &job.entry, &new, size);
+        if mem.replace(key, &job.entry, &current, new) {
+            mem.recharge(key, &job.entry, crate::CachedEntry::charged_bytes);
         }
     }
 }
