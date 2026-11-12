@@ -11,9 +11,14 @@
 
 use crate::{CacheConfig, Device, MemoryPolicy, Threads};
 use asc_cache::{AutoDisk, DEFAULT_MIN_DEX_BYTES, DiskCache, DiskCapacity, Tier};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+mod decompilers;
+
+pub use decompilers::{BUILT_IN_DECOMPILER, Decompiler};
 
 /// Environment variable naming the config file; empty: none.
 pub const CONFIG_ENV: &str = "ASC_CONFIG";
@@ -91,6 +96,18 @@ pub struct Seconds(pub Duration);
 /// A duration whose bare numbers are milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Millis(pub Duration);
+
+/// A name that is never empty (`decompile.default`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Name(pub String);
+
+/// Names, in order (`decompile.fallback`); `none` is the empty list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Names(pub Vec<String>);
+
+/// A file, or none (`decompile.mapping`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaybePath(pub Option<PathBuf>);
 
 /// A setting's value type: parsed from and shown as the same text.
 pub trait Value: Sized + fmt::Display {
@@ -299,6 +316,54 @@ impl Value for Millis {
     }
 }
 
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Value for Name {
+    const EXPECTED: &'static str = "a name";
+    fn parse(text: &str) -> Option<Name> {
+        Some(text.trim()).filter(|t| !t.is_empty() && !t.contains(',')).map(|t| Name(t.to_string()))
+    }
+}
+
+impl fmt::Display for Names {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_empty() { "none".into() } else { self.0.join(",") }.as_str())
+    }
+}
+
+impl Value for Names {
+    const EXPECTED: &'static str = "names separated by `,` (or none)";
+    fn parse(text: &str) -> Option<Names> {
+        if matches!(text.trim(), "" | "none") {
+            return Some(Names::default());
+        }
+        text.split(',').map(|name| Name::parse(name).map(|n| n.0)).collect::<Option<_>>().map(Names)
+    }
+}
+
+impl fmt::Display for MaybePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(path) => write!(f, "{}", path.display()),
+            None => f.write_str("none"),
+        }
+    }
+}
+
+impl Value for MaybePath {
+    const EXPECTED: &'static str = "a file, or none";
+    fn parse(text: &str) -> Option<MaybePath> {
+        match text.trim() {
+            "" | "none" => Some(MaybePath(None)),
+            p => Some(MaybePath(Some(expand_home(p)))),
+        }
+    }
+}
+
 /// A value and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -371,6 +436,8 @@ macro_rules! settings {
             pub $field: Setting<$ty>,)*
             /// The config file read, if any.
             pub file: Option<PathBuf>,
+            /// `[decompilers.<name>]` tables of the config file, by name.
+            pub decompilers: BTreeMap<String, Decompiler>,
         }
 
         impl Config {
@@ -378,7 +445,7 @@ macro_rules! settings {
             pub const KEYS: &'static [Key] = &[$(Key { name: $name, env: $env, legacy_env: $legacy, help: $help },)*];
 
             fn defaults() -> Config {
-                Config { $($field: Setting { value: $default, source: Source::Default },)* file: None }
+                Config { $($field: Setting { value: $default, source: Source::Default },)* file: None, decompilers: BTreeMap::new() }
             }
 
             /// Set `name` from `text`; `origin` names the layer in errors.
@@ -433,7 +500,25 @@ settings! {
         "the daemon exits after this long without a request";
     daemon_wait: Millis = Millis(Duration::from_millis(300)), "daemon.wait", "ASC_DAEMON_WAIT", Some("ASC_DAEMON_WAIT_MS"),
         "how long the first command waits for the daemon it starts, then runs itself";
+    decompile_default: Name = Name(String::from("dexdec")), "decompile.default", "ASC_DECOMPILER", None,
+        "backend of asc decompile unless --decompiler names one (a [decompilers.NAME] table, or the built-in dexdec)";
+    decompile_fallback: Names = Names::default(), "decompile.fallback", "ASC_DECOMPILE_FALLBACK", None,
+        "backends tried in order when the default one fails on a whole class; none: smali right away";
+    decompile_mapping: MaybePath = MaybePath::default(), "decompile.mapping", "ASC_MAPPING", None,
+        "R8 / ProGuard mapping.txt whose names decompiled source shows (--mapping); none: the DEX's own names";
+    decompile_auto_install: bool = true, "decompile.auto_install", "ASC_AUTO_INSTALL", None,
+        "download asc-dexdec-worker speaking this asc's protocol version from decompile.release_url when no worker is found";
+    decompile_release_url: Name = Name(String::from(DEFAULT_RELEASE_URL)), "decompile.release_url", "ASC_RELEASE_URL", None,
+        "where asc install and the auto-install fetch the worker: URL/asc-dexdec-worker-pPROTOCOL-TARGET.tar.gz";
 }
+
+/// The downloads of the latest asc-dexdec-worker release, the default
+/// `decompile.release_url`.
+pub const DEFAULT_RELEASE_URL: &str = "https://github.com/DroidASC/asc-dexdec/releases/latest/download";
+
+/// Settings whose file value may be an array of strings, read as the names
+/// joined with `,`.
+const LIST_KEYS: &[&str] = &["decompile.fallback"];
 
 /// `[section] key = v` as `("section.key", v)`.
 fn flatten<'t>(prefix: &str, table: &'t toml::Table, out: &mut Vec<(String, &'t toml::Value)>) {
@@ -521,8 +606,12 @@ impl Config {
 
     fn apply_file(&mut self, path: &Path, text: &str) -> Result<(), ConfigError> {
         let origin = path.display().to_string();
-        let table: toml::Table =
+        let mut table: toml::Table =
             text.parse().map_err(|e: toml::de::Error| ConfigError::File { path: origin.clone(), message: e.message().to_string() })?;
+        // Tables of their own, not settings: taken out before the rest is flattened.
+        if let Some(decompilers) = table.remove("decompilers") {
+            self.decompilers = Decompiler::parse_all(&decompilers, &origin)?;
+        }
         let mut pairs = Vec::new();
         flatten("", &table, &mut pairs);
         for (name, value) in pairs {
@@ -530,6 +619,21 @@ impl Config {
                 toml::Value::String(s) => s.clone(),
                 toml::Value::Integer(i) => i.to_string(),
                 toml::Value::Boolean(b) => b.to_string(),
+                toml::Value::Array(items) if LIST_KEYS.contains(&name.as_str()) => {
+                    let names: Option<Vec<&str>> = items.iter().map(toml::Value::as_str).collect();
+                    match names {
+                        Some(names) if names.is_empty() => "none".to_string(),
+                        Some(names) => names.join(","),
+                        None => {
+                            return Err(ConfigError::Invalid {
+                                origin,
+                                key: name,
+                                text: "<array>".into(),
+                                expected: "an array of strings",
+                            });
+                        }
+                    }
+                }
                 other => {
                     return Err(ConfigError::Invalid {
                         origin,
