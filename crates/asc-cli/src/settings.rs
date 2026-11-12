@@ -4,6 +4,7 @@
 use asc_engine::asc_cache::{DiskCache, DiskCapacity, ProcessRegistry, ProcessUsage, disk_space};
 use asc_engine::config::{Config, Count, Key, Source};
 use asc_engine::{CacheConfig, Device, auto_threads};
+use asc_frontend::decompile::Settings as Decompile;
 use clap::Subcommand;
 use serde_json::json;
 
@@ -53,6 +54,26 @@ fn rows(config: &Config, machine: &Machine) -> Vec<Row> {
 
 fn gib(bytes: u64) -> String {
     format!("{:.1}G", bytes as f64 / f64::from(1u32 << 30))
+}
+
+/// One row per decompiler backend: name, command line, where it is
+/// defined, and its part in the chain (`default`, `fallback N`,
+/// `disabled`, or `-`).
+fn decompiler_rows(config: &Config) -> Vec<(String, String, &'static str, String)> {
+    let decompile = Decompile::from_config(config);
+    decompile
+        .backends
+        .iter()
+        .map(|(name, entry)| {
+            let role = match decompile.fallback.iter().position(|f| f == name) {
+                _ if !entry.enabled => "disabled".to_string(),
+                _ if *name == decompile.default => "default".to_string(),
+                Some(i) => format!("fallback {}", i + 1),
+                None => "-".to_string(),
+            };
+            (name.clone(), entry.command_line(), entry.origin.name(), role)
+        })
+        .collect()
 }
 
 /// What a setting comes to on this machine, where that is not its text.
@@ -110,6 +131,10 @@ pub(crate) fn print(config: &Config, action: Option<&ConfigAction>, json: bool) 
                 "other_processes": machine.others.len(),
             },
             "settings": settings,
+            "decompilers": decompiler_rows(config)
+                .into_iter()
+                .map(|(name, command, source, role)| json!({"name": name, "command": command, "source": source, "role": role}))
+                .collect::<Vec<_>>(),
         });
         println!("{doc}");
         return Ok(0);
@@ -128,6 +153,12 @@ pub(crate) fn print(config: &Config, action: Option<&ConfigAction>, json: bool) 
     for r in &rows {
         println!("{} | {} | {} | {}", r.key.name, r.value, r.source, r.now.as_deref().unwrap_or("-"));
     }
-    println!("# change: --set KEY=VALUE, the variable --json names (env), or the file ([memory] max = \"4G\")");
+    println!("# decompilers: name | command | source | role");
+    for (name, command, source, role) in decompiler_rows(config) {
+        println!("{name} | {command} | {source} | {role}");
+    }
+    println!(
+        "# change: --set KEY=VALUE, the variable --json names (env), or the file ([memory] max = \"4G\"; [decompilers.NAME] command = ...)"
+    );
     Ok(0)
 }

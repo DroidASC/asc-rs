@@ -83,7 +83,10 @@ fn full_session() {
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "asc");
 
     let tools: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(tools, ["getclass", "findrefs", "callgraph", "hierarchy", "listclass", "getmanifest", "manifest_summary", "resources"]);
+    assert_eq!(
+        tools,
+        ["getclass", "findrefs", "callgraph", "hierarchy", "listclass", "getmanifest", "manifest_summary", "resources", "decompile"]
+    );
 
     assert_eq!(ok(&replies[2])["apk_id"], "apk1");
 
@@ -1074,8 +1077,9 @@ fn tool_definitions_stay_small_and_take_the_output_options() {
     let replies = session(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
     let tools = &replies[0]["result"]["tools"];
     // What an agent reads before its first call; it was 16 KB before the
-    // output budget, 9 KB before parameter defaults and output schemas.
-    assert!(tools.to_string().len() <= 14 << 10, "{} bytes", tools.to_string().len());
+    // output budget, 9 KB before parameter defaults and output schemas, and
+    // 14 KB before `decompile`.
+    assert!(tools.to_string().len() <= 15 << 10, "{} bytes", tools.to_string().len());
     for t in tools.as_array().unwrap() {
         let p = &t["inputSchema"]["properties"];
         assert!(p["max_bytes"].is_object() && p["spill"].is_object() && p["page"].is_object(), "{}", t["name"]);
@@ -1257,4 +1261,95 @@ fn programs_name_left_out_archives_and_classes_defined_twice() {
     let replies = session(&[call(1, "getclass", json!({"apk": apk.path().to_str().unwrap(), "class": "Lexample/Test;"}))]);
     let s = ok(&replies[0]);
     assert!(s.get("notes").is_none() && s.get("also_defined_in").is_none(), "{s}");
+}
+
+/// Options whose `decompile` chain is `default` then `fallback`, each the
+/// mock backend run with the flags its name lists (`no-mappings+fail-all`;
+/// `mock` for none).
+#[cfg(unix)]
+fn decompile_opts(default: &str, fallback: &[&str]) -> asc_mcp::Options {
+    use asc_frontend::decompile::{BackendEntry, Settings};
+    let mut settings = Settings::built_in();
+    settings.default = default.to_string();
+    settings.fallback = fallback.iter().map(ToString::to_string).collect();
+    for name in std::iter::once(&default).chain(fallback) {
+        let mut table = asc_engine::config::Decompiler::new(asc_fixture::mock_backend());
+        table.args = name.split('+').filter(|flag| *flag != "mock").map(|flag| format!("--{flag}")).collect();
+        settings.backends.insert(name.to_string(), BackendEntry::from_config(name, &table, None));
+    }
+    let mut o = opts();
+    o.decompile = settings;
+    o
+}
+
+#[test]
+fn decompile_tool_takes_the_cli_arguments() {
+    let replies = session(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
+    let tools = replies[0]["result"]["tools"].as_array().unwrap();
+    let tool = tools.iter().find(|t| t["name"] == "decompile").expect("decompile is listed");
+    let schema = &tool["inputSchema"];
+    assert_eq!(schema["required"], json!(["class"]));
+    let props: BTreeSet<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    for key in ["apk", "apk_id", "class", "decompiler", "language", "method", "mapping", "max_bytes"] {
+        assert!(props.contains(key), "{key} missing from {props:?}");
+    }
+    let output: BTreeSet<&str> = tool["outputSchema"]["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    let want = ["apk_id", "backend", "status", "cached", "failed_methods", "attempts", "source"];
+    assert_eq!(output, want.into_iter().collect());
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn decompile_tool_reports_backend_status_and_failures() {
+    let apk = temp_apk();
+    let path = apk.path().to_str().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mapping = dir.path().join("mapping.txt");
+    std::fs::write(&mapping, "com.example.Renamed -> example.Test:\n").unwrap();
+    let replies = session_with(
+        decompile_opts("mock", &["no-mappings"]),
+        &[
+            call(1, "decompile", json!({"apk": path, "class": "example.Test"})),
+            call(2, "decompile", json!({"apk": path, "class": "Lpartial;"})),
+            call(3, "decompile", json!({"apk": path, "class": "example.Test", "decompiler": "no-mappings", "mapping": mapping})),
+            call(4, "decompile", json!({"apk": path, "class": "example.Test", "language": "kotlin", "method": "first"})),
+            call(5, "decompile", json!({"apk": path, "class": "example.Test", "decompiler": "jeb"})),
+            call(6, "decompile", json!({"apk": path, "class": "example.Test", "language": "smali"})),
+        ],
+    );
+    let ok1 = ok(&replies[0]);
+    assert_eq!((ok1["backend"].as_str(), ok1["version"].as_str(), ok1["status"].as_str()), (Some("mock"), Some("1.0"), Some("ok")));
+    assert_eq!(
+        (ok1["language"].as_str(), ok1["path"].as_str(), ok1["names_unified"].clone()),
+        (Some("java"), Some("example/Test.java"), Value::Null)
+    );
+    assert!(text(&replies[0]).starts_with("// decompile Lexample/Test; | by mock 1.0 | status ok\n// pid="), "{}", text(&replies[0]));
+    assert_eq!(ok1["source"], text(&replies[0]));
+
+    let partial = ok(&replies[1]);
+    assert_eq!(partial["status"], "partial");
+    assert_eq!(partial["failed_methods"], json!([{"signature": "f()V", "reason": "irreducible loop"}]));
+    assert!(text(&replies[1]).contains("// failed methods: 1\n//   f()V: irreducible loop\n"), "{}", text(&replies[1]));
+
+    let unmapped = ok(&replies[2]);
+    assert_eq!(unmapped["names_unified"], false);
+    assert!(text(&replies[2]).contains("// names not unified: no-mappings takes no mapping file"), "{}", text(&replies[2]));
+
+    // The mock writes no Kotlin: each backend fails, smali (the picked method) answers.
+    let smali = ok(&replies[3]);
+    assert_eq!(
+        (smali["backend"].as_str(), smali["status"].as_str(), smali["language"].as_str()),
+        (Some("smali"), Some("failed"), Some("smali"))
+    );
+    assert_eq!(
+        smali["attempts"],
+        json!([{"backend": "mock", "reason": "no kotlin output"}, {"backend": "no-mappings", "reason": "no kotlin output"}])
+    );
+    assert!(text(&replies[3]).contains(".method public static first()V"), "{}", text(&replies[3]));
+
+    for (reply, error) in [(&replies[4], "unknown decompiler \"jeb\""), (&replies[5], "unknown language \"smali\"")] {
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        assert!(text(reply).contains(error), "{}", text(reply));
+    }
 }

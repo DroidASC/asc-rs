@@ -5,6 +5,7 @@
 use crate::Common;
 use asc_engine::{Engine, condition};
 use asc_findrefs::Query;
+use asc_frontend::decompile::{Decompilers, Settings};
 use asc_frontend::spill::SpillDir;
 use std::borrow::Cow;
 use std::fmt::Display;
@@ -21,6 +22,15 @@ pub(crate) trait Engines: Sync {
 
     /// The engine of the HarmonyOS program at `path`, opened.
     fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, asc_ark_engine::EngineError>;
+
+    /// The decompiler backends and their process pools.
+    fn decompilers(&self, common: &Common) -> Arc<Decompilers>;
+}
+
+/// The backends `common` configures, their results kept in its disk cache.
+pub(crate) fn new_decompilers(common: &Common) -> Decompilers {
+    let config = common.config();
+    Decompilers::new(Settings::from_config(config), config.disk_cache())
 }
 
 /// A fresh engine per command, as a one-shot process uses.
@@ -37,6 +47,13 @@ impl Engines for LocalEngines {
         // analyses is left to the exit rather than freed piece by piece.
         std::mem::forget(Arc::clone(&engine));
         Ok(engine)
+    }
+
+    /// Pools of their own, shut down with the command: started for it alone
+    /// (a JVM backend's start costs seconds), but without a daemon there is
+    /// nothing to keep them in.
+    fn decompilers(&self, common: &Common) -> Arc<Decompilers> {
+        Arc::new(new_decompilers(common))
     }
 }
 
@@ -134,6 +151,11 @@ impl<'a> Io<'a> {
     /// The engine of the HarmonyOS program at `path`.
     pub(crate) fn harmony(&self, common: &Common, path: &Path) -> Result<Arc<asc_ark_engine::Engine>, asc_ark_engine::EngineError> {
         self.engines.harmony(common, &self.program_path(path))
+    }
+
+    /// The decompiler backends: the daemon's, or a command's own.
+    pub(crate) fn decompilers(&self, common: &Common) -> Arc<Decompilers> {
+        self.engines.decompilers(common)
     }
 
     /// `apk_path` as this command's process would open it: each path of a

@@ -24,12 +24,22 @@ clap.workspace = true
 libc = "0.2"
 serde_json.workspace = true
 
+[features]
+default = ["installer"]
+# `asc install dexdec` and the auto-install of asc-dexdec-worker (HTTPS
+# client, gzip'd tar reader). Without it asc only finds a worker put in place.
+installer = ["asc-frontend/installer"]
+
 [dev-dependencies]
+asc-decompile.workspace = true
 asc-fixture.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 # `cargo binstall asc-cli` fetches the archives built by the Release workflow.
+# It installs `asc` only (the archive's asc-dexdec-worker is not a bin of this
+# crate); asc downloads the worker on first use, or with `asc install dexdec`.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/asc-v{ version }-{ target }.tar.gz"
 bin-dir = "asc-v{ version }-{ target }/{ bin }{ binary-ext }"

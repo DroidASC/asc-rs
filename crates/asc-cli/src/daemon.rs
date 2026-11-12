@@ -33,12 +33,19 @@
 //! program is opened again once its files change
 //! ([`asc_ark_engine::Engine::is_current`]); the DEX engine checks the same
 //! on every open of its own.
+//!
+//! The daemon also owns the decompiler backends of `asc decompile`
+//! ([`Decompilers`]): their processes start on the first request, exit
+//! after their own idle time, restart after a crash, and their resident
+//! memory counts against the same budget, the longest idle processes
+//! retired first.
 
-use crate::output::{Engines, Io};
+use crate::output::{Engines, Io, new_decompilers};
 use crate::{Cli, Common, run_program};
 use asc_ark_engine::EngineError as HarmonyError;
 use asc_engine::asc_cache::LockExt;
 use asc_engine::{Busy, Engine, SharedCache};
+use asc_frontend::decompile::Decompilers;
 use asc_frontend::format::ProgramFormat;
 use clap::Parser;
 use std::cell::RefCell;
@@ -242,6 +249,8 @@ impl Identity {
             config.write(b"=");
             config.write(v.as_bytes());
         }
+        // The backends `asc decompile` may start, which the settings above do not list.
+        config.write(format!("{:?}", common.config().decompilers).as_bytes());
         config.write(&umask().to_le_bytes());
         let (build, config) = (build.finish(), config.finish());
         let mut all = Fnv::default();
@@ -461,6 +470,8 @@ struct Daemon {
     id: Identity,
     cache: SharedCache,
     engines: Mutex<Pool>,
+    /// The backends of `asc decompile`, started on demand.
+    decompilers: Arc<Decompilers>,
     /// Requests running now.
     active: AtomicUsize,
     /// Commands run (declined ones aside).
@@ -567,6 +578,11 @@ impl Engines for Daemon {
         self.engines.lock_or_default().insert(key, Resident::Harmony(Arc::clone(&engine)));
         Ok(engine)
     }
+
+    fn decompilers(&self, _common: &Common) -> Arc<Decompilers> {
+        // One daemon serves one configuration (see `Identity`).
+        Arc::clone(&self.decompilers)
+    }
 }
 
 /// The engines of one request: the daemon's, with the HarmonyOS program the
@@ -586,6 +602,10 @@ impl Engines for Lease<'_> {
             Some(engine) => Ok(Arc::clone(engine)),
             None => self.daemon.harmony(common, path),
         }
+    }
+
+    fn decompilers(&self, common: &Common) -> Arc<Decompilers> {
+        self.daemon.decompilers(common)
     }
 }
 
@@ -609,6 +629,7 @@ fn serve(common: &Common, dir: &Path) -> Result<u8, String> {
     let daemon = Arc::new(Daemon {
         cache: SharedCache::new(common.resident_cache(), |_| {}),
         engines: Mutex::new(Pool::default()),
+        decompilers: Arc::new(new_decompilers(common)),
         active: AtomicUsize::new(0),
         served: AtomicUsize::new(0),
         last: Mutex::new(Instant::now()),
@@ -713,9 +734,9 @@ impl Daemon {
         }
     }
 
-    /// Close the least recently used programs when what the open ones hold
-    /// outside the cache exceeds their share of the memory budget
-    /// ([`SharedCache::fit_resident_bytes`]).
+    /// Close the least recently used programs when what the open ones and
+    /// the decompiler processes hold outside the cache exceeds their share
+    /// of the memory budget ([`Decompilers::fit_resident`]).
     fn trim_pool(&self) {
         // Sized outside the pool lock: sizing takes each engine's cache locks.
         let mut open: Vec<_> = {
@@ -729,7 +750,7 @@ impl Daemon {
             engine.shed_analyses(self.cache.resident_share());
         }
         let sizes: Vec<usize> = open.iter().map(|(_, _, program)| program.resident_bytes()).collect();
-        let closing = self.cache.fit_resident_bytes(&sizes);
+        let closing = self.decompilers.fit_resident(&self.cache, &sizes);
         if !closing.is_empty() {
             let mut pool = self.engines.lock_or_default();
             for i in closing {
@@ -740,12 +761,15 @@ impl Daemon {
 
     fn status(&self) -> String {
         let open = self.engines.lock_or_default().programs.len();
+        let backends = self.decompilers.processes();
+        let backend_mib = backends.iter().map(|p| p.resident_bytes).sum::<usize>() >> 20;
         format!(
-            "pid {}, up {} s, {} requests ({} running), {open} APKs open, memory cache {} of {} MiB ({} MiB reserved for open APKs), {} ({})\n",
+            "pid {}, up {} s, {} requests ({} running), {open} APKs open, {} decompiler processes ({backend_mib} MiB), memory cache {} of {} MiB ({} MiB reserved for open APKs and decompilers), {} ({})\n",
             std::process::id(),
             self.started.elapsed().as_secs(),
             self.served.load(Ordering::Relaxed),
             self.active.load(Ordering::SeqCst),
+            backends.len(),
             self.cache.memory_bytes() >> 20,
             self.cache.memory_capacity() >> 20,
             self.cache.memory_reserved() >> 20,
@@ -765,6 +789,8 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(10));
         }
         self.cache.flush_writes();
+        // Exiting runs no destructors: shut the backend processes down first.
+        self.decompilers.close();
         std::process::exit(code)
     }
 

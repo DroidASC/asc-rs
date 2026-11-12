@@ -188,7 +188,10 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             let engine = open(io, common, &apk_path)?;
             hierarchy(io, &engine, &query, output.as_ref())?
         }
-        Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } => {
+        Command::Decompile { .. } => {
+            return Err("decompile applies to DEX programs only; getclass disassembles a HarmonyOS record".into());
+        }
+        Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } | Command::Install { .. } => {
             unreachable!("only a command with a program path is dispatched by format")
         }
     };

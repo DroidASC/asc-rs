@@ -31,6 +31,11 @@
 //! ([`SharedCache::fit_resident_bytes`]). Their `apk_id`s stay valid; the next call
 //! naming one opens the APK again.
 //!
+//! `decompile` asks a decompiler backend for Java / Kotlin source
+//! ([`asc_frontend::decompile`]). The session owns the backend processes:
+//! they start on its first call, exit when idle or with the session,
+//! restart after a crash, and count against the memory budget with the APKs.
+//!
 //! A HarmonyOS program (`.hap` / `.hsp` / `.app` / `.abc`) opens the same way
 //! and gets an `apk_id` of the same series; the tools that carry over answer
 //! it from its own engine, the others say what does.
@@ -49,6 +54,7 @@ use asc_engine::{
 };
 use asc_findrefs::{FieldAccess, Query};
 use asc_frontend::class_text::ClassText;
+use asc_frontend::decompile::{self as decompiler, Decompilers, Naming, Request as DecompileRequest};
 use asc_frontend::findrefs::{Member, Target};
 use asc_frontend::format::{self, ProgramFormat};
 use asc_frontend::spill::SpillDir;
@@ -96,6 +102,8 @@ pub struct Options {
     pub spill_bytes: u64,
     /// How much of each result goes into `structuredContent`.
     pub structured: Structured,
+    /// The backends of `decompile` and the choice between them.
+    pub decompile: decompiler::Settings,
 }
 
 impl Options {
@@ -113,6 +121,7 @@ impl Options {
             spill_dir: Some(spill_dir),
             spill_bytes: output::SPILL_BUDGET,
             structured: Structured::Full,
+            decompile: decompiler::Settings::built_in(),
         }
     }
 }
@@ -250,6 +259,7 @@ const TOOLS: &[Tool] = &[
     Tool { name: "getmanifest", run: Server::getmanifest, definition: defs::getmanifest },
     Tool { name: "manifest_summary", run: Server::manifest_summary, definition: res::defs::manifest_summary },
     Tool { name: "resources", run: Server::resources, definition: res::defs::resources },
+    Tool { name: "decompile", run: Server::decompile, definition: defs::decompile },
 ];
 
 /// An APK of the session.
@@ -335,6 +345,8 @@ pub struct Server {
     reports: Mutex<Reports>,
     spill: Option<SpillDir>,
     structured: Structured,
+    /// The decompiler backends; their L3 results live in the disk cache.
+    decompilers: Decompilers,
     cache: SharedCache,
 }
 
@@ -380,6 +392,7 @@ impl Server {
             reports: Mutex::new(Reports::default()),
             spill: opts.spill_dir.map(|d| SpillDir::new(d, opts.spill_bytes)),
             structured: opts.structured,
+            decompilers: Decompilers::with_disk_of(opts.decompile, opts.cache.disk.as_ref()),
             cache: SharedCache::new(opts.cache, |m| eprintln!("{m}")),
         }
     }
@@ -439,7 +452,8 @@ impl Server {
                         and shows it, often no getclass needed) -> getclass with method=\"name\" for more of a class \
                         (a large class comes as an outline first) -> callgraph / hierarchy to follow calls. \
                         manifest_summary gives the attack surface (kind=\"provider\" etc. to narrow); resources reads \
-                        resources.arsc and res/xml. Many APKs: give apks (paths) or dir (+ glob) instead of apk; the \
+                        resources.arsc and res/xml. decompile gives Java source of a class (its header names the backend \
+                        and what failed; method as in getclass, mapping a mapping.txt path). Many APKs: give apks (paths) or dir (+ glob) instead of apk; the \
                         reply has a section per APK (per_apk rows each) and a cursor for its next page. Replies stay \
                         within max_bytes (16 KB): beyond it the full output is written to a file whose path the reply \
                         gives (read the lines you need), or with spill=\"never\" paged (page=N). A `more` / `next` hint \
@@ -667,7 +681,8 @@ impl Server {
             program.engine.shed_analyses(self.cache.resident_share());
         }
         let sizes: Vec<usize> = open.iter().map(|(_, program)| program.resident_bytes()).collect();
-        let closing = self.cache.fit_resident_bytes(&sizes);
+        // Idle backend processes over the budget are retired in there.
+        let closing = self.decompilers.fit_resident(&self.cache, &sizes);
         if closing.is_empty() {
             return;
         }
@@ -855,6 +870,45 @@ impl Server {
             None => text.push_str(&src.source),
         }
         structured["source"] = json!(text);
+        Ok((text, structured))
+    }
+
+    /// Java / Kotlin source of a class from a decompiler backend, its header
+    /// saying which backend answered and what failed.
+    fn decompile(&self, args: &Value, call: &Call) -> ToolResult {
+        let apk = self.resolve(args)?;
+        let class = str_arg(args, "class")?.ok_or_else(|| ToolError("decompile needs `class`".into()))?;
+        let language = str_arg(args, "language")?.map(decompiler::parse_language).transpose()?.unwrap_or(decompiler::Language::Java);
+        let mapping =
+            str_arg(args, "mapping")?.map(|m| canonical(m).map_err(|_| ToolError(format!("cannot read mapping file {m}")))).transpose()?;
+        let request = DecompileRequest::new(class)
+            .decompiler(str_arg(args, "decompiler")?)
+            .language(language)
+            .method(str_arg(args, "method")?)
+            .mapping(mapping.as_deref());
+        let answer = self.decompilers.decompile(&apk.engine, &request, &call.cancel)?;
+        let text = answer.render();
+        let failed: Vec<Value> = answer.failed_methods.iter().map(|m| json!({"signature": m.signature, "reason": m.reason})).collect();
+        let attempts: Vec<Value> = answer.attempts.iter().map(|a| json!({"backend": a.backend, "reason": a.reason})).collect();
+        let structured = json!({
+            "apk_id": apk.id,
+            "class": answer.class,
+            "folded_into": answer.folded_into,
+            "backend": answer.backend.as_deref().unwrap_or("smali"),
+            "version": answer.version,
+            "status": answer.status.name(),
+            "language": answer.language.map_or("smali", |l| if l == decompiler::Language::Kotlin { "kotlin" } else { "java" }),
+            "cached": answer.cached,
+            "names_unified": match answer.naming {
+                Naming::Unified => Some(true),
+                Naming::NotUnified => Some(false),
+                _ => None,
+            },
+            "failed_methods": failed,
+            "attempts": attempts,
+            "path": answer.path.to_string_lossy(),
+            "source": text,
+        });
         Ok((text, structured))
     }
 
@@ -1779,6 +1833,25 @@ pub(crate) mod defs {
             "outputSchema": shape(&[
                 ("apk_id", "string"), ("class", "string"), ("dex_name", "string"), ("source", "string"), ("warning", "string?"),
                 ("rebuilt", "boolean"),
+            ]),
+        })
+    }
+
+    pub(crate) fn decompile() -> Value {
+        json!({
+            "description": "Java source of a class. `//` header: decompiler, status (ok, partial, failed = smali), failures.",
+            "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
+                "class": {"type": "string"},
+                "decompiler": {"type": "string", "description": "Only this backend."},
+                "language": {"type": "string", "description": "java or kotlin."},
+                "method": {"type": "string"},
+                "mapping": {"type": "string"},
+            })]), "required": ["class"]},
+            // `version`, `language`, `names_unified`, `folded_into` and `path` come too; left
+            // out here for the size of the list.
+            "outputSchema": shape(&[
+                ("apk_id", "string"), ("backend", "string"), ("status", "string"), ("cached", "boolean"),
+                ("failed_methods", "array"), ("attempts", "array"), ("source", "string"),
             ]),
         })
     }

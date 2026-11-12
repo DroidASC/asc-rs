@@ -689,7 +689,9 @@ fn first_command_starts_the_daemon_and_off_bypasses_it() {
 
 #[test]
 fn a_replaced_binary_retires_the_old_daemon() {
-    let bin = short_tempdir();
+    // Two copies of a debug `asc` are hundreds of MB: keep them in the
+    // regular temp dir (TMPDIR), not the short-path /tmp used for sockets.
+    let bin = tempfile::tempdir().unwrap();
     let exe = bin.path().join("asc");
     std::fs::copy(env!("CARGO_BIN_EXE_asc"), &exe).unwrap();
     let env = Env::with_exe(exe.clone());

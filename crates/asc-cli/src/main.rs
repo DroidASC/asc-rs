@@ -9,6 +9,7 @@ mod settings;
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::config::Config;
 use asc_engine::{CacheConfig, CallQuery, CallRoots, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext, names};
+use asc_frontend::decompile::{Language, Request as DecompileRequest};
 use asc_frontend::findrefs::{self, Member, Target};
 use asc_frontend::format::{ProgramFormat, left_out_note};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -41,7 +42,8 @@ macro_rules! help_exit_status {
         "exit status:
   0  success
   1  error (bad arguments, unreadable APK, class not found, output not writable, ...)
-  2  findrefs / callgraph finished, but one or more DEX (or ABC) entries could not be searched (details on stderr)"
+  2  findrefs / callgraph finished, but one or more DEX (or ABC) entries could not be searched (details on stderr);
+     decompile answered, but the class is partial or shown as smali (the header says why)"
     };
 }
 
@@ -144,6 +146,9 @@ examples (Android):
   asc findrefs app.apk rules 'in:{extends:android.app.Service} & annotation:androidx.annotation.RequiresPermission'
   asc callgraph app.apk rs.asc.Main onCreate --depth 3
   asc callgraph app.apk rs.asc.Main 'run(I)V' --callees
+  asc decompile app.apk rs.asc.Main
+  asc decompile app.apk rs.asc.Main --method onCreate --mapping mapping.txt
+  asc decompile app.apk rs.asc.Main --decompiler jadx -o src/
   asc findrefs system/framework impl com.android.internal.telephony.ITelephony
   asc callgraph framework.jar,services.jar,TeleService.apk android.telephony.TelephonyManager getImei
   asc callgraph app.apk --to 'method:java.lang.Runtime->exec' --from 'method:Intent.getStringExtra' --depth 5
@@ -307,6 +312,9 @@ impl Common {
             let (key, value) = (key.trim(), value.trim());
             match key {
                 "cache.dir" if !matches!(value, "" | "default") && !value.starts_with('~') => {
+                    flag(key, cwd.join(value).display().to_string());
+                }
+                "decompile.mapping" if !matches!(value, "" | "none") && !value.starts_with('~') => {
                     flag(key, cwd.join(value).display().to_string());
                 }
                 _ => flag(key, value.to_string()),
@@ -744,6 +752,51 @@ enum Command {
         /// Class in dotted or Dalvik form.
         class: String,
     },
+    /// Java or Kotlin source of a class from a decompiler backend (default: the built-in dexdec).
+    ///
+    /// The first lines (`//` comments; `#` for smali) say how the answer came
+    /// about: `decompile CLASS | by BACKEND VERSION | status ok|partial|failed`
+    /// (`, from cache` when the result was cached), one `BACKEND failed:
+    /// REASON` line per backend that gave nothing before it, the methods that
+    /// failed to decompile (stubs in the source), and `names not unified`
+    /// when a mapping file is given but the backend takes none.
+    ///
+    /// Backends are tried in order: --decompiler alone, else decompile.default
+    /// and then decompile.fallback (config.toml: [decompile] default = "dexdec",
+    /// fallback = ["jadx"]; [decompilers.NAME] command = ..., args = [...]). A
+    /// backend failing on the whole class (failed, crashed, timed out) hands
+    /// over to the next; a partial class does not. When every backend failed,
+    /// the class is shown as smali (status failed).
+    ///
+    /// Results are cached on disk by program, class, backend version and
+    /// options, mapping and language (failures for 10 minutes); backend
+    /// processes stay up in the daemon. Exits with status 2 when the class is
+    /// partial or shown as smali.
+    Decompile {
+        /// Write the source under this directory, at a path made from the
+        /// class name (pkg/Name.java); stdout then shows the header and the path.
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+        /// Use this backend only (no fallback): dexdec, or a [decompilers.NAME]
+        /// of the config file.
+        #[arg(long, value_name = "NAME")]
+        decompiler: Option<String>,
+        /// Output language.
+        #[arg(long, value_enum, default_value_t = LanguageArg::Java)]
+        language: LanguageArg,
+        /// Show only these methods: a name (every overload) or a signature, e.g. run or run(I)V.
+        #[arg(long = "method", value_name = "NAME|SIGNATURE")]
+        method: Option<String>,
+        /// R8 / ProGuard mapping.txt whose names the source shows (`--set
+        /// decompile.mapping=FILE`); backends that take no mappings keep
+        /// the DEX's names and say so.
+        #[arg(long, value_name = "FILE")]
+        mapping: Option<PathBuf>,
+        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        apk_path: PathBuf,
+        /// Class name in dotted or Dalvik form, e.g. rs.asc.Main or Lrs/asc/Main;.
+        class: String,
+    },
     /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
     /// opened programs (APKs, HarmonyOS packages) resident across calls.
     /// Every opened program shares one `--memory-mb` budget.
@@ -786,6 +839,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Download the latest release of a tool asc runs and install it for
+    /// asc, replacing the one installed before.
+    ///
+    /// `dexdec`: asc-dexdec-worker, which `asc decompile` runs (the latest
+    /// one speaking this asc's decompile protocol version). asc also
+    /// installs it on its own the first time it needs it
+    /// (`decompile.auto_install`), unless it finds one next to asc or on PATH.
+    Install {
+        /// What to install.
+        #[arg(value_enum)]
+        tool: InstallTool,
+    },
+}
+
+/// What `asc install` installs.
+#[derive(Clone, Copy, ValueEnum)]
+enum InstallTool {
+    /// asc-dexdec-worker, the built-in decompiler backend.
+    Dexdec,
 }
 
 impl Command {
@@ -802,8 +874,9 @@ impl Command {
             | Command::Xml { apk_path, .. }
             | Command::Findrefs { apk_path, .. }
             | Command::Callgraph { apk_path, .. }
-            | Command::Hierarchy { apk_path, .. } => Some(apk_path),
-            Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } => None,
+            | Command::Hierarchy { apk_path, .. }
+            | Command::Decompile { apk_path, .. } => Some(apk_path),
+            Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } | Command::Install { .. } => None,
         }
     }
 }
@@ -819,6 +892,22 @@ enum DaemonAction {
     /// Run the daemon in this process (what `start` spawns).
     #[command(hide = true)]
     Serve,
+}
+
+/// `decompile --language`.
+#[derive(Clone, Copy, ValueEnum)]
+enum LanguageArg {
+    Java,
+    Kotlin,
+}
+
+impl From<LanguageArg> for Language {
+    fn from(language: LanguageArg) -> Language {
+        match language {
+            LanguageArg::Java => Language::Java,
+            LanguageArg::Kotlin => Language::Kotlin,
+        }
+    }
 }
 
 /// `--context`: a number of lines, or `method`.
@@ -1642,11 +1731,62 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 return Ok(EXIT_PARTIAL);
             }
         }
-        Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } => {
+        Command::Decompile { output, decompiler, language, method, mapping, apk_path, class } => {
+            let args = DecompileArgs { output, decompiler, language: language.into(), method, mapping, apk_path, class };
+            return decompile(io, common, args, t_start);
+        }
+        Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } | Command::Install { .. } => {
             unreachable!("run handles the resident and maintenance commands")
         }
     }
     Ok(EXIT_OK)
+}
+
+/// The arguments of `asc decompile`.
+struct DecompileArgs {
+    output: Option<PathBuf>,
+    decompiler: Option<String>,
+    language: Language,
+    method: Option<String>,
+    mapping: Option<PathBuf>,
+    apk_path: PathBuf,
+    class: String,
+}
+
+/// `asc decompile`: the header and the source (or, with `-o DIR`, the file
+/// written); [`EXIT_PARTIAL`] when the class is partial or shown as smali.
+fn decompile(io: &mut Io<'_>, common: &Common, args: DecompileArgs, t_start: Instant) -> Result<u8, String> {
+    let engine = io.engine(common, &args.apk_path);
+    let decompilers = io.decompilers(common);
+    let mapping = args.mapping.as_deref().map(|m| io.path(m).into_owned());
+    let request = DecompileRequest::new(&args.class)
+        .decompiler(args.decompiler.as_deref())
+        .language(args.language)
+        .method(args.method.as_deref())
+        .mapping(mapping.as_deref());
+    let answer = decompilers.decompile(&engine, &request, io.cancel).map_err(|e| e.to_string())?;
+    if common.debug {
+        for name in decompilers.settings().chain(args.decompiler.as_deref()) {
+            let stderr = decompilers.backend(name).map(|backend| backend.stderr()).unwrap_or_default();
+            if !stderr.is_empty() {
+                io.note(format_args!("[DEBUG] {name} stderr:\n{}", stderr.trim_end()));
+            }
+        }
+        io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
+    }
+    match &args.output {
+        Some(dir) => {
+            let file = dir.join(&answer.path);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(io.path(parent)).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            io.write_output(Some(&file), &answer.text)?;
+            let comment = if answer.language.is_some() { "//" } else { "#" };
+            io.emit(&format!("{}{comment} wrote {}\n", answer.header(), file.display()))?;
+        }
+        None => io.emit_records(&answer.render(), None)?,
+    }
+    Ok(if answer.is_degraded() { EXIT_PARTIAL } else { EXIT_OK })
 }
 
 fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
@@ -1668,6 +1808,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
                 opts.spill_dir = None;
             }
             opts.spill_bytes = spill_bytes;
+            opts.decompile = asc_frontend::decompile::Settings::from_config(common.config());
             asc_mcp::serve(std::io::stdin().lock(), std::io::stdout(), opts).map_err(|e| format!("mcp: {e}"))?;
         }
         Command::Cache { action } => {
@@ -1699,6 +1840,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
         }
         Command::Daemon { action } => return daemon_command(&common, action),
         Command::Config { action, json } => return settings::print(common.config(), action.as_ref(), json),
+        Command::Install { tool: InstallTool::Dexdec } => return install_dexdec(&common),
         command => {
             // Not locked: engine threads log to stderr themselves (`--debug`).
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -1726,6 +1868,28 @@ fn mib(bytes: u64) -> String {
     format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
+/// `asc install dexdec`: the latest worker of this asc's protocol version,
+/// downloaded and installed into asc's data directory whatever is there or elsewhere.
+#[cfg(feature = "installer")]
+fn install_dexdec(common: &Common) -> Result<u8, String> {
+    use asc_frontend::decompile::install::InstallMode;
+    let dexdec = asc_frontend::decompile::WorkerSettings::from_config(common.config());
+    eprintln!("downloading {}", dexdec.release().archive_url());
+    let worker = dexdec.install(InstallMode::Replace).map_err(|e| e.to_string())?;
+    println!("installed asc-dexdec-worker (protocol {}) at {}", asc_frontend::decompile::dexdec::PROTOCOL, worker.path.display());
+    if let Some(used) = dexdec.locate().filter(|used| used.path != worker.path) {
+        eprintln!("note: asc uses {} ({}) before it; remove that one to use the installed worker", used.path.display(), used.origin.name());
+    }
+    Ok(EXIT_OK)
+}
+
+#[cfg(not(feature = "installer"))]
+fn install_dexdec(_common: &Common) -> Result<u8, String> {
+    Err("this asc was built without the installer (feature `installer`); \
+         build asc-dexdec-worker (from https://github.com/DroidASC/asc-dexdec) and put it next to asc"
+        .into())
+}
+
 fn main() -> ExitCode {
     let t_start = Instant::now();
     let parsed = Cli::try_parse();
@@ -1741,6 +1905,11 @@ fn main() -> ExitCode {
     if let Err(e) = cli.common.resolve() {
         eprintln!("Error: {e}");
         return ExitCode::from(1);
+    }
+    // A missing worker is installed here, where its progress shows, not in
+    // the daemon the command goes to.
+    if let Command::Decompile { decompiler, .. } = &cli.command {
+        asc_frontend::decompile::Settings::from_config(cli.common.config()).prepare_worker(decompiler.as_deref());
     }
     // The daemon keeps programs of either format resident and tells them
     // apart itself; only a command that runs here looks at the format.
