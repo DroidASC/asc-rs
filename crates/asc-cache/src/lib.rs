@@ -584,13 +584,19 @@ fn is_cache_dir_name(name: &str) -> bool {
 }
 
 impl DiskCache {
-    /// The default cache directory: `$XDG_CACHE_HOME/asc`, else
-    /// `~/.cache/asc`.
+    /// The default cache directory: `$XDG_CACHE_HOME/asc`, else on Windows
+    /// `%LOCALAPPDATA%\\asc\\cache`, else `~/.cache/asc`.
     pub fn default_dir() -> Option<PathBuf> {
-        if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
-            return Some(PathBuf::from(d).join("asc"));
+        let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+        if let Some(d) = var("XDG_CACHE_HOME") {
+            return Some(d.join("asc"));
         }
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("asc"))
+        if cfg!(windows)
+            && let Some(d) = var("LOCALAPPDATA")
+        {
+            return Some(d.join("asc").join("cache"));
+        }
+        var("HOME").map(|h| h.join(".cache").join("asc"))
     }
 
     /// A cache in `dir` with the default policy: automatic capacity, every

@@ -7,7 +7,7 @@
 
 线程、内存和磁盘都是同一套设置，`asc config` 列出每项的值、来源和在本机的实际值（`--json` 给脚本和
 agent）。优先级：命令行（`--set KEY=VALUE`）> 环境变量（`$ASC_<KEY>`，名字见 `--json`）> 配置文件
-`~/.config/asc/config.toml`（`$XDG_CONFIG_HOME`，或 `$ASC_CONFIG` 指定；空值表示不读）> 默认值。
+`~/.config/asc/config.toml`（`$XDG_CONFIG_HOME`；Windows 上 `%APPDATA%\asc\config.toml`；或 `$ASC_CONFIG` 指定，空值表示不读）> 默认值。
 `auto` 默认值按本机计算，多个常驻进程会登记并平分内存和线程。
 
 | 设置 | 默认 |
@@ -16,7 +16,7 @@ agent）。优先级：命令行（`--set KEY=VALUE`）> 环境变量（`$ASC_<K
 | `memory.max`（`--memory-mb`） | auto = 25%：(可用内存 + 常驻进程已占) × 25% / 常驻进程数；也可写 `4G` 或 `40%` |
 | `memory.ceiling` | auto：物理内存的 1/16，在 2G..8G 之间（12 GB 机器 2G，96 GB 机器 6G） |
 | `memory.split` | on：在常驻进程间平分 |
-| `cache.enabled`（`--no-cache`）、`cache.dir`（`--cache-dir`） | on；`$XDG_CACHE_HOME/asc` 或 `~/.cache/asc` |
+| `cache.enabled`（`--no-cache`）、`cache.dir`（`--cache-dir`） | on；`$XDG_CACHE_HOME/asc`，Windows 上 `%LOCALAPPDATA%\asc\cache`，否则 `~/.cache/asc` |
 | `cache.max`（`--cache-max-mb`） | auto = 20%：(剩余空间 + cache 自身) × 20%，不超过 `cache.ceiling`（32G），保留 1 GiB / 5% 剩余空间 |
 | `cache.tiers`、`cache.min_dex` | `dex,derived,rendered`；小于 4M 的 DEX 不写 L1 |
 | `cache.write_queue`、`cache.writers` | 512M（且不超过内存预算）；auto：每 8 个 CPU 一个，1..4 |
@@ -50,7 +50,7 @@ max = "10%"
 worker 在自己的仓库（[DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec)）构建和发布，版本号与 asc 无关，
 两者只需说同一个反编译协议版本。asc 按顺序找 worker：`[decompilers.dexdec]` 的 `command` → `asc` 所在目录的
 `asc-dexdec-worker` → asc 为本协议版本安装的 `$XDG_DATA_HOME/asc/tools/asc-dexdec-worker-p<协议版本>-<target>/`
-（默认 `~/.local/share/asc/…`）→ `PATH`。都没有时，第一个需要 dexdec 的请求从 `decompile.release_url` 下载
+（默认 `~/.local/share/asc/…`，Windows 上 `%LOCALAPPDATA%\asc\…`）→ `PATH`。都没有时，第一个需要 dexdec 的请求从 `decompile.release_url` 下载
 `asc-dexdec-worker-p<协议版本>-<target>.tar.gz`：先取 `.sha256` 校验，只解出 worker（其它条目、链接、越界路径一律拒绝），
 运行一次 `--protocol-version` 确认协议版本后原子改名就位；
 有锁文件，daemon 和命令同时装也只下载一次。进度写 stderr（经 daemon 的命令在自己进程里先装好再转发；MCP 写日志），

@@ -134,7 +134,7 @@ impl WorkerSettings {
         } else if cfg!(debug_assertions) && self.release_url == DEFAULT_RELEASE_URL {
             Some("a debug build of asc does not download it".into())
         } else if self.data_dir.is_none() {
-            Some("there is no data directory ($XDG_DATA_HOME, $HOME) to install it in".into())
+            Some("there is no data directory ($XDG_DATA_HOME, %LOCALAPPDATA% on Windows, $HOME) to install it in".into())
         } else {
             None
         }
@@ -170,7 +170,10 @@ impl WorkerSettings {
     pub fn install(&self, mode: InstallMode) -> Result<Worker, InstallError> {
         let dir = self.install_dir().ok_or_else(|| InstallError::Io {
             path: PathBuf::from("$XDG_DATA_HOME"),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no data directory: neither $XDG_DATA_HOME nor $HOME is set"),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no data directory: none of $XDG_DATA_HOME, %LOCALAPPDATA% (Windows) or $HOME is set",
+            ),
         })?;
         let path = self.release().install(&dir, mode)?;
         let _ = std::fs::remove_file(dir.join(FAILED_MARKER));
@@ -235,12 +238,13 @@ impl WorkerSettings {
     }
 }
 
-/// `$XDG_DATA_HOME/asc`, else `~/.local/share/asc`.
+/// `$XDG_DATA_HOME/asc`, else on Windows `%LOCALAPPDATA%\\asc`, else
+/// `~/.local/share/asc`.
 fn default_data_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").filter(|home| !home.is_empty()).map(|home| Path::new(&home).join(".local/share")))?;
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let base = var("XDG_DATA_HOME")
+        .or_else(|| if cfg!(windows) { var("LOCALAPPDATA") } else { None })
+        .or_else(|| var("HOME").map(|home| home.join(".local/share")))?;
     Some(base.join("asc"))
 }
 

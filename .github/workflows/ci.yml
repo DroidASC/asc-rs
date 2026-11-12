@@ -60,8 +60,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
   # Windows: code under cfg(windows) / cfg(not(unix)) is compiled nowhere
-  # else. Build, lint and test the workspace there (asc is not released for
-  # Windows; this keeps it building).
+  # else. Build, lint and test the workspace there (the Release workflow
+  # ships Windows builds too).
   windows:
     runs-on: windows-latest
     timeout-minutes: 45
