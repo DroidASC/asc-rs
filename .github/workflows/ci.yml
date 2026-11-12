@@ -75,3 +75,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
       # Every failing test at once, not the first test binary's.
       - run: cargo test --workspace --no-fail-fast
+  # aarch64 Windows, a Release target: its C and assembly dependencies
+  # build differently (sha2-asm does not build with MSVC there).
+  windows-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p asc-cli

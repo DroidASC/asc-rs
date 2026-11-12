@@ -25,8 +25,9 @@ toml = { version = "1.1", default-features = false, features = ["std", "parse", 
 
 # sha2 0.10 uses the ARMv8 SHA2 instructions only with `asm` (x86 picks
 # SHA-NI at run time either way). In software, hashing DEX entries for the
-# cross-APK dedup costs more than the scan it saves.
-[target.'cfg(target_arch = "aarch64")'.dependencies]
+# cross-APK dedup costs more than the scan it saves. Not with MSVC: sha2-asm's
+# assembly does not build there (aarch64 Windows hashes in software).
+[target.'cfg(all(target_arch = "aarch64", not(target_env = "msvc")))'.dependencies]
 sha2 = { workspace = true, features = ["asm"] }
 
 # Memory statistics on Apple systems (`budget::apple`).
