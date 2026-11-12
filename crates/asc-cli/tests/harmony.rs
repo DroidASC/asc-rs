@@ -810,6 +810,8 @@ fn what_is_not_supported_yet_says_what_is() {
     let searches = "(supported: findrefs string, prop, global, import, method, number, call, all, rules)";
     let conditions = "(supported: string:, literal:, prop:, global:, import:, method:, number:, call:)";
     let not_yet = "is not supported for HarmonyOS programs yet";
+    // The system's own words for a missing file (os error 2).
+    let missing = std::io::Error::from_raw_os_error(2);
     let cases: [(&[&str], String); 51] = [
         (
             &["getmanifest", "--resolve"],
@@ -886,12 +888,12 @@ fn what_is_not_supported_yet_says_what_is() {
         (&["findrefs", "extends", "Index"], format!("findrefs extends {not_yet} {searches}")),
         (&["findrefs", "rules"], "findrefs rules needs at least one rule".into()),
         (&["findrefs", "rules", "string:a & type:Index"], format!("findrefs type: {not_yet} {conditions}")),
-        (&["findrefs", "rules", "--file", "nowhere.txt"], "cannot read nowhere.txt: No such file or directory (os error 2)".into()),
+        (&["findrefs", "rules", "--file", "nowhere.txt"], format!("cannot read nowhere.txt: {missing}")),
         (&["findrefs", "all", "!string:b"], "a rule needs a condition without `!` (`!` only removes functions)".into()),
         (&["findrefs", "all", "string:a", "--none", "type:Index"], format!("findrefs type: {not_yet} {conditions}")),
         (&["findrefs", "all", "string:a & prop:b"], "\"string:a & prop:b\" is several conditions; give one KIND:VALUE here".into()),
         (&["findrefs", "all", "call:{string:a"], "bad rule \"call:{string:a\": expected `}` at column 15".into()),
-        (&["findrefs", "call", "{@nowhere.txt}"], "cannot read function list nowhere.txt: No such file or directory (os error 2)".into()),
+        (&["findrefs", "call", "{@nowhere.txt}"], format!("cannot read function list nowhere.txt: {missing}")),
         (&["findrefs", "all", "type:Index"], format!("findrefs type: {not_yet} {conditions}")),
         (&["findrefs", "all", "prop:"], "bad rule \"prop:\": empty value at column 6".into()),
         (
