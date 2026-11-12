@@ -25,6 +25,7 @@ use std::io::Write;
 
 pub mod abc;
 pub mod hap;
+pub mod http;
 pub mod mutate;
 pub mod res;
 
@@ -1202,4 +1203,47 @@ pub fn make_truncated_insn_dex() -> Vec<u8> {
         ..Default::default()
     });
     ids.finish()
+}
+
+/// The `mock_backend` example of asc-decompile (a scriptable decompiler
+/// backend), built on first use if this test run did not build it: `cargo
+/// test --workspace` builds every example, `cargo test -p` only its own.
+pub fn mock_backend() -> std::path::PathBuf {
+    static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        // A test runs as target/<profile>/deps/<name>-<hash>.
+        let exe = std::env::current_exe().expect("test executable path");
+        let profile = exe.parent().and_then(std::path::Path::parent).expect("test executable under target/<profile>/deps");
+        let path = profile.join("examples").join(format!("mock_backend{}", std::env::consts::EXE_SUFFIX));
+        if !path.exists() {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let mut build = std::process::Command::new(cargo);
+            build.args(["build", "-p", "asc-decompile", "--example", "mock_backend"]);
+            if profile.file_name().is_some_and(|name| name == "release") {
+                build.arg("--release");
+            }
+            if let Some(target) = profile.parent() {
+                build.env("CARGO_TARGET_DIR", target);
+            }
+            let status = build.status().expect("run cargo to build mock_backend");
+            assert!(status.success(), "building asc-decompile's mock_backend example failed: {status}");
+        }
+        path
+    })
+    .clone()
+}
+
+/// `asc-dexdec-worker`, the real backend behind the built-in `dexdec`, if
+/// `ASC_DEXDEC_WORKER` names one.
+///
+/// The worker is built in its own repository (DroidASC/asc-dexdec), not in
+/// this workspace, so the tests that need it skip themselves without it.
+///
+/// # Panics
+///
+/// `ASC_DEXDEC_WORKER` is set to something that is not a file.
+pub fn dexdec_worker() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os("ASC_DEXDEC_WORKER").filter(|path| !path.is_empty())?);
+    assert!(path.is_file(), "ASC_DEXDEC_WORKER={} is not a file", path.display());
+    Some(path)
 }

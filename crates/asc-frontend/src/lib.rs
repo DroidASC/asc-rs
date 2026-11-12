@@ -6,6 +6,8 @@
 //! * [`harmony`]: HarmonyOS function spellings, name patterns, call trees
 //!   as rows and the hints of an empty answer.
 //! * [`class_text`]: smali split into methods, for picking and outlining.
+//! * [`decompile`]: Java / Kotlin source from decompiler backends, their
+//!   process pools, fallback and cached results.
 //! * [`spill`]: the directory output too long for its reader goes to.
 //!
 //! What only one front end has stays there: command-line parsing and the
@@ -13,6 +15,7 @@
 //! asc-mcp.
 
 pub mod class_text;
+pub mod decompile;
 pub mod findrefs;
 pub mod format;
 pub mod harmony;

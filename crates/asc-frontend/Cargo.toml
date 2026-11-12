@@ -5,16 +5,36 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "What the asc CLI and MCP server share above the engines: which engine answers for a program, findrefs arguments as queries, spilled output, class outlines and HarmonyOS call trees."
+description = "What the asc CLI and MCP server share above the engines: which engine answers for a program, findrefs arguments as queries, spilled output, class outlines, decompiler backends and HarmonyOS call trees."
 
 [dependencies]
 asc-ark-engine.workspace = true
+asc-decompile.workspace = true
 asc-engine.workspace = true
 asc-findrefs.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+# The installer (feature `installer`): the release asset is a gzip'd tar,
+# fetched over HTTPS with rustls and the bundled webpki roots (no OpenSSL,
+# no system TLS); one blocking request at a time is all it needs.
+flate2 = { workspace = true, optional = true }
+tar = { version = "0.4.46", default-features = false, optional = true }
+thiserror.workspace = true
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"], optional = true }
 
 [dev-dependencies]
+asc-fixture.workspace = true
+libc = "0.2"
 tempfile.workspace = true
+
+[features]
+# Downloading asc-dexdec-worker from the release (`asc install dexdec`, the
+# auto-install of `decompile.auto_install`).
+installer = ["dep:ureq", "dep:tar", "dep:flate2"]
+
+[[test]]
+name = "install"
+required-features = ["installer"]
 
 [lints]
 workspace = true
