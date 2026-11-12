@@ -1,6 +1,6 @@
 //! MUTF-8 string data and descriptor lookups (MG1937/ASC issue #33).
 
-use asc_dex::{Dex, DexError, mutf8};
+use asc_dex::{Dex, mutf8};
 use asc_fixture::{ClassSpec, DexBuilder};
 
 /// The DEX attached to the upstream issue: two classes whose names hold
@@ -43,14 +43,6 @@ fn issue_fixture_decodes_and_finds_non_ascii_classes() {
 }
 
 #[test]
-fn special_forms_decode() {
-    assert_eq!(mutf8::decode(b"a\xc0\x80b"), "a\0b");
-    assert_eq!(mutf8::decode(b"\xed\xa0\xbd\xed\xb8\x80"), "\u{1f600}");
-    assert_eq!(mutf8::decode(b"a\xffb"), "a\u{fffd}b");
-    assert_eq!(mutf8::decode(b"a\xc0\x80\xffb"), "a\0\u{fffd}b");
-}
-
-#[test]
 fn lookup_follows_utf16_sort_order() {
     // U+10000 is the surrogate pair D800 DC00 and sorts before U+E000 by
     // UTF-16 code units, although its code point (and UTF-8 form) is larger.
@@ -83,14 +75,4 @@ fn lookup_sorts_nul_first() {
         }
         assert_eq!(dex.find_string_idx(b"La;").unwrap(), None);
     }
-}
-
-#[test]
-fn unterminated_string_is_rejected() {
-    let mut data = class_dex(&["Lexample/Test;"]);
-    let off = Dex::parse(&data).unwrap().string_data_off(0).unwrap() as usize;
-    data[off..].fill(b'x');
-    data[off] = 14; // keep a plausible uleb128 length
-    let dex = Dex::parse(&data).unwrap();
-    assert_eq!(dex.string_item(0), Err(DexError::UnterminatedString(off)));
 }

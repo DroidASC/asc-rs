@@ -215,7 +215,6 @@ fn dispatch_nesting_constraints_and_defs_compose_across_jars() {
         // An interface with a couple of implementers is followed: no note.
         assert!(rows_and_notes(&engine, &names::parse_rule("method:{literal:android_id}").unwrap()).1.is_empty());
     }
-    let _ = AtomicBool::new(false);
 }
 
 #[test]

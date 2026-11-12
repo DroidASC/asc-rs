@@ -1,30 +1,68 @@
 //! The engine over hand-built ABC files packed the ways real programs are:
 //! lone packages, application packages with stored and Deflate inner
 //! packages, bare files, directories, encrypted entries.
-//!
-//! The ABC writer in `common` is a copy of the `asc-abc` test helper; these
-//! tests should move onto `asc-fixture`'s synthetic ABC / HAP writer once it
-//! exists.
-
-mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use asc_ark_engine::{ClassQuery, Engine, EngineError, EntryStatus, Format, ListOptions, NameFilter, Query, RefRow, RefSite};
+use asc_fixture::abc::{
+    ACC_STATIC, AbcAnnotation, AbcBuilder, AbcCode, AbcField, AbcFieldValue, AbcFile, AbcFunction, AbcModule, AbcRecord, AbcType, Asm, Op,
+    seal,
+};
 use asc_fixture::make_apk;
-use common::{RECORD_A, RECORD_B, adler32, encrypted, synthetic};
+
+const RECORD_A: &str = "&entry/src/main/ets/pages/Index&";
+const RECORD_B: &str = "com.example.app/entry/ets/model/Util";
+
+/// A two-region file, version 12.0.6.0, with a correct checksum. Region 0
+/// holds record A, whose `func_main_0` loads `hello` and `#~@0>#build`
+/// loads `world`; region 1 holds record B, whose three functions load
+/// `world` under another 16-bit id. The second and third function of B
+/// store a wrong region number (7, out of range, and 0, the other region).
+fn synthetic_builder() -> AbcBuilder {
+    let load = |text: &str| {
+        let mut code = Asm::new();
+        code.op("lda.str", [Op::str(text)]).op("return", []);
+        AbcCode::new(1, 3, code)
+    };
+    // What the compiler adds to a record: its own annotation, also on a typed field.
+    let annotation = || AbcAnnotation::new("_ESTypeAnnotation").element("SlotNumber", 5);
+    let mut big = AbcField::new("big", AbcType::I64, AbcFieldValue::Wide(0x1122_3344_5566_7788)).annotation(annotation());
+    big.access_flags = ACC_STATIC;
+    let module = AbcModule::new().import("hilog", "default", "@ohos:hilog").export("Index", "default");
+    let record_a = AbcRecord::new(RECORD_A)
+        .field(AbcField::module_record(module))
+        .field(AbcField::scope_names(["Index"]))
+        .field(AbcField::new("isCommonjs", AbcType::U1, AbcFieldValue::Int(0)))
+        .field(AbcField::new("pkgName@entry", AbcType::U1, AbcFieldValue::Int(0)))
+        .field(big)
+        .function(AbcFunction::new("func_main_0", load("hello")).annotation(annotation()))
+        .function(AbcFunction::new("#~@0>#build", load("world")));
+    let mut record_b = AbcRecord::new(RECORD_B);
+    for (name, hint) in [("#*#helper", None), ("#*#helper^1", Some(7)), ("#*#", Some(0))] {
+        let mut function = AbcFunction::new(name, load("world"));
+        function.region_hint = hint;
+        record_b = record_b.function(function);
+    }
+    let mut builder = AbcBuilder::new();
+    builder.foreign_class("_ESTypeAnnotation").record(record_a).record(record_b).split_region_before(RECORD_B);
+    builder
+}
+
+fn synthetic() -> AbcFile {
+    synthetic_builder().build()
+}
 
 /// The synthetic file with string `from` replaced by the equally long `to`
 /// and the checksum fixed: a second, different, valid ABC file.
 fn variant(from: &str, to: &str) -> Vec<u8> {
     assert_eq!(from.len(), to.len());
-    let (mut data, _) = synthetic();
+    let mut data = synthetic().bytes;
     let at = data.windows(from.len()).position(|window| window == from.as_bytes()).expect("string is in the file");
     data[at..at + to.len()].copy_from_slice(to.as_bytes());
-    let checksum = adler32(&data[12..]);
-    data[8..12].copy_from_slice(&checksum.to_le_bytes());
+    seal(&mut data);
     data
 }
 
@@ -58,7 +96,7 @@ fn find(engine: &Engine, query: &Query) -> Vec<String> {
 #[test]
 fn lone_package_with_two_abc_files() {
     let dir = tempfile::tempdir().unwrap();
-    let (abc, _) = synthetic();
+    let abc = synthetic().bytes;
     let widgets = variant("hello", "jello");
     for deflate in [false, true] {
         let hap = make_apk(
@@ -95,7 +133,7 @@ fn lone_package_with_two_abc_files() {
 #[test]
 fn listing_filters_and_pseudo_records() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write(dir.path(), "modules.abc", &synthetic().0);
+    let path = write(dir.path(), "modules.abc", &synthetic().bytes);
     assert_eq!(Format::detect(&path), Some(Format::Abc));
     let engine = Engine::open(&path).unwrap();
     assert_eq!(entry_names(&engine), ["modules.abc"]);
@@ -122,7 +160,7 @@ fn listing_filters_and_pseudo_records() {
 #[test]
 fn application_package_with_stored_and_deflated_inner_packages() {
     let dir = tempfile::tempdir().unwrap();
-    let (abc, _) = synthetic();
+    let abc = synthetic().bytes;
     let other = variant("world", "woild");
     let entry_hap = make_apk(&[("ets/modules.abc", &abc)], false);
     let feature_hap = make_apk(&[("ets/modules.abc", &other), ("module.json", b"{}")], true);
@@ -160,7 +198,7 @@ fn directories_and_lists_are_one_program() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("program");
     fs::create_dir_all(root.join("libs")).unwrap();
-    let (abc, _) = synthetic();
+    let abc = synthetic().bytes;
     write(&root, "entry.hap", &make_apk(&[("ets/modules.abc", &abc)], false));
     write(&root.join("libs"), "shared.hsp", &make_apk(&[("ets/modules.abc", &abc)], false));
     write(&root, "dump.abc", &variant("hello", "jello"));
@@ -195,7 +233,7 @@ fn directories_and_lists_are_one_program() {
 #[test]
 fn records_and_functions_resolve_by_several_spellings() {
     let dir = tempfile::tempdir().unwrap();
-    let engine = Engine::open(write(dir.path(), "modules.abc", &synthetic().0)).unwrap();
+    let engine = Engine::open(write(dir.path(), "modules.abc", &synthetic().bytes)).unwrap();
     let get = |record, function| engine.get_class(&ClassQuery::new(record).function(function).entry(None));
 
     for spelling in
@@ -224,14 +262,17 @@ fn records_and_functions_resolve_by_several_spellings() {
 #[test]
 fn string_references_come_from_operands_fields_and_every_region() {
     let dir = tempfile::tempdir().unwrap();
-    let engine = Engine::open(write(dir.path(), "modules.abc", &synthetic().0)).unwrap();
-    // `hello` is id 0 of region 0 and id 2 of region 1; only record A loads it.
+    let engine = Engine::open(write(dir.path(), "modules.abc", &synthetic().bytes)).unwrap();
+    // Only record A loads `hello`.
     assert_eq!(
         find(&engine, &Query::string_literal("hello")),
         [format!("modules.abc | {RECORD_A}->func_main_0+0x0 | func_main_0 | lda.str \"hello\"")]
     );
     // `world` is id 1 of region 0 and id 0 of region 1; the third method of B
     // claims region 0 in its flags but lies in region 1.
+    let at = synthetic().layout;
+    let world_off = at.string("world");
+    assert_eq!((at.entity_id(RECORD_A, "#~@0>#build", world_off), at.entity_id(RECORD_B, "#*#", world_off)), (Some(1), Some(0)));
     let world = [
         format!("modules.abc | {RECORD_A}->#~@0>#build+0x0 | Index.build | lda.str \"world\""),
         format!("modules.abc | {RECORD_B}->#*#helper+0x0 | helper | lda.str \"world\""),
@@ -243,7 +284,7 @@ fn string_references_come_from_operands_fields_and_every_region() {
     // The scope name table is a literal array reached from a record field.
     assert_eq!(
         find(&engine, &Query::string_regex("^Index$").unwrap()),
-        [format!("modules.abc | {RECORD_A} field scopeNames | - | literal@{:#x} [0]=\"Index\"", synthetic().1.scope_names)]
+        [format!("modules.abc | {RECORD_A} field scopeNames | - | literal@{:#x} [0]=\"Index\"", synthetic().layout.scope_names(RECORD_A))]
     );
     assert!(find(&engine, &Query::string_literal("absent")).is_empty());
     assert!(find(&engine, &Query::string_regex("^ello").unwrap()).is_empty());
@@ -271,9 +312,13 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("store");
     fs::create_dir_all(&root).unwrap();
-    let (abc, _) = synthetic();
+    let abc = synthetic().bytes;
     let widgets = variant("hello", "jello");
-    let hap = write(&root, "entry.hap", &make_apk(&[("ets/modules.abc", &encrypted(&abc)), ("ets/widgets.abc", &widgets)], false));
+    let hap = write(
+        &root,
+        "entry.hap",
+        &make_apk(&[("ets/modules.abc", &synthetic_builder().encrypted().build().bytes), ("ets/widgets.abc", &widgets)], false),
+    );
 
     // The package alone: the open succeeds, the entry is named, the rest works.
     let engine = Engine::open(&hap).unwrap();
@@ -372,10 +417,9 @@ fn inputs_without_code_are_errors() {
     assert_eq!(Format::detect(&apk), None);
     assert!(!Format::accepts(&apk));
     // A damaged ABC entry is reported per entry, not as a failure of the open.
-    let mut damaged = synthetic().0;
+    let mut damaged = synthetic().bytes;
     damaged.truncate(100);
-    let checksum = adler32(&damaged[12..]);
-    damaged[8..12].copy_from_slice(&checksum.to_le_bytes());
+    seal(&mut damaged);
     let engine = Engine::open(write(dir.path(), "bad.hap", &make_apk(&[("ets/modules.abc", &damaged)], false))).unwrap();
     assert!(matches!(engine.entries().next().map(|info| &info.status), Some(EntryStatus::Unreadable(_))));
     assert!(engine.notes()[0].starts_with("ets/modules.abc: unreadable: "));

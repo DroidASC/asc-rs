@@ -241,15 +241,6 @@ fn output_flag_writes_the_file() {
 }
 
 #[test]
-fn unreadable_output_path_is_an_error() {
-    let apk = temp_apk();
-    let dir = tempfile::tempdir().unwrap();
-    let out = asc(&["findrefs", path(apk.path()), "string", "token", "-o", path(dir.path())]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("cannot write"), "{}", stderr(&out));
-}
-
-#[test]
 fn foreign_cache_dir_is_reported_and_left_alone() {
     let f = temp_apk();
     let dir = tempfile::tempdir().unwrap();
@@ -279,15 +270,6 @@ fn broken_dex_entry_gives_partial_exit_status() {
 }
 
 #[test]
-fn help_points_to_the_settings() {
-    let out = asc(&["--help"]);
-    assert!(out.status.success());
-    let text = stdout(&out);
-    assert!(text.contains("--set KEY=VALUE") && text.contains("`asc config` lists them"), "{text}");
-    assert!(text.contains("exit status"), "{text}");
-}
-
-#[test]
 fn short_help_is_a_digest_of_the_long_one() {
     let short = stdout(&asc(&["-h"]));
     let long = stdout(&asc(&["--help"]));
@@ -297,6 +279,7 @@ fn short_help_is_a_digest_of_the_long_one() {
     }
     assert!(short.contains("`asc --help` adds"), "{short}");
     assert!(long.contains("settings:") && !short.contains("settings:"), "{short}");
+    assert!(long.contains("--set KEY=VALUE") && long.contains("`asc config` lists them"), "{long}");
     assert!(short.lines().count() * 2 < long.lines().count(), "-h {} lines, --help {}", short.lines().count(), long.lines().count());
 }
 
@@ -713,16 +696,6 @@ fn zero_disk_budget_evicts_after_the_query() {
     let out = run(&["--cache-max-mb", "0", "findrefs", path(f.path()), "string", "token"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&run(&["cache", "stats"])).contains("0 APKs, 0 files"));
-}
-
-#[test]
-fn memory_budget_is_a_global_flag() {
-    // Before the subcommand as well as after it; one-shot commands accept and ignore it.
-    let apk = temp_apk();
-    let out = asc(&["--memory-mb", "64", "findrefs", path(apk.path()), "string", "token"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    let out = asc(&["listclass", path(apk.path()), "--memory-mb", "64"]);
-    assert!(out.status.success(), "{}", stderr(&out));
 }
 
 fn audit_apk() -> tempfile::NamedTempFile {

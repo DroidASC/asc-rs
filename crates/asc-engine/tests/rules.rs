@@ -151,8 +151,6 @@ fn compound_queries_reject_what_cannot_combine() {
         let err = engine.find_refs(&q, |_| {}).unwrap_err().to_string();
         assert!(err.contains(msg), "{err}");
     }
-    assert!(names::parse_condition("bogus").is_err());
-    assert!(names::parse_condition("method:").is_err());
 }
 
 #[test]

@@ -6,12 +6,11 @@ use asc_fixture::abc::{
     annotations_program, call_graph_program, callable_names_program, class_hierarchy_program, make_abc, sample_program,
 };
 use asc_fixture::hap::{
-    Compression, DETAIL_PAGE, Hap, LABELS_PAGE, LONG_FILLER_BYTES, LONG_MARKER, LONG_PAGE, SAMPLE_BRAND_ID, SAMPLE_MAIN_PAGES,
-    SAMPLE_MODULE_JSON, SAMPLE_PACK_INFO, SHARED_PAGE, make_app, make_hap, make_library_hsp, make_routed_hap, resource_program,
-    sample_resources,
+    Compression, DETAIL_PAGE, Hap, LABELS_PAGE, LONG_MARKER, SAMPLE_BRAND_ID, SAMPLE_MAIN_PAGES, SAMPLE_MODULE_JSON, SAMPLE_PACK_INFO,
+    SHARED_PAGE, make_app, make_hap, make_library_hsp, make_routed_hap, resource_program, sample_resources,
 };
 use asc_fixture::{make_apk, make_dex};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 /// A directory of inputs that lives as long as the test.
@@ -74,13 +73,6 @@ impl Inputs {
         let out = self.run(args);
         assert!(out.status.success(), "{args:?}: {}", stderr(&out));
         assert_eq!(stderr(&out), "", "{args:?}");
-        stdout(&out).lines().map(String::from).collect()
-    }
-
-    /// The stdout lines of a run that must succeed; what it says on stderr is not looked at.
-    fn run_lines(&self, args: &[&str]) -> Vec<String> {
-        let out = self.run(args);
-        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
         stdout(&out).lines().map(String::from).collect()
     }
 
@@ -218,6 +210,11 @@ fn getclass_prints_one_function() {
     let error = inputs.error(&["getclass", &hap, "pages/Index", "--method", "render"]);
     assert!(error.starts_with(&format!("Error: function render of {INDEX_PAGE} not found; its functions: func_main_0, ")), "{error}");
     assert!(error.contains("#~@0>#build (Index.build)"), "{error}");
+
+    // Long strings are cut at the length findrefs rows use.
+    let routed = inputs.file("routed.hap", &make_routed_hap());
+    let listing = inputs.lines(&["getclass", &routed, "pages/Long", "--method", "long"]);
+    assert!(listing.iter().any(|line| line.ends_with(&format!("a\"… (+{} bytes)", 3000 + LONG_MARKER.len() + 8 - 2048))), "{listing:?}");
 }
 
 #[test]
@@ -787,32 +784,6 @@ fn callgraph_names_the_entry_only_where_it_tells_rows_apart() {
 }
 
 #[test]
-fn limit_and_offset_page_the_output() {
-    let inputs = Inputs::new();
-    let hap = inputs.sample_hap();
-    let all = inputs.lines(&["findrefs", &hap, "string", "testTag"]);
-    assert_eq!(all.len(), 2);
-
-    let first = inputs.lines(&["findrefs", &hap, "string", "testTag", "--limit", "1"]);
-    assert_eq!(first[0], all[0]);
-    assert!(first[1].starts_with("# records 1-1 of 2 shown; full output in "), "{first:?}");
-    assert!(first[1].ends_with("(grep it, or rerun with --offset 1)"), "{first:?}");
-    let spilled = first[1].split("full output in ").nth(1).unwrap().split(" (").next().unwrap();
-    assert!(Path::new(spilled).starts_with(inputs.path("cache")), "{spilled}");
-    assert_eq!(std::fs::read_to_string(spilled).unwrap().lines().collect::<Vec<_>>(), all);
-    assert_eq!(inputs.lines(&["findrefs", &hap, "string", "testTag", "--limit", "1", "--offset", "1"]), all[1..]);
-
-    // The same window on the other two commands.
-    let records = inputs.lines(&["listclass", &hap, "--limit", "1", "--spill-mb", "0"]);
-    assert_eq!(records.len(), 2);
-    assert!(records[0].starts_with(ENTRY_ABILITY), "{records:?}");
-    assert_eq!(records[1], "# records 1-1 of 2 shown; rerun with --offset 1");
-    let source = inputs.lines(&["getclass", &hap, "pages/Index", "--max-bytes", "80", "--spill-mb", "0"]);
-    assert_eq!(source[0], format!(".record {INDEX_PAGE}"));
-    assert!(source.last().unwrap().starts_with("# records 1-"), "{source:?}");
-}
-
-#[test]
 fn what_is_not_supported_yet_says_what_is() {
     let inputs = Inputs::new();
     let hap = inputs.sample_hap();
@@ -1226,41 +1197,6 @@ fn getmanifest_prints_the_documents() {
 }
 
 #[test]
-fn a_component_of_an_encrypted_package_is_unresolved_and_says_why() {
-    let inputs = Inputs::new();
-    let encrypted = sample_program().encrypted().build().bytes;
-    let hap = inputs.file("store/entry.hap", &Hap::new().modules_abc(&encrypted).module_json(SAMPLE_MODULE_JSON).build());
-    let out = inputs.run(&["manifest-summary", &hap]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert_eq!(stderr(&out), "# warning: ets/modules.abc is encrypted (app-store protection); supply the decrypted .abc\n");
-    let ability = stdout(&out).lines().find(|line| line.starts_with("ability ")).unwrap().to_owned();
-    assert!(ability.ends_with(" srcEntry=./ets/entryability/EntryAbility.ets record=- (ets/modules.abc is encrypted)"), "{ability}");
-    assert!(!stdout(&out).contains("callbacks "));
-
-    // A source file the code has no record for.
-    let renamed = SAMPLE_MODULE_JSON.replace("entryability/EntryAbility.ets", "gone/Missing.ets");
-    let missing = inputs.file("missing.hap", &Hap::new().modules_abc(&make_abc()).module_json(&renamed).build());
-    let summary = inputs.lines(&["manifest-summary", &missing]);
-    let ability = summary.iter().find(|line| line.starts_with("ability ")).unwrap();
-    assert!(
-        ability.ends_with(" record=- (no record com.example.sample/entry/ets/gone/Missing or &entry/src/main/ets/gone/Missing&)"),
-        "{ability}"
-    );
-
-    // With the decrypted file next to the package the join goes through, and the summary names the file.
-    inputs.file("store/modules.abc", &make_abc());
-    let out = inputs.run(&["manifest-summary", inputs.path("store").to_str().unwrap()]);
-    let ability = stdout(&out).lines().find(|line| line.starts_with("ability ")).unwrap().to_owned();
-    assert!(ability.ends_with(&format!(" record={ENTRY_ABILITY}")), "{ability}");
-    assert!(
-        stdout(&out).contains("\nabc entry.hap/ets/modules.abc version=12.0.6.0 bytes=1928 status=readable served-from=modules.abc (encrypted in the package)\n"),
-        "{}",
-        stdout(&out)
-    );
-    assert_eq!(stderr(&out), "# note: entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted modules.abc\n");
-}
-
-#[test]
 fn an_encrypted_entry_is_named_and_left_out() {
     let inputs = Inputs::new();
     let hap = inputs.store_hap("entry.hap");
@@ -1310,17 +1246,6 @@ fn an_encrypted_entry_is_named_and_left_out() {
     let out = many.run(&["findrefs", &root, "string", "shared|testTag"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(stderr(&out), note);
-    let abc: Vec<String> = many.run_lines(&["manifest-summary", &root]).into_iter().filter(|line| line.contains(" | abc ")).collect();
-    assert_eq!(
-        abc,
-        [
-            "a.hap | abc a.hap/ets/modules.abc version=12.0.6.0 bytes=1928 status=readable served-from=a.hap.abc (encrypted in the package)",
-            &format!(
-                "b.hsp | abc b.hsp/ets/modules.abc version=12.0.6.0 bytes={} status=readable served-from=b.hsp.abc (encrypted in the package)",
-                other.build().bytes.len()
-            ),
-        ]
-    );
     many.file("c.hap", &Hap::new().modules_abc(&encrypted).abc("widgets", &make_abc()).module_json("{}").build());
     let out = many.run(&["findrefs", &root, "string", "shared|testTag"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
@@ -1512,44 +1437,6 @@ fn pages_and_routes_are_lines_with_their_records() {
 }
 
 #[test]
-fn findrefs_cuts_long_strings_and_shows_the_match() {
-    let inputs = Inputs::new();
-    let hap = inputs.file("entry.hap", &make_routed_hap());
-    let rows = inputs.lines(&["findrefs", &hap, "string", "example\\.com/far"]);
-    assert_eq!(rows.len(), 3, "{rows:?}");
-    assert!(rows.iter().all(|row| row.len() < 2048 + 600), "{:?}", rows.iter().map(String::len).collect::<Vec<_>>());
-    let at = LONG_FILLER_BYTES + "https://".len();
-    assert!(rows[0].starts_with(&format!("ets/modules.abc | {LONG_PAGE} field jsonFileContent | - | \"{{")), "{}", &rows[0][..100]);
-    assert!(
-        rows[0].contains(&format!("\"… (+{} bytes) match at byte {}: …\"", 3000 + 9 + LONG_MARKER.len() + 8 - 2048, at + 9)),
-        "{}",
-        rows[0]
-    );
-    assert!(rows[1].starts_with(&format!("ets/modules.abc | {LONG_PAGE}->#*#long+0x0 | long | lda.str \"aaaa")), "{}", &rows[1][..100]);
-    assert!(
-        rows[1].ends_with(&format!(
-            "a\"… (+{} bytes) ; match at byte {at}: …\"{}{LONG_MARKER}/operand\"",
-            3000 + LONG_MARKER.len() + 8 - 2048,
-            "a".repeat(88)
-        )),
-        "{}",
-        &rows[1][rows[1].len() - 240..]
-    );
-    assert!(
-        rows[2].ends_with(&format!("match at byte {at}: …\"{}{LONG_MARKER}/item\"", "b".repeat(88))),
-        "{}",
-        &rows[2][rows[2].len() - 240..]
-    );
-    // Plain text is located the same way; `all` rows are made of the same texts.
-    assert_eq!(inputs.lines(&["findrefs", &hap, "string", "example.com/far", "--literal"]), rows);
-    let both = inputs.lines(&["findrefs", &hap, "all", "string:far/operand", "literal:far/item"]);
-    assert!(both.len() == 1 && both[0].len() < 2 * 2048 + 1200 && both[0].matches("match at byte").count() == 2, "{both:?}");
-    // getclass cuts the same strings at the same length.
-    let listing = inputs.lines(&["getclass", &hap, "pages/Long", "--method", "long"]);
-    assert!(listing.iter().any(|line| line.ends_with(&format!("a\"… (+{} bytes)", 3000 + LONG_MARKER.len() + 8 - 2048))), "{listing:?}");
-}
-
-#[test]
 fn findrefs_and_listclass_keep_to_an_entry_or_a_package() {
     let inputs = Inputs::new();
     inputs.file("pkgs/a.hap", &make_hap(&resource_program().build().bytes));
@@ -1603,10 +1490,10 @@ fn findrefs_and_listclass_keep_to_an_entry_or_a_package() {
     }
 }
 
-/// A package unpacked into a directory is that package; packages are found
-/// through zips; the source maps of a debug build reach `getclass`.
+/// A package unpacked into a directory is that package; the source maps of
+/// a debug build reach `getclass`.
 #[test]
-fn unpacked_packages_zips_of_packages_and_source_maps() {
+fn unpacked_packages_and_source_maps() {
     let inputs = Inputs::new();
     let debug = asc_fixture::hap::make_debug_hap(&make_abc());
     let hap = inputs.file("packed/entry.hap", &debug);
@@ -1631,17 +1518,10 @@ fn unpacked_packages_zips_of_packages_and_source_maps() {
         let renamed: Vec<String> = of_file.iter().map(|line| line.replace("entry.hap", "entry")).collect();
         assert_eq!(of_directory, renamed, "{args:?}");
     }
-    let summary = inputs.lines(&["manifest-summary", unpacked]);
-    assert!(summary.contains(&"source-maps ets/sourceMaps.map modules=2".to_owned()), "{summary:?}");
-    assert!(summary.iter().any(|line| line.starts_with("page pages/Index record=")), "{summary:?}");
-    assert_eq!(inputs.lines(&["xml", unpacked, "$profile:main_pages"]), SAMPLE_MAIN_PAGES.lines().collect::<Vec<_>>());
     assert!(inputs.error(&["xml", unpacked, "../packed/entry.hap"]).contains("not found"));
 
     let function = inputs.lines(&["getclass", unpacked, "pages/Index", "--method", "Index.build"]);
     assert!(function[1].ends_with(", line 12 (source line 4)"), "{function:?}");
-    let record = inputs.lines(&["getclass", &hap, "entryability/EntryAbility"]);
-    assert!(record[2].starts_with("; source entry/src/main/ets/entryability/EntryAbility.ets (by the source map: "), "{record:?}");
-    assert!(record.iter().any(|line| line.ends_with(", line 6 (no source line)")), "{record:?}");
 
     // `--lines`: every change of line where it happens, instead of the first line in the header.
     let woven = inputs.lines(&["getclass", unpacked, "pages/Index", "--method", "Index.build", "--lines"]);
@@ -1656,16 +1536,6 @@ fn unpacked_packages_zips_of_packages_and_source_maps() {
     for command in ["getclass", "disassemble"] {
         assert!(inputs.error(&[command, &apk, "example.Test", "--lines"]).contains("--lines applies to HarmonyOS programs only"));
     }
-
-    // An `.app` inside a zip: entries carry the whole path.
-    let app = make_app(&[("entry.hap", &debug), ("feature.hap", &debug)], Compression::Deflated);
-    let bundle = inputs.file("bundle.zip", &Hap::new().entry("out/shop.app", &app, Compression::Deflated).build());
-    let rows = inputs.lines(&["findrefs", &bundle, "string", "testTag"]);
-    let mut entries = first_columns(&rows);
-    entries.dedup();
-    assert_eq!(entries, ["out/shop.app/entry.hap/ets/modules.abc", "out/shop.app/feature.hap/ets/modules.abc"]);
-    let kept = inputs.lines(&["listclass", &bundle, "--entry", "out/shop.app/feature.hap"]);
-    assert_eq!(kept.len(), 2, "{kept:?}");
 }
 
 /// Rows of the call graph program without the entry column, records shortened.

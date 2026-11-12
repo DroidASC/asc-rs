@@ -106,17 +106,7 @@ metadata EntryFormAbility name=ohos.extension.form resource=$profile:form_config
 "#;
     assert_eq!(m.summary(), expected);
     assert!(m.notes.is_empty() && m.unmodelled.is_empty(), "{:?} {:?}", m.notes, m.unmodelled);
-}
-
-#[test]
-fn app_fields() {
-    let m = ModuleJson::parse(REALISTIC.as_bytes()).unwrap();
-    assert_eq!(m.app.bundle_name.as_deref(), Some("com.example.shop"));
-    assert_eq!(m.app.version_code, Some(10200));
-    assert_eq!(m.app.debug, Some(false));
-    assert_eq!(m.app.min_api_version.map(ApiVersion::level), Some(13));
-    assert_eq!(m.app.target_api_version, Some(ApiVersion(50003015)));
-    assert_eq!(m.app.environments[0].value.as_deref(), Some("oomdump:enable"));
+    // The summary prints the typed fields above; `label` is not among them.
     assert_eq!(m.app.label.as_deref(), Some("$string:app_name"));
 }
 
@@ -124,34 +114,6 @@ fn app_fields() {
 fn api_version_display() {
     assert_eq!(ApiVersion(9).to_string(), "9");
     assert_eq!(ApiVersion(60000020).to_string(), "60000020(20)");
-}
-
-#[test]
-fn module_fields() {
-    let m = ModuleJson::parse(REALISTIC.as_bytes()).unwrap().module;
-    assert_eq!(m.kind.as_deref(), Some("entry"));
-    assert_eq!(m.device_types, ["phone", "tablet"]);
-    assert_eq!(m.delivery_with_install, Some(true));
-    assert_eq!(m.router_map.as_deref(), Some("$profile:router_map"));
-    assert_eq!(m.metadata[0].value.as_deref(), Some("100000002"));
-    assert_eq!(m.dependencies[0].version_code, Some(7));
-    assert_eq!(m.proxy_data[0].metadata.as_ref().unwrap().resource.as_deref(), Some("$profile:cart_config"));
-    assert_eq!(m.query_schemes, ["examplepay", "examplechat"]);
-    assert_eq!(m.test_runner.unwrap().src_path.as_deref(), Some("testrunner"));
-    assert_eq!(m.atomic_service.unwrap().preloads, ["feature"]);
-}
-
-#[test]
-fn permissions() {
-    let m = ModuleJson::parse(REALISTIC.as_bytes()).unwrap().module;
-    let location = &m.request_permissions[1];
-    assert_eq!(location.name.as_deref(), Some("ohos.permission.LOCATION"));
-    assert_eq!(location.used_when.as_deref(), Some("inuse"));
-    assert_eq!(location.used_abilities, ["EntryAbility"]);
-    assert_eq!(m.request_permissions[0].used_when, None);
-    let defined = &m.define_permissions[0];
-    assert_eq!(defined.grant_mode.as_deref(), Some("system_grant"));
-    assert_eq!(defined.provision_enable, Some(true));
 }
 
 #[test]

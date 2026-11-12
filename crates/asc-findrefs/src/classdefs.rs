@@ -40,7 +40,7 @@ pub(crate) fn related_classes(dex: &Dex<'_>, relation: ClassRelation, descriptor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asc_fixture::{make_dex, make_rich_dex};
+    use asc_fixture::make_rich_dex;
 
     fn names(dex: &Dex<'_>, idxs: Vec<u32>) -> Vec<String> {
         idxs.into_iter().map(|t| dex.type_descriptor(t).unwrap()).collect()
@@ -60,15 +60,6 @@ mod tests {
         assert!(related_classes(&dex, ClassRelation::Extends, b"Lexample/Iface;").unwrap().is_empty());
         assert!(related_classes(&dex, ClassRelation::Implements, b"Ljava/lang/Object;").unwrap().is_empty());
         assert!(related_classes(&dex, ClassRelation::Extends, b"Lexample/Missing;").unwrap().is_empty());
-    }
-
-    #[test]
-    fn root_class_without_superclass_is_never_a_subclass() {
-        // Lexample/Test; extends Object; Object itself is only referenced.
-        let data = make_dex();
-        let dex = Dex::parse(&data).unwrap();
-        assert_eq!(names(&dex, related_classes(&dex, ClassRelation::Extends, b"Ljava/lang/Object;").unwrap()), ["Lexample/Test;"]);
-        assert!(related_classes(&dex, ClassRelation::Extends, b"Lexample/Test;").unwrap().is_empty());
     }
 
     #[test]

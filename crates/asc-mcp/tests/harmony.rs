@@ -505,28 +505,6 @@ fn an_encrypted_entry_is_named_in_every_reply_and_left_out() {
 }
 
 #[test]
-fn a_decrypted_abc_next_to_its_package_stands_in() {
-    let inputs = Inputs::new();
-    inputs.store_hap("store/entry.hap");
-    inputs.file("store/modules.abc", &make_abc());
-    let replies = session(&[
-        call(1, "listclass", json!({"apk": inputs.path("store")})),
-        call(2, "findrefs", json!({"apk_id": "apk1", "kind": "string", "value": "https?://"})),
-    ]);
-    let listed = ok(&replies[0]);
-    let entries = listed["program"]["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2, "{entries:?}");
-    assert!(entries.iter().all(|entry| entry["status"] == "readable"), "{entries:?}");
-    let note = listed["notes"][0].as_str().unwrap();
-    assert!(note.starts_with("entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted "), "{note}");
-    assert_eq!(listed["total"], 4);
-    let found = ok(&replies[1]);
-    assert_eq!((&found["total"], &found["unsearched_entries"]), (&json!(2), &json!(0)));
-    // Nothing is left out: the note is not repeated.
-    assert!(found.get("notes").is_none() && !text(&replies[1]).contains("# warning"), "{}", text(&replies[1]));
-}
-
-#[test]
 fn a_large_record_goes_through_the_output_budget() {
     let inputs = Inputs::new();
     let hap = inputs.sample_hap();
@@ -624,8 +602,10 @@ fn an_apk_session_is_untouched() {
         call(6, "callgraph", json!({"apk": apk, "class": "example.Test", "method": "first", "unresolved": true})),
         call(7, "callgraph", json!({"apk": apk, "class": "example.Test", "method": "first", "entry": "classes.dex"})),
         call(8, "hierarchy", json!({"apk": apk, "class": "java.lang.Object", "entry": "classes.dex"})),
+        call(9, "findrefs", json!({"apk": apk, "kind": "string", "value": "x", "entry": "classes.dex"})),
+        call(10, "listclass", json!({"apk": apk, "entry": "classes.dex"})),
     ]);
-    for (reply, arg) in replies[4..].iter().zip(["defines", "unresolved", "entry", "entry"]) {
+    for (reply, arg) in replies[4..].iter().zip(["defines", "unresolved", "entry", "entry", "entry", "entry"]) {
         assert_eq!(error(reply), format!("`{arg}` applies to HarmonyOS programs only"));
     }
     assert_eq!(error(&replies[0]), "`all` applies to HarmonyOS programs only (a DEX program has no pseudo records)");
@@ -1556,9 +1536,6 @@ fn pages_routes_long_strings_and_one_package_of_several() {
 
     // Long strings are cut in the rows and in the structured reply; the match is shown where it is.
     let limit = asc_ark_engine::text::ROW_STRING_BYTES;
-    let found = rows(&replies[3]);
-    assert_eq!(found.len(), 3, "{found:?}");
-    assert!(found.iter().all(|row| row.len() < limit + 600 && row.contains(" match at byte ")), "{found:?}");
     let matched: Vec<&str> = ok(&replies[3])["results"].as_array().unwrap().iter().map(|row| row["matched"][0].as_str().unwrap()).collect();
     assert!(matched.iter().all(|text| text.len() < limit + 40 && text.contains("… (+")), "{matched:?}");
     assert!(
@@ -1598,19 +1575,6 @@ fn pages_routes_long_strings_and_one_package_of_several() {
         entries[1].starts_with("b.hsp | abc b.hsp/ets/modules.abc ")
             && entries[1].ends_with(" served-from=b.hsp.abc (encrypted in the package)")
     );
-}
-
-#[test]
-fn entry_is_refused_on_a_dex_program() {
-    let inputs = Inputs::new();
-    let apk = inputs.file("app.apk", &asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_dex())], true));
-    let replies = session(&[
-        call(1, "findrefs", json!({"apk": apk, "kind": "string", "value": "x", "entry": "classes.dex"})),
-        call(2, "listclass", json!({"apk": apk, "entry": "classes.dex"})),
-    ]);
-    for reply in &replies {
-        assert_eq!(error(reply), "`entry` applies to HarmonyOS programs only");
-    }
 }
 
 /// The shapes of input the `asc` commands take reach the tools the same

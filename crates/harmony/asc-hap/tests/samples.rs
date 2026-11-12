@@ -238,14 +238,3 @@ fn large_sample() {
     }
     assert!(located > 0);
 }
-
-/// `ASC_HAP_PRINT=1 cargo test -p asc-hap --test samples print -- --nocapture`
-#[test]
-fn print_summaries() {
-    if std::env::var_os("ASC_HAP_PRINT").is_none() {
-        return;
-    }
-    for package in [Package::large_sample(), Package::sample("contacts.hap")].into_iter().flatten() {
-        print!("{}\n{}\n", package.module.summary(), package.pack.summary());
-    }
-}

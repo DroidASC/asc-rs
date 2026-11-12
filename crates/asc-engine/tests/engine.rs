@@ -213,6 +213,7 @@ fn written_entries_are_remapped_from_the_disk_cache() {
     // file-backed rate.
     let heap_only = Engine::new(apk.path()).with_threads(2).with_cache(asc_engine::CacheConfig::default().memory_bytes(64 << 20));
     assert_eq!(lines(&heap_only), before);
+    assert_eq!(heap_only.memory_cache_mapped_bytes(), 0);
     let tables = heap_only.memory_cache_bytes() - 2 * dex.len();
     assert!(tables > 0);
     assert_eq!(engine.memory_cache_bytes(), tables + 2 * (dex.len() / asc_engine::MAPPED_CHARGE_DIVISOR));
@@ -229,17 +230,6 @@ fn written_entries_are_remapped_from_the_disk_cache() {
     // mapped inode outlives its directory entry.
     asc_engine::asc_cache::DiskCache::open(dir.path()).clear().unwrap();
     assert_eq!(lines(&engine), before);
-}
-
-#[test]
-fn memory_only_cache_keeps_heap_entries() {
-    let apk = temp_apk(true);
-    let cfg = asc_engine::CacheConfig::default().memory_bytes(64 << 20);
-    let engine = Engine::new(apk.path()).with_threads(2).with_cache(cfg);
-    engine.find_refs(&Query::String("token".into()), |_| {}).unwrap();
-    engine.flush_cache_writes();
-    assert_eq!(engine.memory_cache_mapped_bytes(), 0);
-    assert!(engine.memory_cache_bytes() > 0);
 }
 
 #[test]

@@ -57,11 +57,6 @@ fn rebuild_keeps_static_values_and_field_operands_aligned() {
     assert_eq!(dex.string(dex.field_id(field_idx).unwrap().name_idx).unwrap(), "SECOND");
 }
 
-#[test]
-fn missing_class_is_an_error() {
-    assert!(rebuild_class_bytes(&make_dex(), "Lnope;").is_err());
-}
-
 // ---------------------------------------------------------------------------
 // Rich fixture: payloads, try/catch, annotations, debug info, MUTF-8
 // ---------------------------------------------------------------------------

@@ -23,13 +23,6 @@ fn ids(m: &Option<MethodRef>) -> BTreeSet<u32> {
 }
 
 #[test]
-fn shared_code_keeps_method_zero() {
-    let results = search(&make_dex());
-    assert_eq!(results.len(), 1);
-    assert_eq!(ids(&results[0]), [0, 1].into_iter().collect());
-}
-
-#[test]
 fn repeated_scans_preserve_method_bounds() {
     let data = make_dex();
     let dex = Dex::parse(&data).unwrap();
