@@ -506,9 +506,12 @@ impl DecompileClassesResult {
 
 /// The output for one requested class. A failed class does not fail the batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ClassUnit {
-    /// Type descriptor of the class.
+    /// Type descriptor of the class the unit is the source of: the requested
+    /// class, or with `nested` the class a requested nested class is folded
+    /// into (listed in [`nested_classes`](Self::nested_classes) then).
     pub class: String,
     /// `status` with `path` and `text`, or `reason`, flattened into the unit.
     #[serde(flatten)]
@@ -522,13 +525,24 @@ pub struct ClassUnit {
     /// Source line → (method, dex pc) correspondence, when the backend has it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<LineMapping>,
+    /// `nestedClasses`: descriptors of the nested classes folded into the
+    /// text, at any depth. Empty when the backend does not say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_classes: Vec<String>,
 }
 
 impl ClassUnit {
     /// The `outcome` for `class`, with no method report, diagnostic or line
     /// mapping.
     pub fn new(class: impl Into<String>, outcome: UnitOutcome) -> ClassUnit {
-        ClassUnit { class: class.into(), outcome, methods: Vec::new(), diagnostics: Vec::new(), lines: Vec::new() }
+        ClassUnit {
+            class: class.into(),
+            outcome,
+            methods: Vec::new(),
+            diagnostics: Vec::new(),
+            lines: Vec::new(),
+            nested_classes: Vec::new(),
+        }
     }
 
     /// This unit with its per-method status.
@@ -547,6 +561,18 @@ impl ClassUnit {
     #[must_use]
     pub fn lines(self, lines: Vec<LineMapping>) -> ClassUnit {
         ClassUnit { lines, ..self }
+    }
+
+    /// This unit with the nested classes folded into its text.
+    #[must_use]
+    pub fn nested_classes(self, nested_classes: Vec<String>) -> ClassUnit {
+        ClassUnit { nested_classes, ..self }
+    }
+
+    /// Whether the unit's text shows `class`: it is the unit's class or one
+    /// of its nested classes.
+    pub fn covers(&self, class: &str) -> bool {
+        self.class == class || self.nested_classes.iter().any(|nested| nested == class)
     }
 
     /// The `status` member of this unit.
@@ -830,7 +856,8 @@ mod tests {
             "methods": [{"signature": "toString()Ljava/lang/String;", "status": "failed",
                          "reason": "region recovery: irreducible loop"}],
             "diagnostics": [{"severity": "warning", "message": "m", "method": "f()V"}],
-            "lines": [{"line": 120, "method": "put(Ljava/lang/String;I)Lbin/mt/json/JSONObject;", "pc": 4}]
+            "lines": [{"line": 120, "method": "put(Ljava/lang/String;I)Lbin/mt/json/JSONObject;", "pc": 4}],
+            "nestedClasses": ["Lbin/mt/json/JSONObject$Member;"]
         }, {
             "class": "La;", "status": "failed", "reason": "boom"
         }]});
@@ -838,6 +865,8 @@ mod tests {
         assert_eq!(result.units[0].status(), UnitStatus::Partial);
         assert_eq!(result.units[0].text(), Some("package bin.mt.json;\n"));
         assert_eq!(result.units[1].outcome, UnitOutcome::Failed { reason: "boom".into() });
+        assert!(result.units[0].covers("Lbin/mt/json/JSONObject$Member;") && result.units[0].covers("Lbin/mt/json/JSONObject;"));
+        assert!(result.units[1].nested_classes.is_empty() && !result.units[1].covers("La$1;"), "nestedClasses is optional");
         assert_eq!(serde_json::to_value(&result).unwrap(), wire);
 
         let no_reason = json!({"units": [{"class": "La;", "status": "failed"}]});

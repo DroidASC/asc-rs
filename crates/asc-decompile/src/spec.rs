@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,8 @@ pub struct BackendSpec {
     pub cwd: Option<PathBuf>,
     /// Number of processes in the pool.
     pub instances: NonZeroUsize,
+    /// Caps the `maxConcurrency` a process declares; `None` takes the declaration as it is.
+    pub max_concurrency: Option<NonZeroU32>,
     /// A process idle this long after its last request is shut down.
     pub idle: Duration,
     /// Deadline of one request, queueing excluded.
@@ -62,6 +64,12 @@ impl BackendSpec {
         BackendSpec { instances, ..self }
     }
 
+    /// The spec with [`max_concurrency`](#structfield.max_concurrency) set.
+    #[must_use]
+    pub fn max_concurrency(self, max_concurrency: Option<NonZeroU32>) -> Self {
+        BackendSpec { max_concurrency, ..self }
+    }
+
     /// The spec with [`idle`](#structfield.idle) set.
     #[must_use]
     pub fn idle(self, idle: Duration) -> Self {
@@ -94,8 +102,9 @@ impl BackendSpec {
 }
 
 impl BackendSpec {
-    /// Runs `command` without arguments: one instance, 10 min idle, 60 s
-    /// request timeout, 30 s startup timeout, no options.
+    /// Runs `command` without arguments: one instance taking as many requests
+    /// as it declares, 10 min idle, 60 s request timeout, 30 s startup
+    /// timeout, no options.
     pub fn new(command: impl Into<PathBuf>) -> Self {
         Self {
             command: command.into(),
@@ -103,6 +112,7 @@ impl BackendSpec {
             env: BTreeMap::new(),
             cwd: None,
             instances: NonZeroUsize::MIN,
+            max_concurrency: None,
             idle: Duration::from_secs(10 * 60),
             timeout: Duration::from_secs(60),
             startup_timeout: Duration::from_secs(30),

@@ -7,6 +7,7 @@
 //! the lock, so other tickets keep flowing meanwhile.
 
 use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -99,9 +100,12 @@ impl PoolState {
         }
     }
 
-    fn take_capacity(&mut self) -> Option<Arc<Process>> {
+    /// A request slot on a ready process: at most what it declared, and at most `cap`.
+    fn take_capacity(&mut self, cap: Option<NonZeroU32>) -> Option<Arc<Process>> {
         self.slots.iter_mut().find_map(|slot| match slot {
-            Slot::Ready { process, in_flight, .. } if *in_flight < process.capabilities().max_concurrency.get() => {
+            Slot::Ready { process, in_flight, .. }
+                if *in_flight < process.capabilities().max_concurrency.min(cap.unwrap_or(NonZeroU32::MAX)).get() =>
+            {
                 *in_flight += 1;
                 Some(Arc::clone(process))
             }
@@ -112,6 +116,18 @@ impl PoolState {
     fn has_live_process(&self) -> bool {
         self.slots.iter().any(|slot| matches!(slot, Slot::Ready { .. } | Slot::Starting))
     }
+}
+
+/// A running process of a pool, as [`Backend::processes`](crate::Backend::processes) lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProcessInfo {
+    /// The operating system's process id.
+    pub pid: u32,
+    /// Requests it is serving now.
+    pub in_flight: u32,
+    /// How long since its last request ended; `None` while it serves one.
+    pub idle_for: Option<Duration>,
 }
 
 /// What a queued request does once it is its turn.
@@ -215,7 +231,7 @@ impl Inner {
             }
             let mut wait_for = None;
             if state.queue.head() == Some(ticket) {
-                if let Some(process) = state.take_capacity() {
+                if let Some(process) = state.take_capacity(self.spec.max_concurrency) {
                     break Step::Take(process);
                 }
                 let empty = state.slots.iter().position(|slot| matches!(slot, Slot::Empty));
@@ -321,6 +337,37 @@ impl Inner {
 
     pub(crate) fn running_processes(&self) -> usize {
         self.lock().slots.iter().filter(|slot| matches!(slot, Slot::Ready { process, .. } if process.is_usable())).count()
+    }
+
+    pub(crate) fn processes(&self) -> Vec<ProcessInfo> {
+        let now = Instant::now();
+        let state = self.lock();
+        state
+            .slots
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Ready { process, in_flight, last_used } if process.is_usable() => Some(ProcessInfo {
+                    pid: process.pid(),
+                    in_flight: *in_flight,
+                    idle_for: (*in_flight == 0).then(|| now.saturating_duration_since(*last_used)),
+                }),
+                Slot::Empty | Slot::Starting | Slot::Ready { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Shuts the process `pid` down if it serves no request; the next request starts another.
+    pub(crate) fn retire(&self, pid: u32) -> bool {
+        let retired = {
+            let mut state = self.lock();
+            let slot =
+                state.slots.iter_mut().find(|slot| matches!(slot, Slot::Ready { process, in_flight: 0, .. } if process.pid() == pid));
+            slot.map(|slot| std::mem::replace(slot, Slot::Empty))
+        };
+        let Some(Slot::Ready { process, .. }) = retired else { return false };
+        self.changed.notify_all();
+        process.shutdown();
+        true
     }
 
     /// Shuts every process down in parallel and fails all later requests.

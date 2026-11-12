@@ -7,7 +7,7 @@
 //! marker types in [`methods`].
 //!
 //! The crate is shared by both ends: the client in `asc-decompile` and any
-//! backend written in Rust (the embedded `asc __decompile-worker`). It has no
+//! backend written in Rust (`asc-dexdec-worker`). It has no
 //! process logic, only:
 //!
 //! * [`Message`] and its parts, the untyped JSON-RPC envelope;

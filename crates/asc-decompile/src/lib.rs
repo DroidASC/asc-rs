@@ -43,6 +43,7 @@ pub use asc_decompile_protocol as protocol;
 use asc_decompile_protocol::methods::{Implementation, InitializeResult, ProgramOpenParams};
 
 pub use error::Error;
+pub use pool::ProcessInfo;
 pub use program::{DecompileRequest, Program};
 pub use spec::{BackendSpec, CallOptions, CancelToken, Lifecycle, Priority, ProgressSink};
 
@@ -111,6 +112,18 @@ impl Backend {
     /// Processes currently able to take requests.
     pub fn running_processes(&self) -> usize {
         self.inner.running_processes()
+    }
+
+    /// The processes able to take requests, for a host that counts their memory (§10).
+    pub fn processes(&self) -> Vec<ProcessInfo> {
+        self.inner.processes()
+    }
+
+    /// Shuts the idle process `pid` down, as the idle timeout would; `false`
+    /// when it is busy or not one of this pool's. A host over its memory
+    /// budget retires the longest idle processes first (§10).
+    pub fn retire(&self, pid: u32) -> bool {
+        self.inner.retire(pid)
     }
 
     /// Opens a program session (§6.2).

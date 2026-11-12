@@ -172,6 +172,11 @@ impl Process {
         self.id
     }
 
+    /// The operating system's id of the process.
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
     pub(crate) fn capabilities(&self) -> &Arc<InitializeResult> {
         self.capabilities.get().expect("a started process has completed its handshake")
     }

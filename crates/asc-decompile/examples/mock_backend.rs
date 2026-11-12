@@ -7,6 +7,9 @@
 //! * `--hang-startup`: never answer `initialize`
 //! * `--ignore-shutdown`: ignore SIGTERM and stdin EOF; only SIGKILL ends it
 //! * `--log FILE`: append `start <pid>` / `open <pid> <programId>` lines
+//! * `--no-mappings`: declare `mappings = false`
+//! * `--fail-all`: every class comes back `failed`
+//! * `--version V` (default 1.0): the version reported in `initialize`
 //!
 //! Per-class behaviour comes from the requested descriptor:
 //!
@@ -18,7 +21,8 @@
 //! * `Lforget;`: drop every program session, then answer normally
 //! * `Lfail;` / `Lpartial;`: a failed / partial unit
 //! * `Lprogress;`: send two progress notifications first
-//! * anything else: `ok`, with text naming the pid and program id
+//! * anything else: `ok`, with text naming the pid and program id (and the
+//!   number of mapped classes, when the program was opened with mappings)
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -44,11 +48,14 @@ struct Flags {
     hang_startup: bool,
     ignore_shutdown: bool,
     log: Option<PathBuf>,
+    no_mappings: bool,
+    fail_all: bool,
+    version: String,
 }
 
 impl Flags {
     fn parse() -> Self {
-        let mut flags = Self { max_concurrency: 1, protocol_version: 1, ..Self::default() };
+        let mut flags = Self { max_concurrency: 1, protocol_version: 1, version: "1.0".into(), ..Self::default() };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -58,6 +65,9 @@ impl Flags {
                 "--hang-startup" => flags.hang_startup = true,
                 "--ignore-shutdown" => flags.ignore_shutdown = true,
                 "--log" => flags.log = Some(args.next().unwrap().into()),
+                "--no-mappings" => flags.no_mappings = true,
+                "--fail-all" => flags.fail_all = true,
+                "--version" => flags.version = args.next().unwrap(),
                 other => panic!("unknown flag {other}"),
             }
         }
@@ -90,12 +100,13 @@ impl Mock {
                     return;
                 }
                 let options = serde_json::to_string(&request.params["options"]).unwrap();
-                let result = InitializeResult::new(self.flags.protocol_version, Implementation::new("mock", "1.0"), options)
-                    .inputs(vec![InputKind::Archive, InputKind::Slice])
-                    .languages(vec![Language::Java])
-                    .mappings(true)
-                    .method_status(true)
-                    .max_concurrency(self.flags.max_concurrency.try_into().unwrap());
+                let result =
+                    InitializeResult::new(self.flags.protocol_version, Implementation::new("mock", self.flags.version.as_str()), options)
+                        .inputs(vec![InputKind::Archive, InputKind::Slice])
+                        .languages(vec![Language::Java])
+                        .mappings(!self.flags.no_mappings)
+                        .method_status(true)
+                        .max_concurrency(self.flags.max_concurrency.try_into().unwrap());
                 self.out.respond(request.id, Ok(result)).unwrap();
             }
             "program/open" => {
@@ -148,14 +159,20 @@ impl Mock {
 
     /// `None` when the scripted behaviour means no answer at all.
     fn units(&self, id: &RequestId, params: &DecompileClassesParams) -> Result<Option<DecompileClassesResult>, ErrorObject> {
-        if !self.programs.lock().unwrap().contains_key(&params.program_id.0) {
-            return Err(ErrorObject::new(ErrorCode::PROGRAM_NOT_FOUND, format!("no program {}", params.program_id.0)));
-        }
+        let mapped = match self.programs.lock().unwrap().get(&params.program_id.0) {
+            Some(program) => program.mappings.as_ref().map(|mappings| mappings.classes.len()),
+            None => return Err(ErrorObject::new(ErrorCode::PROGRAM_NOT_FOUND, format!("no program {}", params.program_id.0))),
+        };
+        let mapped = mapped.map(|n| format!(" mappings={n}")).unwrap_or_default();
         let mut units = Vec::new();
         for class in &params.classes {
             let ok = |text: String| ClassUnit::new(class.clone(), UnitOutcome::Ok { path: None, text });
             let pid = std::process::id();
-            let normal = ok(format!("// pid={pid} program={} class={class}", params.program_id.0));
+            let normal = ok(format!("// pid={pid} program={} class={class}{mapped}", params.program_id.0));
+            if self.flags.fail_all {
+                units.push(ClassUnit::new(class.clone(), UnitOutcome::Failed { reason: "mock fails everything".into() }));
+                continue;
+            }
             let unit = match class.as_str() {
                 "Lcrash;" => {
                     eprintln!("mock: crashing on purpose");
