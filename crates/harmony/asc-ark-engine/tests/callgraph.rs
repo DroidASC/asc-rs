@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use asc_abc::FunctionKind;
 use asc_ark_engine::{CallEdge, CallNode, CallQuery, CallRoots, Direction, EdgeKind, Engine, EngineError, Pattern, RequestForm};
@@ -148,9 +148,21 @@ fn program() -> AbcBuilder {
     builder
 }
 
+/// A name in a test's directory not used before (see [`packaged`]).
+fn fresh(prefix: &str) -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    format!("{prefix}{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// `builder`'s program as `modules.abc` in `dir`, opened. A cold engine on
+/// the same program keeps the file as it is: the engines before it map it,
+/// and Windows refuses to rewrite a mapped file.
 fn open(dir: &Path, builder: &AbcBuilder) -> Engine {
     let path = dir.join("modules.abc");
-    std::fs::write(&path, builder.build().bytes).unwrap();
+    let bytes = builder.build().bytes;
+    if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::write(&path, bytes).unwrap();
+    }
     Engine::open(&path).unwrap()
 }
 
@@ -754,8 +766,12 @@ fn a_binding_written_twice_is_followed_only_as_a_decorated_class() {
     );
 }
 
-/// The two packages of the fixture in a directory: `entry.hap` and `lib.hsp`.
+/// The two packages of the fixture in a new directory under `dir`:
+/// `entry.hap` and `lib.hsp`. New each time, since the engines before map
+/// the packages and Windows refuses to rewrite a mapped file.
 fn packaged(dir: &Path, library_module_json: &str) -> Engine {
+    let dir = &dir.join(fresh("app-"));
+    std::fs::create_dir(dir).unwrap();
     use asc_fixture::abc::{PACKAGED_ENTRY_MODULE_JSON, PACKAGED_ENTRY_PKG_CONTEXT, packaged_entry_program, packaged_library_program};
     use asc_fixture::hap::{Compression, Hap};
     let entry = Hap::new().modules_abc(&packaged_entry_program().build().bytes).module_json(PACKAGED_ENTRY_MODULE_JSON).entry(
