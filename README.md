@@ -4,12 +4,21 @@
 
 把 APK 当作只读数据库：直接在压缩包上定位类、搜索交叉引用、反汇编、解码 manifest 和资源，毫秒级，
 不需要预处理或全局索引；HarmonyOS 的 HAP / ABC 也用同一套命令查（见 [HarmonyOS](#harmonyoshap--abc)）。
-面向人和 agent：CLI 为主（Unix 上有透明的预热 daemon），也提供 MCP 服务器。可执行文件叫 `asc`。
+面向人和 agent：CLI 为主（Unix 上有透明的预热 daemon），也提供 MCP 服务器。可执行文件叫 `asc`，
+`asc decompile` 用的反编译器是另一个可执行文件 `asc-dexdec-worker`。
 
-## 构建
+## 安装与构建
+
+[Release](https://github.com/Ylarod/asc-rs/releases) 的 `asc-v<版本>-<target>.tar.gz` 里是 `asc`（`cargo binstall asc-cli`
+也只装 `asc`）。`asc decompile` 用的反编译 worker `asc-dexdec-worker` 在
+[DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec) 单独发布：没有 worker 时，第一次 `asc decompile` 会从它最新的
+release 下载协议版本对应的 `asc-dexdec-worker-p<协议版本>-<target>.tar.gz`，校验 SHA-256 后装进
+`~/.local/share/asc/tools/`；也可以手动 `asc install dexdec`。不想联网：`ASC_AUTO_INSTALL=off`（或
+`--set decompile.auto_install=off`），此时 `asc decompile` 退回 smali 并提示怎么装；离线机器把 worker 放到 `asc`
+旁边、`PATH` 上，或在 `[decompilers.dexdec]` 里写 `command`（见 [configuration.md](docs/configuration.md)）。
 
 ```sh
-cargo build --release        # -> target/release/asc（需要 Rust 1.98+）
+cargo build --release                                            # -> target/release/asc（需要 Rust 1.98+）
 cargo test --workspace
 ```
 
@@ -35,7 +44,7 @@ asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 | `hierarchy` | 传递的子类 / 实现类，或 `--supers`；`--method` 标出重写 |
 | `getmanifest`（`manifest`）/ `manifest-summary` | 解码 manifest；摘要每行一条记录：导出组件及原因、权限、provider、deep link、FileProvider、网络安全配置 |
 | `resources` / `xml` | 查询 `resources.arsc`；解码任意二进制 XML |
-| `mcp` / `daemon` / `cache` | MCP 服务器；daemon 管理；磁盘 cache 管理（`path` / `stats` / `clear`） |
+| `mcp` / `daemon` / `cache` / `install` | MCP 服务器；daemon 管理；磁盘 cache 管理（`path` / `stats` / `clear`）；`install dexdec` 下载本版本的反编译 worker |
 
 APK 参数也可以是 jar、`.dex`，或作为一个程序一起分析的多个文件（一个目录，或用 `,` 连接的路径），见
 [docs/query.md](docs/query.md#多个文件作为一个程序)。

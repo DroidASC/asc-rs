@@ -9,7 +9,7 @@ description = "Inflated-DEX caches for asc-rs: an on-disk cache shared across pr
 
 [dependencies]
 asc-apk.workspace = true
-crc32fast = "1.5"
+crc32fast.workspace = true
 memmap2.workspace = true
 thiserror.workspace = true
 

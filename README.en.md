@@ -6,12 +6,21 @@ Treats an APK as a read-only database: locate classes, search cross-references, 
 the manifest and resources straight from the archive, in milliseconds, with no preprocessing or global
 index; HarmonyOS HAP / ABC files answer the same commands (see [HarmonyOS](#harmonyos-hap--abc)). Built for
 people and agents: CLI first (with a transparent warm daemon on Unix), plus an MCP server. The binary is
-`asc`.
+`asc`; the decompiler `asc decompile` runs is a second one, `asc-dexdec-worker`.
 
-## Build
+## Install and build
+
+A [release](https://github.com/Ylarod/asc-rs/releases)'s `asc-v<version>-<target>.tar.gz` holds `asc` (as does
+`cargo binstall asc-cli`). The decompile worker `asc decompile` runs, `asc-dexdec-worker`, is released on its own
+from [DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec): without one, the first `asc decompile`
+downloads `asc-dexdec-worker-p<protocol>-<target>.tar.gz` for its protocol version from the latest release there,
+checks its SHA-256 and installs it in `~/.local/share/asc/tools/`; `asc install dexdec` does the same on demand. To stay offline set `ASC_AUTO_INSTALL=off` (or `--set decompile.auto_install=off`):
+`asc decompile` then falls back to smali and says how to install the worker. On an offline machine put the
+worker next to `asc`, on `PATH`, or name it in `[decompilers.dexdec]` `command` (see
+[configuration.en.md](docs/configuration.en.md)).
 
 ```sh
-cargo build --release        # -> target/release/asc (Rust 1.98+)
+cargo build --release                                            # -> target/release/asc (Rust 1.98+)
 cargo test --workspace
 ```
 
@@ -37,7 +46,7 @@ asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 | `hierarchy` | Transitive subclasses / implementers, or `--supers`; `--method` marks overrides |
 | `getmanifest` (`manifest`) / `manifest-summary` | Decode the manifest; the summary is one record per line: exported components and why, permissions, providers, deep links, FileProvider, network security config |
 | `resources` / `xml` | Query `resources.arsc`; decode any binary XML |
-| `mcp` / `daemon` / `cache` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`) |
+| `mcp` / `daemon` / `cache` / `install` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`); `install dexdec` downloads this version's decompiler worker |
 
 The APK argument may also be a jar, a `.dex`, or several files analysed as one program (a directory, or paths
 joined with `,`): see [docs/query.en.md](docs/query.en.md#several-files-as-one-program).

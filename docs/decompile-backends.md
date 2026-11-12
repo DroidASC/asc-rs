@@ -1,6 +1,6 @@
 # 反编译后端接入设计
 
-状态：提案（2026-11-10）。配套文档：[rebuild-slice.md](rebuild-slice.md)（给后端喂的闭包切片）。
+状态：P1 已实现（2026-11-11：配置、进程池、`asc decompile`、MCP `decompile`、L3、内置 dexdec）；P2–P4 仍是提案。配套文档：[rebuild-slice.md](rebuild-slice.md)（给后端喂的闭包切片）。
 
 目标：`asc` 能把一个类交给可替换的反编译后端（dexdec、JEB、jadx …）得到 Java / Kotlin 源码，不在进程内
 链接任何后端，并利用 asc-rebuild 的切片让整包加载慢的后端提速。
@@ -13,6 +13,10 @@
   （能力、逐方法状态、缓存键），自由参数的 tool 给不了。
 - **不监听端口、不做 FFI**。崩溃、栈溢出、OOM 都只伤一个子进程（dexdec 在 ART `159-app-image-fields` 上
   栈溢出 abort，正是这种情况）。
+- **内置的 dexdec 也是子进程**：独立的可执行文件 `asc-dexdec-worker`，在自己的仓库
+  （[DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec)）构建和发布，版本号与 asc 无关，只要说同一个
+  协议版本；`asc` 不链接它。找不到时自动安装最新的、协议版本相同的 worker（§12）。进程隔离照旧：
+  栈溢出、OOM 只结束 worker，由进程池重启。
 - **后端进程归 asc daemon / `asc mcp` 会话所有**，按需拉起、空闲退出、崩溃重启。一次性 CLI 经现有
   daemon 转发；`ASC_DAEMON=off` 时临时拉起，能用但慢（JEB 冷启动以秒计）。
 - **配置写在 `config.toml` 的 `[decompilers.<name>]`**，形如 MCP 的 `command` / `args` / `env`。
@@ -47,7 +51,7 @@ MT2.26.8（5 个 DEX，34 MB），反编译 `bin.mt.json.JSONObject`：
 asc CLI ──(现有 daemon 转发)──▶ asc daemon / asc mcp
                                   │  asc-decompile：配置、进程池、JSON-RPC 客户端、L3 结果缓存
                                   │  asc-engine：类定位、ClassGraph、切片（asc-rebuild）
-                                  ├─stdio─▶ dexdec serve --stdio
+                                  ├─stdio─▶ asc-dexdec-worker（内置 dexdec）
                                   ├─stdio─▶ java -jar jeb-server.jar --stdio
                                   └─stdio─▶ jadx-worker
 ```
@@ -62,15 +66,17 @@ asc CLI ──(现有 daemon 转发)──▶ asc daemon / asc mcp
 default = "dexdec"            # 不写 --decompiler 时用哪个
 fallback = ["jadx"]           # 默认后端失败时依次尝试；空 = 不回退
 
+# dexdec 是内置后端，不写这一节时 command 是 asc 找到的 asc-dexdec-worker（§12）、inputs = ["archive"]；
+# 这一节不写 command 时只改 instances / timeout / options 等（此时不能写 args），写了 command 就换成那个程序。
 [decompilers.dexdec]
-command = "dexdec"
-args = ["serve", "--stdio"]
+options = { indent = "    " }
 
 [decompilers.jeb]
 command = "java"
 args = ["-Xmx6g", "-jar", "/opt/jeb-server/jeb-server.jar", "--stdio"]
 env = { JEB_HOME = "/opt/jeb" }
 instances = 1                  # 进程数；每个进程同时处理的请求数由后端在 initialize 里声明
+max_concurrency = 1            # 可选：把后端声明的 maxConcurrency 再压低
 idle = "10m"                   # 空闲多久退出
 timeout = "60s"                # 单个请求的超时
 startup_timeout = "60s"        # 等 initialize 的超时
@@ -83,18 +89,23 @@ instances = 2
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `command` | 字符串 | 必填 | 可执行文件；不含 `/` 时按 `PATH` 查找 |
+| `command` | 字符串 | 必填（`dexdec` 除外） | 可执行文件；不含 `/` 时按 `PATH` 查找 |
 | `args` | 字符串数组 | `[]` | |
 | `env` | 表 | `{}` | 在继承的环境上追加 |
 | `cwd` | 路径 | cache 目录下的 `decompilers/<name>/` | |
 | `instances` | 整数 | 1 | |
-| `idle` / `timeout` / `startup_timeout` | 时长 | 10m / 60s / 30s | |
+| `max_concurrency` | 整数 | 后端声明的值 | 只能压低 `initialize` 里的 `maxConcurrency` |
+| `idle` / `timeout` / `startup_timeout` | 时长 | 10m / 60s / 30s | 数字按秒 |
+| `inputs` | 字符串数组 | 后端声明的值 | asc 可以交给它的输入形态（`archive` / `slice`），和后端声明取交集 |
 | `options` | 表 | `{}` | 不解释，放进 `initialize` 的 `options` |
 | `enabled` | 布尔 | true | |
 
 实现注意：`asc_engine::config` 把整个文件展开成标量键并逐个校验（`config.rs` 的 `flatten`），
-`[decompilers.*]` 必须在展开前摘出来单独解析，否则会被当成未知键报错。`asc config` 另起一节列出后端：
-名字、命令、来源，以及最近一次 `initialize` 报告的版本。
+`[decompilers.*]` 必须在展开前摘出来单独解析，否则会被当成未知键报错（已实现：`config/decompilers.rs`）。
+`[decompile]` 的 `default` / `fallback` / `mapping` 是普通设置，也能用 `--set`、`$ASC_DECOMPILER`、
+`$ASC_DECOMPILE_FALLBACK`、`$ASC_MAPPING` 给。`asc config` 另起一节列出后端：名字、命令行、来源
+（built-in / file）和角色（default / fallback N / disabled）。最近一次 `initialize` 报告的版本只有常驻进程
+知道，在结果头部（`by dexdec 0.1.1`）里给出，`asc config` 不显示。
 
 ## 5. 传输与生命周期
 
@@ -168,7 +179,8 @@ instances = 2
 - `mappings` 用 asc 的成员写法（与 `findrefs` 一致）。后端把它当作用户改名：输出时用新名字，引用处一起改。
   键一律是 DEX 里的名字（混淆后的），包括成员签名里的类型：上例 `b` 字段的类型写 `Ll/ۢۤܺ;` 而不是改名后的类；
   值是要显示的名字。`classes` 的值是完整描述符，包名可以变（mapping.txt 记录的是原始全名），内部类的值是完整
-  的二进制名（`Lpkg/Outer$Inner;`）；类换了包时，结果的 `path` 跟着新名字走。`fields` / `methods` 的值是简单名，
+  的二进制名（`Lpkg/Outer$Inner;`）；类换了包时，结果的 `path` 跟着新名字走；后端不得不放弃某个类的改名时
+  （见 §12 dexdec），`path` 仍按 DEX 名字给出，`-o` 的文件名也随之用 DEX 名字（`-o` 何时采用后端的 `path` 见 §11）。`fields` / `methods` 的值是简单名，
   构造器（`<init>` / `<clinit>`）不出现。没有映射时三个表都为空。
 - 切片会话的生命周期由 asc 管：一次请求开一个，用完就关。archive 会话按程序常驻，被进程池的 LRU 淘汰
   时才关。后端必须真正释放会话（JEB 是 `unloadProject`），否则项目越积越多。
@@ -196,7 +208,15 @@ instances = 2
 - 不允许把失败的方法“伪装”成成功：后端自己输出的失败桩（如 dexdec 的
   `throw new UnsupportedOperationException("Method could not be decompiled …")`）必须同时在 `methods` 里报告。
 - `lines` 可选：源码行到（方法，dex pc）的对应，供 `--method` 截取和跳转。没有时 asc 按方法签名匹配源码。
-- `nested = true`：内部类、匿名类并入外部类的源码，这是 jadx / dexdec 的默认行为。
+- `nested = true`：内部类、匿名类并入外部类的源码，这是 jadx / dexdec 的默认行为。并入的内部类里失败的方法，
+  `signature` 带上所属类（`Lpkg/A$B;->name(Args)Ret`），否则和外部类的同名方法分不开；外部类自己的方法照常不带。
+- `nestedClasses`（可选）：并入本单元源码的嵌套类（任意深度），DEX 描述符，排好序。后端不报时为空，asc 照旧工作。
+- `nested = true` 时请求一个嵌套类，后端可以回它所并入的外部类的单元：`class` 是外部类，`nestedClasses` 里有
+  请求的类（`units` 仍是每个请求的类一项，同一个外部类可以出现多次）。asc 按 `class` 或 `nestedClasses` 找到
+  请求的类，头部写成 `decompile Lpkg/A$B; | in Lpkg/A; | …`，`-o` 写外部类的文件，`--method` 先在外部类源码里找
+  嵌套类的声明，在声明里挑方法（找不到声明时，比如匿名类，在整个源码里挑）。dexdec 就这样回答：单独反编译的
+  内部类看不到外部类的私有成员，`$$Nest$` 访问器还原不了，`Outer.this` 也落不了地；外部类本身失败、或者没把它
+  并进去时，才单独反编译这个嵌套类。
 
 ### 6.4 取消、进度与错误
 
@@ -233,6 +253,9 @@ instances = 2
 - 输入指纹：切片用切片的 SHA-256。切片输出是规范化的（id 表排序固定），所以同一个类闭包每次得到相同的哈希。
   archive 用 `ApkKey` 加类描述符。
 - `status = failed` 的结果也缓存，但只保留 10 分钟（失败往往和超时、资源有关）。
+- 并入外部类的嵌套类（§6.3）：单元只按外部类的键存一份，嵌套类的键里存一条指向外部类的引用。请求嵌套类时
+  先查它自己的键；没有时按 `$` 逐级截短描述符（`La/B$C$D;` → `La/B;`、`La/B$C;`，外层优先）查外部类的单元，
+  它的 `nestedClasses` 列出了请求的类就直接用，不再问后端。所以先反编译过外部类，再要它的内部类、匿名类都命中缓存。
 
 ## 9. 选后端与回退
 
@@ -257,17 +280,52 @@ instances = 2
 
 - 只用 stdio，不监听端口。后端以当前用户身份运行，没有额外权限。
 - 切片和 cache 目录同权限（只有当前用户可读写）。传给后端的只有路径，不经过 shell 拼接。
-- 后端输出属于不可信数据：asc 只解析 JSON，路径字段（`path`）只用来显示，不用来写文件；`asc decompile -o`
-  的输出路径由 asc 自己根据描述符生成。
+- 后端输出属于不可信数据：asc 只解析 JSON。`asc decompile -o` 只在 `path` 是相对路径、每段都是普通名字
+  （没有 `.`、`..`、根、反斜杠、冒号或控制字符）且扩展名对应语言时才采用它（后端知道自己怎样转义源码写不出的
+  名字，例如 `Main-IA` 声明为 `MainIA`，文件名要与之一致）；否则由 asc 自己根据描述符生成。
 
 ## 12. 各后端的工作
 
-### dexdec
+### dexdec（内置）
 
-- 新增 `dexdec serve --stdio`：直接复用 `Decompiler`（`open` / `generate_classes`）。
-- 声明 `inputs = ["archive"]`。会话期间常驻 `DexFileReader`，各类按需加载。
-- 失败的方法照常输出桩，同时写进 `methods`；CLI 现在把这种桩计为成功，这一点需要一起修正。
-- `optionsHash` 由 `DecompileOptions` 加二进制版本计算。
+worker 的实现不在本仓库：[DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec) 构建并发布
+`asc-dexdec-worker`，它的能力（`initialize` 声明的 `inputs`、`languages`、`mappings` 等）以它自己的文档为准。
+asc 对它的约定只有下面这些。
+
+- 可执行文件 `asc-dexdec-worker`：不带参数时在 stdio 上服务本协议；`--version` 打印 `asc-dexdec-worker <版本>`；
+  `--protocol-version` 打印它说的协议版本（一个整数）；其它参数报用法错误（退出码 2）。stdout 只写协议帧。
+- 版本：worker 自己的版本与 asc 无关，二者只需协议版本相同（`initialize` 里 `protocolVersion` 必须等于 asc 的
+  `PROTOCOL_VERSION`，否则这个后端停用，见 §6.1）。
+- 发布：每个 release 带 `asc-dexdec-worker-p<协议版本>-<target>.tar.gz` 和同名 `.sha256`（`shasum -a 256` 格式）；
+  归档里只有目录 `<名字>/`、其中的 `asc-dexdec-worker` 和 `LICENSE`。
+- 查找顺序（`asc_frontend::decompile::dexdec`）：`[decompilers.dexdec]` 的 `command` → `asc` 所在目录（`current_exe`，
+  再按解析符号链接后的路径）→ asc 为本协议版本安装的 `$XDG_DATA_HOME/asc/tools/asc-dexdec-worker-p<协议版本>-<target>/`
+  （默认 `~/.local/share/asc/…`，按协议版本和 target 分开，说同一协议的 asc 共用）→ `PATH`。每个请求先比对正在用的
+  worker 文件的大小和修改时间，变了（重装、重新编译、被删）就重新查找并换新进程池。
+- 自动安装：都找不到、且 `decompile.auto_install` 为 on（`$ASC_AUTO_INSTALL`）时，第一个需要 dexdec 的请求从
+  `decompile.release_url`（`$ASC_RELEASE_URL`，默认 `https://github.com/DroidASC/asc-dexdec/releases/latest/download`，
+  即最新 release）下载 `asc-dexdec-worker-p<协议版本>-<target>.tar.gz`，target 是构建时的 `TARGET`（`asc-frontend` 的 build.rs）。
+  - 先取同名 `.sha256`，归档的 SHA-256 不符就放弃；归档整个读进内存（上限 256 MiB）。
+  - 只解出 `<名字>/asc-dexdec-worker`（普通文件）；允许的其它条目只有目录 `<名字>/` 和打包进去的 `LICENSE` 等普通文件，
+    其余（符号链接、硬链接、`..`、绝对路径、目录外的文件、第二个 worker）一律拒绝整个归档。
+  - 写到安装目录里的临时文件，`chmod 755`、`fsync`，运行一次 `--protocol-version` 确认能跑且协议版本对，再原子
+    `rename` 就位。
+  - 安装目录里有 `.lock`（`File::lock`），daemon 和命令同时安装时后到的等锁，锁到手发现已装好就直接用。
+  - HTTP：ureq 3（rustls + webpki-roots，不用 OpenSSL / native-tls），连接 10 s、单次下载总计 60 s，跟随重定向，
+    读 `HTTPS_PROXY` 等代理环境变量（本机地址除外），User-Agent `asc/<版本>`。代码在 feature `installer` 后（asc-cli 默认开启；
+    `--no-default-features` 构建没有网络代码，找不到 worker 时直接提示）。
+  - 失败（离线、超时、404、校验不符）写进安装目录的 `.install-failed`，一小时内本进程和其它进程都不再自动重试，
+    请求退回 smali，头部 `# dexdec failed: …` 写明原因和办法；`asc install dexdec` 不受限制，成功后清掉记录。
+    404 时提示还没有这个协议版本或这个 target 的 worker，可以自己从 DroidASC/asc-dexdec 构建。
+  - debug 构建在默认 URL 下不下载（测试和开发构建不联网）；`decompile.release_url` 指向别处（镜像、测试）时照常。
+  - 进度写 stderr，不写 stdout。经 daemon 转发的 `asc decompile` 在转发前于命令自己的进程里安装（daemon 的 stderr
+    没人看）；`asc mcp` 的 stderr 就是日志。
+- `asc install dexdec`：不管已有什么，下载最新的、本协议版本的 worker 并覆盖安装，stdout 报告
+  `installed asc-dexdec-worker (protocol <协议版本>) at <路径>`；查找顺序里排在它前面的另一个 worker 会在 stderr 提示。
+- 协议检查：找到的 worker 不是 asc 自己安装的那份、且 `initialize` 报告的协议版本不同时，改用 asc 自己安装的那份
+  （没有且允许时自动安装）；都不行就让请求失败，退回 smali 并写明原因。
+- 测试：asc-cli 里需要真 worker 的测试读 `ASC_DEXDEC_WORKER`（一个 `asc-dexdec-worker` 的路径），没设就跳过；其余用
+  asc-decompile 的 mock 后端。
 
 ### jeb-server（`../jeb-cli`）
 
@@ -294,7 +352,7 @@ instances = 2
 
 | 期 | 内容 | 验收 |
 |---|---|---|
-| P1 | `asc-decompile`：配置解析、进程池、JSON-RPC 客户端；`dexdec serve --stdio`；`asc decompile` 和 MCP 工具；L3 缓存 | daemon 常驻时，第二次反编译同一个类直接命中缓存；杀掉 dexdec 后自动重启 |
+| P1 | `asc-decompile`：配置解析、进程池、JSON-RPC 客户端；内置 dexdec（`asc-dexdec-worker`）；`asc decompile` 和 MCP 工具；L3 缓存 | daemon 常驻时，第二次反编译同一个类直接命中缓存；杀掉 dexdec 后自动重启 |
 | P2 | asc-rebuild 闭包切片（rebuild-slice.md 的 S1–S2）；jadx worker | 在 MT2 等 3 个样本上，jadx 切片与整包输出的差异行数降到单类切片的 1/5 以下，耗时不超过整包的 1/5 |
 | P3 | jeb-server `--stdio`；映射下发；回退链 | JEB 与 dexdec 输出的名字一致 |
 | P4 | 差分测试接入 CI：ART 语料，后端 × 输入形态 | 每个后端的通过率不低于当前基线（dexdec 549 / 598，jadx 527 / 598） |

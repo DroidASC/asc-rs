@@ -41,6 +41,7 @@ their own below the front ends ([HarmonyOS](#harmonyos-hap--abc)).
 | `asc-query` | The rule syntax both engines parse (`&`, `!`, sets, `{@FILE}`, nesting limit, errors with a column) and the escaping of quoted strings in line output |
 | `asc-engine` | Queries over an APK: class lookup, findrefs, rules, call graph, hierarchy, manifest summary, multi-APK sweeps |
 | `asc-abc`, `asc-arkisa`, `asc-pasm`, `asc-hap`, `asc-ark-engine` | HarmonyOS: see [HarmonyOS](#harmonyos-hap--abc) |
+| `asc-dexdec` | DEX → Java (frozen Kotlin) decompiler, see [Decompilation](#decompilation) |
 | `asc-frontend` | What both front ends share: which engine answers for a program, findrefs arguments as queries, the spill directory, class outlines, HarmonyOS call trees and hints |
 | `asc-cli` | `asc` binary and its daemon; uses asc-mcp only to run `asc mcp` |
 | `asc-mcp` | `asc mcp`: resident stdio MCP session (protocol, argument leniency, reply budgets) |
@@ -99,6 +100,16 @@ display other than what it holds. Row *content* matches the Python ASC semantica
 * **Call graph and hierarchy.** A per-DEX CSR call graph (`u16` targets, built on first
   use, persisted in L2) is walked by signature across DEX files. The class hierarchy is one
   graph over all `class_def_item`s, kept on the engine; virtual-call resolution uses it.
+
+## Decompilation
+
+Decompilers run as separate processes that speak the decompile backend protocol
+(asc-decompile-protocol, docs/decompile-backends.md); asc-decompile is the client and
+asc-frontend owns the pools, the fallback chain and the L3 cache of their output. The
+built-in `dexdec` backend is `asc-dexdec-worker`, built and released in its own
+repository ([DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec)) on top of
+asc-dex, asc-dalvik, asc-apk and asc-decompile-protocol; asc finds it next to itself,
+in its data directory or on `PATH`, and downloads it when there is none.
 
 ## Class extraction
 

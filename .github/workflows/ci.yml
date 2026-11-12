@@ -3,6 +3,7 @@ on:
   push:
     branches: ['**']
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -17,8 +18,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      # The tests that need the real asc-dexdec-worker (it is built in its
+      # own repository) skip themselves unless ASC_DEXDEC_WORKER names one.
       - run: cargo test --workspace --no-default-features
-      - run: cargo build --release -p asc-cli --no-default-features
+      # The installer (asc-cli's default `installer` feature) against a local server.
+      - run: cargo clippy -p asc-frontend --all-targets --features installer -- -D warnings
+      - run: cargo test -p asc-frontend --features installer
+  # The release binary, as the Release workflow builds it (fat LTO).
+  release-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-asc
+      - run: cargo build --release --locked -p asc-cli
   # Broken intra-doc links and public docs naming private items fail here.
   doc:
     runs-on: ubuntu-latest

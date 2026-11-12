@@ -19,7 +19,7 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -29,12 +29,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --locked -p asc-cli --target ${{ matrix.target }}
+      # asc-<tag>-<target>.tar.gz. asc-dexdec-worker, the decompile backend
+      # asc runs, is released from its own repository (DroidASC/asc-dexdec);
+      # asc downloads it from there. COPYFILE_DISABLE keeps macOS tar from
+      # adding ._ files.
       - name: Package
         shell: bash
+        env:
+          COPYFILE_DISABLE: 1
         run: |
+          bin=target/${{ matrix.target }}/release
           name=asc-${GITHUB_REF_NAME}-${{ matrix.target }}
           mkdir "$name"
-          cp target/${{ matrix.target }}/release/asc LICENSE README.md README.en.md "$name"/
+          cp "$bin/asc" LICENSE README.md README.en.md "$name"/
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
