@@ -838,6 +838,9 @@ impl Server {
             // A smali comment, so the text still assembles.
             text.push_str(&format!("# Warning: {w}\n"));
         }
+        if src.descriptor != descriptor {
+            text.push_str(&format!("# {descriptor} read as the Java/Kotlin spelling of {}\n", src.descriptor));
+        }
         if !src.also_defined_in.is_empty() {
             text.push_str(&format!("# from {}; also defined in {}\n", src.dex_name, src.also_defined_in.join(", ")));
         }
@@ -845,7 +848,7 @@ impl Server {
         let budget = output::budget(args)?;
         let mut structured = json!({
             "apk_id": apk.id,
-            "class": descriptor,
+            "class": src.descriptor,
             "dex_name": src.dex_name,
             "warning": src.warning,
             "rebuilt": src.rebuilt.is_some(),
@@ -853,11 +856,14 @@ impl Server {
         if !src.also_defined_in.is_empty() {
             structured["also_defined_in"] = json!(src.also_defined_in);
         }
+        if src.descriptor != descriptor {
+            structured["queried"] = json!(descriptor);
+        }
         match str_arg(args, "method")? {
             Some(m) => {
-                let picked = parsed.select(m);
+                let picked = parsed.select_in(&src.descriptor, m);
                 if picked.is_empty() {
-                    return Err(ToolError(format!("{descriptor} has no method {m:?}; its methods: {}", parsed.signatures(4 << 10))));
+                    return Err(ToolError(format!("{} has no method {m:?}; its methods: {}", src.descriptor, parsed.signatures(4 << 10))));
                 }
                 structured["methods"] = json!(picked.iter().map(|b| b.signature).collect::<Vec<_>>());
                 text.push_str(&parsed.with_methods(&picked));

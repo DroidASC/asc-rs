@@ -221,6 +221,50 @@ impl Engine {
     }
 }
 
+/// The nested class of `outer` in `dex` whose `dalvik.annotation.InnerClass`
+/// name is `name` (or what `name` stands for, see
+/// [`names::denormalize_identifier`]): source shows an obfuscated
+/// `Outer$a` by that name. `None` when there is none or the DEX cannot be read.
+pub(crate) fn inner_class_named(dex: &[u8], outer: &str, name: &str) -> Option<String> {
+    let prefix = format!("{}$", outer.strip_suffix(';')?);
+    let dex = Dex::parse(dex).ok()?;
+    let mut wanted = names::denormalize_identifier(name);
+    wanted.push(name.to_string());
+    (0..dex.class_def_count()).find_map(|i| {
+        let def = dex.class_def(i).ok()?;
+        let descriptor = dex.type_descriptor(def.class_idx).ok()?;
+        if !descriptor.starts_with(&prefix) {
+            return None;
+        }
+        inner_class_annotation_name(&dex, def.annotations_off).filter(|n| wanted.contains(n)).map(|_| descriptor)
+    })
+}
+
+/// The `name` of the `Ldalvik/annotation/InnerClass;` annotation of the
+/// class whose annotations directory is at `annotations_off`.
+fn inner_class_annotation_name(dex: &Dex<'_>, annotations_off: u32) -> Option<String> {
+    use asc_dex::encoded::{EncodedValue, parse_annotation_item};
+    if annotations_off == 0 {
+        return None;
+    }
+    let buf = dex.buf();
+    let dir = asc_dex::annotations::AnnotationsDirectory::parse(buf, annotations_off as usize).ok()?;
+    if dir.class_annotations_off == 0 {
+        return None;
+    }
+    for item_off in asc_dex::annotations::parse_annotation_set(buf, dir.class_annotations_off as usize).ok()? {
+        let (item, _) = parse_annotation_item(buf, item_off as usize).ok()?;
+        if dex.type_bytes(item.annotation.type_idx).ok()? != b"Ldalvik/annotation/InnerClass;" {
+            continue;
+        }
+        return item.annotation.elements.iter().find_map(|(name_idx, value)| match value {
+            EncodedValue::String(s) if dex.string_bytes(*name_idx).ok()? == b"name" => dex.string(*s).ok(),
+            _ => None,
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

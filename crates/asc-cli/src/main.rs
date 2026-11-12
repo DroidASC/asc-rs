@@ -1380,9 +1380,9 @@ fn class_methods(
     let mut src = engine.get_class_method_cancellable(descriptor, opts, None, cancel).map_err(|e| e.to_string())?;
     if let Some(m) = method {
         let parsed = asc_frontend::class_text::ClassText::parse(&src.source);
-        let picked = parsed.select(m);
+        let picked = parsed.select_in(&src.descriptor, m);
         if picked.is_empty() {
-            return Err(format!("{descriptor} has no method {m:?}; its methods: {}", parsed.signatures(4 << 10)));
+            return Err(format!("{} has no method {m:?}; its methods: {}", src.descriptor, parsed.signatures(4 << 10)));
         }
         let text = parsed.with_methods(&picked);
         src.source = text;
@@ -1407,6 +1407,10 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant)
     if let Some(w) = &src.warning {
         io.note(format_args!("Warning: {w}"));
     }
+    if src.descriptor != descriptor {
+        io.note(format_args!("# {descriptor} read as the Java/Kotlin spelling of {}", src.descriptor));
+    }
+    let descriptor = &src.descriptor;
     if !src.also_defined_in.is_empty() {
         io.note(format_args!("# {descriptor} from {}; also defined in {}", src.dex_name, src.also_defined_in.join(", ")));
     }

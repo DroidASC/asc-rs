@@ -92,6 +92,23 @@ impl<'a> ClassText<'a> {
         self.methods.iter().filter(|m| m.signature == dalvik || m.signature.starts_with(&dalvik)).collect()
     }
 
+    /// [`ClassText::select`], or when that picks nothing, the first reading
+    /// of `query` as decompiled Java / Kotlin source spells a method of
+    /// class `class` that picks something (`Cdo` → `do`, `m$2` → `m`, the
+    /// class name or `constructor` → `<init>`; see
+    /// [`asc_engine::names::denormalize_method_candidates`]).
+    pub fn select_in(&self, class: &str, query: &str) -> Vec<&MethodBlock<'a>> {
+        let picked = self.select(query);
+        if !picked.is_empty() {
+            return picked;
+        }
+        asc_engine::names::denormalize_method_candidates(Some(class), query)
+            .iter()
+            .map(|c| self.select(c))
+            .find(|p| !p.is_empty())
+            .unwrap_or_default()
+    }
+
     /// The header and `picked` methods, as smali.
     pub fn with_methods(&self, picked: &[&MethodBlock<'_>]) -> String {
         let mut out = self.header.trim_end().to_string();
@@ -174,6 +191,18 @@ mod tests {
         assert!(names("walk").is_empty());
         assert_eq!(c.signatures(1000), "<init>()V, run(I)V, run(Ljava/lang/String;)V");
         assert_eq!(c.signatures(15), "<init>()V, ... 2 more");
+    }
+
+    #[test]
+    fn selects_methods_as_source_spells_them() {
+        let c = ClassText::parse(SMALI);
+        let names = |q: &str| c.select_in("LA;", q).iter().map(|m| m.signature).collect::<Vec<_>>();
+        // The constructor by class name, a collision suffix, Java parameter types.
+        assert_eq!(names("A"), ["<init>()V"]);
+        assert_eq!(names("A()"), ["<init>()V"]);
+        assert_eq!(names("run$2"), ["run(I)V", "run(Ljava/lang/String;)V"]);
+        assert_eq!(names("run(int)"), ["run(I)V"]);
+        assert!(names("walk").is_empty());
     }
 
     #[test]

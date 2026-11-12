@@ -24,6 +24,8 @@
 Member targets accept `Lrs/asc/B;->name(sig)`, `rs.asc.B->name`, `rs.asc.B#name`, `rs.asc.B.name`,
 or `B.name` (any package). A name alone is a substring / regex (`=name` or a signature: exact). A signature picks that
 overload: `run(I)V`, `run(I)` (any return), `run(int, String)`; `f:I` a field of that type.
+Names copied from decompiled Java / Kotlin work when nothing matches as written: `rs.asc.Outer.Inner` (`Outer$Inner`),
+`Outer.Anonymous1` (`$1`), `Cdo` (`do`), `a$2` (`a`), `` `in` ``, the class name for a constructor; a `#` line names the match.
 Field output always says `[read]` or `[write]`; without `--access`, a method that does both lists both.
 
 ## Several archives as one program

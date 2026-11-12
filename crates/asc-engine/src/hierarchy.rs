@@ -11,7 +11,7 @@
 //! unknown.
 
 use crate::resources::{FileIdent, file_ident};
-use crate::{DexView, Engine, EngineError, Job, NOT_CANCELLED, Result, WriteJob, cancelled};
+use crate::{DexView, Engine, EngineError, Job, NOT_CANCELLED, Result, WriteJob, cancelled, names};
 use asc_cache::{LockExt, Tier};
 use asc_dex::Dex;
 use asc_findrefs::ClassRelation;
@@ -411,7 +411,7 @@ impl ClassGraph {
                 continue;
             }
             let p = asc_smali::proto_descriptor(&dex, mid.proto_idx as u32)?;
-            if proto.is_none_or(|want| want == p) {
+            if proto.is_none_or(|want| names::proto_matches(&p, want)) {
                 out.push(format!("{name}{p}"));
             }
         }
@@ -482,14 +482,18 @@ pub(crate) struct Defining {
 /// The cached graph and the APK file it was built from.
 pub(crate) type CachedGraph = (Option<FileIdent>, Arc<ClassGraph>);
 
-/// `name` or `name(params)ret` split into name and normalised proto.
+/// `name` or `name(params)ret` split into name and normalised proto. A
+/// signature without return type (`run(int)`, `entry(com.a.Outer.Inner)`)
+/// gives a `(params)` proto, matched as a prefix ([`names::proto_matches`]).
 pub(crate) fn split_method(method: &str) -> Result<(String, Option<String>)> {
     match method.find('(') {
-        Some(_) => {
-            let sig = asc_smali::normalize_method_signature(method)?;
-            let p = sig.find('(').expect("normalised signature has a paren");
-            Ok((sig[..p].to_string(), Some(sig[p..].to_string())))
-        }
+        Some(_) => match asc_smali::normalize_method_signature(method) {
+            Ok(sig) => {
+                let p = sig.find('(').expect("normalised signature has a paren");
+                Ok((sig[..p].to_string(), Some(sig[p..].to_string())))
+            }
+            Err(e) => names::partial_proto(method).map(|(n, proto)| (n, Some(proto))).ok_or_else(|| e.into()),
+        },
         None => Ok((method.to_string(), None)),
     }
 }
@@ -569,7 +573,9 @@ impl Engine {
         let method = q.method.as_deref().map(split_method).transpose()?;
         let (views, mut errors) = self.load_views(None, cancel)?;
         let g = self.class_graph(&views, &mut errors, cancel)?;
-        let Some(root) = g.id(&q.class) else {
+        // A class written as Java / Kotlin source spells it (`com.a.Outer.Inner`)
+        // is looked up as the DEX class it stands for when only that exists.
+        let Some(root) = g.id(&q.class).or_else(|| names::denormalize_class_candidates(&q.class).iter().find_map(|c| g.id(c))) else {
             return Err(EngineError::Query(format!("no class {} in this APK", q.class)));
         };
         // Breadth-first: each class's shallowest depth and its children.
@@ -615,6 +621,26 @@ impl Engine {
                     }
                     Ok(_) => {}
                     Err(e) => errors.push(format!("{}: {e}", g.name(c))),
+                }
+            }
+            // Defined nowhere as written: the first reading of the method as
+            // decompiled source spells it (`Cdo`, `m$2`, the class name for a
+            // constructor) that some class of the tree defines.
+            if defines.is_empty()
+                && let Some(raw) = q.method.as_deref()
+            {
+                for cand in names::denormalize_method_candidates(Some(g.name(root)), raw) {
+                    let Ok((name, proto)) = split_method(&cand) else { continue };
+                    for &c in depth_of.keys() {
+                        if let Ok(d) = g.defines(&views, g.name(c), &name, proto.as_deref())
+                            && !d.is_empty()
+                        {
+                            defines.insert(c, d);
+                        }
+                    }
+                    if !defines.is_empty() {
+                        break;
+                    }
                 }
             }
         }

@@ -24,6 +24,13 @@ classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/as
   regex / substring; `=name` is exact.
 - A signature picks that overload: `run(I)V`, parameters only `run(I)`, Java style `run(int, String)`;
   fields `f:I`.
+- Names copied from decompiled Java / Kotlin source work too: when a class or member matches nothing as written,
+  `getclass`, `findrefs`, `callgraph` and `hierarchy` also read it the way source spells DEX names: nested
+  classes with dots (`rs.asc.Outer.Inner` is `Lrs/asc/Outer$Inner;`, also an obfuscated `Outer$a` by its
+  `InnerClass` name), `AnonymousN` (`$N`), escaped reserved words and digits (`Cdo`, `Cif`, `C1a`), collision
+  suffixes (`a$2`), Kotlin backticks and `_dex_<HEX>_`, a constructor by its class name, parameter types without
+  return type (`entry(rs.asc.Outer.Inner)`). A `#` line says which name it was read as. A name the DEX has as
+  written always wins.
 - Field references are labelled `[read]` for `iget*` / `sget*` and `[write]` for `iput*` / `sput*`.
   `findrefs app.apk field TARGET --access read` (or `write`) keeps only that access; omitting it prints both.
 - Conditions are `KIND:VALUE` (`string:`, `literal:`, `type:`, `method:`, `field:`); in `rules` they combine

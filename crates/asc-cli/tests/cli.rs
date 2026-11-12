@@ -57,6 +57,56 @@ fn getclass_prints_smali() {
     assert!(stderr(&out).starts_with("Error:"), "{}", stderr(&out));
 }
 
+/// `Lcom/app/Outer;` with a nested `Outer$Inner` whose method `do()V` calls
+/// nothing, called by `Outer.use()V`.
+fn nested_class_apk() -> tempfile::NamedTempFile {
+    use asc_fixture::{ClassSpec, CodeSpec, DexBuilder, MethodSpec};
+    const OBJ: &str = "Ljava/lang/Object;";
+    const OUTER: &str = "Lcom/app/Outer;";
+    const INNER: &str = "Lcom/app/Outer$Inner;";
+    let mut d = DexBuilder::new();
+    d.type_(OBJ).type_(OUTER).type_(INNER).method(INNER, "do", "V", &[]).method(OUTER, "use", "V", &[]);
+    let mut ids = d.resolve();
+    let ret = CodeSpec { registers: 1, insns: vec![0x0e, 0x00], ..Default::default() };
+    let call_do = idx_le(ids.method(INNER, "do", "V", &[]));
+    let calls = CodeSpec { registers: 1, insns: vec![0x71, 0x00, call_do[0], call_do[1], 0x00, 0x00, 0x0e, 0x00], ..Default::default() };
+    ids.add_class(ClassSpec {
+        descriptor: INNER.into(),
+        access: 0x1,
+        superclass: Some(OBJ.into()),
+        direct_methods: vec![MethodSpec { idx: ids.method(INNER, "do", "V", &[]), access: 0x9, code: Some(ret) }],
+        ..Default::default()
+    });
+    ids.add_class(ClassSpec {
+        descriptor: OUTER.into(),
+        access: 0x1,
+        superclass: Some(OBJ.into()),
+        direct_methods: vec![MethodSpec { idx: ids.method(OUTER, "use", "V", &[]), access: 0x9, code: Some(calls) }],
+        ..Default::default()
+    });
+    temp_apk_from(&make_apk(&[("classes.dex", &ids.finish())], true))
+}
+
+fn idx_le(idx: u32) -> [u8; 2] {
+    (idx as u16).to_le_bytes()
+}
+
+#[test]
+fn names_written_as_decompiled_source_spells_them_are_found() {
+    let apk = nested_class_apk();
+    let out = asc(&["getclass", path(apk.path()), "com.app.Outer.Inner", "--method", "Cdo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains(".method public static do()V"), "{}", stdout(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("# Lcom/app/Outer/Inner; read as the Java/Kotlin spelling of Lcom/app/Outer$Inner;"), "{err}");
+
+    let out = asc(&["findrefs", path(apk.path()), "method", "com.app.Outer.Inner.Cdo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("Lcom/app/Outer;->use()V | Lcom/app/Outer$Inner;->do()V"), "{text}");
+    assert!(stderr(&out).contains("read as Java/Kotlin source"), "{}", stderr(&out));
+}
+
 #[test]
 fn getclass_debug_keeps_stdout_clean() {
     let apk = temp_apk();
