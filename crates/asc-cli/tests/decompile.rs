@@ -214,7 +214,9 @@ fn the_daemon_keeps_the_backend_and_restarts_it_after_a_kill() {
     assert_ne!(pid_of(&stdout(&restarted)), pid, "a new backend process answered");
 }
 
-/// The `asc-dexdec-worker` processes the daemon of `env` started.
+/// The `asc-dexdec-worker` processes the daemon of `env` started (read
+/// from `/proc`, so Linux only, as the tests that call it).
+#[cfg(target_os = "linux")]
 fn workers(env: &Env) -> Vec<u32> {
     let status = stdout(&env.run(true, &["daemon", "status"]));
     let daemon: u32 = status.strip_prefix("pid ").and_then(|s| s.split(',').next()).and_then(|p| p.parse().ok()).expect(&status);
