@@ -15,24 +15,38 @@ use std::process::{Command, Output};
 
 /// A directory of inputs that lives as long as the test.
 struct Inputs {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    /// The directory as asc names it back (canonical: on Windows the long
+    /// name of a temporary directory, without a `\\?\` prefix).
+    root: PathBuf,
 }
 
 impl Inputs {
     fn new() -> Inputs {
-        Inputs { dir: tempfile::tempdir().unwrap() }
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = match root.to_str().and_then(|r| r.strip_prefix(r"\\?\")) {
+            Some(plain) => PathBuf::from(plain),
+            None => root,
+        };
+        Inputs { _dir: dir, root }
+    }
+
+    /// `name` (`/`-separated) below the directory.
+    fn join(&self, name: &str) -> PathBuf {
+        name.split('/').fold(self.root.clone(), |path, part| path.join(part))
     }
 
     /// Write `bytes` as `name` (below the directory); its path.
     fn file(&self, name: &str, bytes: &[u8]) -> String {
-        let path = self.dir.path().join(name);
+        let path = self.join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, bytes).unwrap();
         path.to_str().unwrap().to_owned()
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.dir.path().join(name)
+        self.join(name)
     }
 
     /// The sample program as `entry.hap`.
@@ -155,7 +169,7 @@ fn every_kind_of_input_opens() {
     // A directory and a comma list are one program.
     let dir = Inputs::new();
     let (first, second) = (dir.file("a/entry.hap", &hap), dir.file("b/feature.hap", &hap));
-    assert_eq!(dir.lines(&["listclass", dir.dir.path().to_str().unwrap()]).len(), 4);
+    assert_eq!(dir.lines(&["listclass", dir.root.as_path().to_str().unwrap()]).len(), 4);
     assert_eq!(dir.lines(&["listclass", &format!("{first},{second}")]).len(), 4);
 }
 
@@ -1156,12 +1170,12 @@ fn getmanifest_prints_the_documents() {
     mixed.file("a.hap", &inner);
     mixed.file("b.hap", &inner);
     mixed.file("c.hap", &own);
-    let of_packs = mixed.lines(&["manifest-summary", mixed.dir.path().to_str().unwrap(), "--file", "pack.info"]);
+    let of_packs = mixed.lines(&["manifest-summary", mixed.root.as_path().to_str().unwrap(), "--file", "pack.info"]);
     assert_eq!(of_packs.len(), 10, "{of_packs:?}");
     assert_eq!(of_packs[0], "a.hap | pack-info packages=2 (pack.info is byte for byte the same in b.hap: listed once, here)");
     assert_eq!(of_packs[5], "b.hap | pack-info same-as=a.hap (pack.info is byte for byte the one listed there)");
     assert_eq!(of_packs[6], "c.hap | pack-app com.example.sample bundleType=- versionCode=1000000 versionName=1.0.1");
-    let packs = mixed.lines(&["getmanifest", mixed.dir.path().to_str().unwrap(), "--file", "pack.info"]);
+    let packs = mixed.lines(&["getmanifest", mixed.root.as_path().to_str().unwrap(), "--file", "pack.info"]);
     assert_eq!(headers(&packs), ["# a.hap/pack.info (the same in b.hap)", "# c.hap/pack.info"]);
     let abilities: Vec<&String> = summary.iter().filter(|line| line.contains(" | ability ")).collect();
     assert_eq!(abilities.len(), 2);
@@ -1172,13 +1186,13 @@ fn getmanifest_prints_the_documents() {
     let dir = Inputs::new();
     dir.file("b/feature.hap", &inner);
     dir.file("a/entry.hap", &inner);
-    let summary = dir.lines(&["manifest-summary", dir.dir.path().to_str().unwrap()]);
+    let summary = dir.lines(&["manifest-summary", dir.root.as_path().to_str().unwrap()]);
     let mut sections: Vec<&str> = summary.iter().map(|line| line.split(" | ").next().unwrap()).collect();
     sections.dedup();
     assert_eq!(sections, ["a/entry.hap", "b/feature.hap"]);
     // A bare file that is part of no package is one line that says what it lacks.
     dir.file("c/dump.abc", &make_abc());
-    let summary = dir.lines(&["manifest-summary", dir.dir.path().to_str().unwrap()]);
+    let summary = dir.lines(&["manifest-summary", dir.root.as_path().to_str().unwrap()]);
     assert_eq!(
         summary.last().unwrap(),
         "c/dump.abc | abc c/dump.abc version=12.0.6.0 bytes=1928 status=readable bare (part of no package: no manifest, no resources)"
@@ -1224,7 +1238,7 @@ fn an_encrypted_entry_is_named_and_left_out() {
     let dir = Inputs::new();
     dir.store_hap("entry.hap");
     dir.file("modules.abc", &make_abc());
-    let out = dir.run(&["findrefs", dir.dir.path().to_str().unwrap(), "string", "https?://"]);
+    let out = dir.run(&["findrefs", dir.root.as_path().to_str().unwrap(), "string", "https?://"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let entries: Vec<String> = stdout(&out).lines().map(|row| row.split(" | ").next().unwrap().to_owned()).collect();
     assert_eq!(entries, ["entry.hap/ets/modules.abc", "entry.hap/ets/widgets.abc"]);
@@ -1240,7 +1254,7 @@ fn an_encrypted_entry_is_named_and_left_out() {
     many.file("a.hap.abc", &make_abc());
     many.file("b.hsp", &Hap::new().modules_abc(&other_encrypted).module_json("{}").build());
     many.file("b.hsp.abc", &other.build().bytes);
-    let root = many.dir.path().to_str().unwrap().to_owned();
+    let root = many.root.as_path().to_str().unwrap().to_owned();
     let note = "# note: 2 encrypted abc entries are served from the decrypted files next to them (manifest-summary names each: its \
                 `abc` lines)\n";
     let out = many.run(&["findrefs", &root, "string", "shared|testTag"]);
@@ -1320,7 +1334,7 @@ fn an_apk_is_still_an_android_program() {
     // next to it, and says that the file is left out.
     let mixed = Inputs::new();
     mixed.file("app.apk", &make_apk(&[("classes.dex", &dex)], true));
-    let dir = mixed.dir.path().to_str().unwrap().to_owned();
+    let dir = mixed.root.as_path().to_str().unwrap().to_owned();
     let alone = mixed.lines(&["listclass", &dir]);
     assert_eq!(alone, ["Lexample/Test;"]);
     mixed.file("entry.hap", &make_hap(&make_abc()));

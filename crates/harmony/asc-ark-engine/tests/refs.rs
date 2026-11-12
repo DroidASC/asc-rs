@@ -184,9 +184,14 @@ fn program() -> AbcBuilder {
     builder
 }
 
+/// `bytes` as `modules.abc` in `dir`, opened. A cold engine on the same
+/// program keeps the file as it is: the engines before it map it, and
+/// Windows refuses to rewrite a mapped file.
 fn open(dir: &Path, bytes: &[u8]) -> Engine {
     let path = dir.join("modules.abc");
-    std::fs::write(&path, bytes).unwrap();
+    if std::fs::read(&path).ok().as_deref() != Some(bytes) {
+        std::fs::write(&path, bytes).unwrap();
+    }
     Engine::open(&path).unwrap()
 }
 

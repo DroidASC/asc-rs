@@ -755,9 +755,11 @@ impl DiskCache {
         }
         if self.predates_boot(&meta) {
             if crc32fast::hash(&map) != u32::from_le_bytes(trailer[4..].try_into().expect("4 bytes")) {
+                // Unmapped first: Windows refuses to remove a mapped file.
+                drop(map);
                 return self.discard(&path);
             }
-            let _ = touch_file(&file);
+            let _ = touch_file(&file, &path);
         }
         // Touch the APK directory so LRU eviction sees recent use.
         let _ = touch_dir(path.parent()?);
@@ -810,9 +812,10 @@ impl DiskCache {
             return None;
         }
         if self.predates_boot(&meta) && crc32fast::hash(&map[DERIVED_HEADER..]) != u32_at(32) {
+            drop(map);
             return self.discard(&path);
         }
-        let _ = touch_file(&file);
+        let _ = touch_file(&file, &path);
         Some(Derived { build_cost: Duration::from_micros(u64_at(16)), map })
     }
 
@@ -872,7 +875,7 @@ impl DiskCache {
         if data.get(16..body)? != query.as_bytes() {
             return None;
         }
-        let _ = touch_file(&file);
+        let _ = touch_file(&file, &path);
         Some(Rendered { map: data, body })
     }
 
@@ -1360,7 +1363,14 @@ fn read_boot_time() -> Option<SystemTime> {
     )
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+#[cfg(windows)]
+fn read_boot_time() -> Option<SystemTime> {
+    // SAFETY: GetTickCount64 takes no arguments and only reads the uptime.
+    let uptime = Duration::from_millis(unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() });
+    SystemTime::now().checked_sub(uptime)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple", windows)))]
 fn read_boot_time() -> Option<SystemTime> {
     None
 }
@@ -1384,13 +1394,32 @@ fn source_stamp(apk: &Path) -> Option<String> {
     (!path.contains('\n')).then(|| format!("{}\n{mtime}\n{path}", meta.len()))
 }
 
-fn touch_file(file: &fs::File) -> std::io::Result<()> {
-    file.set_modified(SystemTime::now())
+/// `path` (a file or a directory) opened so its times can be set: Unix
+/// sets them through any handle the owner holds, Windows only through one
+/// with FILE_WRITE_ATTRIBUTES access (and opens a directory only with
+/// FILE_FLAG_BACKUP_SEMANTICS).
+fn open_for_times(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new().access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::File::open(path)
+    }
+}
+
+/// Set the modification time of `file` (opened read-only at `path`) to now.
+fn touch_file(file: &fs::File, path: &Path) -> std::io::Result<()> {
+    if cfg!(windows) { open_for_times(path)?.set_modified(SystemTime::now()) } else { file.set_modified(SystemTime::now()) }
 }
 
 fn touch_dir(dir: &Path) -> std::io::Result<()> {
     let now = SystemTime::now();
-    if fs::File::open(dir).and_then(|f| f.set_modified(now)).is_ok() {
+    if open_for_times(dir).and_then(|f| f.set_modified(now)).is_ok() {
         return Ok(());
     }
     // Portable fallback: update the directory mtime by creating and removing a marker.
@@ -1684,7 +1713,7 @@ mod tests {
         for (i, k) in keys.iter().enumerate() {
             cache.put(k, "classes.dex", &[0; 10]).unwrap();
             let t = SystemTime::now() + Duration::from_secs(10 * i as u64);
-            fs::File::open(dir.path().join(k.as_str())).unwrap().set_modified(t).unwrap();
+            open_for_times(&dir.path().join(k.as_str())).unwrap().set_modified(t).unwrap();
         }
         cache.evict();
         assert_eq!(cache.stats(), (3, 3, 3 * (10 + L1_TRAILER)));
@@ -1946,7 +1975,7 @@ mod tests {
         } else {
             SystemTime::now() - Duration::from_secs((-secs_from_now) as u64)
         };
-        fs::File::open(path).unwrap().set_modified(t).unwrap();
+        open_for_times(path).unwrap().set_modified(t).unwrap();
     }
 
     #[test]
@@ -2059,6 +2088,7 @@ mod tests {
         assert_eq!(&*d, b"tables");
         assert_eq!(d.build_cost, Duration::from_millis(7));
         assert_eq!(d.as_ptr() as usize % 64, 0, "payload as aligned as the mapping");
+        drop(d);
         // Another producer version, kind or name is another file.
         assert!(cache.get_derived(&key, "classes.dex", "locators", 2).is_none());
         assert!(cache.get_derived(&key, "classes.dex", "callgraph", 1).is_none());

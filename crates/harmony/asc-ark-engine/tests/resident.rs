@@ -72,15 +72,18 @@ fn the_stamp_follows_the_files_of_a_lone_file() {
     let engine = Engine::open(&hap).unwrap();
     assert!(engine.is_current());
 
-    // Another size.
-    std::fs::write(&hap, make_hap(&call_graph_program().build().bytes)).unwrap();
-    assert!(!engine.is_current());
+    // Another size, and gone. Windows refuses to rewrite or remove a file
+    // an engine maps, so there nothing can change under a live engine.
+    #[cfg(unix)]
+    {
+        std::fs::write(&hap, make_hap(&call_graph_program().build().bytes)).unwrap();
+        assert!(!engine.is_current());
 
-    // Gone: nothing to be current with.
-    let engine = Engine::open(&hap).unwrap();
-    std::fs::remove_file(&hap).unwrap();
-    assert!(!engine.is_current());
-    assert!(Stamp::of(&hap).is_err());
+        let engine = Engine::open(&hap).unwrap();
+        std::fs::remove_file(&hap).unwrap();
+        assert!(!engine.is_current());
+        assert!(Stamp::of(&hap).is_err());
+    }
 }
 
 #[test]

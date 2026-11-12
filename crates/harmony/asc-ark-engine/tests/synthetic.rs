@@ -334,6 +334,9 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     assert!(missing.contains("ets/modules.abc is encrypted"), "{missing}");
 
     // A decrypted dump pairs whatever it is called, and takes the entry's name.
+    // (Each engine is closed before the files it maps change: Windows
+    // refuses to replace or remove a mapped file.)
+    drop(engine);
     write(&root, "entry.hap.abc", &abc);
     let engine = Engine::open(&root).unwrap();
     assert_eq!(entry_names(&engine), ["entry.hap/ets/modules.abc", "entry.hap/ets/widgets.abc"]);
@@ -342,6 +345,7 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
         engine.stand_in_note().as_deref(),
         Some("entry.hap/ets/modules.abc is encrypted in its package; served from the decrypted entry.hap.abc")
     );
+    drop(engine);
     fs::remove_file(root.join("entry.hap.abc")).unwrap();
 
     // Neither file needs a telling name: both are found by their content.
@@ -363,6 +367,7 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     let engine = Engine::open(&root).unwrap();
     assert_eq!(entry_names(&engine), ["dump.abc", "entry.hap/ets/modules.abc", "entry.hap/ets/widgets.abc"]);
     assert_eq!(engine.notes(), ["entry.hap/ets/modules.abc is encrypted (app-store protection); supply the decrypted .abc"]);
+    drop(engine);
     fs::remove_file(root.join("dump.abc")).unwrap();
 
     // Same name, other content: reported, not paired.
@@ -376,12 +381,14 @@ fn encrypted_entries_are_reported_and_paired_with_a_decrypted_file() {
     let mut tampered = abc.clone();
     let last = tampered.len() - 1;
     tampered[last] ^= 1;
+    drop(engine);
     write(&root, "modules.abc", &tampered);
     let engine = Engine::open(&root).unwrap();
     assert_eq!(engine.entries().filter(|info| info.status == EntryStatus::Encrypted).count(), 1);
     assert!(engine.notes()[0].ends_with("its body does not have the checksum"), "{:?}", engine.notes());
 
     // The real dump: it takes the encrypted entry's name and place.
+    drop(engine);
     write(&root, "modules.abc", &abc);
     let engine = Engine::open(&root).unwrap();
     assert_eq!(entry_names(&engine), ["entry.hap/ets/modules.abc", "entry.hap/ets/widgets.abc"]);
