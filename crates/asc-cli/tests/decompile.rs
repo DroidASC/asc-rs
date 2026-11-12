@@ -226,7 +226,10 @@ fn workers(env: &Env) -> Vec<u32> {
         // `pid (comm) state ppid ...`; comm may hold spaces, so read after the last `)`.
         let ppid = stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(1)).and_then(|p| p.parse::<u32>().ok());
         let program = cmdline.split(|b| *b == 0).next().unwrap_or_default();
-        if ppid == Some(daemon) && program.ends_with(b"/asc-dexdec-worker") {
+        // Installed copies are named asc-dexdec-worker; the release fixture's
+        // script execs `$ASC_DEXDEC_WORKER`, which may be named anything.
+        let worker = dexdec_worker().is_some_and(|path| program == path.as_os_str().as_encoded_bytes());
+        if ppid == Some(daemon) && (program.ends_with(b"/asc-dexdec-worker") || worker) {
             found.push(pid);
         }
     }
