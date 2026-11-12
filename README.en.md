@@ -10,7 +10,7 @@ people and agents: CLI first (with a transparent warm daemon on Unix), plus an M
 
 ## Install and build
 
-A [release](https://github.com/Ylarod/asc-rs/releases)'s `asc-v<version>-<target>.tar.gz` holds `asc` (as does
+A [release](https://github.com/Ylarod/asc-rs/releases)'s `asc-v<version>-<target>.tar.gz` (Linux, macOS and Windows, x86_64 and aarch64) holds `asc` (as does
 `cargo binstall asc-cli`). The decompile worker `asc decompile` runs, `asc-dexdec-worker`, is released on its own
 from [DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec): without one, the first `asc decompile`
 downloads `asc-dexdec-worker-p<protocol>-<target>.tar.gz` for its protocol version from the latest release there,
@@ -46,7 +46,7 @@ asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 | `hierarchy` | Transitive subclasses / implementers, or `--supers`; `--method` marks overrides |
 | `getmanifest` (`manifest`) / `manifest-summary` | Decode the manifest; the summary is one record per line: exported components and why, permissions, providers, deep links, FileProvider, network security config |
 | `resources` / `xml` | Query `resources.arsc`; decode any binary XML |
-| `mcp` / `daemon` / `cache` / `install` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`); `install dexdec` downloads this version's decompiler worker |
+| `mcp` / `daemon` / `cache` / `install` | MCP server; daemon control; on-disk cache (`path` / `stats` / `clear`); `install dexdec` downloads the latest decompiler worker speaking this asc's protocol version |
 
 The APK argument may also be a jar, a `.dex`, or several files analysed as one program (a directory, or paths
 joined with `,`): see [docs/query.en.md](docs/query.en.md#several-files-as-one-program).

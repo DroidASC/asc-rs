@@ -347,7 +347,8 @@ fn usage_errors_exit_1_not_2() {
 fn deeply_nested_rule_is_a_usage_error_not_a_crash() {
     // Parsed before the APK is opened, so a missing file does not matter;
     // before the depth limit this overflowed the stack and aborted (134).
-    let n = 5000;
+    // 2000 levels keep the command line under Windows' 32767 characters.
+    let n = 2000;
     let rule = format!("{}La;->a()V{}", "method:{".repeat(n), "}".repeat(n));
     let out = bin().env("ASC_DAEMON", "off").args(["--no-cache", "findrefs", "/nonexistent.apk", "all", &rule]).output().expect("run asc");
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));

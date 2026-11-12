@@ -98,6 +98,8 @@ fn an_unpacked_package_answers_as_the_package_does() {
     assert!(matches!(bare.manifest(), Err(EngineError::NoManifest { bare: true, .. })));
 }
 
+// Symbolic links need privileges on Windows.
+#[cfg(unix)]
 #[test]
 fn files_of_an_unpacked_package_stay_inside_it() {
     let dir = tempfile::tempdir().unwrap();

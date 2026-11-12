@@ -259,9 +259,11 @@ impl Value for CacheDir {
     }
 }
 
-/// `~/x` under `$HOME`.
+/// `~/x` under `$HOME` (on Windows without one, `%USERPROFILE%`).
 fn expand_home(path: &str) -> PathBuf {
-    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+    let home = var("HOME").or_else(|| if cfg!(windows) { var("USERPROFILE") } else { None });
+    match (path.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(path),
     }
@@ -481,7 +483,7 @@ settings! {
     cache_enabled: bool = true, "cache.enabled", "ASC_CACHE", None,
         "read and write the disk cache";
     cache_dir: CacheDir = CacheDir::Default, "cache.dir", "ASC_CACHE_DIR", None,
-        "disk cache directory; default: $XDG_CACHE_HOME/asc or ~/.cache/asc";
+        "disk cache directory; default: $XDG_CACHE_HOME/asc, else %LOCALAPPDATA%\\asc\\cache on Windows, else ~/.cache/asc";
     cache_max: Amount = Amount::Auto, "cache.max", "ASC_CACHE_MAX", Some("ASC_CACHE_MAX_MB"),
         "disk cache budget; auto = 20%: of free space plus the cache, at most cache.ceiling, never into a 1 GiB / 5% reserve";
     cache_ceiling: Bytes = Bytes(AutoDisk::CEILING), "cache.ceiling", "ASC_CACHE_CEILING", None,
@@ -541,16 +543,16 @@ impl Config {
     }
 
     /// The config file: `$ASC_CONFIG` (empty: none), else
-    /// `$XDG_CONFIG_HOME/asc/config.toml`, else
-    /// `~/.config/asc/config.toml`.
+    /// `$XDG_CONFIG_HOME/asc/config.toml`, else on Windows
+    /// `%APPDATA%\\asc\\config.toml`, else `~/.config/asc/config.toml`.
     pub fn file_path(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
         if let Some(p) = env(CONFIG_ENV) {
             return (!p.is_empty()).then(|| expand_home(&p));
         }
-        let base = env("XDG_CONFIG_HOME")
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| env("HOME").map(|h| Path::new(&h).join(".config")))?;
+        let set = |name: &str| env(name).filter(|d| !d.is_empty()).map(PathBuf::from);
+        let base = set("XDG_CONFIG_HOME")
+            .or_else(|| if cfg!(windows) { set("APPDATA") } else { None })
+            .or_else(|| set("HOME").map(|h| h.join(".config")))?;
         Some(base.join("asc").join("config.toml"))
     }
 

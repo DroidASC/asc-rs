@@ -11,7 +11,7 @@ use asc_fixture::hap::{
 };
 use asc_fixture::{make_apk, make_dex};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const TOOLS: &str = "listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, findrefs \
                      kind=string|literal|prop|global|import|method|number|call";
@@ -25,24 +25,38 @@ const ENCRYPTED: &str = "ets/modules.abc is encrypted (app-store protection); su
 
 /// A directory of inputs that lives as long as the test.
 struct Inputs {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    /// The directory as asc names it back (canonical: on Windows the long
+    /// name of a temporary directory, without a `\\?\` prefix).
+    root: PathBuf,
 }
 
 impl Inputs {
     fn new() -> Inputs {
-        Inputs { dir: tempfile::tempdir().unwrap() }
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = match root.to_str().and_then(|r| r.strip_prefix(r"\\?\")) {
+            Some(plain) => PathBuf::from(plain),
+            None => root,
+        };
+        Inputs { _dir: dir, root }
+    }
+
+    /// `name` (`/`-separated) below the directory.
+    fn join(&self, name: &str) -> PathBuf {
+        name.split('/').fold(self.root.clone(), |path, part| path.join(part))
     }
 
     /// Write `bytes` as `name` (below the directory); its path.
     fn file(&self, name: &str, bytes: &[u8]) -> String {
-        let path = self.dir.path().join(name);
+        let path = self.join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, bytes).unwrap();
         path.to_str().unwrap().to_owned()
     }
 
     fn path(&self, name: &str) -> String {
-        self.dir.path().join(name).to_str().unwrap().to_owned()
+        self.join(name).to_str().unwrap().to_owned()
     }
 
     /// The sample program as `entry.hap`.

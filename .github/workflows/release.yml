@@ -18,6 +18,10 @@ jobs:
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -29,10 +33,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --locked -p asc-cli --target ${{ matrix.target }}
-      # asc-<tag>-<target>.tar.gz. asc-dexdec-worker, the decompile backend
-      # asc runs, is released from its own repository (DroidASC/asc-dexdec);
-      # asc downloads it from there. COPYFILE_DISABLE keeps macOS tar from
-      # adding ._ files.
+      # asc-<tag>-<target>.tar.gz (on Windows too: cargo-binstall's metadata
+      # names one format). asc-dexdec-worker, the decompile backend asc runs,
+      # is released from its own repository (DroidASC/asc-dexdec); asc
+      # downloads it from there. COPYFILE_DISABLE keeps macOS tar from adding
+      # ._ files.
       - name: Package
         shell: bash
         env:
@@ -41,9 +46,12 @@ jobs:
           bin=target/${{ matrix.target }}/release
           name=asc-${GITHUB_REF_NAME}-${{ matrix.target }}
           mkdir "$name"
-          cp "$bin/asc" LICENSE README.md README.en.md "$name"/
+          exe=asc
+          [[ "${{ matrix.target }}" == *-windows-* ]] && exe=asc.exe
+          cp "$bin/$exe" LICENSE README.md README.en.md "$name"/
           tar czf "$name.tar.gz" "$name"
-          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          if command -v shasum >/dev/null; then sha256=(shasum -a 256); else sha256=(sha256sum); fi
+          "${sha256[@]}" "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}

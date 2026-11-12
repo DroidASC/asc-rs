@@ -9,7 +9,7 @@
 
 ## 安装与构建
 
-[Release](https://github.com/Ylarod/asc-rs/releases) 的 `asc-v<版本>-<target>.tar.gz` 里是 `asc`（`cargo binstall asc-cli`
+[Release](https://github.com/Ylarod/asc-rs/releases) 的 `asc-v<版本>-<target>.tar.gz`（Linux、macOS、Windows，x86_64 和 aarch64）里是 `asc`（`cargo binstall asc-cli`
 也只装 `asc`）。`asc decompile` 用的反编译 worker `asc-dexdec-worker` 在
 [DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec) 单独发布：没有 worker 时，第一次 `asc decompile` 会从它最新的
 release 下载协议版本对应的 `asc-dexdec-worker-p<协议版本>-<target>.tar.gz`，校验 SHA-256 后装进
@@ -44,7 +44,7 @@ asc findrefs app.apk rules 'string:http://' 'method:java.lang.Runtime->exec'
 | `hierarchy` | 传递的子类 / 实现类，或 `--supers`；`--method` 标出重写 |
 | `getmanifest`（`manifest`）/ `manifest-summary` | 解码 manifest；摘要每行一条记录：导出组件及原因、权限、provider、deep link、FileProvider、网络安全配置 |
 | `resources` / `xml` | 查询 `resources.arsc`；解码任意二进制 XML |
-| `mcp` / `daemon` / `cache` / `install` | MCP 服务器；daemon 管理；磁盘 cache 管理（`path` / `stats` / `clear`）；`install dexdec` 下载本版本的反编译 worker |
+| `mcp` / `daemon` / `cache` / `install` | MCP 服务器；daemon 管理；磁盘 cache 管理（`path` / `stats` / `clear`）；`install dexdec` 下载与本 asc 协议版本相同的最新反编译 worker |
 
 APK 参数也可以是 jar、`.dex`，或作为一个程序一起分析的多个文件（一个目录，或用 `,` 连接的路径），见
 [docs/query.md](docs/query.md#多个文件作为一个程序)。

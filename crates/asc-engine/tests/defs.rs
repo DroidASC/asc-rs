@@ -116,6 +116,8 @@ fn the_class_graph_is_kept_on_disk_for_later_processes() {
     let later = cached();
     run(&later, "varargs");
     later.flush_cache_writes();
+    // Closed first: Windows refuses to rewrite a file it maps.
+    drop(later);
     let files = graph_files();
     let mut bytes = std::fs::read(&files[0]).unwrap();
     bytes.truncate(bytes.len() - 3);

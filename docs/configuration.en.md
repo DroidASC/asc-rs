@@ -9,7 +9,7 @@ things up and can be deleted at any time; files carry a CRC, so damage is just a
 Threads, memory and disk are one set of settings. `asc config` lists each with its value, its source
 and what it comes to on this machine (`--json` for scripts and agents). A flag (`--set KEY=VALUE`) beats
 the environment (`$ASC_<KEY>`, named in `--json`), which beats the config file
-`~/.config/asc/config.toml` (under `$XDG_CONFIG_HOME`, or `$ASC_CONFIG`; empty reads none), which
+`~/.config/asc/config.toml` (under `$XDG_CONFIG_HOME`; on Windows `%APPDATA%\asc\config.toml`; or `$ASC_CONFIG`, empty reads none), which
 beats the default. `auto` defaults are computed for this machine, and resident processes register so they
 split memory and threads.
 
@@ -19,7 +19,7 @@ split memory and threads.
 | `memory.max` (`--memory-mb`) | auto = 25%: (available memory + what resident processes hold) × 25% / resident processes; or `4G`, `40%` |
 | `memory.ceiling` | auto: 1/16 of physical memory within 2G..8G (2G on a 12 GB machine, 6G on 96 GB) |
 | `memory.split` | on: split between resident processes |
-| `cache.enabled` (`--no-cache`), `cache.dir` (`--cache-dir`) | on; `$XDG_CACHE_HOME/asc` or `~/.cache/asc` |
+| `cache.enabled` (`--no-cache`), `cache.dir` (`--cache-dir`) | on; `$XDG_CACHE_HOME/asc`, on Windows `%LOCALAPPDATA%\asc\cache`, else `~/.cache/asc` |
 | `cache.max` (`--cache-max-mb`) | auto = 20%: (free space + the cache) × 20%, at most `cache.ceiling` (32G), keeping 1 GiB / 5% free |
 | `cache.tiers`, `cache.min_dex` | `dex,derived,rendered`; DEX under 4M are not written to L1 |
 | `cache.write_queue`, `cache.writers` | 512M (and at most the memory budget); auto: one per 8 CPUs, 1..4 |
@@ -55,7 +55,7 @@ The worker is built and released in its own repository
 ([DroidASC/asc-dexdec](https://github.com/DroidASC/asc-dexdec)); its version is not tied to asc's, the two only
 have to speak the same decompile protocol version. asc looks for the worker in this order: `[decompilers.dexdec]`
 `command` → `asc-dexdec-worker` in the directory of `asc` → the one asc installed for its protocol version,
-`$XDG_DATA_HOME/asc/tools/asc-dexdec-worker-p<protocol>-<target>/` (`~/.local/share/asc/…` by default) → `PATH`.
+`$XDG_DATA_HOME/asc/tools/asc-dexdec-worker-p<protocol>-<target>/` (`~/.local/share/asc/…` by default, `%LOCALAPPDATA%\asc\…` on Windows) → `PATH`.
 When there is none, the first request that needs dexdec downloads `asc-dexdec-worker-p<protocol>-<target>.tar.gz`
 from `decompile.release_url`: it checks the archive against its `.sha256`, takes only the worker out (any other
 entry, a link or a path outside the directory refuses the archive), runs it once with `--protocol-version`, and

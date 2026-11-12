@@ -1567,12 +1567,34 @@ fn apk_arg(args: &Value) -> Result<Option<String>, ToolError> {
     }
 }
 
+/// `path` canonical, as a person writes it: on Windows without the `\\?\`
+/// prefix `canonicalize` adds (`\\?\C:\a` → `C:\a`, `\\?\UNC\h\s` →
+/// `\\h\s`), which every message naming the program would show. A path too
+/// long to open without it keeps it.
+fn plain_canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let full = path.canonicalize()?;
+    #[cfg(windows)]
+    {
+        const MAX_PATH: usize = 260;
+        let text = full.to_string_lossy();
+        let plain = match text.strip_prefix(r"\\?\") {
+            Some(unc) if unc.starts_with(r"UNC\") => Some(format!(r"\\{}", &unc[4..])),
+            Some(local) if local.as_bytes().get(1) == Some(&b':') => Some(local.to_string()),
+            _ => None,
+        };
+        if let Some(plain) = plain.filter(|p| p.len() < MAX_PATH) {
+            return Ok(PathBuf::from(plain));
+        }
+    }
+    Ok(full)
+}
+
 /// `path` made absolute and canonical, each path of a program on its own.
 fn canonical(path: &str) -> Result<PathBuf, ToolError> {
     if path.is_empty() {
         return Err(ToolError("`apk` is empty".into()));
     }
-    let one = |p: &str| Path::new(p).canonicalize().map_err(|e| ToolError(format!("cannot open {p}: {e}")));
+    let one = |p: &str| plain_canonical(Path::new(p)).map_err(|e| ToolError(format!("cannot open {p}: {e}")));
     if Path::new(path).exists() || !path.contains(',') {
         return one(path);
     }
@@ -2050,6 +2072,9 @@ mod tests {
         server.handle_line(&line.to_string()).unwrap()["result"].clone()
     }
 
+    // A program changes under the session holding it open: Windows refuses
+    // to rewrite or remove a file that session maps.
+    #[cfg(unix)]
     #[test]
     fn a_changed_harmony_program_is_opened_again_under_its_id() {
         let dir = tempfile::tempdir().unwrap();
