@@ -84,6 +84,64 @@ pub fn to_utf16(bytes: &[u8]) -> Vec<u16> {
     out
 }
 
+/// Why bytes are not valid MUTF-8 ([`to_utf16_strict`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid MUTF-8 at byte {offset}: {reason}")]
+#[non_exhaustive]
+pub struct Mutf8Error {
+    /// Offset of the offending byte in the decoded bytes.
+    pub offset: usize,
+    /// What is wrong with it.
+    pub reason: &'static str,
+}
+
+/// Decode MUTF-8 bytes into UTF-16 code units, rejecting what ART's DEX
+/// verifier rejects: a raw NUL byte, a byte that cannot start a sequence
+/// (continuation bytes, and the lead bytes of 4-byte UTF-8 sequences, which
+/// MUTF-8 writes as surrogate pairs), a sequence cut short, and an overlong
+/// sequence (other than `C0 80` for `U+0000`). Unpaired surrogates are valid
+/// MUTF-8 and decode as they are. [`to_utf16`] is the lenient counterpart.
+///
+/// # Errors
+///
+/// [`Mutf8Error`] at the first byte that breaks those rules.
+pub fn to_utf16_strict(bytes: &[u8]) -> Result<Vec<u16>, Mutf8Error> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let err = |offset, reason| Mutf8Error { offset, reason };
+        let cont = |k: usize| match bytes.get(i + k) {
+            Some(&b) if b & 0xC0 == 0x80 => Ok(u16::from(b & 0x3F)),
+            Some(_) => Err(err(i + k, "expected a continuation byte")),
+            None => Err(err(i, "sequence cut short")),
+        };
+        let b0 = bytes[i];
+        let (unit, len) = match b0 {
+            0 => return Err(err(i, "NUL byte (U+0000 is C0 80)")),
+            0x01..=0x7F => (u16::from(b0), 1),
+            0x80..=0xBF => return Err(err(i, "continuation byte without a lead byte")),
+            0xC0..=0xDF => {
+                let unit = (u16::from(b0 & 0x1F) << 6) | cont(1)?;
+                if unit != 0 && unit < 0x80 {
+                    return Err(err(i, "overlong sequence"));
+                }
+                (unit, 2)
+            }
+            0xE0..=0xEF => {
+                let unit = (u16::from(b0 & 0x0F) << 12) | (cont(1)? << 6) | cont(2)?;
+                if unit < 0x800 {
+                    return Err(err(i, "overlong sequence"));
+                }
+                (unit, 3)
+            }
+            0xF0..=0xFF => return Err(err(i, "byte that cannot start a MUTF-8 sequence")),
+        };
+        out.push(unit);
+        i += len;
+    }
+    Ok(out)
+}
+
 /// Compare two MUTF-8 strings by their UTF-16 code units, the order DEX
 /// string tables are sorted in (ART's
 /// `CompareModifiedUtf8ToModifiedUtf8AsUtf16CodePointValues`). Plain byte
@@ -198,6 +256,33 @@ mod tests {
         assert_eq!(decode(&[0xE2, 0x82, 0xAC, 0xE2]), "\u{20AC}\u{FFFD}");
         // An unpaired surrogate decodes lossily instead of failing.
         assert_eq!(decode(&[0xED, 0xA0, 0x80]), "\u{FFFD}");
+    }
+
+    #[test]
+    fn strict_decoding_rejects_what_lenient_decoding_replaces() {
+        let ok = |bytes: &[u8]| to_utf16_strict(bytes).unwrap();
+        let err = |bytes: &[u8]| to_utf16_strict(bytes).unwrap_err();
+        assert_eq!(ok(b""), Vec::<u16>::new());
+        assert_eq!(ok(&encode("a\0\u{7FF}\u{800}\u{FFFF}😀")), "a\0\u{7FF}\u{800}\u{FFFF}😀".encode_utf16().collect::<Vec<_>>());
+        // An unpaired surrogate is valid MUTF-8.
+        assert_eq!(ok(&[0xED, 0xA0, 0x80]), vec![0xD800]);
+        assert_eq!(err(&[b'a', 0]), Mutf8Error { offset: 1, reason: "NUL byte (U+0000 is C0 80)" });
+        assert_eq!(err(&[b'a', 0x80]).offset, 1);
+        assert_eq!(err(&[0xC3]), Mutf8Error { offset: 0, reason: "sequence cut short" });
+        assert_eq!(err(&[0xC3, b'a']), Mutf8Error { offset: 1, reason: "expected a continuation byte" });
+        assert_eq!(err(&[0xE2, 0x82]).reason, "sequence cut short");
+        assert_eq!(err(&[0xE2, 0x82, b'x']).offset, 2);
+        // Overlong forms, except C0 80 for U+0000.
+        assert_eq!(err(&[0xC1, 0x81]).reason, "overlong sequence");
+        assert_eq!(err(&[0xE0, 0x81, 0x81]).reason, "overlong sequence");
+        assert_eq!(err(&[0xE0, 0x80, 0x80]).reason, "overlong sequence");
+        // 4-byte UTF-8 (the lenient decoder tolerates it) and invalid leads.
+        assert_eq!(err("😀".as_bytes()).reason, "byte that cannot start a MUTF-8 sequence");
+        assert_eq!(err(&[0xFF]).offset, 0);
+        // Whatever strict decoding accepts, lenient decoding agrees with.
+        for bytes in [&encode("x\0y\u{1A7B}")[..], &[0xED, 0xB0, 0x80, b'z']] {
+            assert_eq!(ok(bytes), to_utf16(bytes));
+        }
     }
 
     #[test]

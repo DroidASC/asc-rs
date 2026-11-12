@@ -23,48 +23,34 @@ pub fn escape_string(s: &str) -> String {
     out
 }
 
-/// `(params)ret` for a proto index.
+/// `(params)ret` for a proto index ([`Dex::proto_descriptor`]).
 ///
 /// # Errors
 ///
 /// [`SmaliError::Dex`](crate::SmaliError::Dex) when the proto, its type list
 /// or a type it names is out of range or malformed.
 pub fn proto_descriptor(dex: &Dex<'_>, proto_idx: u32) -> Result<String> {
-    let id = dex.proto_id(proto_idx)?;
-    let mut s = String::from("(");
-    for p in dex.type_list(id.parameters_off)? {
-        s.push_str(&dex.type_descriptor(p as u32)?);
-    }
-    s.push(')');
-    s.push_str(&dex.type_descriptor(id.return_type_idx)?);
-    Ok(s)
+    Ok(dex.proto_descriptor(proto_idx)?)
 }
 
-/// `Lcls;->name(params)ret` for a method index.
+/// `Lcls;->name(params)ret` for a method index ([`Dex::method_signature`]).
 ///
 /// # Errors
 ///
 /// [`SmaliError::Dex`](crate::SmaliError::Dex) when the method id, or a
 /// string, type or proto it refers to, is out of range or malformed.
 pub fn method_signature(dex: &Dex<'_>, method_idx: u32) -> Result<String> {
-    let id = dex.method_id(method_idx)?;
-    Ok(format!(
-        "{}->{}{}",
-        dex.type_descriptor(id.class_idx as u32)?,
-        dex.string(id.name_idx)?,
-        proto_descriptor(dex, id.proto_idx as u32)?
-    ))
+    Ok(dex.method_signature(method_idx)?)
 }
 
-/// `Lcls;->name:type` for a field index.
+/// `Lcls;->name:type` for a field index ([`Dex::field_signature`]).
 ///
 /// # Errors
 ///
 /// [`SmaliError::Dex`](crate::SmaliError::Dex) when the field id, or a
 /// string or type it refers to, is out of range or malformed.
 pub fn field_signature(dex: &Dex<'_>, field_idx: u32) -> Result<String> {
-    let id = dex.field_id(field_idx)?;
-    Ok(format!("{}->{}:{}", dex.type_descriptor(id.class_idx as u32)?, dex.string(id.name_idx)?, dex.type_descriptor(id.type_idx as u32)?))
+    Ok(dex.field_signature(field_idx)?)
 }
 
 /// baksmali's method handle literal: `invoke-static@Lcls;->m(I)V`,

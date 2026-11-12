@@ -304,6 +304,24 @@ fn is_root_dex(name: &[u8]) -> bool {
     name.ends_with(b".dex") && !name.contains(&b'/')
 }
 
+/// Whether `name` (inside one archive) is a `*.dex` at any depth
+/// (`classes.dex`, `assets/payload.dex`, ...).
+fn is_any_dex(name: &[u8]) -> bool {
+    name.ends_with(b".dex")
+}
+
+/// Where a root DEX entry falls in the runtime's multidex order:
+/// `classes.dex` is 1, `classesN.dex` is N, anything else comes last. `name`
+/// may carry a program's archive prefix.
+fn multidex_rank(name: &str) -> u32 {
+    let file = name.rsplit('/').next().unwrap_or(name);
+    match file.strip_prefix("classes").and_then(|rest| rest.strip_suffix(".dex")) {
+        Some("") => 1,
+        Some(n) if n.bytes().all(|b| b.is_ascii_digit()) && !n.starts_with('0') => n.parse().unwrap_or(u32::MAX),
+        _ => u32::MAX,
+    }
+}
+
 /// The one entry of a bare DEX file, by its name inside the archive.
 const BARE_DEX_ENTRY: &str = "classes.dex";
 /// Size of the DEX header, which carries the file's checksum and SHA-1.
@@ -454,7 +472,13 @@ impl Archive {
     /// Root-level DEX entries in central-directory order. Duplicate names
     /// keep the last occurrence, like [`Apk::find_entry`] (and `zipfile`).
     fn dex_entries_in_order(&self, index: usize) -> Result<Vec<Entry>> {
-        let mut entries = self.entries_filtered(index, &mut is_root_dex)?;
+        self.dex_entries_matching(index, is_root_dex)
+    }
+
+    /// The entries `is_dex` accepts by name, in central-directory order,
+    /// duplicate names keeping the last occurrence.
+    fn dex_entries_matching(&self, index: usize, mut is_dex: fn(&[u8]) -> bool) -> Result<Vec<Entry>> {
+        let mut entries = self.entries_filtered(index, &mut is_dex)?;
         // Last occurrence wins: walk from the back keeping first-seen names.
         entries.reverse();
         let mut seen = std::collections::HashSet::with_capacity(entries.len());
@@ -692,6 +716,41 @@ impl Apk {
         Ok(entries)
     }
 
+    /// The entries of [`Apk::dex_entries`] in the order the runtime loads
+    /// them, archive by archive: `classes.dex`, `classes2.dex`,
+    /// `classes3.dex`, ... by number, then any other root `*.dex` in
+    /// central-directory order. Duplicate names keep the last occurrence.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::dex_entries`].
+    pub fn dex_entries_multidex(&self) -> Result<Vec<Entry>> {
+        let mut entries = self.dex_entries_in_order()?;
+        self.check_dex_total(&entries)?;
+        // Stable: entries outside the classesN.dex scheme keep their order.
+        entries.sort_by_key(|e| (e.archive, multidex_rank(&e.name)));
+        Ok(entries)
+    }
+
+    /// Every `*.dex` entry at any depth (`assets/payload.dex`,
+    /// `lib/x/classes.dex` as well as the root ones), in central-directory
+    /// order, archive by archive. Duplicate names keep the last occurrence.
+    /// The runtime loads only the root entries ([`Apk::dex_entries`]); this
+    /// is for callers that look at embedded code too. The total size is not
+    /// checked. A program of several archives has already left out those
+    /// without root DEX entries ([`Apk::open`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::directories`].
+    pub fn all_dex_entries(&self) -> Result<Vec<Entry>> {
+        let mut entries = Vec::new();
+        for (i, a) in self.archives.iter().enumerate() {
+            entries.extend(a.dex_entries_matching(i, is_any_dex)?);
+        }
+        Ok(entries)
+    }
+
     fn check_dex_total(&self, entries: &[Entry]) -> Result<()> {
         let total = entries.iter().fold(0u64, |t, e| t.saturating_add(e.uncomp_size));
         if total > self.limits.max_dex_total_bytes {
@@ -782,14 +841,7 @@ impl Apk {
     ///
     /// As [`Apk::read_entry`].
     pub fn open_nested(&self, entry: &Entry) -> Result<Apk> {
-        let map = match entry.method {
-            METHOD_STORED => {
-                // Checks the declared size against the payload like any other read.
-                self.read_entry(entry)?;
-                Data::Window { outer: Arc::clone(&self.archives), archive: entry.archive, range: self.payload_range(entry)? }
-            }
-            _ => Data::Owned(self.read_entry(entry)?.into_owned()),
-        };
+        let EntryBytes(map) = self.read_entry_owned(entry)?;
         let bare_dex = map.starts_with(b"dex\n");
         let nested = Archive { path: self.archive(entry).path.clone(), map, label: String::new(), bare_dex };
         Ok(Apk {
@@ -799,6 +851,42 @@ impl Apk {
             notes: Arc::new([]),
             version: self.version.clone(),
         })
+    }
+
+    /// Where the bytes of `entry` lie in [`Apk::archive_data`] when it is
+    /// stored: `archive_data(entry)[range]` is what [`Apk::read_entry`]
+    /// borrows. `None` for a compressed entry, which has to be inflated.
+    /// With the range, a caller holding a clone of this [`Apk`] can keep a
+    /// zero-copy view of the entry for as long as it likes (or see
+    /// [`Apk::read_entry_owned`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::read_entry`] for a stored entry: [`ApkError::BadLocalHeader`],
+    /// [`ApkError::LimitExceeded`] and [`ApkError::SizeMismatch`].
+    pub fn entry_range(&self, entry: &Entry) -> Result<Option<std::ops::Range<usize>>> {
+        if entry.method != METHOD_STORED {
+            return Ok(None);
+        }
+        let range = self.payload_range(entry)?;
+        self.check_declared_size(entry)?;
+        self.check_stored_size(entry, range.len())?;
+        Ok(Some(range))
+    }
+
+    /// Extract `entry` into a handle that keeps its bytes alive on its own:
+    /// a stored entry stays in the mapping (the handle shares it, like a
+    /// clone of this [`Apk`]), a Deflate entry is inflated into the handle.
+    ///
+    /// # Errors
+    ///
+    /// As [`Apk::read_entry`].
+    pub fn read_entry_owned(&self, entry: &Entry) -> Result<EntryBytes> {
+        let data = match self.entry_range(entry)? {
+            Some(range) => Data::Window { outer: Arc::clone(&self.archives), archive: entry.archive, range },
+            None => Data::Owned(self.read_entry(entry)?.into_owned()),
+        };
+        Ok(EntryBytes(data))
     }
 
     /// Extract `entry`: stored entries are borrowed straight from the mapping,
@@ -830,13 +918,7 @@ impl Apk {
         let bound = self.check_declared_size(entry)?;
         let out = match entry.method {
             METHOD_STORED => {
-                if entry.uncomp_size != 0 && payload.len() as u64 != entry.uncomp_size {
-                    return Err(ApkError::SizeMismatch {
-                        name: entry.name.clone(),
-                        expected: entry.uncomp_size as usize,
-                        actual: payload.len(),
-                    });
-                }
+                self.check_stored_size(entry, payload.len())?;
                 return Ok(Cow::Borrowed(payload));
             }
             #[cfg(feature = "libdeflate")]
@@ -882,6 +964,15 @@ impl Apk {
             return Err(ApkError::SizeMismatch { name: entry.name.clone(), expected: entry.uncomp_size as usize, actual: out.len() });
         }
         Ok(Cow::Owned(out))
+    }
+
+    /// A stored entry's payload must be as long as it declares (when it
+    /// declares a size at all).
+    fn check_stored_size(&self, entry: &Entry, len: usize) -> Result<()> {
+        if entry.uncomp_size != 0 && len as u64 != entry.uncomp_size {
+            return Err(ApkError::SizeMismatch { name: entry.name.clone(), expected: entry.uncomp_size as usize, actual: len });
+        }
+        Ok(())
     }
 
     /// Reject Deflate entries whose declared uncompressed size cannot come out
@@ -933,6 +1024,39 @@ impl Apk {
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         let entry = self.find_entry(name)?.ok_or_else(|| ApkError::NotFound(name.to_string()))?;
         Ok(self.read_entry(&entry)?.into_owned())
+    }
+}
+
+/// The bytes of one entry, kept alive on their own ([`Apk::read_entry_owned`]):
+/// a window of the shared mapping for a stored entry, a buffer for an
+/// inflated one. Dereferences to the bytes.
+pub struct EntryBytes(Data);
+
+impl EntryBytes {
+    /// Whether the bytes are read in place from an archive rather than held
+    /// in a buffer of their own.
+    pub fn is_mapped(&self) -> bool {
+        matches!(self.0, Data::Window { .. })
+    }
+}
+
+impl std::ops::Deref for EntryBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for EntryBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for EntryBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntryBytes").field("len", &self.len()).field("mapped", &self.is_mapped()).finish()
     }
 }
 
@@ -1106,6 +1230,95 @@ mod tests {
                 assert!(matches!(apk.read_entry(&truncated), Err(ApkError::BadLocalHeader(_))));
             }
         }
+    }
+
+    #[test]
+    fn entries_outlive_their_apk_in_place_or_inflated() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EntryBytes>();
+        let dex = asc_fixture::make_dex();
+        for deflate in [false, true] {
+            let f = write_temp(&asc_fixture::make_apk(&[("classes.dex", &dex), ("a.txt", b"text")], deflate));
+            let apk = Apk::open(f.path()).unwrap();
+            let entry = apk.find_entry("classes.dex").unwrap().unwrap();
+            let range = apk.entry_range(&entry).unwrap();
+            assert_eq!(range.is_some(), !deflate);
+            if let Some(range) = &range {
+                let Cow::Borrowed(read) = apk.read_entry(&entry).unwrap() else { panic!("a stored entry is borrowed") };
+                assert_eq!(&apk.archive_data(&entry)[range.clone()], read);
+                assert_eq!(apk.archive_data(&entry)[range.clone()].as_ptr(), read.as_ptr());
+            }
+            let owned = apk.read_entry_owned(&entry).unwrap();
+            assert_eq!(owned.is_mapped(), !deflate);
+            if let Some(range) = range {
+                assert_eq!(owned.as_ptr(), apk.archive_data(&entry)[range].as_ptr());
+            }
+            drop(apk);
+            assert_eq!(&*owned, dex.as_slice());
+            assert_eq!(owned.as_ref(), dex.as_slice());
+            assert!(format!("{owned:?}").contains(&format!("len: {}", dex.len())));
+        }
+        // A stored entry is checked like any read.
+        let f = write_temp(&asc_fixture::make_apk(&[("classes.dex", &dex)], false));
+        let apk = Apk::open(f.path()).unwrap();
+        let mut lying = apk.find_entry("classes.dex").unwrap().unwrap();
+        lying.uncomp_size += 1;
+        assert!(matches!(apk.entry_range(&lying), Err(ApkError::SizeMismatch { .. })));
+        assert!(matches!(apk.read_entry_owned(&lying), Err(ApkError::SizeMismatch { .. })));
+        lying.local_header_off += 1;
+        assert!(matches!(apk.entry_range(&lying), Err(ApkError::BadLocalHeader(_))));
+        let small = apk.clone().with_limits(Limits::default().max_entry_bytes(16));
+        let entry = small.find_entry("classes.dex").unwrap().unwrap();
+        assert!(matches!(small.entry_range(&entry), Err(ApkError::LimitExceeded { .. })));
+    }
+
+    #[test]
+    fn all_dex_entries_reach_any_depth() {
+        let dex = asc_fixture::make_dex();
+        let apk_bytes = asc_fixture::make_apk(
+            &[
+                ("classes2.dex", &dex),
+                ("assets/payload.dex", b"x"),
+                ("classes.dex", &dex),
+                ("lib/x/classes.dex", &dex),
+                ("assets/notdex.dex.bak", b"y"),
+                ("AndroidManifest.xml", b"xml"),
+            ],
+            true,
+        );
+        let f = write_temp(&apk_bytes);
+        let apk = Apk::open(f.path()).unwrap();
+        let names = |entries: Vec<Entry>| entries.into_iter().map(|e| e.name).collect::<Vec<_>>();
+        assert_eq!(names(apk.all_dex_entries().unwrap()), ["classes2.dex", "assets/payload.dex", "classes.dex", "lib/x/classes.dex"]);
+        // The root enumeration is unchanged.
+        assert_eq!(names(apk.dex_entries_in_order().unwrap()), ["classes2.dex", "classes.dex"]);
+        let payload = apk.all_dex_entries().unwrap().remove(1);
+        assert_eq!(apk.read_entry(&payload).unwrap().as_ref(), b"x");
+        // A bare DEX file is its one entry.
+        let f = write_temp(&dex);
+        assert_eq!(names(Apk::open(f.path()).unwrap().all_dex_entries().unwrap()), ["classes.dex"]);
+    }
+
+    #[test]
+    fn multidex_entries_follow_the_runtime_load_order() {
+        let dex = asc_fixture::make_dex();
+        let apk_bytes = asc_fixture::make_apk(
+            &[
+                ("classes10.dex", &dex),
+                ("extra.dex", &dex),
+                ("classes2.dex", &dex),
+                ("classes.dex", &dex),
+                ("classes02.dex", &dex),
+                ("classes3.dex", &dex),
+                ("assets/classes4.dex", &dex),
+            ],
+            true,
+        );
+        let f = write_temp(&apk_bytes);
+        let apk = Apk::open(f.path()).unwrap();
+        let names: Vec<String> = apk.dex_entries_multidex().unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["classes.dex", "classes2.dex", "classes3.dex", "classes10.dex", "extra.dex", "classes02.dex"]);
+        assert_eq!(multidex_rank("services.jar/classes2.dex"), 2);
     }
 
     /// Deflate stream of `n` zero bytes (compresses about 1000:1).

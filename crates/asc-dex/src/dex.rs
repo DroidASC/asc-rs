@@ -4,6 +4,7 @@ use crate::code::CodeItem;
 use crate::header::{Header, Section};
 use crate::map::{MapItem, MapList};
 use crate::{DexError, Result, leb128, map_type, mutf8, u16_at, u32_at};
+use std::borrow::Cow;
 use std::ops::Range;
 
 /// `proto_id_item`.
@@ -95,12 +96,33 @@ pub struct StringItem<'a> {
     pub bytes: &'a [u8],
 }
 
-/// Lazily parsed DEX file over a borrowed buffer.
+impl StringItem<'_> {
+    /// The UTF-16 code units of the string, decoded strictly
+    /// ([`mutf8::to_utf16_strict`]) and checked against the declared
+    /// `utf16_size`. The lenient path ([`mutf8::to_utf16`] of
+    /// [`Self::bytes`]) replaces bad bytes and trusts no length.
+    ///
+    /// # Errors
+    ///
+    /// [`DexError::Malformed`] at the item's offset when the payload is not
+    /// valid MUTF-8 or its length is not `utf16_size`.
+    pub fn to_utf16_strict(&self) -> Result<Vec<u16>> {
+        let malformed = |reason| DexError::Malformed { what: "string_data_item", offset: self.data_off as usize, reason };
+        let units = mutf8::to_utf16_strict(self.bytes).map_err(|e| malformed(e.reason))?;
+        if u32::try_from(units.len()).ok() != Some(self.utf16_len) {
+            return Err(malformed("utf16_size does not match the decoded length"));
+        }
+        Ok(units)
+    }
+}
+
+/// Lazily parsed DEX file over a borrowed buffer. To keep one around with
+/// its bytes, see [`DexFile`].
 #[derive(Debug, Clone)]
 pub struct Dex<'a> {
     buf: &'a [u8],
     header: Header,
-    name: String,
+    name: Cow<'a, str>,
     /// Offset of the last NUL byte: no `string_data_item` starting after it
     /// can be terminated.
     last_nul: Option<usize>,
@@ -125,7 +147,7 @@ impl<'a> Dex<'a> {
         let header = Header::parse(buf)?;
         // A DEX ends with its map list (or zero padding): this stops at once.
         let last_nul = memchr::memrchr(0, buf);
-        Ok(Dex { buf, header, name: name.into(), last_nul })
+        Ok(Dex { buf, header, name: Cow::Owned(name.into()), last_nul })
     }
 
     /// The whole underlying buffer (for a 041 container, all of it).
@@ -253,6 +275,33 @@ impl<'a> Dex<'a> {
     #[inline]
     pub fn string(&self, idx: u32) -> Result<String> {
         Ok(mutf8::decode(self.string_bytes(idx)?))
+    }
+
+    /// String `idx` as UTF-16 code units, decoded strictly (see
+    /// [`StringItem::to_utf16_strict`]); [`Self::string`] is the lenient
+    /// counterpart.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::string_item`] and [`StringItem::to_utf16_strict`].
+    pub fn string_utf16_strict(&self, idx: u32) -> Result<Vec<u16>> {
+        self.string_item(idx)?.to_utf16_strict()
+    }
+
+    /// Decoded string `idx`, strictly: as [`Self::string_utf16_strict`],
+    /// and the code units must form a Rust string (no unpaired surrogate).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::string_utf16_strict`], and [`DexError::Malformed`] for an
+    /// unpaired surrogate.
+    pub fn string_strict(&self, idx: u32) -> Result<String> {
+        let item = self.string_item(idx)?;
+        String::from_utf16(&item.to_utf16_strict()?).map_err(|_| DexError::Malformed {
+            what: "string_data_item",
+            offset: item.data_off as usize,
+            reason: "unpaired surrogate",
+        })
     }
 
     /// Binary search the sorted string table for `s` (MUTF-8 bytes, compared
@@ -407,6 +456,55 @@ impl<'a> Dex<'a> {
         self.check_idx("method", idx, self.header.method_ids.size)?;
         let off = self.header.method_ids.off as usize + (idx as usize) * 8;
         Ok(MethodId { class_idx: u16_at(self.buf, off)?, proto_idx: u16_at(self.buf, off + 2)?, name_idx: u32_at(self.buf, off + 4)? })
+    }
+
+    /// `(params)ret`, the descriptor of proto `idx` (`(ILjava/lang/String;)V`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::proto_id`], [`Self::type_list`] and [`Self::type_descriptor`].
+    pub fn proto_descriptor(&self, idx: u32) -> Result<String> {
+        let proto = self.proto_id(idx)?;
+        let mut s = String::from("(");
+        for param in self.type_list(proto.parameters_off)? {
+            s.push_str(&self.type_descriptor(u32::from(param))?);
+        }
+        s.push(')');
+        s.push_str(&self.type_descriptor(proto.return_type_idx)?);
+        Ok(s)
+    }
+
+    /// `Lpkg/Cls;->name(params)ret`, the full reference of method `idx`
+    /// as smali writes it ([`Self::method_display`] leaves out the proto).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::method_id`], [`Self::type_descriptor`], [`Self::string`]
+    /// and [`Self::proto_descriptor`].
+    pub fn method_signature(&self, idx: u32) -> Result<String> {
+        let m = self.method_id(idx)?;
+        Ok(format!(
+            "{}->{}{}",
+            self.type_descriptor(u32::from(m.class_idx))?,
+            self.string(m.name_idx)?,
+            self.proto_descriptor(u32::from(m.proto_idx))?
+        ))
+    }
+
+    /// `Lpkg/Cls;->name:type`, the full reference of field `idx` as smali
+    /// writes it ([`Self::field_display`] leaves out the type).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::field_id`], [`Self::type_descriptor`] and [`Self::string`].
+    pub fn field_signature(&self, idx: u32) -> Result<String> {
+        let f = self.field_id(idx)?;
+        Ok(format!(
+            "{}->{}:{}",
+            self.type_descriptor(u32::from(f.class_idx))?,
+            self.string(f.name_idx)?,
+            self.type_descriptor(u32::from(f.type_idx))?
+        ))
     }
 
     /// `Lpkg/Cls;->name` for a method index.
@@ -660,6 +758,72 @@ impl<'a> Dex<'a> {
     }
 }
 
+/// A DEX file that holds its bytes (a `Vec<u8>`, an `Arc<[u8]>`, a mapped
+/// entry, ...) and its parsed header, handing out [`Dex`] views on demand.
+///
+/// [`Dex`] borrows its buffer, so a long-lived owner would otherwise call
+/// [`Dex::parse`] on every access, reading the header and scanning for the
+/// last NUL each time. [`DexFile::dex`] reuses both: a view costs a copy of
+/// the header and nothing else.
+#[derive(Debug, Clone)]
+pub struct DexFile<B> {
+    bytes: B,
+    header: Header,
+    name: String,
+    /// As the field of [`Dex`], computed once.
+    last_nul: Option<usize>,
+}
+
+impl<B: AsRef<[u8]>> DexFile<B> {
+    /// Parse the header of `bytes` and keep both. Nothing else is read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Header::parse`].
+    pub fn new(bytes: B) -> Result<Self> {
+        Self::with_name(bytes, "")
+    }
+
+    /// As [`Self::new`], remembering a display name (see [`Dex::with_name`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Header::parse`].
+    pub fn with_name(bytes: B, name: impl Into<String>) -> Result<Self> {
+        let Dex { header, last_nul, .. } = Dex::parse(bytes.as_ref())?;
+        Ok(DexFile { bytes, header, name: name.into(), last_nul })
+    }
+
+    /// A view of the file, without parsing anything again.
+    #[inline]
+    pub fn dex(&self) -> Dex<'_> {
+        Dex { buf: self.bytes.as_ref(), header: self.header.clone(), name: Cow::Borrowed(&self.name), last_nul: self.last_nul }
+    }
+
+    /// The parsed `header_item`.
+    #[inline]
+    pub fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// Display name given to [`Self::with_name`], empty for [`Self::new`].
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The bytes of the file.
+    #[inline]
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+
+    /// The byte container, giving up the parsed header.
+    pub fn into_inner(self) -> B {
+        self.bytes
+    }
+}
+
 /// The first index below `end` from which `pred` is false up to `end`,
 /// `pred` being true on a prefix of `0..end` and false on the rest. Gallops
 /// back from `end` and bisects the bracket found, so it costs a logarithm of
@@ -708,6 +872,83 @@ mod tests {
     use crate::encoded::EncodedValue;
     use crate::{MethodHandleKind, map_type};
     use asc_fixture::make_dex;
+
+    #[test]
+    fn dex_file_hands_out_views_without_reparsing() {
+        let data = make_dex();
+        let file = DexFile::with_name(std::sync::Arc::<[u8]>::from(data.clone()), "classes.dex").unwrap();
+        let dex = file.dex();
+        let parsed = Dex::parse(&data).unwrap();
+        assert_eq!(dex.header(), parsed.header());
+        assert_eq!(file.header(), parsed.header());
+        assert_eq!((dex.name(), file.name()), ("classes.dex", "classes.dex"));
+        assert_eq!(dex.last_nul, parsed.last_nul);
+        assert_eq!(dex.string(5).unwrap(), "token");
+        assert_eq!(dex.buf().as_ptr(), file.bytes().as_ptr());
+        assert_eq!(&*file.clone().into_inner(), &data[..]);
+        assert_eq!(DexFile::new(&data[..]).unwrap().name(), "");
+        assert_eq!(DexFile::new(vec![0u8; 4]).unwrap_err(), DexError::TooSmall(4));
+    }
+
+    #[test]
+    fn strict_strings_check_mutf8_and_utf16_size() {
+        let data = make_dex();
+        let dex = Dex::parse(&data).unwrap();
+        assert_eq!(dex.string_strict(5).unwrap(), "token");
+        assert_eq!(dex.string_utf16_strict(5).unwrap(), "token".encode_utf16().collect::<Vec<_>>());
+        let off = dex.string_data_off(5).unwrap() as usize;
+        let malformed = |reason| DexError::Malformed { what: "string_data_item", offset: off, reason };
+
+        // A wrong utf16_size: tolerated leniently, rejected strictly.
+        let mut short = data.clone();
+        short[off] = 4;
+        let dex = Dex::parse(&short).unwrap();
+        assert_eq!(dex.string(5).unwrap(), "token");
+        assert_eq!(dex.string_strict(5), Err(malformed("utf16_size does not match the decoded length")));
+
+        // A bad byte: replaced leniently, rejected strictly.
+        let mut bad = data.clone();
+        bad[off + 2] = 0x80;
+        let dex = Dex::parse(&bad).unwrap();
+        assert_eq!(dex.string(5).unwrap(), "t\u{FFFD}ken");
+        assert_eq!(dex.string_utf16_strict(5), Err(malformed("continuation byte without a lead byte")));
+
+        // An unpaired surrogate: valid MUTF-8, but not a Rust string.
+        let mut lone = data;
+        lone[off + 1..off + 4].copy_from_slice(&[0xED, 0xA0, 0x80]);
+        lone[off] = 3;
+        let dex = Dex::parse(&lone).unwrap();
+        assert_eq!(dex.string_utf16_strict(5).unwrap(), [0xD800, u16::from(b'e'), u16::from(b'n')]);
+        assert_eq!(dex.string_strict(5), Err(malformed("unpaired surrogate")));
+        assert_eq!(
+            dex.string_strict(u32::MAX),
+            Err(DexError::IndexOutOfRange { what: "string", index: u32::MAX, size: dex.string_count() })
+        );
+    }
+
+    #[test]
+    fn member_references_format_as_smali_writes_them() {
+        let mut builder = asc_fixture::DexBuilder::new();
+        builder.method("Lpkg/Cls;", "run", "V", &["I", "[Ljava/lang/String;"]).method("Lpkg/Cls;", "get", "J", &[]);
+        builder.field("Lpkg/Cls;", "count", "I");
+        let ids = builder.resolve();
+        let data = ids.finish();
+        let dex = Dex::parse(&data).unwrap();
+        let run = ids.method("Lpkg/Cls;", "run", "V", &["I", "[Ljava/lang/String;"]);
+        let get = ids.method("Lpkg/Cls;", "get", "J", &[]);
+        let count = ids.field("Lpkg/Cls;", "count", "I");
+        assert_eq!(dex.method_signature(run).unwrap(), "Lpkg/Cls;->run(I[Ljava/lang/String;)V");
+        assert_eq!(dex.method_signature(get).unwrap(), "Lpkg/Cls;->get()J");
+        assert_eq!(dex.method_display(run).unwrap(), "Lpkg/Cls;->run");
+        assert_eq!(dex.field_signature(count).unwrap(), "Lpkg/Cls;->count:I");
+        assert_eq!(dex.field_display(count).unwrap(), "Lpkg/Cls;->count");
+        let proto = u32::from(ids.proto("V", &["I", "[Ljava/lang/String;"]));
+        assert_eq!(dex.proto_descriptor(proto).unwrap(), "(I[Ljava/lang/String;)V");
+        let oob = |what, size| DexError::IndexOutOfRange { what, index: 9, size };
+        assert_eq!(dex.method_signature(9), Err(oob("method", dex.method_count())));
+        assert_eq!(dex.field_signature(9), Err(oob("field", dex.field_count())));
+        assert_eq!(dex.proto_descriptor(9), Err(oob("proto", dex.proto_count())));
+    }
 
     #[test]
     fn string_items_find_their_terminator() {

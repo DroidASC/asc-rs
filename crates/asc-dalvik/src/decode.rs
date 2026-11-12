@@ -199,7 +199,9 @@ pub struct Instruction {
     pub pc: usize,
     /// Opcode row; payloads report the `nop` row.
     pub opcode: &'static Opcode,
-    /// `A` operand as decoded by [`vreg_a`] (0 for payloads).
+    /// `A` operand as decoded by [`vreg_a`] (0 for payloads). For
+    /// `35c`/`45cc` this is the raw argument count, up to 15 even though
+    /// only five registers can be encoded (see [`Self::regs_truncated`]).
     pub a: i64,
     /// `B` operand as decoded by [`vreg_b`] (0 when absent).
     pub b: i64,
@@ -207,7 +209,9 @@ pub struct Instruction {
     pub c: i64,
     /// `H` operand (`proto@HHHH` of `invoke-polymorphic`; 0 otherwise).
     pub h: u16,
-    /// Argument registers of `35c`/`45cc` formats.
+    /// Argument registers: the first `min(A, 5)` of `vC, vD, vE, vF, vG`
+    /// for `35c`/`45cc`, `vCCCC ..` for the `A` registers of `3rc`/`4rcc`,
+    /// empty for other formats.
     pub regs: Vec<u16>,
     /// Length in code units (payloads report their full size).
     pub units: usize,
@@ -277,6 +281,15 @@ impl Instruction {
             _ => Vec::new(),
         };
         Some(Instruction { pc, opcode: op, a, b, c, h, regs, units: op.len as usize, payload: None })
+    }
+
+    /// Whether [`Self::regs`] holds fewer registers than the instruction
+    /// claims: a `35c`/`45cc` whose `A` exceeds the five it can encode.
+    /// ART's verifier rejects such code; the decoder keeps going with the
+    /// five registers so a listing does not stop there, and [`Self::a`]
+    /// keeps the raw count for callers that want to report or reject it.
+    pub fn regs_truncated(&self) -> bool {
+        matches!(self.opcode.format, Format::K35c | Format::K45cc) && self.a > 5
     }
 
     #[inline]
@@ -429,6 +442,23 @@ mod tests {
         // 35c with all five registers.
         let i = Instruction::decode(&[0x6e, 0x54, 0x05, 0x00, 0x10, 0x32], 0).unwrap();
         assert_eq!(i.regs, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn arg_counts_past_five_keep_the_raw_count() {
+        // invoke-virtual with A = 7: five registers can be encoded.
+        let i = Instruction::decode(&[0x6e, 0x74, 0x05, 0x00, 0x10, 0x32], 0).unwrap();
+        assert_eq!(i.a, 7);
+        assert_eq!(i.regs, vec![0, 1, 2, 3, 4]);
+        assert!(i.regs_truncated());
+        // A = 15, the largest the nibble holds; invoke-polymorphic alike.
+        let i = Instruction::decode(&[0xfa, 0xf0, 0x05, 0x00, 0x10, 0x32, 0x00, 0x00], 0).unwrap();
+        assert_eq!((i.a, i.regs.len()), (15, 5));
+        assert!(i.regs_truncated());
+        // Well-formed counts, and range forms, are never truncated.
+        assert!(!Instruction::decode(&[0x6e, 0x54, 0x05, 0x00, 0x10, 0x32], 0).unwrap().regs_truncated());
+        assert!(!Instruction::decode(&[0x74, 0xff, 0x02, 0x01, 0x00, 0x01], 0).unwrap().regs_truncated());
+        assert!(!Instruction::decode(&[0x12, 0xf0], 0).unwrap().regs_truncated());
     }
 
     #[test]

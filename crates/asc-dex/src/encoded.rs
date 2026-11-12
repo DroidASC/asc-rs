@@ -185,12 +185,27 @@ impl EncodedValue {
 /// overflowing the stack (each level recurses through `parse_value`).
 pub const MAX_NESTING: usize = 64;
 
+/// Most value bytes a numeric value type may have, `None` for a type that
+/// is not numeric. Unknown types are kept as [`EncodedValue::Primitive`]
+/// with however many bytes they declare.
+fn primitive_width(kind: u8) -> Option<usize> {
+    match kind {
+        VALUE_BYTE => Some(1),
+        VALUE_SHORT | VALUE_CHAR => Some(2),
+        VALUE_INT | VALUE_FLOAT => Some(4),
+        VALUE_LONG | VALUE_DOUBLE => Some(8),
+        _ => None,
+    }
+}
+
 /// Parse one `encoded_value` at `pos`. Returns `(value, bytes consumed)`.
 ///
 /// # Errors
 ///
-/// `Truncated` when the value runs past the end of `buf`, `Malformed` when
-/// arrays or annotations nest deeper than [`MAX_NESTING`].
+/// `Truncated` when the value runs past the end of `buf`. `Malformed` when
+/// arrays or annotations nest deeper than [`MAX_NESTING`], when an index
+/// value has more than four bytes, or a numeric value more bytes than its
+/// type holds (a byte one, a short or char two, an int or float four).
 pub fn parse_value(buf: &[u8], pos: usize) -> Result<(EncodedValue, usize)> {
     parse_value_at(buf, pos, 0)
 }
@@ -202,11 +217,11 @@ fn parse_value_at(buf: &[u8], pos: usize, depth: usize) -> Result<(EncodedValue,
     let mut p = pos + 1;
     let read_idx = |p: &mut usize| -> Result<u32> {
         let size = arg + 1;
-        let bytes = buf.get(*p..*p + size).ok_or(DexError::Truncated { what: "encoded_value.idx", offset: *p })?;
-        let mut v = 0u32;
-        for (i, &b) in bytes.iter().enumerate().take(4) {
-            v |= (b as u32) << (8 * i);
+        if size > 4 {
+            return Err(DexError::Malformed { what: "encoded_value", offset: pos, reason: "index wider than four bytes" });
         }
+        let bytes = buf.get(*p..*p + size).ok_or(DexError::Truncated { what: "encoded_value.idx", offset: *p })?;
+        let v = bytes.iter().rev().fold(0u32, |v, &b| (v << 8) | u32::from(b));
         *p += size;
         Ok(v)
     };
@@ -232,6 +247,9 @@ fn parse_value_at(buf: &[u8], pos: usize, depth: usize) -> Result<(EncodedValue,
         VALUE_BOOLEAN => EncodedValue::Boolean(arg != 0),
         _ => {
             let size = arg + 1;
+            if primitive_width(kind).is_some_and(|width| size > width) {
+                return Err(DexError::Malformed { what: "encoded_value", offset: pos, reason: "more value bytes than the type holds" });
+            }
             let raw = buf.get(p..p + size).ok_or(DexError::Truncated { what: "encoded_value.primitive", offset: p })?.to_vec();
             p += size;
             EncodedValue::Primitive { kind, raw }
@@ -474,6 +492,42 @@ mod tests {
         let mut buf = [0x1c, 0x01].repeat(MAX_NESTING - 1);
         buf.push(0x1e);
         assert!(parse_value(&buf, 0).is_ok());
+    }
+
+    #[test]
+    fn value_widths_are_checked_against_the_type() {
+        let malformed = |reason| DexError::Malformed { what: "encoded_value", offset: 0, reason };
+        let wide_index = malformed("index wider than four bytes");
+        let too_long = malformed("more value bytes than the type holds");
+        // Index values: up to four bytes, little-endian.
+        assert_eq!(parse_value(&[(3 << 5) | VALUE_STRING, 0x78, 0x56, 0x34, 0x12], 0), Ok((EncodedValue::String(0x1234_5678), 5)));
+        for kind in [VALUE_METHOD_TYPE, VALUE_METHOD_HANDLE, VALUE_STRING, VALUE_TYPE, VALUE_FIELD, VALUE_METHOD, VALUE_ENUM] {
+            // A fifth byte used to be dropped silently, even when non-zero.
+            assert_eq!(parse_value(&[(4 << 5) | kind, 1, 0, 0, 0, 1], 0), Err(wide_index.clone()), "{kind:#x}");
+            assert_eq!(parse_value(&[(7 << 5) | kind], 0), Err(wide_index.clone()), "{kind:#x}");
+        }
+        // Numeric values: at most the width of their type.
+        for (kind, width) in
+            [(VALUE_BYTE, 1), (VALUE_SHORT, 2), (VALUE_CHAR, 2), (VALUE_INT, 4), (VALUE_FLOAT, 4), (VALUE_LONG, 8), (VALUE_DOUBLE, 8)]
+        {
+            let value = |size: usize| [&[((size as u8 - 1) << 5) | kind][..], &vec![0x7f; size]].concat();
+            let (parsed, n) = parse_value(&value(width), 0).unwrap();
+            assert_eq!((parsed, n), (EncodedValue::Primitive { kind, raw: vec![0x7f; width] }, width + 1));
+            if width < 8 {
+                assert_eq!(parse_value(&value(width + 1), 0), Err(too_long.clone()), "{kind:#x}");
+            }
+        }
+        // Nested values report their own offset.
+        let nested = [VALUE_ARRAY, 1, (4 << 5) | VALUE_TYPE, 0, 0, 0, 0, 0];
+        assert_eq!(
+            parse_value(&nested, 0),
+            Err(DexError::Malformed { what: "encoded_value", offset: 2, reason: "index wider than four bytes" })
+        );
+        // A type the format does not define keeps its declared bytes.
+        assert_eq!(
+            parse_value(&[(5 << 5) | 0x05, 1, 2, 3, 4, 5, 6], 0),
+            Ok((EncodedValue::Primitive { kind: 0x05, raw: vec![1, 2, 3, 4, 5, 6] }, 7))
+        );
     }
 
     #[test]

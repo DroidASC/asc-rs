@@ -23,7 +23,7 @@ pub mod quick;
 mod dex;
 
 pub use call_site::{CallSite, MethodHandle, MethodHandleKind};
-pub use dex::{ClassDef, Dex, FieldId, MethodId, ProtoId, StringItem};
+pub use dex::{ClassDef, Dex, DexFile, FieldId, MethodId, ProtoId, StringItem};
 pub use error::{DexError, Result};
 pub use header::{Header, Section};
 pub use map::{MapItem, MapList};
