@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "asc-abc"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-fixture",
  "memchr",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "asc-apk"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-fixture",
  "flate2",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "asc-ark-engine"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-abc",
  "asc-apk",
@@ -120,11 +120,11 @@ dependencies = [
 
 [[package]]
 name = "asc-arkisa"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "asc-arsc"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-axml",
  "asc-fixture",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "asc-axml"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-fixture",
  "thiserror",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "asc-cache"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-apk",
  "crc32fast",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "asc-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-ark-engine",
  "asc-decompile",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "asc-dalvik"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-dex",
  "asc-fixture",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "asc-decompile"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-decompile-protocol",
  "libc",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "asc-decompile-protocol"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "asc-dex"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-fixture",
  "memchr",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "asc-engine"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-apk",
  "asc-arsc",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "asc-findrefs"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-dalvik",
  "asc-dex",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "asc-fixture"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-abc",
  "asc-arkisa",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "asc-frontend"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-ark-engine",
  "asc-decompile",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "asc-hap"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-fixture",
  "asc-query",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "asc-mcp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-ark-engine",
  "asc-engine",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "asc-pasm"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-abc",
  "asc-arkisa",
@@ -313,14 +313,14 @@ dependencies = [
 
 [[package]]
 name = "asc-query"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "asc-rebuild"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-dalvik",
  "asc-dex",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "asc-smali"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "asc-dalvik",
  "asc-dex",
