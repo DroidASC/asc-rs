@@ -109,6 +109,8 @@ impl<'a> Io<'a> {
     }
 
     /// Resolve relative paths against `cwd` (a client's directory).
+    // Only the daemon (Unix) and the tests serve another process's directory.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn with_cwd(mut self, cwd: &'a Path) -> Io<'a> {
         self.cwd = Some(cwd);
         self

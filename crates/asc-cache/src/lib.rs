@@ -57,7 +57,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// A memory budget charges file-backed bytes (mapped from the disk cache,
 /// the APK or a HarmonyOS package) at this fraction of their size, heap bytes in full.
@@ -1340,7 +1340,7 @@ fn boot_time() -> Option<SystemTime> {
 fn read_boot_time() -> Option<SystemTime> {
     let stat = fs::read_to_string("/proc/stat").ok()?;
     let secs = stat.lines().find_map(|l| l.strip_prefix("btime "))?.trim().parse().ok()?;
-    Some(UNIX_EPOCH + Duration::from_secs(secs))
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
 #[cfg(target_vendor = "apple")]
@@ -1353,7 +1353,11 @@ fn read_boot_time() -> Option<SystemTime> {
     if rc != 0 || len != std::mem::size_of::<libc::timeval>() {
         return None;
     }
-    Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(tv.tv_sec).ok()?) + Duration::from_micros(u64::try_from(tv.tv_usec).ok()?))
+    Some(
+        SystemTime::UNIX_EPOCH
+            + Duration::from_secs(u64::try_from(tv.tv_sec).ok()?)
+            + Duration::from_micros(u64::try_from(tv.tv_usec).ok()?),
+    )
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
