@@ -60,7 +60,15 @@ parsed parts to its own query type (`asc_engine::condition`,
 One parser (`asc_engine::names`) reads every way of writing a target, for the CLI, MCP and
 rule sets alike: `Lc;->m(sig)`, `c.B->m`, `c.B#m`, `c.B.m`, `B.m`. A signature after the
 name (`m(I)V`, `m(I)`, `m(int, String)`, `f:I`) selects one overload; the locators check it
-against proto and type ids, so other overloads are never scanned. MCP additionally repairs
+against proto and type ids, so other overloads are never scanned. Names copied from
+decompiled Java / Kotlin source (`Outer.Inner`, `AnonymousN`, `Cdo`, `a$2`, `` `in` ``,
+a constructor by class name, `m(params)` without return type) are read back into DEX names
+by `names::denormalize_*` — only as a fallback: `get_class_dex` tries the candidates (and
+the `InnerClass` name of the outer class's nested classes) after the exact lookup misses,
+`find_refs` runs `denormalize_query` as a second search only when the query as written
+found no row (holding back the empty batches until then, so a query that matches still
+streams), and `callgraph` / `hierarchy` try them when the root or method is not found.
+A note names what was used. MCP additionally repairs
 aliased argument keys (`asc-mcp/src/lenient.rs`) and reads enumerated values leniently
 (case, plurals, synonyms), so schemas describe values instead of enforcing `enum`s. Errors
 and zero-result replies say what to try next (`asc-engine/src/hints.rs`), computed only on

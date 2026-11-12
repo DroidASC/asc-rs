@@ -13,7 +13,7 @@
 //! overrides of each callee in its subclasses (marked `override of`).
 
 use crate::hierarchy::{ClassGraph, Lineage};
-use crate::{DexView, Engine, EngineError, NOT_CANCELLED, Result, cancelled};
+use crate::{DexView, Engine, EngineError, NOT_CANCELLED, Result, cancelled, names};
 use asc_dex::Dex;
 use asc_findrefs::{FindRefs, Query};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -272,7 +272,7 @@ fn method_ids(dex: &Dex<'_>, class: &str, name: &str, proto: Option<&str>) -> Re
         if ((id.class_idx as u32), id.name_idx) != target {
             break;
         }
-        if proto.is_none_or(|p| asc_smali::proto_descriptor(dex, id.proto_idx as u32).is_ok_and(|d| d == p)) {
+        if proto.is_none_or(|p| asc_smali::proto_descriptor(dex, id.proto_idx as u32).is_ok_and(|d| names::proto_matches(&d, p))) {
             out.push(i);
         }
     }
@@ -332,7 +332,7 @@ impl Engine {
             return engine.call_graph_cancellable(q, cancel);
         }
         let matching = if conditions.is_empty() { None } else { Some(self.matching_methods(&conditions, cancel)?) };
-        let notes = matching.as_ref().map(|m| m.notes.clone()).unwrap_or_default();
+        let mut notes = matching.as_ref().map(|m| m.notes.clone()).unwrap_or_default();
         let mut sets = matching.map(|m| m.sets).unwrap_or_default().into_iter();
         let matched_roots = matching_roots.and_then(|_| sets.next());
         let from = q.from.as_ref().and_then(|_| sets.next());
@@ -347,7 +347,7 @@ impl Engine {
         let graph = if q.virtual_calls { Some(self.class_graph(&views, &mut errors, cancel).map_err(|e| stop(&views, e))?) } else { None };
         let load_us = t0.elapsed().as_micros();
         let mut roots = match (&q.roots, matched_roots) {
-            (CallRoots::Method { class, method }, _) => self.method_roots(&views, class, method)?,
+            (CallRoots::Method { class, method }, _) => self.method_roots(&views, class, method, &mut notes)?,
             (CallRoots::Matching(_), Some(set)) if !set.is_empty() => set,
             (CallRoots::Matching(_), _) => return Err(EngineError::Query("no method's code matches the root condition".into())),
         };
@@ -490,27 +490,56 @@ impl Engine {
 
     /// Every overload of `class`'s `method` (or that exact signature) some
     /// DEX knows; an unknown method is an error.
-    fn method_roots(&self, views: &[DexView], class: &str, method: &str) -> Result<BTreeSet<String>> {
-        let (name, proto) = match method.find('(') {
-            Some(p) => {
-                let sig = asc_smali::normalize_method_signature(method)?;
-                let p2 = sig.find('(').unwrap_or(p);
-                (sig[..p2].to_string(), Some(sig[p2..].to_string()))
+    ///
+    /// A signature may leave out the return type (`run(int)`). When nothing
+    /// matches as written, the class and method are also read as decompiled
+    /// Java / Kotlin source spells them (`com.a.Outer.Inner`, `Cdo`, the
+    /// class name for a constructor), the first reading that matches
+    /// winning; `notes` then says so.
+    fn method_roots(&self, views: &[DexView], class: &str, method: &str, notes: &mut Vec<String>) -> Result<BTreeSet<String>> {
+        let split = |spec: &str| -> Result<(String, Option<String>)> {
+            let Some(p) = spec.find('(') else { return Ok((spec.to_string(), None)) };
+            match asc_smali::normalize_method_signature(spec) {
+                Ok(sig) => {
+                    let p2 = sig.find('(').unwrap_or(p);
+                    Ok((sig[..p2].to_string(), Some(sig[p2..].to_string())))
+                }
+                // `run(int)`, `entry(com.a.Outer.Inner)`: no return type.
+                Err(e) => names::partial_proto(spec).map(|(n, proto)| (n, Some(proto))).ok_or_else(|| e.into()),
             }
-            None => (method.to_string(), None),
         };
-        let mut roots = BTreeSet::new();
-        for v in views {
-            let dex = Dex::with_name(&v.data, &v.name)?;
-            for m in method_ids(&dex, class, &name, proto.as_deref())? {
-                roots.insert(asc_smali::method_signature(&dex, m)?);
+        let collect = |cls: &str, name: &str, proto: Option<&str>| -> Result<BTreeSet<String>> {
+            let mut roots = BTreeSet::new();
+            for v in views {
+                let dex = Dex::with_name(&v.data, &v.name)?;
+                for m in method_ids(&dex, cls, name, proto)? {
+                    roots.insert(asc_smali::method_signature(&dex, m)?);
+                }
+            }
+            Ok(roots)
+        };
+        let (name, proto) = split(method)?;
+        let roots = collect(class, &name, proto.as_deref())?;
+        if !roots.is_empty() {
+            return Ok(roots);
+        }
+        let classes = std::iter::once(class.to_string()).chain(names::denormalize_class_candidates(class));
+        for cls in classes {
+            let methods = std::iter::once(method.to_string()).chain(names::denormalize_method_candidates(Some(&cls), method));
+            for m in methods {
+                if cls == class && m == method {
+                    continue;
+                }
+                let Ok((name, proto)) = split(&m) else { continue };
+                let roots = collect(&cls, &name, proto.as_deref())?;
+                if !roots.is_empty() {
+                    notes.push(format!("{class}->{method} read as the Java/Kotlin spelling of {cls}->{m}"));
+                    return Ok(roots);
+                }
             }
         }
-        if roots.is_empty() {
-            let hint = self.member_not_found_hint(class, Some(&name), true);
-            return Err(EngineError::Query(format!("no method {class}->{method} in this APK{hint}")));
-        }
-        Ok(roots)
+        let hint = self.member_not_found_hint(class, Some(&name), true);
+        Err(EngineError::Query(format!("no method {class}->{method} in this APK{hint}")))
     }
 
     /// Look every frontier method up in every DEX (in parallel) and collect

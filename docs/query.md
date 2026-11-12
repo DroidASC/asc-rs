@@ -20,6 +20,11 @@ classes.dex | Lrs/asc/Store;->update()V | Lrs/asc/Store;->count:I [read], Lrs/as
 - 成员在 CLI、MCP 和规则里写法统一：`Lrs/asc/B;->name(I)V`、`rs.asc.B->name`、`rs.asc.B#name`、`rs.asc.B.name`、
   `B.name`（不带包名的类匹配任意包）。只写名字是 regex / 子串，`=name` 精确匹配。
 - 带签名时只命中该重载：`run(I)V`、只写参数的 `run(I)`、Java 写法 `run(int, String)`，字段 `f:I`。
+- 也可以直接用反编译出的 Java / Kotlin 源码里的写法：类或成员按原样查不到时，`getclass`、`findrefs`、
+  `callgraph`、`hierarchy` 会按源码对 DEX 名字的改写反推再查：点号写的内部类（`rs.asc.Outer.Inner` 即
+  `Lrs/asc/Outer$Inner;`，混淆过的 `Outer$a` 也能按 `InnerClass` 注解里的名字找到）、`AnonymousN`（`$N`）、
+  关键字和数字开头的转义（`Cdo`、`Cif`、`C1a`）、重名后缀（`a$2`）、Kotlin 反引号和 `_dex_<HEX>_`、用类名写的构造函数、
+  不带返回类型的参数列表（`entry(rs.asc.Outer.Inner)`）。会有一行 `#` 说明实际按哪个名字查到；DEX 里原样存在的名字始终优先。
 - 字段引用按 Dalvik opcode 标记 `[read]`（`iget*` / `sget*`）或 `[write]`（`iput*` / `sput*`）。
   `findrefs app.apk field TARGET --access read` 或 `--access write` 只保留对应引用；不指定时两者都打印。
 - 条件写作 `KIND:VALUE`（`string:`、`literal:`、`type:`、`method:`、`field:`），`rules` 中可用 `&` 组合，

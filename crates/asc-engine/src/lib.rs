@@ -140,6 +140,10 @@ pub struct ClassHit {
     pub dex_name: String,
     /// Its inflated bytes.
     pub dex: DexBytes,
+    /// The descriptor of the class found: the one looked up, or the DEX
+    /// class a Java / Kotlin spelling of it stands for (`Lcom/a/Outer/Inner;`
+    /// → `Lcom/a/Outer$Inner;`) when only that exists.
+    pub descriptor: String,
     /// In a program, the DEX files of other archives that define the class
     /// too (the hit is the first archive's, in program order).
     pub also_defined_in: Vec<String>,
@@ -151,6 +155,9 @@ pub struct ClassHit {
 pub struct ClassSource {
     /// The DEX entry that defines the class.
     pub dex_name: String,
+    /// The class rendered ([`ClassHit::descriptor`]: differs from the one
+    /// asked for when that was a Java / Kotlin spelling of it).
+    pub descriptor: String,
     /// The class rendered as smali.
     pub source: String,
     /// The minimal DEX containing the class and its `$` nested classes,
@@ -1477,6 +1484,54 @@ impl Engine {
     ///
     /// As [`Engine::get_class_dex`], plus the cancellation.
     pub fn get_class_dex_cancellable(&self, descriptor: &str, cancel: &AtomicBool) -> Result<Option<ClassHit>> {
+        if let Some(hit) = self.get_class_dex_exact(descriptor, cancel)? {
+            return Ok(Some(hit));
+        }
+        self.get_class_dex_denormalized(descriptor, cancel)
+    }
+
+    /// The class `descriptor` stands for when it is written as decompiled
+    /// Java / Kotlin source spells it (`com.a.Outer.Inner`, `Outer.Anonymous1`,
+    /// `Cdo`, `` `in` ``): the first of [`names::denormalize_class_candidates`]
+    /// the APK defines, else a nested class of the named outer class whose
+    /// `dalvik.annotation.InnerClass` name is the one written (an obfuscated
+    /// `Outer$a` the source shows as `Outer.RealName`). The APK's class list
+    /// is read once (the miss it follows costs as much for its hint).
+    fn get_class_dex_denormalized(&self, descriptor: &str, cancel: &AtomicBool) -> Result<Option<ClassHit>> {
+        let candidates = names::denormalize_class_candidates(descriptor);
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let defined: HashSet<String> =
+            self.scan_classes(None, |_, _| {})?.into_iter().filter_map(|e| e.result.ok()).flatten().flat_map(|d| d.descriptors).collect();
+        let found = |hit: Option<ClassHit>, real: &str| {
+            hit.map(|mut h| {
+                self.log(format!("[APK] getclass {descriptor} read as {real}"));
+                h.descriptor = real.to_string();
+                h
+            })
+        };
+        if let Some(real) = candidates.iter().find(|c| defined.contains(c.as_str())) {
+            return Ok(found(self.get_class_dex_exact(real, cancel)?, real));
+        }
+        // Several candidates name the same outer class: read each once.
+        let mut outers_seen = HashSet::new();
+        for candidate in std::iter::once(descriptor).chain(candidates.iter().map(String::as_str)) {
+            let Some((outer_stem, inner_name)) = candidate.strip_suffix(';').and_then(|s| s.rsplit_once('$')) else { continue };
+            let outer = format!("{outer_stem};");
+            if !defined.contains(&outer) || !outers_seen.insert(outer.clone()) {
+                continue;
+            }
+            let Some(hit) = self.get_class_dex_exact(&outer, cancel)? else { continue };
+            if let Some(real) = classes::inner_class_named(&hit.dex, &outer, inner_name) {
+                return Ok(found(self.get_class_dex_exact(&real, cancel)?, &real));
+            }
+        }
+        Ok(None)
+    }
+
+    /// [`Engine::get_class_dex_cancellable`] of exactly `descriptor`.
+    fn get_class_dex_exact(&self, descriptor: &str, cancel: &AtomicBool) -> Result<Option<ClassHit>> {
         if cancel.load(Ordering::Relaxed) {
             return Err(cancelled());
         }
@@ -1571,7 +1626,8 @@ impl Engine {
                         }
                         match asc_dex::quick::dex_defines_class(&data, &target) {
                             Ok(true) => {
-                                found = Some(ClassHit { dex_name: name, dex: data, also_defined_in: Vec::new() });
+                                found =
+                                    Some(ClassHit { dex_name: name, dex: data, descriptor: String::new(), also_defined_in: Vec::new() });
                                 break;
                             }
                             Ok(false) => {}
@@ -1639,6 +1695,7 @@ impl Engine {
         let mut hits = hits.into_iter().map(|(_, h)| h);
         match (hits.next(), last_err) {
             (Some(mut h), _) => {
+                h.descriptor = descriptor.to_string();
                 let archive = archive_of(&h.dex_name).map(str::to_string);
                 h.also_defined_in = hits.map(|o| o.dex_name).filter(|n| archive_of(n).map(str::to_string) != archive).collect();
                 Ok(Some(h))
@@ -1704,6 +1761,7 @@ impl Engine {
             .get_class_dex_cancellable(descriptor, cancel)?
             .ok_or_else(|| EngineError::ClassNotFound { class: descriptor.to_string(), hint: self.class_not_found_hint(descriptor) })?;
         let scan_us = t0.elapsed().as_micros();
+        let descriptor = hit.descriptor.as_str();
         let (rebuilt, source, warning) = match decompile_dex_class_method(&hit.dex, descriptor, opts, method) {
             Ok((r, s)) => {
                 let warning = (!r.dropped.is_empty()).then(|| {
@@ -1738,11 +1796,24 @@ impl Engine {
                     t.total_us()
                 ));
         }
-        Ok(ClassSource { dex_name: hit.dex_name, source, rebuilt, warning, scan_us, also_defined_in: hit.also_defined_in })
+        Ok(ClassSource {
+            descriptor: descriptor.to_string(),
+            dex_name: hit.dex_name,
+            source,
+            rebuilt,
+            warning,
+            scan_us,
+            also_defined_in: hit.also_defined_in,
+        })
     }
 
     /// Search every DEX entry for references. `sink` receives one batch per
     /// entry in completion order. Returns a summary once all entries finish.
+    ///
+    /// A query that finds no row as written is searched again with its names
+    /// read as decompiled Java / Kotlin source spells DEX names
+    /// ([`names::denormalize_query`]); [`RefSummary::notes`] says so when that
+    /// finds rows.
     ///
     /// # Errors
     ///
@@ -1838,53 +1909,93 @@ impl Engine {
         let resolved = self.resolve(std::slice::from_ref(query), cancel)?;
         summary.notes = resolved.notes.into_iter().next().unwrap_or_default();
         let _query = self.prebuild.query();
-        let compiled = CompiledQuery::new(resolved.queries.as_ref().map_or(query, |r| &r[0]))?;
+        let active = resolved.queries.as_ref().map_or(query, |r| &r[0]);
+        let compiled = CompiledQuery::new(active)?;
         let mut recorder = rendered.as_ref().map(|(d, _, _)| tiers::ResultRecorder::new(tiers::result_limit(d, shape)));
-        let next = AtomicUsize::new(0);
-        let (tx, rx) = mpsc::channel::<RefBatch>();
         let workers = self.threads().min(entries.len()).max(1);
         let cache = self.cache.as_deref();
         let stats = &self.stats;
-        let probe = skip::Probe::new(vec![&compiled]);
-        let (compiled, probe) = (&compiled, &probe);
-        std::thread::scope(|s| {
-            for _ in 0..workers {
-                let tx = tx.clone();
-                let (apk, entries, next, key) = (&apk, &entries, &next, key.as_ref());
-                s.spawn(move || {
-                    loop {
-                        if cancel.load(Ordering::Relaxed) {
-                            break;
+        // One search of every entry, each batch handed to `on_batch` as it completes.
+        let run = |compiled: &CompiledQuery, on_batch: &mut dyn FnMut(RefBatch)| {
+            let next = AtomicUsize::new(0);
+            let (tx, rx) = mpsc::channel::<RefBatch>();
+            let probe = skip::Probe::new(vec![compiled]);
+            let probe = &probe;
+            std::thread::scope(|s| {
+                for _ in 0..workers {
+                    let tx = tx.clone();
+                    let (apk, entries, next, key) = (&apk, &entries, &next, key.as_ref());
+                    s.spawn(move || {
+                        loop {
+                            if cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(entry) = entries.get(i) else { break };
+                            let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe), cancel, cache, stats);
+                            if tx.send(batch).is_err() {
+                                break;
+                            }
                         }
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(entry) = entries.get(i) else { break };
-                        let batch = search_entry(apk, key, entry, compiled, opts, shape, Some(probe), cancel, cache, stats);
-                        if tx.send(batch).is_err() {
-                            break;
-                        }
+                    });
+                }
+                drop(tx);
+                for batch in rx {
+                    if self.debug {
+                        self.log(format!(
+                            "[APK] '{}' {}={} us process={} us results={}{}",
+                            batch.entry_name,
+                            batch.source,
+                            batch.inflate_us,
+                            batch.search_us,
+                            batch.row_count(),
+                            batch.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default()
+                        ));
                     }
-                });
-            }
-            drop(tx);
-            for batch in rx {
-                if self.debug {
-                    self.log(format!(
-                        "[APK] '{}' {}={} us process={} us results={}{}",
-                        batch.entry_name,
-                        batch.source,
-                        batch.inflate_us,
-                        batch.search_us,
-                        batch.row_count(),
-                        batch.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default()
-                    ));
+                    on_batch(batch);
                 }
-                summary.total_results += batch.row_count();
-                if let Some(r) = recorder.as_mut() {
-                    r.record(&batch);
-                }
-                sink(batch);
+            });
+        };
+        let mut emit = |batch: RefBatch| {
+            summary.total_results += batch.row_count();
+            if let Some(r) = recorder.as_mut() {
+                r.record(&batch);
             }
+            sink(batch);
+        };
+        // Names written as decompiled Java / Kotlin source spells them
+        // (`com.a.Outer.Inner`, `Cdo`, `a$2`) get a second search when the
+        // query as written finds nothing. Until a row shows up the (empty)
+        // batches are held back, so a query that matches streams as before.
+        let fallback = names::denormalize_query(active).and_then(|q| CompiledQuery::new(&q).ok());
+        let mut held: Option<Vec<RefBatch>> = fallback.as_ref().map(|_| Vec::new());
+        run(&compiled, &mut |batch| match held.as_mut() {
+            Some(h) if batch.row_count() == 0 => h.push(batch),
+            Some(h) => {
+                h.drain(..).for_each(&mut emit);
+                held = None;
+                emit(batch);
+            }
+            None => emit(batch),
         });
+        let mut read_as_source = false;
+        if let (Some(held), Some(fallback)) = (held, fallback) {
+            if !cancel.load(Ordering::Relaxed) && held.iter().all(|b| b.error.is_none()) {
+                let mut batches = Vec::with_capacity(held.len());
+                run(&fallback, &mut |batch| batches.push(batch));
+                read_as_source = batches.iter().any(|b| b.row_count() > 0);
+                batches.into_iter().for_each(&mut emit);
+            } else {
+                held.into_iter().for_each(&mut emit);
+            }
+        }
+        if read_as_source {
+            summary.notes.push(
+                "nothing matched the names as written; these rows match them read as Java/Kotlin source spells DEX names \
+                 (Outer.Inner -> Outer$Inner, AnonymousN -> $N, Cdo -> do, a$2 -> a, `in` -> in)"
+                    .to_string(),
+            );
+        }
         if let (Some((_, k, q)), Some(payload)) = (rendered, recorder.and_then(|r| r.finish(&summary.notes))) {
             // A cancelled run may be missing entries.
             if !cancel.load(Ordering::Relaxed) {
@@ -2424,7 +2535,15 @@ pub fn find_refs_in_dex(dex_name: &str, buf: &[u8], query: &Query, aggregate: bo
 ///
 /// As [`find_refs_in_dex`].
 pub fn find_refs_in_dex_opts(dex_name: &str, buf: &[u8], query: &Query, opts: FindOptions) -> Result<Vec<RefResult>> {
-    find_refs_in_dex_compiled(dex_name, buf, &CompiledQuery::new(query)?, opts)
+    let rows = find_refs_in_dex_compiled(dex_name, buf, &CompiledQuery::new(query)?, opts)?;
+    if !rows.is_empty() {
+        return Ok(rows);
+    }
+    // As [`Engine::find_refs`]: names spelled as decompiled source get a second try.
+    match names::denormalize_query(query).and_then(|q| CompiledQuery::new(&q).ok()) {
+        Some(fallback) => find_refs_in_dex_compiled(dex_name, buf, &fallback, opts),
+        None => Ok(rows),
+    }
 }
 
 fn find_refs_in_dex_compiled(dex_name: &str, buf: &[u8], query: &CompiledQuery, opts: FindOptions) -> Result<Vec<RefResult>> {

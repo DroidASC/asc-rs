@@ -1,11 +1,18 @@
-//! Class-name normalisation shared by the CLI and MCP, and the name
-//! mappings handed to decompiler backends ([`NameMappings`]).
+//! Class-name normalisation shared by the CLI and MCP, the readings of names
+//! as decompiled Java / Kotlin source spells them ([`denormalize_query`]),
+//! and the name mappings handed to decompiler backends ([`NameMappings`]).
 
 use crate::{EngineError, Result};
 use asc_findrefs::{ClassQuery, MemberQuery, MemberSignature, Query, TypeMatch};
 
+mod denormalize;
 mod mappings;
 mod proguard;
+
+pub use denormalize::{
+    denormalize_class_candidates, denormalize_identifier, denormalize_method_candidates, denormalize_query, is_java_reserved,
+};
+pub(crate) use denormalize::{partial_proto, proto_matches};
 
 pub use mappings::{FieldRef, MappingError, MappingsHash, MethodRef, NameMappings, NameResolver};
 pub use proguard::{ProguardError, ProguardMapping, ProguardWarning, WarningKind};
@@ -105,8 +112,12 @@ impl<'a> MemberTarget<'a> {
 }
 
 /// `[A-Za-z_$][A-Za-z0-9_$]*`, the identifiers of Java class paths and members
-/// (obfuscators stay within it; non-ASCII names are left to `->`).
+/// (obfuscators stay within it; non-ASCII names are left to `->`), or a
+/// Kotlin backticked name (`` `in` ``).
 fn is_identifier(s: &str) -> bool {
+    if let Some(inner) = s.strip_prefix('`').and_then(|r| r.strip_suffix('`')) {
+        return !inner.is_empty() && !inner.contains('`');
+    }
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
@@ -124,7 +135,7 @@ fn dotted_member_split(spec: &str) -> Option<usize> {
     let i = head.rfind('.')?;
     let (class, name) = (&head[..i], &head[i + 1..]);
     let segments: Vec<&str> = class.split(['.', '/']).collect();
-    let capitalised = segments.last().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase()));
+    let capitalised = segments.last().is_some_and(|l| l.trim_matches('`').starts_with(|c: char| c.is_ascii_uppercase()));
     let classlike = segments.iter().all(|s| is_identifier(s));
     // A signature or a constructor name settles it; otherwise Java naming does.
     let member_evident = head_end < spec.len() || name.starts_with('<');
@@ -141,7 +152,7 @@ pub(crate) fn looks_like_class(spec: &str) -> bool {
     let segments: Vec<&str> = s.split('.').collect();
     segments.len() > 1
         && segments.iter().all(|seg| is_identifier(seg))
-        && segments.last().is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase()))
+        && segments.last().is_some_and(|l| l.trim_matches('`').starts_with(|c: char| c.is_ascii_uppercase()))
 }
 
 /// A class written without its package (`WebView`, `Build$VERSION`): a fuzzy
