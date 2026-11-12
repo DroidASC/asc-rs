@@ -59,3 +59,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+  # Windows: code under cfg(windows) / cfg(not(unix)) is compiled nowhere
+  # else. Build, lint and test the workspace there (asc is not released for
+  # Windows; this keeps it building).
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      - run: cargo test --workspace
