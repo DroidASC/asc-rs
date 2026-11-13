@@ -71,6 +71,9 @@ impl ErrorCode {
     pub const UNSUPPORTED_INPUT: Self = Self(-33002);
     /// A license or feature the request needs is not available.
     pub const UNAVAILABLE: Self = Self(-33003);
+    /// The program file differs from what asc described in `program/open`
+    /// (an `abc` input whose `sha256` does not match); asc opens it again.
+    pub const INPUT_MISMATCH: Self = Self(-33004);
 
     /// The symbolic name of a code defined by the protocol, if it is one.
     pub fn name(self) -> Option<&'static str> {
@@ -84,6 +87,7 @@ impl ErrorCode {
             Self::PROGRAM_NOT_FOUND => "program not found",
             Self::UNSUPPORTED_INPUT => "unsupported input",
             Self::UNAVAILABLE => "unavailable",
+            Self::INPUT_MISMATCH => "input mismatch",
             _ => return None,
         };
         Some(name)
@@ -386,6 +390,7 @@ mod tests {
     #[test]
     fn error_code_display_names_known_codes() {
         assert_eq!(ErrorCode::PROGRAM_NOT_FOUND.to_string(), "-33001 (program not found)");
+        assert_eq!(ErrorCode::INPUT_MISMATCH.to_string(), "-33004 (input mismatch)");
         assert_eq!(ErrorCode(-33100).to_string(), "-33100");
     }
 }

@@ -1,0 +1,12 @@
+{"dir":"→","msg":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"client":{"name":"asc","version":"0.2.0"},"options":{}}}}
+{"dir":"←","msg":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"backend":{"name":"dexdec","version":"0.2.0"},"optionsHash":"9f2c","inputs":["archive"],"languages":["java","kotlin"],"mappings":true,"methodStatus":true,"maxConcurrency":2}}}
+{"dir":"→","msg":{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}}
+{"dir":"→","msg":{"jsonrpc":"2.0","id":2,"method":"program/open","params":{"input":{"kind":"archive","files":["/data/app.apk"]},"mappings":{"classes":{"Ll/x;":"Lbin/mt/json/LinkedTable;"},"fields":{"Lbin/mt/json/JSONObject;->a:I":"size"},"methods":{}}}}}
+{"dir":"←","msg":{"jsonrpc":"2.0","id":2,"result":{"programId":"p1"}}}
+{"dir":"→","msg":{"jsonrpc":"2.0","id":3,"method":"decompile/classes","params":{"programId":"p1","classes":["Lbin/mt/json/JSONObject;"],"language":"java","nested":true,"progressToken":3}}}
+{"dir":"←","msg":{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":3,"progress":0.0,"total":1.0}}}
+{"dir":"←","msg":{"jsonrpc":"2.0","id":3,"result":{"units":[{"class":"Lbin/mt/json/JSONObject;","status":"partial","path":"bin/mt/json/JSONObject.java","text":"package bin.mt.json;\n","methods":[{"signature":"toString()Ljava/lang/String;","status":"failed","reason":"region recovery: irreducible loop"}],"diagnostics":[{"severity":"warning","message":"m","method":"toString()Ljava/lang/String;"}],"lines":[{"line":1,"method":"toString()Ljava/lang/String;","pc":4}],"nestedClasses":["Lbin/mt/json/JSONObject$Member;"]}]}}}
+{"dir":"→","msg":{"jsonrpc":"2.0","id":4,"method":"program/close","params":{"programId":"p1"}}}
+{"dir":"←","msg":{"jsonrpc":"2.0","id":4,"error":{"code":-33001,"message":"no such program"}}}
+{"dir":"→","msg":{"jsonrpc":"2.0","id":5,"method":"shutdown","params":{}}}
+{"dir":"←","msg":{"jsonrpc":"2.0","id":5,"result":{}}}

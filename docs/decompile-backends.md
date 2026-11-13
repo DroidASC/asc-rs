@@ -228,6 +228,69 @@ instances = 2
   `-33000` 起：`-33001` 找不到程序会话，`-33002` 不支持这种输入，`-33003` 许可证或功能不可用（例如 JEB
   不是 Pro 版）。
 
+### 6.5 ABC 程序（HarmonyOS，arkdec）
+
+HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下成员都是在协议版本 1 上追加的：
+`protocolVersion` 不变，新成员都可选，取默认值时不写出。DEX 的消息因此逐字节不变，已有的 L3 条目照常命中
+（`crates/asc-decompile-protocol/tests/data/dexdec-session.jsonl` 固定了这一点）。
+
+```json
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,
+     "client":{"name":"asc","version":"0.3.0"},"options":{"threads":4}}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,
+     "backend":{"name":"arkdec","version":"0.2.0+g1a2b3c4.r9f8e7d6"},"optionsHash":"5d41402abc4b2a76",
+     "inputs":["abc"],"languages":["javascript"],"mappings":false,"methodStatus":true,
+     "maxConcurrency":4,"requestOptions":["raw","level"]}}
+
+→ {"jsonrpc":"2.0","id":2,"method":"program/open","params":{"input":{"kind":"abc",
+     "files":["/home/u/.cache/asc/decompilers/abc/3a/3a7f….abc"],"sha256":"3a7f…",
+     "entry":"entry.hap/ets/modules.abc"}}}
+← {"jsonrpc":"2.0","id":2,"result":{"programId":"p1"}}
+
+→ {"jsonrpc":"2.0","id":3,"method":"decompile/classes","params":{"programId":"p1",
+     "classes":["&entry/src/main/ets/pages/Index&"],"language":"javascript","nested":true,
+     "options":{"raw":true},"progressToken":3}}
+← {"jsonrpc":"2.0","id":3,"result":{"units":[{
+     "class":"&entry/src/main/ets/pages/Index&","status":"partial",
+     "path":"entry/src/main/ets/pages/Index.js",
+     "text":"import hilog from '@ohos:hilog';\nclass Index {\n…",
+     "methods":[
+       {"signature":"func_main_0","status":"ok","level":"structured","span":[0,812]},
+       {"signature":"#~@0>#build","status":"ok","reason":"irreducible loop at 0x3c",
+        "restored":"Index.build","level":"labelled","span":[46,90]},
+       {"signature":"#~@0>#aboutToAppear","status":"failed","reason":"inexact: opaque operation at 0x12",
+        "restored":"Index.aboutToAppear","level":"structured","span":[90,160]}],
+     "diagnostics":[{"severity":"warning","message":"desugar: finally shape not recognized",
+                     "method":"#~@0>#build","pc":88}],
+     "lines":[{"line":4,"method":"#~@0>#build","pc":24}]}]}}
+```
+
+| 成员 | 含义 |
+|---|---|
+| `inputs: ["abc"]` | 接受 ABC 文件。不认识 `abc` 的旧 asc 读 `initialize` 时会丢掉它，也就不会把 HarmonyOS 程序交给这个后端 |
+| `languages: ["javascript"]` | 每个 ABC record 输出一个 ES 模块。`arkts` 留给 ArkUI DSL 还原（P6），现在不定义 |
+| `requestOptions` | 后端接受的每请求选项名，缺省为空。asc 只发送这里列出的名字；后端没声明时，带这个选项的请求不发出去，这次尝试直接失败（`asc-decompile` 返回 `UnsupportedOption`） |
+| `input.kind = "abc"` | `files` 恰好一个 ABC 文件，后端只读。zip 里的条目、解密后的替身由 asc 先写成文件（按内容寻址） |
+| `input.sha256` | 可选，asc 读到的文件内容的 SHA-256（小写十六进制）。后端收到时要核对，不一致时回 `-33004`（输入与 asc 所见不符），asc 重新落盘后再开一次 |
+| `input.entry` | 可选，这个文件在程序里的位置（`entry.hap/ets/modules.abc`），只用于消息 |
+| `classes` | record 名：`&entry/src/main/ets/pages/Index&`、`_GLOBAL` 等。`nested` 照收但不起作用，`nestedClasses` 为空 |
+| `options` | 每请求选项，缺省为空、为空时不写出。它会改变输出，所以进入 L3 键（§8）。arkdec 认 `raw: bool`（true 关掉去语法糖，缺省 false）和 `level: "pcDispatch"`（目前唯一的值；不写就尽量结构化） |
+| `methods[].signature` | ABC 的原始函数名（`#~@0>#build`）；DEX 仍是 `name(Args)Ret` |
+| `methods[].restored` | 可选，还原出的可读名（`Index.build`） |
+| `methods[].level` | 可选，控制流结构化到哪一级：`structured`、`labelled`、`conditioned`、`pcDispatch`。不是 `structured` 时 `reason` 说明原因。这个成员是字符串而不是枚举，是为了让较新后端报出的未知等级不至于让整个单元解析失败 |
+| `methods[].span` | 可选，`[start, end)`：函数源码在单元 `text` 里的 UTF-8 字节偏移。嵌套函数的区间落在外层函数区间之内。`--method` 按它截取，区间越界或不在字符边界上时视为没有 |
+| `diagnostics[].pc` | 可选，诊断对应的指令位置，单位同 `lines[].pc` |
+| `lines[].pc` | ABC：函数代码里的字节偏移；DEX 仍是 16 位代码单元 |
+
+- 状态：降级的函数仍是 `status: ok`，并带 `level` 和 `reason`。结果不精确的函数报 `status: failed`
+  （`reason` 以 `inexact:` 开头），这时单元是 `partial`。单元 `failed` 只用于三种情况：找不到 record、ABC
+  读不了、后端内部出错。每个函数都要列进 `methods`（成功的也列），asc 才能按 `span` 截取。
+- 输出只取决于（ABC 内容、record、`initialize` 的 options、请求 `options`、后端版本），所以一个 record 的结果
+  按 ABC 文件的 SHA-256 缓存，而不是按整个程序。后端不得按耗时降级：超时只靠取消处理（§6.4）。
+- 错误码：在 §6.4 的基础上加 `-33004`，表示输入与 asc 描述的不符（`sha256` 不匹配）。
+- 样本：`crates/asc-decompile-protocol/tests/data/arkdec-session.jsonl` 是按本节手写的一次会话，`tests/transcripts.rs`
+  把每条消息读成对应的类型再写回，要求结果一致。`asc-decompile` 的 `mock_backend --abc` 按本节回答，供生命周期测试使用。
+
 ## 7. 命名
 
 - 名字一律以 asc 为准，而 asc 唯一的名字来源是用户提供的映射文件，主要是 R8 / ProGuard 的 `mapping.txt`

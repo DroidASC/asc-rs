@@ -10,6 +10,8 @@
 //! * `--no-mappings`: declare `mappings = false`
 //! * `--fail-all`: every class comes back `failed`
 //! * `--version V` (default 1.0): the version reported in `initialize`
+//! * `--abc`: be an ABC backend like arkdec instead: `inputs ["abc"]`,
+//!   `languages ["javascript"]`, `requestOptions ["raw", "level"]`, no mappings
 //!
 //! Per-class behaviour comes from the requested descriptor:
 //!
@@ -23,6 +25,18 @@
 //! * `Lprogress;`: send two progress notifications first
 //! * anything else: `ok`, with text naming the pid and program id (and the
 //!   number of mapped classes, when the program was opened with mappings)
+//!
+//! With `--abc`, `program/open` takes only `kind: "abc"` with one file
+//! (`-33002` / `-32602` otherwise) and answers `-33004` when `sha256` is
+//! `"mismatch"`; `decompile/classes` takes only `javascript`. Per record:
+//!
+//! * `&crash&`: exit 3 mid-request
+//! * `&slow/<ms>&`: work for `ms`, honouring cancellation
+//! * `&inexact&`: a partial unit whose second function failed, with a diagnostic
+//! * `&fail&`: a failed unit
+//! * anything else: `ok`. The text's first line names the pid, program id,
+//!   record, file sha256 and the request's `options`; then two functions,
+//!   each reported in `methods` with its `span`
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -33,9 +47,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use asc_decompile::protocol::methods::{
-    CancelledParams, ClassUnit, DecompileClassesParams, DecompileClassesResult, Empty, Implementation, InitializeResult, InputKind,
-    Language, MethodReport, MethodStatus, ProgramCloseParams, ProgramId, ProgramOpenParams, ProgramOpenResult, Progress, ProgressParams,
-    UnitOutcome,
+    CancelledParams, ClassUnit, DecompileClassesParams, DecompileClassesResult, Diagnostic, Empty, Implementation, InitializeResult,
+    InputKind, Language, MethodReport, MethodStatus, ProgramCloseParams, ProgramId, ProgramInput, ProgramOpenParams, ProgramOpenResult,
+    Progress, ProgressParams, Severity, UnitOutcome,
 };
 use asc_decompile::protocol::server::{Cancellations, Outgoing};
 use asc_decompile::protocol::{ErrorCode, ErrorObject, FrameReader, MAX_MESSAGE_BYTES, Message, Request, RequestId};
@@ -51,6 +65,7 @@ struct Flags {
     no_mappings: bool,
     fail_all: bool,
     version: String,
+    abc: bool,
 }
 
 impl Flags {
@@ -68,6 +83,7 @@ impl Flags {
                 "--no-mappings" => flags.no_mappings = true,
                 "--fail-all" => flags.fail_all = true,
                 "--version" => flags.version = args.next().unwrap(),
+                "--abc" => flags.abc = true,
                 other => panic!("unknown flag {other}"),
             }
         }
@@ -102,17 +118,28 @@ impl Mock {
                 let options = serde_json::to_string(&request.params["options"]).unwrap();
                 let result =
                     InitializeResult::new(self.flags.protocol_version, Implementation::new("mock", self.flags.version.as_str()), options)
+                        .method_status(true)
+                        .max_concurrency(self.flags.max_concurrency.try_into().unwrap());
+                let result = if self.flags.abc {
+                    result
+                        .inputs(vec![InputKind::Abc])
+                        .languages(vec![Language::JavaScript])
+                        .request_options(vec!["raw".into(), "level".into()])
+                } else {
+                    result
                         .inputs(vec![InputKind::Archive, InputKind::Slice])
                         .languages(vec![Language::Java])
                         .mappings(!self.flags.no_mappings)
-                        .method_status(true)
-                        .max_concurrency(self.flags.max_concurrency.try_into().unwrap());
+                };
                 self.out.respond(request.id, Ok(result)).unwrap();
             }
             "program/open" => {
                 let result = request.params::<ProgramOpenParams>().and_then(|params| {
                     if params.input.files().iter().any(|file| file.ends_with("unsupported")) {
                         return Err(ErrorObject::new(ErrorCode::UNSUPPORTED_INPUT, "mock rejects this input"));
+                    }
+                    if self.flags.abc {
+                        check_abc(&params.input)?;
                     }
                     let mut next = self.next_program.lock().unwrap();
                     *next += 1;
@@ -159,6 +186,9 @@ impl Mock {
 
     /// `None` when the scripted behaviour means no answer at all.
     fn units(&self, id: &RequestId, params: &DecompileClassesParams) -> Result<Option<DecompileClassesResult>, ErrorObject> {
+        if self.flags.abc {
+            return self.records(id, params).map(Some);
+        }
         let mapped = match self.programs.lock().unwrap().get(&params.program_id.0) {
             Some(program) => program.mappings.as_ref().map(|mappings| mappings.classes.len()),
             None => return Err(ErrorObject::new(ErrorCode::PROGRAM_NOT_FOUND, format!("no program {}", params.program_id.0))),
@@ -231,6 +261,63 @@ impl Mock {
         Ok(Some(DecompileClassesResult::new(units)))
     }
 
+    /// The `--abc` answer: one unit per record.
+    fn records(&self, id: &RequestId, params: &DecompileClassesParams) -> Result<DecompileClassesResult, ErrorObject> {
+        if params.language != Language::JavaScript {
+            return Err(ErrorObject::new(ErrorCode::INVALID_PARAMS, "mock --abc writes javascript only"));
+        }
+        let sha256 = match self.programs.lock().unwrap().get(&params.program_id.0).map(|program| &program.input) {
+            Some(ProgramInput::Abc { sha256, .. }) => sha256.clone().unwrap_or_else(|| "-".into()),
+            _ => return Err(ErrorObject::new(ErrorCode::PROGRAM_NOT_FOUND, format!("no program {}", params.program_id.0))),
+        };
+        let options = serde_json::to_string(&params.options).unwrap();
+        let mut units = Vec::new();
+        for record in &params.classes {
+            let unit = match record.as_str() {
+                "&crash&" => {
+                    eprintln!("mock: crashing on purpose");
+                    std::process::exit(3);
+                }
+                "&fail&" => ClassUnit::new(record.clone(), UnitOutcome::Failed { reason: "record not found".into() }),
+                record => {
+                    if let Some(work) = parse_record_work(record)
+                        && !self.work(id, work, true)
+                    {
+                        return Err(ErrorObject::new(ErrorCode::REQUEST_CANCELLED, "cancelled"));
+                    }
+                    let pid = std::process::id();
+                    let header =
+                        format!("// pid={pid} program={} record={record} sha256={sha256} options={options}\n", params.program_id.0);
+                    let main = "function func_main_0() {}\n";
+                    let build = "function build() { return 1; }\n";
+                    let text = format!("{header}{main}{build}");
+                    let span = |start: usize, part: &str| Some([start as u64, (start + part.len()) as u64]);
+                    let level = if params.options.get("level").is_some() { "pcDispatch" } else { "structured" };
+                    let main_report =
+                        MethodReport::new("func_main_0", MethodStatus::Ok).level(Some(level.into())).span(span(header.len(), main));
+                    let build_report = MethodReport::new("#~@0>#build", MethodStatus::Ok)
+                        .restored(Some("Index.build".into()))
+                        .level(Some(level.into()))
+                        .span(span(header.len() + main.len(), build));
+                    let path = Some(format!("{}.js", record.trim_matches('&')));
+                    if record == "&inexact&" {
+                        let mut failed = build_report.reason(Some("inexact: opaque operation at 0x12".into()));
+                        failed.status = MethodStatus::Failed;
+                        let diagnostic =
+                            Diagnostic::new(Severity::Warning, "opaque operation").method(Some("#~@0>#build".into())).pc(Some(0x12));
+                        ClassUnit::new(record, UnitOutcome::Partial { path, text })
+                            .methods(vec![main_report, failed])
+                            .diagnostics(vec![diagnostic])
+                    } else {
+                        ClassUnit::new(record, UnitOutcome::Ok { path, text }).methods(vec![main_report, build_report])
+                    }
+                }
+            };
+            units.push(unit);
+        }
+        Ok(DecompileClassesResult::new(units))
+    }
+
     /// Sleeps `work`; `false` if cancelled first.
     fn work(&self, id: &RequestId, work: Duration, cancellable: bool) -> bool {
         let deadline = Instant::now() + work;
@@ -243,6 +330,25 @@ impl Mock {
         }
         true
     }
+}
+
+/// What `program/open` of `--abc` accepts.
+fn check_abc(input: &ProgramInput) -> Result<(), ErrorObject> {
+    let ProgramInput::Abc { files, sha256, .. } = input else {
+        return Err(ErrorObject::new(ErrorCode::UNSUPPORTED_INPUT, "mock --abc takes abc input only"));
+    };
+    if files.len() != 1 {
+        return Err(ErrorObject::new(ErrorCode::INVALID_PARAMS, "abc input names exactly one file"));
+    }
+    if sha256.as_deref() == Some("mismatch") {
+        return Err(ErrorObject::new(ErrorCode::INPUT_MISMATCH, "input changed since asc hashed it"));
+    }
+    Ok(())
+}
+
+fn parse_record_work(record: &str) -> Option<Duration> {
+    let millis = record.strip_prefix("&slow/")?.strip_suffix('&')?;
+    Some(Duration::from_millis(millis.parse().ok()?))
 }
 
 fn parse_work(class: &str, prefix: &str) -> Option<Duration> {

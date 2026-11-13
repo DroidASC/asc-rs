@@ -7,6 +7,7 @@ use asc_decompile_protocol::methods::{
     DecompileClasses, DecompileClassesParams, DecompileClassesResult, Language, ProgramClose, ProgramCloseParams, ProgramId, ProgramOpen,
     ProgramOpenParams,
 };
+use serde_json::{Map, Value};
 
 use crate::error::Error;
 use crate::pool::{Inner, Lease};
@@ -17,26 +18,39 @@ use crate::spec::CallOptions;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecompileRequest {
-    /// Type descriptors, e.g. `Lbin/mt/json/JSONObject;`.
+    /// Type descriptors, e.g. `Lbin/mt/json/JSONObject;`; ABC record names
+    /// (`&entry/src/main/ets/pages/Index&`) for an `abc` program.
     pub classes: Vec<String>,
     /// Output language; the backend must have declared it.
     pub language: Language,
     /// Fold inner and anonymous classes into their outer class.
     pub nested: bool,
+    /// Per-request options; every name must be in the backend's
+    /// [`requestOptions`](asc_decompile_protocol::methods::InitializeResult::request_options).
+    pub options: Map<String, Value>,
 }
 
 impl DecompileRequest {
+    /// `classes` in `language`, nested classes folded in, no request options.
+    pub fn new(classes: impl IntoIterator<Item = impl Into<String>>, language: Language) -> Self {
+        Self { classes: classes.into_iter().map(Into::into).collect(), language, nested: true, options: Map::new() }
+    }
+
+    /// Java source of `classes`, nested classes folded in: what `asc decompile` asks for.
+    pub fn java(classes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self::new(classes, Language::Java)
+    }
+
     /// The request with [`nested`](#structfield.nested) set.
     #[must_use]
     pub fn nested(self, nested: bool) -> Self {
         DecompileRequest { nested, ..self }
     }
-}
 
-impl DecompileRequest {
-    /// Java source of `classes`, nested classes folded in: what `asc decompile` asks for.
-    pub fn java(classes: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Self { classes: classes.into_iter().map(Into::into).collect(), language: Language::Java, nested: true }
+    /// The request with the per-request [`options`](#structfield.options).
+    #[must_use]
+    pub fn options(self, options: Map<String, Value>) -> Self {
+        DecompileRequest { options, ..self }
     }
 }
 
@@ -76,17 +90,24 @@ impl Program {
     /// # Errors
     ///
     /// Queueing and transport failures ([`Error::is_backend_failure`]), a JSON-RPC
-    /// error from the backend, or [`Error::Cancelled`]. Classes that fail to
-    /// decompile are not errors; they come back with `status = failed`.
+    /// error from the backend, [`Error::Cancelled`], or [`Error::UnsupportedOption`]
+    /// (nothing is sent then). Classes that fail to decompile are not errors;
+    /// they come back with `status = failed`.
     pub fn decompile(&self, request: &DecompileRequest, options: &CallOptions) -> Result<DecompileClassesResult, Error> {
         let lease = self.inner.acquire(options.priority, options.cancel.as_ref())?;
+        // Checked against the serving process: a restart may have brought another version.
+        let capabilities = lease.process.capabilities();
+        if let Some(option) = request.options.keys().find(|option| !capabilities.honours(option)) {
+            return Err(Error::UnsupportedOption { option: option.clone() });
+        }
         let mut reopened = false;
         loop {
             let program_id = self.session_on(&lease, options)?;
             let id = lease.process.next_id();
             let params = DecompileClassesParams::new(program_id, request.classes.clone(), request.language)
                 .nested(request.nested)
-                .progress_token(options.progress.is_some().then(|| id.clone().into()));
+                .progress_token(options.progress.is_some().then(|| id.clone().into()))
+                .options(request.options.clone());
             let result = lease.process.call_as::<DecompileClasses>(id, &params, &lease.control(options));
             lease.observe(&result);
             match result {

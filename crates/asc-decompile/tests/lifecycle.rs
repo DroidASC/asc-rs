@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use asc_decompile::protocol::ErrorCode;
-use asc_decompile::protocol::methods::{InputKind, ProgramInput, ProgramOpenParams, UnitStatus};
+use asc_decompile::protocol::methods::{InputKind, Language, MethodStatus, ProgramInput, ProgramOpenParams, UnitStatus};
 use asc_decompile::{Backend, BackendSpec, CallOptions, CancelToken, DecompileRequest, Error, Lifecycle, Priority, Program};
 use serde_json::json;
 
@@ -402,4 +402,120 @@ fn program_close_releases_sessions() {
     let slice = ProgramInput::Slice { files: vec!["/c/s.dex".into()], manifest: Default::default() };
     drop(backend.open_program(ProgramOpenParams::new(slice), &CallOptions::default()).unwrap());
     assert_eq!(log_lines(&log.0, "close"), 2, "dropping a program closes it too");
+}
+
+const RECORD: &str = "&entry/src/main/ets/pages/Index&";
+
+fn abc(sha256: &str) -> ProgramOpenParams {
+    let input = ProgramInput::Abc {
+        files: vec!["/c/3a/3a7f.abc".into()],
+        sha256: Some(sha256.into()),
+        entry: Some("entry.hap/ets/modules.abc".into()),
+    };
+    ProgramOpenParams::new(input)
+}
+
+fn javascript(record: &str, options: serde_json::Value) -> DecompileRequest {
+    let serde_json::Value::Object(options) = options else { panic!("options are an object") };
+    DecompileRequest::new([record], Language::JavaScript).options(options)
+}
+
+fn decompile_record(program: &Program, record: &str) -> Result<String, Error> {
+    let mut result = program.decompile(&javascript(record, json!({})), &CallOptions::default())?;
+    Ok(result.units.remove(0).text().unwrap_or_default().to_owned())
+}
+
+#[test]
+fn abc_backend_declares_abc_javascript_and_request_options() {
+    let backend = Backend::new("mock", spec(&["--abc"]));
+    let capabilities = backend.capabilities(&CallOptions::default()).unwrap();
+    assert!(capabilities.accepts(InputKind::Abc) && !capabilities.accepts(InputKind::Archive));
+    assert!(capabilities.supports(Language::JavaScript) && !capabilities.supports(Language::Java));
+    assert!(capabilities.honours("raw") && capabilities.honours("level") && !capabilities.honours("mappings"));
+    assert!(!capabilities.mappings);
+}
+
+#[test]
+fn abc_records_carry_spans_levels_and_request_options() {
+    let backend = Backend::new("mock", spec(&["--abc"]));
+    let program = backend.open_program(abc("3a7f"), &CallOptions::default()).unwrap();
+
+    let result = program.decompile(&javascript(RECORD, json!({"raw": true})), &CallOptions::default()).unwrap();
+    let unit = &result.units[0];
+    assert_eq!(unit.class, RECORD);
+    assert_eq!(unit.status(), UnitStatus::Ok);
+    let text = unit.text().unwrap();
+    assert!(text.contains(&format!("program=p1 record={RECORD} sha256=3a7f options={{\"raw\":true}}")), "{text}");
+    let [main, build] = unit.methods.as_slice() else { panic!("two functions: {:?}", unit.methods) };
+    assert_eq!(main.slice(text), Some("function func_main_0() {}\n"));
+    assert_eq!(build.slice(text), Some("function build() { return 1; }\n"));
+    assert_eq!((build.signature.as_str(), build.restored.as_deref()), ("#~@0>#build", Some("Index.build")));
+    assert_eq!(build.level.as_deref(), Some("structured"));
+
+    let pc_dispatch = program.decompile(&javascript(RECORD, json!({"level": "pcDispatch"})), &CallOptions::default()).unwrap();
+    assert_eq!(pc_dispatch.units[0].methods[0].level.as_deref(), Some("pcDispatch"));
+    assert!(decompile_record(&program, RECORD).unwrap().contains("options={}"), "no options sent");
+
+    let inexact = program.decompile(&javascript("&inexact&", json!({})), &CallOptions::default()).unwrap();
+    let unit = &inexact.units[0];
+    assert_eq!(unit.status(), UnitStatus::Partial);
+    assert_eq!(unit.methods[1].status, MethodStatus::Failed);
+    assert_eq!(unit.methods[1].reason.as_deref(), Some("inexact: opaque operation at 0x12"));
+    assert_eq!(unit.diagnostics[0].pc, Some(0x12));
+}
+
+#[test]
+fn undeclared_request_options_are_not_sent() {
+    let backend = Backend::new("mock", spec(&[]));
+    let program = open(&backend);
+    let request = DecompileRequest::java(["La;"]).options(json!({"raw": true}).as_object().unwrap().clone());
+    let err = program.decompile(&request, &CallOptions::default()).unwrap_err();
+    assert!(matches!(&err, Error::UnsupportedOption { option } if option == "raw"), "{err}");
+    assert!(!err.is_backend_failure());
+
+    let backend = Backend::new("mock", spec(&["--abc"]));
+    let program = backend.open_program(abc("3a7f"), &CallOptions::default()).unwrap();
+    let err = program.decompile(&javascript(RECORD, json!({"raw": true, "bogus": 1})), &CallOptions::default()).unwrap_err();
+    assert!(matches!(&err, Error::UnsupportedOption { option } if option == "bogus"), "{err}");
+    decompile_record(&program, RECORD).unwrap();
+}
+
+#[test]
+fn abc_input_mismatch_and_wrong_kind_are_rpc_errors() {
+    let backend = Backend::new("mock", spec(&["--abc"]));
+    let err = backend.open_program(abc("mismatch"), &CallOptions::default()).unwrap_err();
+    assert!(matches!(&err, Error::Rpc(e) if e.code == ErrorCode::INPUT_MISMATCH), "{err}");
+    assert!(!err.is_backend_failure());
+    let err = backend.open_program(archive(), &CallOptions::default()).unwrap_err();
+    assert!(matches!(&err, Error::Rpc(e) if e.code == ErrorCode::UNSUPPORTED_INPUT), "{err}");
+}
+
+#[test]
+fn abc_program_is_reopened_after_a_crash() {
+    let log = TempLog::new("abc-crash");
+    let backend = Backend::new("mock", spec(&["--abc", "--log", log.arg()]));
+    let program = backend.open_program(abc("3a7f"), &CallOptions::default()).unwrap();
+    let pid = pid_of(&decompile_record(&program, RECORD).unwrap());
+
+    let err = decompile_record(&program, "&crash&").unwrap_err();
+    assert!(matches!(err, Error::Exited { .. }), "{err}");
+
+    let text = decompile_record(&program, RECORD).unwrap();
+    assert_ne!(pid_of(&text), pid);
+    assert!(text.contains("sha256=3a7f"), "reopened with the same input: {text}");
+    assert_eq!(log_lines(&log.0, "start"), 2);
+    assert_eq!(log_lines(&log.0, "open"), 2, "the program was reopened on the new process");
+}
+
+#[test]
+fn abc_cancellation_aborts_the_record() {
+    let backend = Backend::new("mock", spec(&["--abc"]));
+    let program = backend.open_program(abc("3a7f"), &CallOptions::default()).unwrap();
+    let pid = pid_of(&decompile_record(&program, RECORD).unwrap());
+    let options = CallOptions::default().timeout(Some(Duration::from_millis(100)));
+    let started = Instant::now();
+    let err = program.decompile(&javascript("&slow/5000&", json!({})), &options).unwrap_err();
+    assert!(matches!(err, Error::Timeout(_)), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    assert_eq!(pid_of(&decompile_record(&program, RECORD).unwrap()), pid, "the worker survives a honoured cancel");
 }

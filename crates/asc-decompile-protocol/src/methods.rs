@@ -188,6 +188,11 @@ pub struct InitializeResult {
     /// Platform classpath the backend ships with; a hint only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// `requestOptions`: names of the per-request
+    /// [`options`](DecompileClassesParams::options) the backend honours.
+    /// asc sends no other name. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_options: Vec<String>,
 }
 
 impl InitializeResult {
@@ -205,6 +210,7 @@ impl InitializeResult {
             method_status: false,
             max_concurrency: one(),
             platform: None,
+            request_options: Vec::new(),
         }
     }
 
@@ -244,6 +250,12 @@ impl InitializeResult {
         InitializeResult { platform, ..self }
     }
 
+    /// This result honouring the per-request options named `request_options`.
+    #[must_use]
+    pub fn request_options(self, request_options: Vec<String>) -> InitializeResult {
+        InitializeResult { request_options, ..self }
+    }
+
     /// Whether the backend declared it accepts `kind` in `inputs`.
     pub fn accepts(&self, kind: InputKind) -> bool {
         self.inputs.contains(&kind)
@@ -252,6 +264,11 @@ impl InitializeResult {
     /// Whether the backend declared it writes `language` in `languages`.
     pub fn supports(&self, language: Language) -> bool {
         self.languages.contains(&language)
+    }
+
+    /// Whether the backend declared the per-request option `option` in `requestOptions`.
+    pub fn honours(&self, option: &str) -> bool {
+        self.request_options.iter().any(|name| name == option)
     }
 }
 
@@ -279,6 +296,8 @@ pub enum InputKind {
     Archive,
     /// A closure slice written by asc (`rebuild-slice.md`).
     Slice,
+    /// `abc`: one ArkCompiler ABC file of a HarmonyOS program.
+    Abc,
 }
 
 /// Source language of the decompiled output.
@@ -290,6 +309,9 @@ pub enum Language {
     Java,
     /// `kotlin`.
     Kotlin,
+    /// `javascript`: one ES module per ABC record.
+    #[serde(rename = "javascript")]
+    JavaScript,
 }
 
 /// Params of [`ProgramOpen`].
@@ -334,6 +356,19 @@ pub enum ProgramInput {
         /// `manifest`: the role of each class in the slice.
         manifest: SliceManifest,
     },
+    /// One ABC file of a HarmonyOS program; asc writes zip entries to a file first.
+    Abc {
+        /// `files`: exactly one ABC path; read-only for the backend.
+        files: Vec<PathBuf>,
+        /// `sha256`: lower-case hex SHA-256 of the file as asc read it. A
+        /// backend that gets it checks the file and refuses a mismatch with
+        /// [`ErrorCode::INPUT_MISMATCH`](crate::ErrorCode::INPUT_MISMATCH).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+        /// `entry`: the file's place in the program (`entry.hap/ets/modules.abc`), for messages only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
+    },
 }
 
 impl ProgramInput {
@@ -342,13 +377,14 @@ impl ProgramInput {
         match self {
             Self::Archive { .. } => InputKind::Archive,
             Self::Slice { .. } => InputKind::Slice,
+            Self::Abc { .. } => InputKind::Abc,
         }
     }
 
     /// The program files, whatever the kind.
     pub fn files(&self) -> &[PathBuf] {
         match self {
-            Self::Archive { files } | Self::Slice { files, .. } => files,
+            Self::Archive { files } | Self::Slice { files, .. } | Self::Abc { files, .. } => files,
         }
     }
 }
@@ -463,13 +499,18 @@ pub struct DecompileClassesParams {
     /// `progressToken`: when present, the backend may send `notifications/progress` under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_token: Option<ProgressToken>,
+    /// `options`: per-request options, only names the backend declared in
+    /// [`requestOptions`](InitializeResult::request_options). They change the
+    /// output, so they are part of the result's cache key. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub options: Map<String, Value>,
 }
 
 impl DecompileClassesParams {
     /// `classes` of `program_id` in `language`, nested classes folded in, no
     /// progress asked for.
     pub fn new(program_id: ProgramId, classes: Vec<String>, language: Language) -> DecompileClassesParams {
-        DecompileClassesParams { program_id, classes, language, nested: true, progress_token: None }
+        DecompileClassesParams { program_id, classes, language, nested: true, progress_token: None, options: Map::new() }
     }
 
     /// These parameters folding nested classes into their outer class, or not.
@@ -482,6 +523,12 @@ impl DecompileClassesParams {
     #[must_use]
     pub fn progress_token(self, progress_token: Option<ProgressToken>) -> DecompileClassesParams {
         DecompileClassesParams { progress_token, ..self }
+    }
+
+    /// These parameters with the per-request `options`.
+    #[must_use]
+    pub fn options(self, options: Map<String, Value>) -> DecompileClassesParams {
+        DecompileClassesParams { options, ..self }
     }
 }
 
@@ -638,25 +685,62 @@ pub enum UnitStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MethodReport {
-    /// `name(Args)Ret`, without the owner.
+    /// DEX: `name(Args)Ret`, without the owner. ABC: the raw function name (`#~@0>#build`).
     pub signature: String,
     /// `status`: whether the method decompiled.
     pub status: MethodStatus,
-    /// `reason`: why the method failed.
+    /// `reason`: why the method failed, or why it is not at the best `level`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// `restored`: the readable name (`Index.build`) when `signature` is a raw ABC name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<String>,
+    /// `level`: how far the control flow was structured, e.g. `structured`,
+    /// `labelled`, `conditioned` or `pcDispatch`. Display data: a string, so a
+    /// rung asc does not know yet does not fail the unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    /// `span`: `[start, end)` UTF-8 byte offsets of the method's text in the
+    /// unit's `text`; spans of nested functions lie inside their parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<[u64; 2]>,
 }
 
 impl MethodReport {
     /// The method `signature` (`name(Args)Ret`) and its `status`, with no reason.
     pub fn new(signature: impl Into<String>, status: MethodStatus) -> MethodReport {
-        MethodReport { signature: signature.into(), status, reason: None }
+        MethodReport { signature: signature.into(), status, reason: None, restored: None, level: None, span: None }
     }
 
     /// This report saying why.
     #[must_use]
     pub fn reason(self, reason: Option<String>) -> MethodReport {
         MethodReport { reason, ..self }
+    }
+
+    /// This report with the method's `restored` name.
+    #[must_use]
+    pub fn restored(self, restored: Option<String>) -> MethodReport {
+        MethodReport { restored, ..self }
+    }
+
+    /// This report with the structuring `level` reached.
+    #[must_use]
+    pub fn level(self, level: Option<String>) -> MethodReport {
+        MethodReport { level, ..self }
+    }
+
+    /// This report with the `[start, end)` byte `span` of the method's text.
+    #[must_use]
+    pub fn span(self, span: Option<[u64; 2]>) -> MethodReport {
+        MethodReport { span, ..self }
+    }
+
+    /// The method's text in `text`, the unit's text, when the report has a
+    /// [`span`](Self::span) that lies on character boundaries of `text`.
+    pub fn slice<'a>(&self, text: &'a str) -> Option<&'a str> {
+        let [start, end] = self.span?;
+        text.get(usize::try_from(start).ok()?..usize::try_from(end).ok()?)
     }
 }
 
@@ -679,21 +763,30 @@ pub struct Diagnostic {
     pub severity: Severity,
     /// `message`: human-readable text.
     pub message: String,
-    /// `method`: `name(Args)Ret` of the method concerned; absent for the whole class.
+    /// `method`: the method concerned, written as in [`MethodReport::signature`]; absent for the whole class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// `pc`: where in `method`'s code, in the unit of [`LineMapping::pc`]; absent when not tied to an instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc: Option<u32>,
 }
 
 impl Diagnostic {
     /// `message` at `severity`, about the whole class.
     pub fn new(severity: Severity, message: impl Into<String>) -> Diagnostic {
-        Diagnostic { severity, message: message.into(), method: None }
+        Diagnostic { severity, message: message.into(), method: None, pc: None }
     }
 
     /// This diagnostic about one `method` (`name(Args)Ret`).
     #[must_use]
     pub fn method(self, method: Option<String>) -> Diagnostic {
         Diagnostic { method, ..self }
+    }
+
+    /// This diagnostic about the instruction at `pc` of its method.
+    #[must_use]
+    pub fn pc(self, pc: Option<u32>) -> Diagnostic {
+        Diagnostic { pc, ..self }
     }
 }
 
@@ -716,9 +809,10 @@ pub enum Severity {
 pub struct LineMapping {
     /// 1-based line in [`UnitOutcome`]'s `text`.
     pub line: u32,
-    /// `name(Args)Ret` of the method the line belongs to.
+    /// The method the line belongs to, written as in [`MethodReport::signature`].
     pub method: String,
-    /// `pc`: dex pc in the method's code, in 16-bit code units.
+    /// `pc`: DEX: dex pc in the method's code, in 16-bit code units. ABC:
+    /// byte offset in the function's code.
     pub pc: u32,
 }
 
@@ -889,6 +983,139 @@ mod tests {
         assert_eq!(serde_json::to_value(&cancelled).unwrap(), json!({"requestId": 3}));
         let progress: ProgressParams = serde_json::from_value(json!({"progressToken": "t3", "progress": 0, "total": 1})).unwrap();
         assert_eq!(progress.progress_token, ProgressToken::String("t3".into()));
+    }
+
+    /// The P1 (DEX) messages of every method, as asc and dexdec wrote them
+    /// before the ABC members existed. The typed values must serialize to
+    /// exactly these bytes: L3 stores units as written and keys them by
+    /// what asc sent.
+    #[test]
+    fn java_messages_serialize_as_in_p1() {
+        fn same<T: Serialize + DeserializeOwned>(wire: &str) {
+            let typed: T = serde_json::from_str(wire).unwrap();
+            assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
+        }
+        let initialize = InitializeResult::new(1, Implementation::new("dexdec", "0.2.0"), "5d41")
+            .inputs(vec![InputKind::Archive])
+            .languages(vec![Language::Java, Language::Kotlin])
+            .mappings(true)
+            .method_status(true);
+        assert_eq!(
+            serde_json::to_string(&initialize).unwrap(),
+            r#"{"protocolVersion":1,"backend":{"name":"dexdec","version":"0.2.0"},"optionsHash":"5d41","inputs":["archive"],"languages":["java","kotlin"],"mappings":true,"methodStatus":true,"maxConcurrency":1}"#
+        );
+        let archive = ProgramOpenParams::new(ProgramInput::Archive { files: vec!["/a.apk".into()] });
+        assert_eq!(serde_json::to_string(&archive).unwrap(), r#"{"input":{"kind":"archive","files":["/a.apk"]}}"#);
+        let params = DecompileClassesParams::new(ProgramId("p1".into()), vec!["La;".into()], Language::Java)
+            .progress_token(Some(ProgressToken::Number(3)));
+        assert_eq!(
+            serde_json::to_string(&params).unwrap(),
+            r#"{"programId":"p1","classes":["La;"],"language":"java","nested":true,"progressToken":3}"#
+        );
+        let unit = ClassUnit::new("La;", UnitOutcome::Partial { path: Some("a.java".into()), text: "class a {}\n".into() })
+            .methods(vec![MethodReport::new("f()V", MethodStatus::Failed).reason(Some("irreducible loop".into()))])
+            .diagnostics(vec![Diagnostic::new(Severity::Warning, "m").method(Some("f()V".into()))])
+            .lines(vec![LineMapping::new(1, "f()V", 4)]);
+        let unit_wire = r#"{"class":"La;","status":"partial","path":"a.java","text":"class a {}\n","methods":[{"signature":"f()V","status":"failed","reason":"irreducible loop"}],"diagnostics":[{"severity":"warning","message":"m","method":"f()V"}],"lines":[{"line":1,"method":"f()V","pc":4}]}"#;
+        assert_eq!(serde_json::to_string(&unit).unwrap(), unit_wire);
+
+        same::<InitializeParams>(r#"{"protocolVersion":1,"client":{"name":"asc","version":"0.2.0"},"options":{"threads":2}}"#);
+        same::<ProgramOpenParams>(
+            r#"{"input":{"kind":"slice","files":["/c/3a.dex"],"manifest":{"targets":["La;"],"attached":[],"shells":[]}},"mappings":{"classes":{},"fields":{},"methods":{"La;->a()V":"run"}}}"#,
+        );
+        same::<DecompileClassesParams>(r#"{"programId":"p1","classes":["La;"],"language":"kotlin","nested":false}"#);
+        same::<DecompileClassesResult>(&format!(r#"{{"units":[{unit_wire},{{"class":"Lb;","status":"failed","reason":"boom"}}]}}"#));
+        // asc's L3 payload around a stored unit.
+        let stored: Value = serde_json::from_str(&format!(r#"{{"storedAt":1,"unit":{unit_wire}}}"#)).unwrap();
+        let unit: ClassUnit = serde_json::from_value(stored["unit"].clone()).unwrap();
+        assert_eq!(serde_json::to_string(&serde_json::json!({"storedAt": 1, "unit": unit})).unwrap(), stored.to_string());
+    }
+
+    #[test]
+    fn abc_input_matches_document() {
+        let wire = json!({"input": {"kind": "abc", "files": ["/c/3a7f.abc"], "sha256": "3a7f", "entry": "entry.hap/ets/modules.abc"}});
+        let params: ProgramOpenParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(params.input.kind(), InputKind::Abc);
+        assert_eq!(params.input.files(), [PathBuf::from("/c/3a7f.abc")]);
+        assert_eq!(serde_json::to_value(&params).unwrap(), wire);
+
+        let bare = ProgramOpenParams::new(ProgramInput::Abc { files: vec!["/m.abc".into()], sha256: None, entry: None });
+        let bare_wire = json!({"input": {"kind": "abc", "files": ["/m.abc"]}});
+        assert_eq!(serde_json::to_value(&bare).unwrap(), bare_wire, "absent sha256 / entry are omitted");
+        assert_eq!(serde_json::from_value::<ProgramOpenParams>(bare_wire).unwrap(), bare);
+
+        let initialize: InitializeResult = serde_json::from_value(json!({
+            "protocolVersion": 1, "backend": {"name": "arkdec", "version": "0.2.0"}, "optionsHash": "5d41",
+            "inputs": ["abc"], "languages": ["javascript", "arkts"], "methodStatus": true, "maxConcurrency": 4,
+            "requestOptions": ["raw", "level"]
+        }))
+        .unwrap();
+        assert!(initialize.accepts(InputKind::Abc) && !initialize.accepts(InputKind::Archive));
+        assert_eq!(initialize.languages, [Language::JavaScript], "unknown languages are dropped");
+        assert!(initialize.honours("raw") && initialize.honours("level") && !initialize.honours("mappings"));
+        assert_eq!(serde_json::to_value(Language::JavaScript).unwrap(), json!("javascript"));
+    }
+
+    #[test]
+    fn request_options_are_omitted_when_empty() {
+        let initialize = InitializeResult::new(1, Implementation::new("x", "0"), "");
+        assert!(!serde_json::to_value(&initialize).unwrap().as_object().unwrap().contains_key("requestOptions"));
+        assert!(!initialize.honours("raw"));
+        let declared = initialize.request_options(vec!["raw".into()]);
+        assert_eq!(serde_json::to_value(&declared).unwrap()["requestOptions"], json!(["raw"]));
+
+        let params = DecompileClassesParams::new(ProgramId("p1".into()), vec!["&a&".into()], Language::JavaScript);
+        assert_eq!(
+            serde_json::to_value(&params).unwrap(),
+            json!({"programId": "p1", "classes": ["&a&"], "language": "javascript", "nested": true})
+        );
+        let mut options = Map::new();
+        options.insert("raw".into(), json!(true));
+        let params = params.options(options);
+        let wire = json!({"programId": "p1", "classes": ["&a&"], "language": "javascript", "nested": true, "options": {"raw": true}});
+        assert_eq!(serde_json::to_value(&params).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<DecompileClassesParams>(wire).unwrap(), params);
+    }
+
+    #[test]
+    fn abc_unit_matches_document() {
+        let text = "function func_main_0() {}\nclass Index { build() {} }\n";
+        let wire = json!({"units": [{
+            "class": "&entry/src/main/ets/pages/Index&", "status": "partial",
+            "path": "entry/src/main/ets/pages/Index.js", "text": text,
+            "methods": [
+                {"signature": "func_main_0", "status": "ok", "level": "structured", "span": [0, 26]},
+                {"signature": "#~@0>#build", "status": "failed", "reason": "inexact: opaque operation at 0x12",
+                 "restored": "Index.build", "level": "labelled", "span": [40, 50]}],
+            "diagnostics": [{"severity": "warning", "message": "desugar: finally shape not recognized",
+                             "method": "#~@0>#build", "pc": 88}],
+            "lines": [{"line": 2, "method": "#~@0>#build", "pc": 24}]
+        }]});
+        let result: DecompileClassesResult = serde_json::from_value(wire.clone()).unwrap();
+        let unit = &result.units[0];
+        assert_eq!(unit.methods[1].restored.as_deref(), Some("Index.build"));
+        assert_eq!(unit.methods[1].level.as_deref(), Some("labelled"));
+        assert_eq!(unit.methods[0].slice(text), Some("function func_main_0() {}\n"));
+        assert_eq!(unit.methods[1].slice(text), Some("build() {}"));
+        assert_eq!(unit.diagnostics[0].pc, Some(88));
+        assert_eq!(serde_json::to_value(&result).unwrap(), wire);
+
+        let report = MethodReport::new("f", MethodStatus::Ok).restored(Some("A.f".into())).level(Some("structured".into()));
+        assert_eq!(report.clone().span(Some([0, 99])).slice("short"), None, "a span past the text");
+        assert_eq!(report.clone().span(Some([1, 2])).slice("é"), None, "a span inside a character");
+        assert_eq!(report.slice("text"), None, "no span");
+        assert_eq!(
+            serde_json::to_value(Diagnostic::new(Severity::Info, "m").pc(Some(0))).unwrap(),
+            json!({"severity": "info", "message": "m", "pc": 0})
+        );
+    }
+
+    #[test]
+    fn unknown_level_does_not_fail_the_unit() {
+        let wire = json!({"units": [{"class": "&a&", "status": "ok", "text": "",
+            "methods": [{"signature": "f", "status": "ok", "level": "someFutureRung", "flavour": 1}]}]});
+        let result: DecompileClassesResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(result.units[0].methods[0].level.as_deref(), Some("someFutureRung"));
     }
 
     #[test]

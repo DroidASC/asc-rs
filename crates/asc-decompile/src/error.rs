@@ -69,6 +69,13 @@ pub enum Error {
     /// The pool was shut down; no further requests are served.
     #[error("backend pool is shut down")]
     Closed,
+    /// The request carries a per-request option the backend did not declare
+    /// in `requestOptions`; the request was not sent.
+    #[error("backend does not take the request option `{option}`")]
+    UnsupportedOption {
+        /// The option's name.
+        option: String,
+    },
 }
 
 fn tail(stderr_tail: &str) -> String {
@@ -88,7 +95,7 @@ impl Error {
             | Self::InvalidResult(_)
             | Self::Unavailable { .. }
             | Self::Disabled { .. } => true,
-            Self::Cancelled | Self::Rpc(_) | Self::Encode(_) | Self::Closed => false,
+            Self::Cancelled | Self::Rpc(_) | Self::Encode(_) | Self::Closed | Self::UnsupportedOption { .. } => false,
         }
     }
 }
