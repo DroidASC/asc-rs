@@ -19,4 +19,9 @@ impl<'a> StringData<'a> {
     pub fn to_str(&self) -> Cow<'a, str> {
         mutf8::decode(self.bytes)
     }
+
+    /// The UTF-16 code units, unpaired surrogates kept.
+    pub fn to_utf16(&self) -> Vec<u16> {
+        mutf8::utf16(self.bytes)
+    }
 }

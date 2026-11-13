@@ -17,6 +17,15 @@ pub fn decode(bytes: &[u8]) -> Cow<'_, str> {
     }
 }
 
+/// The UTF-16 code units of MUTF-8 bytes, unpaired surrogates kept (the
+/// string a JS engine sees); an invalid byte yields `U+FFFD`.
+pub fn utf16(bytes: &[u8]) -> Vec<u16> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.encode_utf16().collect(),
+        Err(_) => Units { bytes, pos: 0 }.collect(),
+    }
+}
+
 /// UTF-16 code units of MUTF-8 bytes; an invalid byte yields `U+FFFD`.
 struct Units<'a> {
     bytes: &'a [u8],
@@ -69,5 +78,12 @@ mod tests {
         assert_eq!(decode(b"\xED\xA0\xBDx"), "\u{FFFD}x");
         assert_eq!(decode(b"\xFFok\xC3"), "\u{FFFD}ok\u{FFFD}");
         assert_eq!(decode(b"\xE4\xB8"), "\u{FFFD}\u{FFFD}");
+    }
+
+    #[test]
+    fn utf16_keeps_unpaired_surrogates() {
+        assert_eq!(utf16(b"a\xC0\x80"), [0x61, 0]);
+        assert_eq!(utf16(b"\xED\xA0\xBDx"), [0xD83D, 0x78]);
+        assert_eq!(utf16("é😀".as_bytes()), [0xE9, 0xD83D, 0xDE00]);
     }
 }
