@@ -14,16 +14,24 @@ pub enum Status {
     Partial,
     /// Every backend failed on the whole class: the text is smali.
     Smali,
+    /// Every backend failed on the whole HarmonyOS record: the text is its
+    /// disassembly, as `getclass` lists it.
+    Disassembly,
 }
 
 impl Status {
-    /// `ok`, `partial` or `failed` (the backends failed; smali shown).
+    /// `ok`, `partial` or `failed` (the backends failed; smali or the disassembly shown).
     pub fn name(self) -> &'static str {
         match self {
             Status::Ok => "ok",
             Status::Partial => "partial",
-            Status::Smali => "failed",
+            Status::Smali | Status::Disassembly => "failed",
         }
+    }
+
+    /// Whether the text is no backend's but asc's own listing.
+    pub fn is_listing(self) -> bool {
+        matches!(self, Status::Smali | Status::Disassembly)
     }
 }
 
@@ -54,23 +62,31 @@ pub struct Attempt {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Decompiled {
-    /// The class's type descriptor.
+    /// The class's type descriptor, or the HarmonyOS record's name.
     pub class: String,
+    /// The ABC entry of a HarmonyOS record (`entry.hap/ets/modules.abc`).
+    pub entry: Option<String>,
     /// The outer class whose source the text is, when the class is nested
     /// and the backend folded it into that one (docs/decompile-backends.md §6.3).
     pub folded_into: Option<String>,
-    /// The backend that answered, `None` for smali.
+    /// The backend that answered, `None` for smali or the disassembly.
     pub backend: Option<String>,
     /// Its version, as `initialize` reported it.
     pub version: Option<String>,
     /// How the answer came about.
     pub status: Status,
-    /// The language of [`text`](Self::text); `None` for smali.
+    /// The language of [`text`](Self::text); `None` for smali or the disassembly.
     pub language: Option<Language>,
     /// The source (or smali), or only the methods the request picked.
     pub text: String,
     /// Methods the backend failed on (stubs in the text).
     pub failed_methods: Vec<MethodReport>,
+    /// Every function the backend reported for a HarmonyOS record: raw and
+    /// restored names, structuring level, status. Empty for a DEX class.
+    pub functions: Vec<MethodReport>,
+    /// More header lines: what asc did about the request, e.g. a method it
+    /// could not cut out of the text.
+    pub notes: Vec<String>,
     /// The backends tried before, in order, and why each gave nothing.
     pub attempts: Vec<Attempt>,
     /// Served from L3 without asking the backend.
@@ -85,8 +101,18 @@ pub struct Decompiled {
 
 impl Decompiled {
     /// The comment marker of the text's language.
-    fn comment(&self) -> &'static str {
-        if self.status == Status::Smali { "#" } else { "//" }
+    pub fn comment(&self) -> &'static str {
+        if self.status.is_listing() { "#" } else { "//" }
+    }
+
+    /// What the text is when no backend gave it: `smali` or `disassembly`;
+    /// `None` when a backend did.
+    pub fn listing(&self) -> Option<&'static str> {
+        match self.status {
+            Status::Smali => Some("smali"),
+            Status::Disassembly => Some("disassembly"),
+            Status::Ok | Status::Partial => None,
+        }
     }
 
     /// Lines naming the backend that answered, the status, the backends
@@ -98,22 +124,30 @@ impl Decompiled {
         let by = match (&self.backend, &self.version) {
             (Some(backend), Some(version)) => format!("{backend} {version}"),
             (Some(backend), None) => backend.clone(),
-            (None, _) => "smali (no decompiler gave source)".to_string(),
+            (None, _) => format!("{} (no decompiler gave source)", self.listing().unwrap_or("smali")),
         };
         let cached = if self.cached { ", from cache" } else { "" };
         let folded = self.folded_into.as_ref().map_or_else(String::new, |outer| format!(" | in {outer}"));
-        let _ = writeln!(out, "{c} decompile {}{folded} | by {by} | status {}{cached}", self.class, self.status.name());
+        let entry = self.entry.as_ref().map_or_else(String::new, |entry| format!(" | {entry}"));
+        let _ = writeln!(out, "{c} decompile {}{entry}{folded} | by {by} | status {}{cached}", self.class, self.status.name());
         for attempt in &self.attempts {
             let _ = writeln!(out, "{c} {} failed: {}", attempt.backend, one_line(&attempt.reason));
         }
         if !self.failed_methods.is_empty() {
             let _ = writeln!(out, "{c} failed methods: {}", self.failed_methods.len());
             for method in &self.failed_methods {
+                let name = match &method.restored {
+                    Some(restored) if *restored != method.signature => format!("{} ({restored})", method.signature),
+                    _ => method.signature.clone(),
+                };
                 match &method.reason {
-                    Some(reason) => _ = writeln!(out, "{c}   {}: {}", method.signature, one_line(reason)),
-                    None => _ = writeln!(out, "{c}   {}", method.signature),
+                    Some(reason) => _ = writeln!(out, "{c}   {name}: {}", one_line(reason)),
+                    None => _ = writeln!(out, "{c}   {name}"),
                 }
             }
+        }
+        for note in &self.notes {
+            let _ = writeln!(out, "{c} {}", one_line(note));
         }
         if self.naming == Naming::NotUnified {
             let backend = self.backend.as_deref().unwrap_or("smali");
@@ -166,6 +200,7 @@ mod tests {
     fn sample() -> Decompiled {
         Decompiled {
             class: "La/Main;".into(),
+            entry: None,
             folded_into: None,
             backend: Some("jadx".into()),
             version: Some("1.5".into()),
@@ -173,6 +208,8 @@ mod tests {
             language: Some(Language::Java),
             text: "class Main {}".into(),
             failed_methods: vec![MethodReport::new("run(I)V", MethodStatus::Failed).reason(Some("irreducible\nloop".into()))],
+            functions: Vec::new(),
+            notes: Vec::new(),
             attempts: vec![Attempt { backend: "dexdec".into(), reason: "backend exited: signal 6".into() }],
             cached: true,
             naming: Naming::NotUnified,
@@ -199,6 +236,49 @@ mod tests {
     fn header_names_the_outer_class_of_a_folded_nested_class() {
         let nested = Decompiled { class: "La/Main$1;".into(), folded_into: Some("La/Main;".into()), ..sample() };
         assert!(nested.header().starts_with("// decompile La/Main$1; | in La/Main; | by jadx 1.5 | status partial"), "{}", nested.header());
+    }
+
+    #[test]
+    fn header_of_a_record_names_its_entry_and_restored_names() {
+        let failed = MethodReport::new("#~@0>#build", MethodStatus::Failed)
+            .restored(Some("Index.build".into()))
+            .reason(Some("inexact: opaque operation at 0x12".into()));
+        let record = Decompiled {
+            class: "&entry/src/main/ets/pages/Index&".into(),
+            entry: Some("ets/modules.abc".into()),
+            backend: Some("arkdec".into()),
+            version: Some("0.2.0".into()),
+            language: Some(Language::JavaScript),
+            failed_methods: vec![failed],
+            attempts: Vec::new(),
+            cached: false,
+            naming: Naming::Dex,
+            notes: vec!["arkdec reported no text of #~@0>#build; the whole record follows".into()],
+            ..sample()
+        };
+        assert_eq!(
+            record.header(),
+            "// decompile &entry/src/main/ets/pages/Index& | ets/modules.abc | by arkdec 0.2.0 | status partial\n\
+             // failed methods: 1\n\
+             //   #~@0>#build (Index.build): inexact: opaque operation at 0x12\n\
+             // arkdec reported no text of #~@0>#build; the whole record follows\n"
+        );
+        let listing = Decompiled {
+            backend: None,
+            version: None,
+            status: Status::Disassembly,
+            language: None,
+            failed_methods: Vec::new(),
+            notes: Vec::new(),
+            attempts: vec![Attempt { backend: "arkdec".into(), reason: "asc-arkdec-worker not found".into() }],
+            ..record
+        };
+        assert_eq!(
+            listing.header(),
+            "# decompile &entry/src/main/ets/pages/Index& | ets/modules.abc | by disassembly (no decompiler gave source) | status failed\n\
+             # arkdec failed: asc-arkdec-worker not found\n"
+        );
+        assert!(listing.is_degraded() && listing.status.is_listing());
     }
 
     #[test]

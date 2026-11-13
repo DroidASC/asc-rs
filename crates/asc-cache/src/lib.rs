@@ -152,6 +152,24 @@ impl ApkKey {
         Ok(ApkKey { archives: archives.into(), ..ApkKey::lone(&apk.stem(), key) })
     }
 
+    /// The key of a file known by its content rather than its place: one
+    /// ABC file of a HarmonyOS program, whose decompiled records depend on
+    /// its bytes alone. `label` names it (`entry.hap/ets/modules.abc`): its
+    /// last component's stem starts the key, the first 16 hex digits of
+    /// `sha256` end it. The same bytes get the same key under any path, in
+    /// any program; there are no archives to [`locate`](ApkKey::locate) in.
+    ///
+    /// The key only spreads files over directories: whoever stores under
+    /// it keeps the whole digest in the query, as two contents may share
+    /// these 64 bits.
+    pub fn for_content(label: &str, sha256: &[u8; 32]) -> ApkKey {
+        let name = label.rsplit(['/', '\\']).next().unwrap_or(label);
+        let stem = Path::new(name).file_stem().map_or_else(|| name.into(), |stem| stem.to_string_lossy());
+        let mut prefix = [0u8; 8];
+        prefix.copy_from_slice(&sha256[..8]);
+        ApkKey::lone(&stem, u64::from_be_bytes(prefix))
+    }
+
     /// The key of one archive: `stem` (sanitised) and its hash.
     fn lone(stem: &str, hash: u64) -> ApkKey {
         let stem: String = stem.chars().filter(|c| is_key_char(*c)).take(STEM_MAX).collect();
@@ -1610,6 +1628,22 @@ impl<T> MemoryCache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_keys_are_stable_and_distinct() {
+        let mut sha = [0u8; 32];
+        sha[0] = 0x3a;
+        sha[7] = 0x7f;
+        let key = ApkKey::for_content("entry.hap/ets/modules.abc", &sha);
+        assert_eq!(key.as_str(), "modules-3a0000000000007f");
+        assert!(is_cache_dir_name(key.as_str()), "evicted and cleared like an APK's directory");
+        assert_eq!(ApkKey::for_content("other/dir/modules.abc", &sha), key, "the place does not count");
+        let mut other = sha;
+        other[1] = 1;
+        assert_ne!(ApkKey::for_content("entry.hap/ets/modules.abc", &other), key);
+        assert_eq!(ApkKey::for_content("a b/w*idgets.abc", &sha).as_str(), "widgets-3a0000000000007f");
+        assert_eq!(key.locate("ets/modules.abc"), (&key, "ets/modules.abc"));
+    }
 
     #[test]
     fn regions_of_a_file_map_at_any_offset() {

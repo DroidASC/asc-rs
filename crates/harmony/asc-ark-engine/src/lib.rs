@@ -173,6 +173,19 @@ pub struct ClassSource {
     pub text: String,
 }
 
+/// Where a record, or one function of it, is: what [`Engine::get_class`]
+/// would disassemble, without the listing ([`Engine::locate`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Location {
+    /// The ABC entry that defines the record.
+    pub entry: String,
+    /// Canonical record name.
+    pub record: String,
+    /// Raw name of the function, when one was asked for.
+    pub function: Option<String>,
+}
+
 /// A HarmonyOS program opened for queries.
 pub struct Engine {
     program: Program,
@@ -358,6 +371,41 @@ impl Engine {
             }
         };
         Ok(ClassSource { entry: located.entry.to_owned(), record, function, text })
+    }
+
+    /// The entry, record and function `query` names, as
+    /// [`Engine::get_class`] resolves them, without disassembling anything.
+    ///
+    /// # Errors
+    /// As [`Engine::get_class`], but for [`EngineError::Disassembly`].
+    pub fn locate(&self, query: &ClassQuery<'_>) -> Result<Location> {
+        let located = records::resolve_record(&self.program, query.record, query.entry)?;
+        let record = String::from_utf8_lossy(located.class.name()).into_owned();
+        let function = match query.function {
+            None => None,
+            Some(name) => {
+                let method = records::resolve_function(&located, name)?;
+                Some(method.name().map(|name| name.to_str().into_owned()).unwrap_or_default())
+            }
+        };
+        Ok(Location { entry: located.entry.to_owned(), record, function })
+    }
+
+    /// SHA-256 of the bytes the engine reads for ABC entry `entry` (its
+    /// name, as [`EntryInfo::name`]): the decrypted file's for an entry a
+    /// stand-in serves. Computed on first use and kept. `None` when the
+    /// program has no such entry.
+    pub fn entry_sha256(&self, entry: &str) -> Option<[u8; 32]> {
+        self.program.sha256(self.program.infos().position(|info| info.name == entry)?)
+    }
+
+    /// The file holding exactly the bytes of ABC entry `entry` (as
+    /// [`Engine::entry_sha256`] takes it), when there is one: a bare
+    /// `.abc` (also a decrypted stand-in) or a file of an unpacked package,
+    /// as the program's path spelled it. `None` for an entry inside a zip
+    /// and for an entry the program does not have.
+    pub fn entry_file(&self, entry: &str) -> Option<&Path> {
+        self.program.entry_file(self.program.infos().position(|info| info.name == entry)?)
     }
 
     /// Search every readable entry. `sink` receives one batch per entry, in

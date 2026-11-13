@@ -1,6 +1,7 @@
 # 反编译后端接入设计
 
-状态：P1 已实现（2026-11-11：配置、进程池、`asc decompile`、MCP `decompile`、L3、内置 dexdec）；P2–P4 仍是提案。配套文档：[rebuild-slice.md](rebuild-slice.md)（给后端喂的闭包切片）。
+状态：P1 已实现（2026-11-11：配置、进程池、`asc decompile`、MCP `decompile`、L3、内置 dexdec）；P5 的 asc 一侧已实现
+（2026-11-13：HarmonyOS record 交给 arkdec，§6.5、§8、§9、§12）；P2–P4 仍是提案。配套文档：[rebuild-slice.md](rebuild-slice.md)（给后端喂的闭包切片）。
 
 目标：`asc` 能把一个类交给可替换的反编译后端（dexdec、JEB、jadx …）得到 Java / Kotlin 源码，不在进程内
 链接任何后端，并利用 asc-rebuild 的切片让整包加载慢的后端提速。
@@ -66,10 +67,18 @@ asc CLI ──(现有 daemon 转发)──▶ asc daemon / asc mcp
 default = "dexdec"            # 不写 --decompiler 时用哪个
 fallback = ["jadx"]           # 默认后端失败时依次尝试；空 = 不回退
 
+harmony_default = "arkdec"    # HarmonyOS 程序（.hap / .hsp / .app / .abc）不写 --decompiler 时用哪个
+harmony_fallback = []         # 它整个 record 失败时依次尝试；空 = 直接给反汇编
+
 # dexdec 是内置后端，不写这一节时 command 是 asc 找到的 asc-dexdec-worker（§12）、inputs = ["archive"]；
 # 这一节不写 command 时只改 instances / timeout / options 等（此时不能写 args），写了 command 就换成那个程序。
 [decompilers.dexdec]
 options = { indent = "    " }
+
+# arkdec 同样是内置的（inputs = ["abc"]），worker 是 asc-arkdec-worker（§12），没有发布、不会自动安装。
+[decompilers.arkdec]
+command = "/path/to/asc-arkdec/target/release/asc-arkdec-worker"   # 或者设 $ASC_ARKDEC_WORKER
+options = { threads = 4 }
 
 [decompilers.jeb]
 command = "java"
@@ -89,22 +98,23 @@ instances = 2
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `command` | 字符串 | 必填（`dexdec` 除外） | 可执行文件；不含 `/` 时按 `PATH` 查找 |
+| `command` | 字符串 | 必填（`dexdec`、`arkdec` 除外） | 可执行文件；不含 `/` 时按 `PATH` 查找 |
 | `args` | 字符串数组 | `[]` | |
 | `env` | 表 | `{}` | 在继承的环境上追加 |
 | `cwd` | 路径 | cache 目录下的 `decompilers/<name>/` | |
 | `instances` | 整数 | 1 | |
 | `max_concurrency` | 整数 | 后端声明的值 | 只能压低 `initialize` 里的 `maxConcurrency` |
 | `idle` / `timeout` / `startup_timeout` | 时长 | 10m / 60s / 30s | 数字按秒 |
-| `inputs` | 字符串数组 | 后端声明的值 | asc 可以交给它的输入形态（`archive` / `slice`），和后端声明取交集 |
+| `inputs` | 字符串数组 | 后端声明的值 | asc 可以交给它的输入形态（`archive` / `slice` / `abc`），和后端声明取交集 |
 | `options` | 表 | `{}` | 不解释，放进 `initialize` 的 `options` |
 | `enabled` | 布尔 | true | |
 
 实现注意：`asc_engine::config` 把整个文件展开成标量键并逐个校验（`config.rs` 的 `flatten`），
 `[decompilers.*]` 必须在展开前摘出来单独解析，否则会被当成未知键报错（已实现：`config/decompilers.rs`）。
-`[decompile]` 的 `default` / `fallback` / `mapping` 是普通设置，也能用 `--set`、`$ASC_DECOMPILER`、
-`$ASC_DECOMPILE_FALLBACK`、`$ASC_MAPPING` 给。`asc config` 另起一节列出后端：名字、命令行、来源
-（built-in / file）和角色（default / fallback N / disabled）。最近一次 `initialize` 报告的版本只有常驻进程
+`[decompile]` 的 `default` / `fallback` / `harmony_default` / `harmony_fallback` / `mapping` 是普通设置，也能用
+`--set`、`$ASC_DECOMPILER`、`$ASC_DECOMPILE_FALLBACK`、`$ASC_HARMONY_DECOMPILER`、`$ASC_HARMONY_DECOMPILE_FALLBACK`、
+`$ASC_MAPPING` 给。`asc config` 另起一节列出后端：名字、命令行、来源（built-in / file）和角色（default /
+fallback N / harmony default / harmony fallback N，同时担任几种时用 `, ` 连起来；disabled）。最近一次 `initialize` 报告的版本只有常驻进程
 知道，在结果头部（`by dexdec 0.1.1`）里给出，`asc config` 不显示。
 
 ## 5. 传输与生命周期
@@ -226,7 +236,9 @@ instances = 2
 - 进度：可选，asc 只转发给 MCP 客户端。
 - 错误码：`-32700` / `-32600` / `-32601` / `-32602` 沿用 JSON-RPC；`-32800` 表示已取消；后端自定义的错误从
   `-33000` 起：`-33001` 找不到程序会话，`-33002` 不支持这种输入，`-33003` 许可证或功能不可用（例如 JEB
-  不是 Pro 版）。
+  不是 Pro 版），`-33004` 输入与 asc 描述的不符（§6.5）。asc 收到 `-33004` 时关掉这个程序会话，把自己读到的
+  字节重新写进内容寻址的文件（§6.5 的落盘目录，覆盖同名文件），用新文件再开一次并重发请求；还不行就算这个后端
+  失败，交给下一个。
 
 ### 6.5 ABC 程序（HarmonyOS，arkdec）
 
@@ -308,13 +320,23 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
 
 ## 8. 结果缓存
 
-结果写入 L3，键为 `(ApkKey, 输入指纹, backend.name, backend.version, optionsHash, mappings 哈希, language, nested)`。
+结果写入 L3，键为 `(ApkKey, 输入指纹, backend.name, backend.version, optionsHash, mappings 哈希, language, nested, 请求 options)`。
 
 - mappings 哈希：`NameMappings::hash`，对 `program/open` 实际下发的（按请求裁剪后的）条目计算，与插入顺序无关；
   编码改动时提升其中的版本标签（当前 `asc-name-mappings/2`）。
 
 - 输入指纹：切片用切片的 SHA-256。切片输出是规范化的（id 表排序固定），所以同一个类闭包每次得到相同的哈希。
   archive 用 `ApkKey` 加类描述符。
+- 请求 options（§6.5）：按键排序的紧凑 JSON（`{"level":"pcDispatch","raw":true}`）；为空时查询串里不出现这一段，
+  所以 DEX 类的键与 P1 逐字节相同，已有条目照常命中（`l3.rs` 的 `dex_query_is_unchanged_from_p1` 固定了 P1 的查询串）。
+- HarmonyOS record：一个 record 的输出只取决于它所在的那个 ABC 文件（§6.5），所以键按文件内容而不是按程序：
+  - `ApkKey::for_content(entry, sha256)`：`<entry 最后一段的文件名主干>-<SHA-256 前 16 个十六进制位>`，例如
+    `modules-3a7f0c…`；只用来把文件分散到目录里；
+  - 查询串：`input=abc:<完整 SHA-256>:<record>\0backend=arkdec\0version=<版本>\0options=<optionsHash>\0mappings=-\0language=javascript\0nested=true`，
+    有请求 options 时再加 `\0request=<JSON>`。完整的 SHA-256 在查询串里，读出时核对（渲染层存了查询串），前缀撞了也不会串。
+  - SHA-256 是引擎实际读到的字节的哈希（加密条目有解密替身时是替身的字节），由 `asc_ark_engine::Engine::entry_sha256`
+    算一次后记住。同一个 ABC 文件放在别的包里、或者包重新打过但 `modules.abc` 没变，都直接命中。
+  - `--method` 不进键：整个 record 存一份，取函数时按 `span` 截取。
 - `status = failed` 的结果也缓存，但只保留 10 分钟（失败往往和超时、资源有关）。
 - 并入外部类的嵌套类（§6.3）：单元只按外部类的键存一份，嵌套类的键里存一条指向外部类的引用。请求嵌套类时
   先查它自己的键；没有时按 `$` 逐级截短描述符（`La/B$C$D;` → `La/B;`、`La/B$C;`，外层优先）查外部类的单元，
@@ -324,9 +346,26 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
 
 - `asc decompile <apk> <class> [--decompiler NAME] [--language java|kotlin] [--method M]`，MCP 工具
   `decompile` 参数相同。不指定时用 `decompile.default`。
+- 程序的格式决定用哪条链（`asc_frontend::format::ProgramFormat`，和其它命令选引擎的规则相同）：DEX 程序用
+  `decompile.default` + `decompile.fallback`；HarmonyOS 程序用 `decompile.harmony_default`（默认 `arkdec`）+
+  `decompile.harmony_fallback`（默认空）。`--decompiler NAME` 两边都只用它一个。一个后端得声明这种格式要的输入
+  （DEX：`archive`；HarmonyOS：`abc`）和语言，否则这次尝试失败（`takes no ABC input`、`no javascript output`），链往下走。
+- HarmonyOS：`asc decompile <hap|app|abc> <record> [--method F] [--entry E] [--raw] [--level pc-dispatch] [-o DIR]`；
+  MCP 的 `decompile` 多了 `entry`、`raw`、`level`。record 和函数的写法与 `getclass` 相同（`pages/Index`、
+  `&entry/src/main/ets/pages/Index&`、`RECORD->FUNCTION[+0xPC]`；`--method Index.build` / `#~@0>#build` / `build`），
+  先在引擎里定位，名字不对（找不到、几个 entry 都有）直接报错，不启动后端。`--raw` / `--level` 是请求 options
+  （后端没在 `requestOptions` 里声明就算这次尝试失败）；`--method` 按函数的 `span` 从整个 record 的文本里截取，
+  后端没给 `span` 时给出整个 record，头部注明。`--language` 只能是 `javascript`（`js`），`--mapping` 只用于 DEX；
+  反过来 `--raw`、`--level`、`--entry`、`--language javascript` 用在 DEX 程序上都报错。
+- 头部（`//` 注释）：`// decompile <record> | <entry> | by arkdec <版本> | status ok|partial`，失败的函数列成
+  `//   #~@0>#build (Index.build): inexact: …`。`-o DIR` 写到 `DIR/<record 路径>.js`（后端给的 `path` 通过 §11 的检查就用它，
+  否则由 record 名生成，`&entry/src/main/ets/pages/Index&` → `entry/src/main/ets/pages/Index.js`）；程序有多个 ABC entry
+  时前面再加 entry 的路径。
 - 回退：默认后端整类失败（`failed`、超时、进程崩溃）时，按 `fallback` 顺序重试，结果头部注明实际用了哪个
   后端。`partial` 不回退，只在 `methods` 里列出失败的方法；需要对照时用 `--decompiler` 显式指定。
-- 都失败时回到现有的 smali 输出，并给出提示。
+- 都失败时回到现有的 smali 输出，并给出提示。HarmonyOS record 回到 `getclass` 的反汇编（`--method` 时是那个函数的），
+  头部用 `#` 注释：`# decompile <record> | <entry> | by disassembly (no decompiler gave source) | status failed`，
+  每个失败的后端一行 `# arkdec failed: <原因>`；找不到 worker 时原因里写明怎样构建、放在哪里。退出码 2。
 - 切片构建失败时（见 rebuild-slice.md §7），只接受 `slice` 的后端退回默认目标及 `$` 附属类切片并注明；默认切片也构建不了，
   就换一个接受 `archive` 的后端。
 
@@ -361,7 +400,7 @@ asc 对它的约定只有下面这些。
   `PROTOCOL_VERSION`，否则这个后端停用，见 §6.1）。
 - 发布：每个 release 带 `asc-dexdec-worker-p<协议版本>-<target>.tar.gz` 和同名 `.sha256`（`shasum -a 256` 格式）；
   归档里只有目录 `<名字>/`、其中的 `asc-dexdec-worker` 和 `LICENSE`。
-- 查找顺序（`asc_frontend::decompile::dexdec`）：`[decompilers.dexdec]` 的 `command` → `asc` 所在目录（`current_exe`，
+- 查找顺序（`asc_frontend::decompile::worker`）：`[decompilers.dexdec]` 的 `command` → `asc` 所在目录（`current_exe`，
   再按解析符号链接后的路径）→ asc 为本协议版本安装的 `$XDG_DATA_HOME/asc/tools/asc-dexdec-worker-p<协议版本>-<target>/`
   （默认 `~/.local/share/asc/…`，按协议版本和 target 分开，说同一协议的 asc 共用）→ `PATH`。每个请求先比对正在用的
   worker 文件的大小和修改时间，变了（重装、重新编译、被删）就重新查找并换新进程池。
@@ -389,6 +428,27 @@ asc 对它的约定只有下面这些。
   （没有且允许时自动安装）；都不行就让请求失败，退回 smali 并写明原因。
 - 测试：asc-cli 里需要真 worker 的测试读 `ASC_DEXDEC_WORKER`（一个 `asc-dexdec-worker` 的路径），没设就跳过；其余用
   asc-decompile 的 mock 后端。
+
+### arkdec（HarmonyOS，`../asc-arkdec`）
+
+`asc-arkdec-worker` 在 asc-arkdec 仓库里构建（`cargo build --release --bin asc-arkdec-worker`），协议见 §6.5；
+命令行约定与 dexdec 的 worker 相同（无参数服务 stdio，`--version`、`--protocol-version`）。它**还没有发布**，所以：
+
+- 只在找到时才用（opt-in）。查找顺序（`asc_frontend::decompile::worker`，`Tool` 为 `ARKDEC`）：
+  `[decompilers.arkdec]` 的 `command` → `$ASC_ARKDEC_WORKER` 指向的可执行文件 → `asc` 所在目录 → `PATH`。
+  不看安装目录（那里不会有 asc 装的 arkdec）。和 dexdec 一样，每个请求先比对 worker 文件的大小和修改时间，变了就换进程池。
+- 不自动安装，`decompile.auto_install` 对它不起作用。找不到时这次尝试失败，原因是
+  `asc-arkdec-worker not found ($ASC_ARKDEC_WORKER, next to asc, on PATH); build it (from asc-arkdec: cargo build --release --bin asc-arkdec-worker) and set ASC_ARKDEC_WORKER to it, put it next to asc or name it in [decompilers.arkdec] command`，
+  然后给出反汇编（§9）。`$ASC_ARKDEC_WORKER` 设了但不是可执行文件时，原因里直接这么说。
+- `asc install arkdec` 存在，但不下载任何东西：报错说没有发布，并给出上面的构建办法（找到了 worker 时在 stderr 说用的是哪个）。
+  将来发布后，安装目录是 `tools/asc-arkdec-worker-p<协议版本>-<target>/`，资产名同理。
+- 输入：一个 ABC 文件。entry 本身就是文件时（裸 `.abc`、解密替身、解开的包里的文件，`Engine::entry_file`）直接给它的路径；
+  zip 里的条目写到 `<cache>/decompilers/abc/<sha 前两位>/<sha>.abc`（先写临时文件再 rename，权限 0600，按内容命名、不覆盖），
+  写入时目录超过 2 GiB 就从最久没用的开始删（删不掉的跳过，Windows 上被映射的文件删不掉）。没有磁盘 cache 时写到一个临时目录，
+  随 `Decompilers` 一起删除。`program/open` 带上 `sha256` 和 `entry`；asc 打开的程序会话按（后端、文件、sha256）区分。
+- daemon 的身份包含所有 `ASC_*` 环境变量和配置，所以改了 `$ASC_ARKDEC_WORKER` 或 `[decompilers.arkdec]` 就是另一个 daemon。
+- 测试：asc 里的测试只用 mock（`mock_backend --abc`）。需要真 worker 的测试（`crates/asc-cli/tests/decompile_harmony.rs`
+  的 `the_built_in_arkdec_daemon_equals_one_shot`）读 `ASC_ARKDEC_WORKER`，没设就跳过。
 
 ### jeb-server（`../jeb-cli`）
 
@@ -419,6 +479,7 @@ asc 对它的约定只有下面这些。
 | P2 | asc-rebuild 闭包切片（rebuild-slice.md 的 S1–S2）；jadx worker | 在 MT2 等 3 个样本上，jadx 切片与整包输出的差异行数降到单类切片的 1/5 以下，耗时不超过整包的 1/5 |
 | P3 | jeb-server `--stdio`；映射下发；回退链 | JEB 与 dexdec 输出的名字一致 |
 | P4 | 差分测试接入 CI：ART 语料，后端 × 输入形态 | 每个后端的通过率不低于当前基线（dexdec 549 / 598，jadx 527 / 598） |
+| P5 | HarmonyOS：协议的 ABC 扩展（§6.5）；arkdec（`asc-arkdec-worker`，asc-arkdec 仓库）；`asc decompile` / MCP `decompile` 对 record；按 ABC 内容的 L3 键；回退到反汇编 | daemon 的输出与一次性命令逐字节相同；杀掉 worker 后自动重启 |
 
 ## 14. 待定
 

@@ -343,6 +343,8 @@ struct AbcEntry {
     /// Whether its class index is sorted, asked once: a cross-file lookup
     /// misses in most files, and a miss in a sorted index costs a binary search.
     sorted: OnceLock<bool>,
+    /// SHA-256 of its bytes, computed when first asked for.
+    sha256: OnceLock<[u8; 32]>,
 }
 
 /// The name of the compiled resource table at the root of a module package.
@@ -644,6 +646,26 @@ impl Program {
     /// The raw bytes of entry `index`; empty when it is out of range.
     pub(crate) fn bytes(&self, index: usize) -> &[u8] {
         self.entries.get(index).map_or(&[], |entry| self.source_bytes(&entry.source))
+    }
+
+    /// SHA-256 of the bytes of entry `index` (the decrypted file's, for an
+    /// entry a stand-in serves), computed once.
+    pub(crate) fn sha256(&self, index: usize) -> Option<[u8; 32]> {
+        let entry = self.entries.get(index)?;
+        Some(*entry.sha256.get_or_init(|| {
+            use sha2::Digest;
+            sha2::Sha256::digest(self.source_bytes(&entry.source)).into()
+        }))
+    }
+
+    /// The file that holds exactly the bytes of entry `index`, when there
+    /// is one: a bare `.abc` (a stand-in included) or a file of an
+    /// unpacked package. `None` for a zip entry.
+    pub(crate) fn entry_file(&self, index: usize) -> Option<&Path> {
+        match self.entries.get(index)?.source {
+            Source::Bare { container, .. } | Source::Loose { container } => Some(self.containers[container].path()),
+            Source::Stored { .. } | Source::Inflated(_) => None,
+        }
     }
 
     fn source_bytes<'p>(&'p self, source: &'p Source) -> &'p [u8] {
@@ -986,6 +1008,7 @@ impl Program {
             header: None,
             package,
             sorted: OnceLock::new(),
+            sha256: OnceLock::new(),
         });
         let index = self.entries.len() - 1;
         let bytes = self.bytes(index);

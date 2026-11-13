@@ -6,7 +6,7 @@
 //! hints read right in both.
 
 use asc_ark_engine::{
-    Access, CallNode, CallRoots, CallTree, ClassQuery, ClassSource, Direction, Engine, EngineError, ListingStyle, Pattern, Query,
+    Access, CallNode, CallRoots, CallTree, ClassQuery, ClassSource, Direction, Engine, EngineError, ListingStyle, Location, Pattern, Query,
 };
 use std::path::Path;
 
@@ -63,7 +63,24 @@ impl<'a> ClassTarget<'a> {
         }
     }
 
-    /// The text of an error of [`ClassTarget::listing`]: an ambiguous record
+    /// Where the target is in `entry` (any entry when `None`): its entry,
+    /// record and raw function name, looked up as [`ClassTarget::listing`]
+    /// looks them up.
+    ///
+    /// # Errors
+    /// As [`Engine::locate`]; [`ClassTarget::explain`] says them.
+    pub fn locate(&self, engine: &Engine, entry: Option<&str>) -> Result<Location, EngineError> {
+        let get = |function: Option<&str>| engine.locate(&ClassQuery::new(self.record).function(function).entry(entry));
+        match get(self.function) {
+            Err(EngineError::NotFound { what: "function", .. }) if self.function.is_some_and(|f| without_pc(f) != f) => {
+                get(self.function.map(without_pc))
+            }
+            other => other,
+        }
+    }
+
+    /// The text of an error of [`ClassTarget::listing`] or
+    /// [`ClassTarget::locate`]: an ambiguous record
     /// says to name its entry (`entry_arg`: how the front end spells that
     /// argument), a function the record lacks lists the ones it has.
     pub fn explain(&self, engine: &Engine, entry: Option<&str>, error: &EngineError, entry_arg: &str) -> String {

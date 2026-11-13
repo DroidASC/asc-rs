@@ -158,7 +158,7 @@ fn partial_and_failed_classes_exit_2_and_say_why() {
     assert!(stdout(&out).starts_with("# decompile Lexample/Test; | by smali (no decompiler gave source) | status failed\n# broken failed: mock fails everything\n.class public Lexample/Test;"), "{}", stdout(&out));
     let out = env.run(false, &["decompile", "app.apk", "example.Test", "--decompiler", "jeb"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(both(&out).contains("Error: unknown decompiler \"jeb\"; configured: broken, dexdec, mock"), "{}", both(&out));
+    assert!(both(&out).contains("Error: unknown decompiler \"jeb\"; configured: arkdec, broken, dexdec, mock"), "{}", both(&out));
 }
 
 #[test]

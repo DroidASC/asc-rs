@@ -13,8 +13,9 @@ use std::time::Duration;
 #[non_exhaustive]
 pub struct Decompiler {
     /// `command`: the executable; looked up on `PATH` when it has no `/`.
-    /// Only the built-in backend ([`BUILT_IN_DECOMPILER`]) may leave it out,
-    /// to change its other keys and keep the `asc-dexdec-worker` asc finds.
+    /// Only the built-in backends ([`BUILT_IN_DECOMPILERS`]) may leave it
+    /// out, to change their other keys and keep the worker asc finds
+    /// (`asc-dexdec-worker`, `asc-arkdec-worker`).
     pub command: Option<PathBuf>,
     /// `args`.
     pub args: Vec<String>,
@@ -34,7 +35,7 @@ pub struct Decompiler {
     /// `startup_timeout`: deadline of the `initialize` handshake.
     pub startup_timeout: Duration,
     /// `inputs`: the input kinds asc may hand the backend (`archive`,
-    /// `slice`); empty: whatever it declares.
+    /// `slice`, `abc`); empty: whatever it declares.
     pub inputs: Vec<String>,
     /// `options`: passed through to `initialize` uninterpreted.
     pub options: serde_json::Map<String, serde_json::Value>,
@@ -61,8 +62,15 @@ const KEYS: &[&str] = &[
 /// The name of asc's own backend, `asc-dexdec-worker`.
 pub const BUILT_IN_DECOMPILER: &str = "dexdec";
 
+/// The name of the HarmonyOS backend, `asc-arkdec-worker`: built in like
+/// dexdec, but only used where its worker is found (it is not installed).
+pub const ARKDEC_DECOMPILER: &str = "arkdec";
+
+/// The backends asc knows without a table: a table of this name needs no `command`.
+pub const BUILT_IN_DECOMPILERS: [&str; 2] = [BUILT_IN_DECOMPILER, ARKDEC_DECOMPILER];
+
 /// What `inputs` may list.
-const INPUT_KINDS: &[&str] = &["archive", "slice"];
+const INPUT_KINDS: &[&str] = &["archive", "slice", "abc"];
 
 impl Decompiler {
     /// A backend run as `command` with every other key at its default.
@@ -116,20 +124,20 @@ impl Decompiler {
         };
         let command = match table.get("command") {
             Some(command) => Some(command.as_str().filter(|c| !c.is_empty()).ok_or_else(|| invalid("command", command, "a command"))?),
-            None if name == BUILT_IN_DECOMPILER => None,
+            None if BUILT_IN_DECOMPILERS.contains(&name) => None,
             None => {
                 return Err(ConfigError::Invalid {
                     origin: origin.into(),
                     key: format!("decompilers.{name}.command"),
                     text: String::new(),
-                    expected: "a command (required but for the built-in dexdec)",
+                    expected: "a command (required but for the built-in dexdec and arkdec)",
                 });
             }
         };
         if command.is_none()
             && let Some(args) = table.get("args")
         {
-            return Err(invalid("args", args, "no args without a command (the built-in dexdec takes none)"));
+            return Err(invalid("args", args, "no args without a command (the built-in workers take none)"));
         }
         let mut decompiler = Decompiler::new("");
         decompiler.command = command.map(expand_home);
@@ -168,7 +176,7 @@ impl Decompiler {
                 "startup_timeout" => decompiler.startup_timeout = duration(DURATION)?,
                 "inputs" => {
                     let kinds = strings().filter(|kinds| kinds.iter().all(|kind| INPUT_KINDS.contains(&kind.as_str())));
-                    decompiler.inputs = kinds.ok_or_else(|| invalid(key, value, "an array of archive, slice"))?;
+                    decompiler.inputs = kinds.ok_or_else(|| invalid(key, value, "an array of archive, slice, abc"))?;
                 }
                 "options" => {
                     let options = value.as_table().and_then(|t| serde_json::to_value(t).ok()).and_then(|v| match v {
@@ -250,7 +258,7 @@ mod tests {
             ("[decompilers.x]\nargs = []\n", "decompilers.x.command"),
             ("[decompilers.x]\ncommand = \"x\"\ninstances = 0\n", "decompilers.x.instances = \"0\": expected a number of processes"),
             ("[decompilers.x]\ncommand = \"x\"\ntimeout = \"soon\"\n", "decompilers.x.timeout = \"soon\": expected a duration"),
-            ("[decompilers.x]\ncommand = \"x\"\ninputs = [\"apk\"]\n", "expected an array of archive, slice"),
+            ("[decompilers.x]\ncommand = \"x\"\ninputs = [\"apk\"]\n", "expected an array of archive, slice, abc"),
             ("[decompilers.x]\ncommand = \"x\"\nmaxConcurrency = 1\n", "unknown setting \"decompilers.x.maxConcurrency\""),
             ("[decompile]\nfallback = [1]\n", "decompile.fallback = \"<array>\": expected an array of strings"),
             ("decompilers = 1\n", "expected a table of [decompilers.NAME] tables"),
@@ -282,5 +290,24 @@ mod tests {
         assert_eq!(c.decompile_mapping.value.0.as_deref(), Some(Path::new("/m/mapping.txt")));
         let c = load("[decompile]\nfallback = []\n").unwrap();
         assert!(c.decompile_fallback.value.0.is_empty());
+    }
+
+    #[test]
+    fn harmony_programs_have_a_chain_and_arkdec_a_table_of_its_own() {
+        let c = Config::resolve(None, |_| None, &[]).unwrap();
+        assert_eq!((c.decompile_harmony_default.value.0.as_str(), c.decompile_harmony_fallback.value.0.len()), ("arkdec", 0));
+        let env = |name: &str| (name == "ASC_HARMONY_DECOMPILE_FALLBACK").then(|| "mock".to_string());
+        assert_eq!(Config::resolve(None, env, &[]).unwrap().decompile_harmony_fallback.value.0, ["mock"]);
+        let c = load("[decompile]\nharmony_default = \"mock\"\nharmony_fallback = [\"arkdec\"]\n[decompilers.arkdec]\ntimeout = 5\ninputs = [\"abc\"]\n").unwrap();
+        assert_eq!(
+            (c.decompile_harmony_default.value.0.as_str(), c.decompile_harmony_fallback.value.0.as_slice()),
+            ("mock", &["arkdec".to_string()][..])
+        );
+        let arkdec = &c.decompilers[ARKDEC_DECOMPILER];
+        assert_eq!(
+            (arkdec.command.as_deref(), arkdec.timeout, arkdec.inputs.as_slice()),
+            (None, Duration::from_secs(5), &["abc".to_string()][..])
+        );
+        assert!(load("[decompilers.arkdec]\nargs = [\"x\"]\n").unwrap_err().to_string().contains("decompilers.arkdec.args"));
     }
 }

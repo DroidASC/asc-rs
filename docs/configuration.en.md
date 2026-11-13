@@ -27,6 +27,8 @@ split memory and threads.
 | `daemon.idle`, `daemon.wait` | 15m; 300ms. `ASC_DAEMON=off` turns the daemon off |
 | `decompile.default` (`$ASC_DECOMPILER`) | `dexdec`: the backend of `asc decompile` without `--decompiler` |
 | `decompile.fallback` (`$ASC_DECOMPILE_FALLBACK`) | none: backends tried in order when the default fails on a whole class (an array in the file, `,`-separated in `--set` and the environment) |
+| `decompile.harmony_default` (`$ASC_HARMONY_DECOMPILER`) | `arkdec`: the backend of `asc decompile` on a HarmonyOS program without `--decompiler`; arkdec runs only where `asc-arkdec-worker` is found (`$ASC_ARKDEC_WORKER`, `[decompilers.arkdec] command`, next to asc, `PATH`), else the disassembly answers |
+| `decompile.harmony_fallback` (`$ASC_HARMONY_DECOMPILE_FALLBACK`) | none: backends tried in order when it fails on a whole record |
 | `decompile.mapping` (`--mapping`) | none: R8 / ProGuard `mapping.txt` whose names decompiled source shows; give an absolute or `~/` path in the file |
 | `decompile.auto_install` (`$ASC_AUTO_INSTALL`) | on: download the latest worker speaking this asc's protocol version when no `asc-dexdec-worker` is found; off: smali, with a hint |
 | `decompile.release_url` (`$ASC_RELEASE_URL`) | `https://github.com/DroidASC/asc-dexdec/releases/latest/download`: where `asc install dexdec` and the auto-install download from (for a mirror) |

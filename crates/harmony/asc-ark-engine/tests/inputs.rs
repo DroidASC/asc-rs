@@ -393,3 +393,63 @@ fn code_of_a_package_is_in_name_order_however_it_is_packed() {
     let app = Engine::open(write(dir.path(), "shop.app", &app)).unwrap();
     assert_eq!(entries(&app), ["b.hap/ets/modules.abc", "b.hap/ets/widgets.abc", "a.hap/ets/modules.abc", "a.hap/ets/widgets.abc"]);
 }
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
+}
+
+#[test]
+fn locate_agrees_with_get_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let hap = write(dir.path(), "entry.hap", &make_hap(&make_abc()));
+    let engine = Engine::open(&hap).unwrap();
+    for (record, function) in [("pages/Index", None), ("pages/Index", Some("build")), (INDEX_PAGE, Some("#~@0>#aboutToAppear"))] {
+        let query = ClassQuery::new(record).function(function);
+        let located = engine.locate(&query).unwrap();
+        let listed = engine.get_class(&query).unwrap();
+        assert_eq!((&located.entry, &located.record, &located.function), (&listed.entry, &listed.record, &listed.function));
+    }
+    assert!(matches!(engine.locate(&ClassQuery::new("pages/Nothing")), Err(EngineError::NotFound { .. })));
+    let missing = engine.locate(&ClassQuery::new("pages/Index").function(Some("nothing")));
+    assert!(matches!(missing, Err(EngineError::NotFound { what: "function", .. })), "{missing:?}");
+}
+
+#[test]
+fn entry_sha256_is_of_the_read_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let sample = make_abc();
+    // A zip entry: no file of its own.
+    let hap = write(dir.path(), "entry.hap", &make_hap(&sample));
+    let engine = Engine::open(&hap).unwrap();
+    assert_eq!(engine.entry_sha256("ets/modules.abc"), Some(sha256(&sample)));
+    assert_eq!(engine.entry_file("ets/modules.abc"), None);
+    assert_eq!((engine.entry_sha256("ets/other.abc"), engine.entry_file("ets/other.abc")), (None, None));
+
+    // A bare file is its own file.
+    let bare = write(dir.path(), "bare/modules.abc", &sample);
+    let engine = Engine::open(&bare).unwrap();
+    let name = engine.entries().next().unwrap().name.clone();
+    assert_eq!((engine.entry_sha256(&name), engine.entry_file(&name)), (Some(sha256(&sample)), Some(bare.as_path())));
+
+    // An encrypted entry served by a decrypted file: that file and its bytes.
+    let store = dir.path().join("store");
+    let encrypted = sample_program().encrypted().build().bytes;
+    write(&store, "entry.hap", &Hap::new().modules_abc(&encrypted).module_json(SAMPLE_MODULE_JSON).build());
+    let decrypted = write(&store, "modules.abc", &sample);
+    let engine = Engine::open(&store).unwrap();
+    assert_eq!(engine.stand_ins().len(), 1);
+    assert_eq!(engine.entry_sha256("entry.hap/ets/modules.abc"), Some(sha256(&sample)));
+    assert_ne!(sha256(&encrypted), sha256(&sample));
+    let file = engine.entry_file("entry.hap/ets/modules.abc").unwrap();
+    assert_eq!(fs::canonicalize(file).unwrap(), fs::canonicalize(&decrypted).unwrap());
+
+    // An unpacked package: its code file.
+    let unpacked = dir.path().join("unpacked");
+    unpack(&make_hap(&sample), &unpacked);
+    let engine = Engine::open(&unpacked).unwrap();
+    let name = engine.entries().next().unwrap().name.clone();
+    let file = engine.entry_file(&name).unwrap();
+    assert_eq!(fs::canonicalize(file).unwrap(), fs::canonicalize(unpacked.join("ets/modules.abc")).unwrap());
+    assert_eq!(engine.entry_sha256(&name), Some(sha256(&sample)));
+}

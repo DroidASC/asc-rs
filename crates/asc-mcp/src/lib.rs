@@ -487,6 +487,7 @@ impl Server {
                     let (text, structured) = match str_arg(args, "cursor")? {
                         Some(cursor) => self.more(name, cursor)?,
                         None => match self.harmony_session(args)? {
+                            Some(program) if name == "decompile" => harmony::decompile(&program, &self.decompilers, args, call)?,
                             Some(program) => harmony::run(&program, name, args, call)?,
                             None => (tool.run)(self, args, call)?,
                         },
@@ -884,6 +885,9 @@ impl Server {
     fn decompile(&self, args: &Value, call: &Call) -> ToolResult {
         let apk = self.resolve(args)?;
         let class = str_arg(args, "class")?.ok_or_else(|| ToolError("decompile needs `class`".into()))?;
+        harmony::refuse_on_dex(args, "entry", "")?;
+        harmony::refuse_on_dex(args, "raw", "")?;
+        harmony::refuse_on_dex(args, "level", "")?;
         let language = str_arg(args, "language")?.map(decompiler::parse_language).transpose()?.unwrap_or(decompiler::Language::Java);
         let mapping =
             str_arg(args, "mapping")?.map(|m| canonical(m).map_err(|_| ToolError(format!("cannot read mapping file {m}")))).transpose()?;
@@ -903,7 +907,7 @@ impl Server {
             "backend": answer.backend.as_deref().unwrap_or("smali"),
             "version": answer.version,
             "status": answer.status.name(),
-            "language": answer.language.map_or("smali", |l| if l == decompiler::Language::Kotlin { "kotlin" } else { "java" }),
+            "language": answer.language.map_or("smali", decompiler::language_name),
             "cached": answer.cached,
             "names_unified": match answer.naming {
                 Naming::Unified => Some(true),
@@ -1867,13 +1871,17 @@ pub(crate) mod defs {
 
     pub(crate) fn decompile() -> Value {
         json!({
-            "description": "Java source of a class. `//` header: decompiler, status (ok, partial, failed = smali), failures.",
+            "description": "Java source of a class; JavaScript of an abc record. `//` header: decompiler, status (ok, partial, \
+                failed = smali / disassembly), failures.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string"},
                 "decompiler": {"type": "string", "description": "Only this backend."},
-                "language": {"type": "string", "description": "java or kotlin."},
+                "language": {"type": "string", "description": "java or kotlin; javascript (records)."},
                 "method": {"type": "string"},
                 "mapping": {"type": "string"},
+                "entry": {"type": "string", "description": "HarmonyOS: the abc entry."},
+                "raw": {"type": "boolean"},
+                "level": {"type": "string", "description": "pc-dispatch"},
             })]), "required": ["class"]},
             // `version`, `language`, `names_unified`, `folded_into` and `path` come too; left
             // out here for the size of the list.

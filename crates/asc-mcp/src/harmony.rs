@@ -29,6 +29,7 @@ use asc_ark_engine::{
     Pattern, Query, RefContext, RefRow, RefSite, text,
 };
 use asc_engine::{Threads, names};
+use asc_frontend::decompile::{self as decompiler, Decompilers, HarmonyRequest, Language, Level};
 use asc_frontend::harmony::{ClassTarget, MAX_ENTRIES_LISTED, SearchArgs, SearchKind, entries_hint};
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -62,10 +63,10 @@ pub(crate) fn refuse_on_dex(args: &Value, arg: &str, why: &str) -> Result<(), To
 
 /// The tools that work on a HarmonyOS program, as the program's
 /// introduction and error messages list them:
-/// `listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, findrefs kind=string|literal|…`.
+/// `listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, decompile, findrefs kind=string|literal|…`.
 fn supported() -> String {
     let tools: Vec<&str> = CARRIED.iter().map(|carried| carried.tool).collect();
-    format!("{} kind={}", tools.join(", "), kind_names("|"))
+    format!("{}, decompile, {} kind={}", tools[..tools.len() - 1].join(", "), tools[tools.len() - 1], kind_names("|"))
 }
 
 fn unsupported(what: &str) -> ToolError {
@@ -361,6 +362,58 @@ fn getclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
         structured["methods"] = json!([function]);
     }
     Ok((text, structured))
+}
+
+/// JavaScript of a record from a decompiler backend (arkdec), else its
+/// disassembly; the header says which and why. Not in [`CARRIED`]: it needs
+/// the server's backends.
+pub(crate) fn decompile(session: &Session, decompilers: &Decompilers, args: &Value, call: &Call) -> ToolResult {
+    if asks_for(args, "mapping") {
+        return Err(dex_only("mapping"));
+    }
+    let class = str_arg(args, "class")?.ok_or_else(|| ToolError("decompile needs `class` (a record, as listclass prints them)".into()))?;
+    let language = str_arg(args, "language")?.map(decompiler::parse_language).transpose()?.unwrap_or(Language::JavaScript);
+    let level = match str_arg(args, "level")? {
+        Some(level) => {
+            Some(Level::parse(level).ok_or_else(|| ToolError(format!("unknown level {level:?}; the one there is: pc-dispatch")))?)
+        }
+        None => None,
+    };
+    let request = HarmonyRequest::new(class)
+        .method(str_arg(args, "method")?)
+        .entry(str_arg(args, "entry")?)
+        .decompiler(str_arg(args, "decompiler")?)
+        .language(language)
+        .raw(bool_arg(args, "raw")?.unwrap_or(false))
+        .level(level)
+        .entry_arg("`entry`");
+    let answer = decompilers.decompile_harmony(&session.engine, &request, &call.cancel)?;
+    let text = answer.render();
+    let failed: Vec<Value> =
+        answer.failed_methods.iter().map(|m| json!({"signature": m.signature, "restored": m.restored, "reason": m.reason})).collect();
+    let attempts: Vec<Value> = answer.attempts.iter().map(|a| json!({"backend": a.backend, "reason": a.reason})).collect();
+    let functions: Vec<Value> = answer
+        .functions
+        .iter()
+        .map(|f| json!({"signature": f.signature, "restored": f.restored, "level": f.level, "status": f.status, "reason": f.reason}))
+        .collect();
+    let structured = json!({
+        "apk_id": session.id,
+        "class": answer.class,
+        "entry": answer.entry,
+        "method": answer.method,
+        "backend": answer.backend.as_deref().or(answer.listing()).unwrap_or("disassembly"),
+        "version": answer.version,
+        "status": answer.status.name(),
+        "language": answer.language.map_or("disassembly", decompiler::language_name),
+        "cached": answer.cached,
+        "failed_methods": failed,
+        "functions": functions,
+        "attempts": attempts,
+        "path": answer.path.to_string_lossy(),
+        "source": text,
+    });
+    Ok(session.framed(text, structured))
 }
 
 /// The kinds of a findrefs call, joined with `separator`.
@@ -1072,7 +1125,7 @@ mod tests {
         assert_eq!(asked(json!({"kind": "number", "value": "abc"})).map_err(|e| e.contains("is not a number")), Err(true));
         assert_eq!(
             supported(),
-            "listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, findrefs \
+            "listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, decompile, findrefs \
              kind=string|literal|prop|global|import|method|number|call"
         );
     }

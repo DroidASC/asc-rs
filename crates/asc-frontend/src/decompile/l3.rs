@@ -6,8 +6,15 @@
 //! the class descriptor; a slice would be its SHA-256), the backend's name
 //! and version and the hash of its effective options as `initialize`
 //! reported them, the hash of the mappings sent with `program/open`, the
-//! language and `nested`. The payload is the unit as the backend sent it, so
-//! a hit renders exactly as a fresh answer does.
+//! language, `nested` and the per-request options, when there are any. The
+//! payload is the unit as the backend sent it, so a hit renders exactly as
+//! a fresh answer does.
+//!
+//! A HarmonyOS record depends on its ABC file's bytes alone, not on where
+//! the file is: its program key is of the content
+//! ([`ApkKey::for_content`]) and its input `abc:<sha256>:<record>`, so the
+//! same file in another package, or a package rebuilt around an unchanged
+//! file, hits.
 //!
 //! A unit answering for a nested class folded into its outer class (§6.3)
 //! is stored once, under the outer class; the nested class's key holds a
@@ -32,7 +39,10 @@ pub(super) const FAILED_TTL: Duration = Duration::from_secs(10 * 60);
 /// What one stored unit is keyed by.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct UnitKey<'a> {
+    /// The class descriptor, or the record name.
     pub(super) descriptor: &'a str,
+    /// Lower-case hex SHA-256 of an ABC input; `None` for a DEX program.
+    pub(super) content: Option<&'a str>,
     pub(super) input: InputKind,
     pub(super) backend: &'a str,
     pub(super) capabilities: &'a InitializeResult,
@@ -40,6 +50,8 @@ pub(super) struct UnitKey<'a> {
     pub(super) mappings: Option<MappingsHash>,
     pub(super) language: Language,
     pub(super) nested: bool,
+    /// The per-request options as JSON; empty when there are none.
+    pub(super) request: &'a str,
 }
 
 impl UnitKey<'_> {
@@ -48,18 +60,29 @@ impl UnitKey<'_> {
         let input = match self.input {
             InputKind::Archive => "archive",
             InputKind::Slice => "slice",
+            InputKind::Abc => "abc",
             _ => "other",
         };
         let language = match self.language {
             Language::Java => "java",
             Language::Kotlin => "kotlin",
+            Language::JavaScript => "javascript",
             _ => "other",
         };
+        let unit = match self.content {
+            Some(sha256) => format!("{sha256}:{}", self.descriptor),
+            None => self.descriptor.to_string(),
+        };
         let mappings = self.mappings.map_or_else(|| "-".to_string(), |hash| hash.to_string());
-        let query = format!(
-            "input={input}:{}\0backend={}\0version={}\0options={}\0mappings={mappings}\0language={language}\0nested={}",
-            self.descriptor, self.backend, self.capabilities.backend.version, self.capabilities.options_hash, self.nested
+        let mut query = format!(
+            "input={input}:{unit}\0backend={}\0version={}\0options={}\0mappings={mappings}\0language={language}\0nested={}",
+            self.backend, self.capabilities.backend.version, self.capabilities.options_hash, self.nested
         );
+        // Only when there are some: the keys of DEX classes stay as they were.
+        if !self.request.is_empty() {
+            query.push_str("\0request=");
+            query.push_str(self.request);
+        }
         rendered_key(PRODUCER, FORMAT, &query)
     }
 }
@@ -82,6 +105,8 @@ fn get_at(disk: &DiskCache, apk: &ApkKey, key: &UnitKey<'_>, now: SystemTime) ->
     match stored_at(disk, apk, key, now) {
         Some(Stored::Unit(unit)) => Some(unit),
         Some(Stored::FoldedInto(outer)) => folded_at(disk, apk, key, &outer, now),
+        // Records are not nested classes.
+        None if key.content.is_some() => None,
         None => owners(key.descriptor).find_map(|outer| folded_at(disk, apk, key, &outer, now)),
     }
 }
@@ -164,12 +189,14 @@ mod tests {
         let caps = capabilities("1.0", "h");
         let base = UnitKey {
             descriptor: "La;",
+            content: None,
             input: InputKind::Archive,
             backend: "dexdec",
             capabilities: &caps,
             mappings: None,
             language: Language::Java,
             nested: true,
+            request: "",
         };
         let (v2, o2) = (capabilities("2.0", "h"), capabilities("1.0", "h2"));
         let mut mapped = NameMappings::new();
@@ -194,6 +221,72 @@ mod tests {
     }
 
     #[test]
+    fn dex_query_is_unchanged_from_p1() {
+        let caps = capabilities("0.2.0", "5d41");
+        let key = UnitKey {
+            descriptor: "La/Main;",
+            content: None,
+            input: InputKind::Archive,
+            backend: "dexdec",
+            capabilities: &caps,
+            mappings: None,
+            language: Language::Kotlin,
+            nested: true,
+            request: "",
+        };
+        // The query of P1: entries stored before HarmonyOS records existed stay valid.
+        let p1 = "input=archive:La/Main;\0backend=dexdec\0version=0.2.0\0options=5d41\0mappings=-\0language=kotlin\0nested=true";
+        assert_eq!(key.query(), rendered_key(PRODUCER, FORMAT, p1));
+    }
+
+    #[test]
+    fn abc_keys_differ_by_sha_record_and_request() {
+        let caps = capabilities("0.2.0", "h");
+        let sha = "3a".repeat(32);
+        let other = "3b".repeat(32);
+        let raw = r#"{"raw":true}"#;
+        let base = UnitKey {
+            descriptor: "&entry/src/main/ets/pages/Index&",
+            content: Some(&sha),
+            input: InputKind::Abc,
+            backend: "arkdec",
+            capabilities: &caps,
+            mappings: None,
+            language: Language::JavaScript,
+            nested: true,
+            request: "",
+        };
+        let expected = format!(
+            "input=abc:{sha}:&entry/src/main/ets/pages/Index&\0backend=arkdec\0version=0.2.0\0options=h\0mappings=-\0language=javascript\0nested=true\0request={raw}"
+        );
+        assert_eq!(UnitKey { request: raw, ..base }.query(), rendered_key(PRODUCER, FORMAT, &expected));
+        let variants = [
+            UnitKey { content: Some(&other), ..base },
+            UnitKey { descriptor: "&entry/src/main/ets/pages/Other&", ..base },
+            UnitKey { request: raw, ..base },
+            UnitKey { request: r#"{"level":"pcDispatch"}"#, ..base },
+            UnitKey { content: None, ..base },
+        ];
+        let mut queries: Vec<String> = variants.iter().map(UnitKey::query).collect();
+        queries.push(base.query());
+        let count = queries.len();
+        queries.sort();
+        queries.dedup();
+        assert_eq!(queries.len(), count, "two keys collide");
+
+        // Stored and found under the content key; a record is not looked up as a nested class.
+        let dir = tempfile::tempdir().unwrap();
+        let disk = DiskCache::open(dir.path().join("cache"));
+        let apk = ApkKey::for_content("entry.hap/ets/modules.abc", &[0x3a; 32]);
+        let unit = ClassUnit::new("&a$b&", UnitOutcome::Ok { path: None, text: "export {}".into() });
+        let key = UnitKey { descriptor: "&a$b&", ..base };
+        assert_eq!(get(&disk, &apk, &key), None);
+        put(&disk, &apk, &key, &unit);
+        assert_eq!(get(&disk, &apk, &key), Some(unit));
+        assert_eq!(get(&disk, &apk, &UnitKey { content: Some(&other), ..key }), None);
+    }
+
+    #[test]
     fn failures_expire_after_ten_minutes_and_results_do_not() {
         let dir = tempfile::tempdir().unwrap();
         let disk = DiskCache::open(dir.path().join("cache"));
@@ -201,12 +294,14 @@ mod tests {
         let caps = capabilities("1.0", "h");
         let key = |descriptor| UnitKey {
             descriptor,
+            content: None,
             input: InputKind::Archive,
             backend: "mock",
             capabilities: &caps,
             mappings: None,
             language: Language::Java,
             nested: true,
+            request: "",
         };
         let then = SystemTime::now();
         let failed = ClassUnit::new("La;", UnitOutcome::Failed { reason: "timeout".into() });
@@ -229,12 +324,14 @@ mod tests {
         let caps = capabilities("1.0", "h");
         let key = |descriptor| UnitKey {
             descriptor,
+            content: None,
             input: InputKind::Archive,
             backend: "mock",
             capabilities: &caps,
             mappings: None,
             language: Language::Java,
             nested: true,
+            request: "",
         };
         let now = SystemTime::now();
         let outer = ClassUnit::new("La/O;", UnitOutcome::Ok { path: None, text: "class O { class I { class J {} } }".into() })

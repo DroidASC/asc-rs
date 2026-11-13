@@ -9,7 +9,7 @@ mod settings;
 use asc_engine::asc_cache::{DiskCache, DiskCapacity};
 use asc_engine::config::Config;
 use asc_engine::{CacheConfig, CallQuery, CallRoots, Device, Direction, Engine, FindOptions, HierarchyQuery, Lineage, RefContext, names};
-use asc_frontend::decompile::{Language, Request as DecompileRequest};
+use asc_frontend::decompile::{Decompiled, Decompilers, Language, Level as DecompileLevel, Request as DecompileRequest};
 use asc_frontend::findrefs::{self, Member, Target};
 use asc_frontend::format::{ProgramFormat, left_out_note};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -43,7 +43,7 @@ macro_rules! help_exit_status {
   0  success
   1  error (bad arguments, unreadable APK, class not found, output not writable, ...)
   2  findrefs / callgraph finished, but one or more DEX (or ABC) entries could not be searched (details on stderr);
-     decompile answered, but the class is partial or shown as smali (the header says why)"
+     decompile answered, but the class is partial or shown as smali / disassembly (the header says why)"
     };
 }
 
@@ -173,6 +173,8 @@ examples (HarmonyOS):
   asc callgraph entry.hap '&entry/src/main/ets/pages/Index&->#~@0>#build' --callees --unresolved
   asc callgraph entry.hap --to 'call:^import:@ohos:net\\.http' --depth 4
   asc callgraph entry.hap --to 'call:^import:@ohos:net\\.http' --from 'method:=EntryAbility.onCreate' --depth 8
+  ASC_ARKDEC_WORKER=/path/to/asc-arkdec-worker asc decompile entry.hap pages/Index --method Index.build
+  asc decompile entry.hap pages/Index --raw -o src/
   asc hierarchy entry.hap 'import:@ohos:app\\.ability\\.UIAbility' --method onCreate
   asc hierarchy entry.hap EntryAbility --supers
 
@@ -752,14 +754,16 @@ enum Command {
         /// Class in dotted or Dalvik form.
         class: String,
     },
-    /// Java or Kotlin source of a class from a decompiler backend (default: the built-in dexdec).
+    /// Java or Kotlin source of a class from a decompiler backend (default: the
+    /// built-in dexdec); JavaScript of a HarmonyOS record (arkdec).
     ///
-    /// The first lines (`//` comments; `#` for smali) say how the answer came
-    /// about: `decompile CLASS | by BACKEND VERSION | status ok|partial|failed`
-    /// (`, from cache` when the result was cached), one `BACKEND failed:
-    /// REASON` line per backend that gave nothing before it, the methods that
-    /// failed to decompile (stubs in the source), and `names not unified`
-    /// when a mapping file is given but the backend takes none.
+    /// The first lines (`//` comments; `#` for smali and the disassembly) say
+    /// how the answer came about: `decompile CLASS | by BACKEND VERSION |
+    /// status ok|partial|failed` (`, from cache` when the result was cached;
+    /// a record also names its ABC entry), one `BACKEND failed: REASON` line
+    /// per backend that gave nothing before it, the methods that failed to
+    /// decompile (stubs in the source), and `names not unified` when a
+    /// mapping file is given but the backend takes none.
     ///
     /// Backends are tried in order: --decompiler alone, else decompile.default
     /// and then decompile.fallback (config.toml: [decompile] default = "dexdec",
@@ -768,10 +772,21 @@ enum Command {
     /// over to the next; a partial class does not. When every backend failed,
     /// the class is shown as smali (status failed).
     ///
-    /// Results are cached on disk by program, class, backend version and
-    /// options, mapping and language (failures for 10 minutes); backend
-    /// processes stay up in the daemon. Exits with status 2 when the class is
-    /// partial or shown as smali.
+    /// HarmonyOS programs (.hap, .hsp, .app, .abc) go down
+    /// decompile.harmony_default (arkdec) and decompile.harmony_fallback.
+    /// arkdec runs asc-arkdec-worker, which asc does not install: it is the
+    /// file ASC_ARKDEC_WORKER names, [decompilers.arkdec] command, or
+    /// asc-arkdec-worker next to asc or on PATH. Without one, or when every
+    /// backend failed, the record is shown as its disassembly (as getclass
+    /// lists it; status failed). CLASS is a record as getclass takes it
+    /// (pages/Index, &entry/src/main/ets/pages/Index&, RECORD->FUNCTION);
+    /// --method a function (Index.build, #~@0>#build).
+    ///
+    /// Results are cached on disk by program (an ABC file's content, for a
+    /// record), class, backend version and options, mapping, language and
+    /// --raw / --level (failures for 10 minutes); backend processes stay up
+    /// in the daemon. Exits with status 2 when the class is partial or shown
+    /// as smali or disassembly.
     Decompile {
         /// Write the source under this directory, at a path made from the
         /// class name (pkg/Name.java); stdout then shows the header and the path.
@@ -781,20 +796,35 @@ enum Command {
         /// of the config file.
         #[arg(long, value_name = "NAME")]
         decompiler: Option<String>,
-        /// Output language.
-        #[arg(long, value_enum, default_value_t = LanguageArg::Java)]
-        language: LanguageArg,
-        /// Show only these methods: a name (every overload) or a signature, e.g. run or run(I)V.
+        /// Output language: java (default) or kotlin; javascript (js), the
+        /// only one, for a HarmonyOS record.
+        #[arg(long, value_enum)]
+        language: Option<LanguageArg>,
+        /// Show only these methods: a name (every overload) or a signature,
+        /// e.g. run or run(I)V; of a HarmonyOS record, one function (Index.build).
         #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method: Option<String>,
+        /// HarmonyOS: take the record from this ABC entry (ets/modules.abc).
+        #[arg(long, value_name = "ENTRY")]
+        entry: Option<String>,
+        /// HarmonyOS: the bytecode as it is, without undoing what the compiler
+        /// generated (classes, async functions, optional chains).
+        #[arg(long)]
+        raw: bool,
+        /// HarmonyOS: structure no further than LEVEL; pc-dispatch: every
+        /// function as a loop over its basic blocks.
+        #[arg(long, value_name = "LEVEL", value_parser = parse_level)]
+        level: Option<DecompileLevel>,
         /// R8 / ProGuard mapping.txt whose names the source shows (`--set
         /// decompile.mapping=FILE`); backends that take no mappings keep
         /// the DEX's names and say so.
         #[arg(long, value_name = "FILE")]
         mapping: Option<PathBuf>,
-        /// Path to the input APK (or jar, .dex); a directory, or paths joined with `,`, read as one program.
+        /// Path to the input APK (or jar, .dex, HarmonyOS .hap / .app / .abc); a
+        /// directory, or paths joined with `,`, read as one program.
         apk_path: PathBuf,
-        /// Class name in dotted or Dalvik form, e.g. rs.asc.Main or Lrs/asc/Main;.
+        /// Class name in dotted or Dalvik form, e.g. rs.asc.Main or
+        /// Lrs/asc/Main;; a HarmonyOS record, e.g. pages/Index.
         class: String,
     },
     /// Serve MCP tools over stdio (one JSON-RPC message per line), keeping
@@ -846,6 +876,9 @@ enum Command {
     /// one speaking this asc's decompile protocol version). asc also
     /// installs it on its own the first time it needs it
     /// (`decompile.auto_install`), unless it finds one next to asc or on PATH.
+    ///
+    /// `arkdec`: asc-arkdec-worker has no release yet; this says how to build
+    /// it and where asc looks for it.
     Install {
         /// What to install.
         #[arg(value_enum)]
@@ -858,6 +891,8 @@ enum Command {
 enum InstallTool {
     /// asc-dexdec-worker, the built-in decompiler backend.
     Dexdec,
+    /// asc-arkdec-worker, the HarmonyOS decompiler backend (not released).
+    Arkdec,
 }
 
 impl Command {
@@ -899,6 +934,8 @@ enum DaemonAction {
 enum LanguageArg {
     Java,
     Kotlin,
+    #[value(alias = "js")]
+    Javascript,
 }
 
 impl From<LanguageArg> for Language {
@@ -906,8 +943,14 @@ impl From<LanguageArg> for Language {
         match language {
             LanguageArg::Java => Language::Java,
             LanguageArg::Kotlin => Language::Kotlin,
+            LanguageArg::Javascript => Language::JavaScript,
         }
     }
+}
+
+/// `decompile --level`.
+fn parse_level(text: &str) -> Result<DecompileLevel, String> {
+    DecompileLevel::parse(text).ok_or_else(|| format!("unknown level {text:?}; the one there is: pc-dispatch"))
 }
 
 /// `--context`: a number of lines, or `method`.
@@ -1735,8 +1778,18 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
                 return Ok(EXIT_PARTIAL);
             }
         }
-        Command::Decompile { output, decompiler, language, method, mapping, apk_path, class } => {
-            let args = DecompileArgs { output, decompiler, language: language.into(), method, mapping, apk_path, class };
+        Command::Decompile { output, decompiler, language, method, mapping, entry, raw, level, apk_path, class } => {
+            if entry.is_some() {
+                return Err(HARMONY_ONLY_ENTRY.into());
+            }
+            if raw {
+                return Err(harmony_only("--raw"));
+            }
+            if level.is_some() {
+                return Err(harmony_only("--level"));
+            }
+            let language = language.map_or(Language::Java, Language::from);
+            let args = DecompileArgs { output, decompiler, language, method, mapping, apk_path, class };
             return decompile(io, common, args, t_start);
         }
         Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } | Command::Install { .. } => {
@@ -1769,8 +1822,25 @@ fn decompile(io: &mut Io<'_>, common: &Common, args: DecompileArgs, t_start: Ins
         .method(args.method.as_deref())
         .mapping(mapping.as_deref());
     let answer = decompilers.decompile(&engine, &request, io.cancel).map_err(|e| e.to_string())?;
+    let chain = decompilers.settings().chain(args.decompiler.as_deref());
+    emit_decompiled(io, common, &decompilers, &chain, &answer, args.output.as_deref(), t_start)
+}
+
+/// The answer of `asc decompile`, a DEX class's or a HarmonyOS record's:
+/// the header and the text, or with `-o DIR` the header and the file
+/// written; [`EXIT_PARTIAL`] when it is partial or a listing. `chain`: the
+/// backends asked, whose stderr `--debug` shows.
+pub(crate) fn emit_decompiled(
+    io: &mut Io<'_>,
+    common: &Common,
+    decompilers: &Decompilers,
+    chain: &[&str],
+    answer: &Decompiled,
+    output: Option<&Path>,
+    t_start: Instant,
+) -> Result<u8, String> {
     if common.debug {
-        for name in decompilers.settings().chain(args.decompiler.as_deref()) {
+        for name in chain {
             let stderr = decompilers.backend(name).map(|backend| backend.stderr()).unwrap_or_default();
             if !stderr.is_empty() {
                 io.note(format_args!("[DEBUG] {name} stderr:\n{}", stderr.trim_end()));
@@ -1778,15 +1848,14 @@ fn decompile(io: &mut Io<'_>, common: &Common, args: DecompileArgs, t_start: Ins
         }
         io.note(format_args!("[DEBUG] Total Execution Time: {} us", t_start.elapsed().as_micros()));
     }
-    match &args.output {
+    match output {
         Some(dir) => {
             let file = dir.join(&answer.path);
             if let Some(parent) = file.parent() {
                 std::fs::create_dir_all(io.path(parent)).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
             }
             io.write_output(Some(&file), &answer.text)?;
-            let comment = if answer.language.is_some() { "//" } else { "#" };
-            io.emit(&format!("{}{comment} wrote {}\n", answer.header(), file.display()))?;
+            io.emit(&format!("{}{} wrote {}\n", answer.header(), answer.comment(), file.display()))?;
         }
         None => io.emit_records(&answer.render(), None)?,
     }
@@ -1845,6 +1914,7 @@ fn run(cli: Cli, t_start: Instant) -> Result<u8, String> {
         Command::Daemon { action } => return daemon_command(&common, action),
         Command::Config { action, json } => return settings::print(common.config(), action.as_ref(), json),
         Command::Install { tool: InstallTool::Dexdec } => return install_dexdec(&common),
+        Command::Install { tool: InstallTool::Arkdec } => return install_arkdec(&common),
         command => {
             // Not locked: engine threads log to stderr themselves (`--debug`).
             let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
@@ -1887,6 +1957,16 @@ fn install_dexdec(common: &Common) -> Result<u8, String> {
     Ok(EXIT_OK)
 }
 
+/// `asc install arkdec`: there is nothing to download yet; says how to
+/// build the worker and where asc looks for it.
+fn install_arkdec(common: &Common) -> Result<u8, String> {
+    let arkdec = asc_frontend::decompile::WorkerSettings::for_tool(&asc_frontend::decompile::worker::ARKDEC, common.config());
+    if let Some(found) = arkdec.locate() {
+        eprintln!("note: asc uses {} ({})", found.path.display(), found.origin.name());
+    }
+    Err(format!("asc-arkdec-worker has no release to install; {}", arkdec.build_hint()))
+}
+
 #[cfg(not(feature = "installer"))]
 fn install_dexdec(_common: &Common) -> Result<u8, String> {
     Err("this asc was built without the installer (feature `installer`); \
@@ -1912,8 +1992,9 @@ fn main() -> ExitCode {
     }
     // A missing worker is installed here, where its progress shows, not in
     // the daemon the command goes to.
-    if let Command::Decompile { decompiler, .. } = &cli.command {
-        asc_frontend::decompile::Settings::from_config(cli.common.config()).prepare_worker(decompiler.as_deref());
+    if let Command::Decompile { decompiler, apk_path, .. } = &cli.command {
+        let settings = asc_frontend::decompile::Settings::from_config(cli.common.config());
+        settings.prepare_worker(decompiler.as_deref(), ProgramFormat::of(apk_path));
     }
     // The daemon keeps programs of either format resident and tells them
     // apart itself; only a command that runs here looks at the format.

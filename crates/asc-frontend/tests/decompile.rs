@@ -127,7 +127,10 @@ fn a_failing_default_hands_over_to_the_fallbacks_in_order() {
     let named = run(&decompilers, &engine, &Request::new("example.Test").decompiler(Some("fail-all"))).unwrap();
     assert_eq!((named.status, named.attempts.len()), (Status::Smali, 1));
     let unknown = run(&decompilers, &engine, &Request::new("example.Test").decompiler(Some("jeb"))).unwrap_err();
-    assert!(unknown.to_string().starts_with("unknown decompiler \"jeb\"; configured: dexdec, fail-all, fail-startup, mock"), "{unknown}");
+    assert!(
+        unknown.to_string().starts_with("unknown decompiler \"jeb\"; configured: arkdec, dexdec, fail-all, fail-startup, mock"),
+        "{unknown}"
+    );
 }
 
 #[test]

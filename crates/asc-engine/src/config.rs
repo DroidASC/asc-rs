@@ -18,7 +18,7 @@ use std::time::Duration;
 
 mod decompilers;
 
-pub use decompilers::{BUILT_IN_DECOMPILER, Decompiler};
+pub use decompilers::{ARKDEC_DECOMPILER, BUILT_IN_DECOMPILER, BUILT_IN_DECOMPILERS, Decompiler};
 
 /// Environment variable naming the config file; empty: none.
 pub const CONFIG_ENV: &str = "ASC_CONFIG";
@@ -506,6 +506,10 @@ settings! {
         "backend of asc decompile unless --decompiler names one (a [decompilers.NAME] table, or the built-in dexdec)";
     decompile_fallback: Names = Names::default(), "decompile.fallback", "ASC_DECOMPILE_FALLBACK", None,
         "backends tried in order when the default one fails on a whole class; none: smali right away";
+    decompile_harmony_default: Name = Name(String::from(ARKDEC_DECOMPILER)), "decompile.harmony_default", "ASC_HARMONY_DECOMPILER", None,
+        "backend of asc decompile on a HarmonyOS program unless --decompiler names one; arkdec runs when ASC_ARKDEC_WORKER, [decompilers.arkdec] command or a worker next to asc / on PATH gives it";
+    decompile_harmony_fallback: Names = Names::default(), "decompile.harmony_fallback", "ASC_HARMONY_DECOMPILE_FALLBACK", None,
+        "backends tried in order when the HarmonyOS one fails on a whole record; none: the disassembly right away";
     decompile_mapping: MaybePath = MaybePath::default(), "decompile.mapping", "ASC_MAPPING", None,
         "R8 / ProGuard mapping.txt whose names decompiled source shows (--mapping); none: the DEX's own names";
     decompile_auto_install: bool = true, "decompile.auto_install", "ASC_AUTO_INSTALL", None,
@@ -520,7 +524,7 @@ pub const DEFAULT_RELEASE_URL: &str = "https://github.com/DroidASC/asc-dexdec/re
 
 /// Settings whose file value may be an array of strings, read as the names
 /// joined with `,`.
-const LIST_KEYS: &[&str] = &["decompile.fallback"];
+const LIST_KEYS: &[&str] = &["decompile.fallback", "decompile.harmony_fallback"];
 
 /// `[section] key = v` as `("section.key", v)`.
 fn flatten<'t>(prefix: &str, table: &'t toml::Table, out: &mut Vec<(String, &'t toml::Value)>) {

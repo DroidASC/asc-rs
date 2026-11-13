@@ -2,7 +2,8 @@
 //! of the DEX side: `listclass`, `getclass` / `disassemble`, `getmanifest`,
 //! `manifest-summary`, `resources`, `xml` (the text files of a package),
 //! `findrefs` (string, prop, global, import, method, number, call, all,
-//! rules), `callgraph` and `hierarchy`.
+//! rules), `callgraph`, `hierarchy` and `decompile` (JavaScript of a record
+//! from arkdec, else its disassembly).
 //!
 //! This is a thin dispatch ahead of the layer both formats will share. The
 //! engine comes from [`Io::harmony`]: opened for this command in a one-shot
@@ -16,6 +17,8 @@ use asc_ark_engine::{
     Access, CallQuery, CallRoots, Direction, Document, Engine, EngineError, EntryStatus, HierarchyQuery, Lineage, ListOptions,
     ListingStyle, Manifest, NameFilter, Pattern, Query, RefBatch, RefContext, ResourceField, ResourceTables,
 };
+use asc_frontend::decompile::{HarmonyRequest, Language};
+use asc_frontend::format::ProgramFormat;
 use asc_frontend::harmony::{
     ClassTarget, SearchArgs, SearchKind, TreeText, entries_hint, function_roots, no_callers_hint, no_class_hint, no_leaf_hint, rule_roots,
     several_entries_define,
@@ -188,8 +191,23 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             let engine = open(io, common, &apk_path)?;
             hierarchy(io, &engine, &query, output.as_ref())?
         }
-        Command::Decompile { .. } => {
-            return Err("decompile applies to DEX programs only; getclass disassembles a HarmonyOS record".into());
+        Command::Decompile { output, decompiler, language, method, mapping, entry, raw, level, apk_path, class } => {
+            if mapping.is_some() {
+                return Err(dex_only("--mapping"));
+            }
+            let engine = open(io, common, &apk_path)?;
+            let decompilers = io.decompilers(common);
+            let request = HarmonyRequest::new(&class)
+                .method(method.as_deref())
+                .entry(entry.as_deref())
+                .decompiler(decompiler.as_deref())
+                .language(language.map_or(Language::JavaScript, Language::from))
+                .raw(raw)
+                .level(level);
+            let answer = decompilers.decompile_harmony(&engine, &request, io.cancel).map_err(|e| e.to_string())?;
+            let chain = decompilers.settings().chain_for(ProgramFormat::Harmony, decompiler.as_deref());
+            // The time is the decompile's own to report.
+            return crate::emit_decompiled(io, common, &decompilers, &chain, &answer, output.as_deref(), t_start);
         }
         Command::Mcp { .. } | Command::Cache { .. } | Command::Daemon { .. } | Command::Config { .. } | Command::Install { .. } => {
             unreachable!("only a command with a program path is dispatched by format")

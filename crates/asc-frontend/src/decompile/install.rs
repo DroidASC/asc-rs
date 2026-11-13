@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use super::dexdec::{PROTOCOL, TARGET, VERSION, WORKER_FILE};
+use super::worker::{PROTOCOL, TARGET, VERSION, WORKER_FILE};
 
 /// How long a connection may take to open.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -84,6 +84,14 @@ pub enum InstallError {
         path: PathBuf,
         /// What it did.
         message: String,
+    },
+    /// The worker has no releases to install it from (arkdec).
+    #[error("{tool} has no release to install; {hint}")]
+    Unreleased {
+        /// The worker.
+        tool: &'static str,
+        /// How to get one instead.
+        hint: String,
     },
     /// The install directory could not be written.
     #[error("{path}: {source}")]

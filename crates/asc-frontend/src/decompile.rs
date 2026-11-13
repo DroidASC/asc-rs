@@ -1,5 +1,6 @@
 //! `asc decompile` and the MCP tool `decompile`: Java or Kotlin source of a
-//! class from a decompiler backend (docs/decompile-backends.md).
+//! class from a decompiler backend, or JavaScript of a HarmonyOS record
+//! ([`Decompilers::decompile_harmony`]; docs/decompile-backends.md).
 //!
 //! [`Decompilers`] owns one process pool per backend ([`asc_decompile::Backend`])
 //! and the program sessions open on them. A resident host (the daemon, an
@@ -12,7 +13,9 @@
 //! fails on the whole class (`failed`, a crash, a timeout, a start that does
 //! not complete) hands over to the next; `partial` is an answer, its failed
 //! methods listed. When every backend failed the answer is the class's
-//! smali. Results of a backend are kept in the L3 tier of the disk cache,
+//! smali (the disassembly, for a HarmonyOS record). DEX and HarmonyOS
+//! programs have a chain each ([`Settings::chain_for`]). Results of a
+//! backend are kept in the L3 tier of the disk cache,
 //! keyed by everything the output depends on (docs/decompile-backends.md
 //! §8); failures for 10 minutes only.
 //!
@@ -20,28 +23,35 @@
 //! `program/open` to backends that declare `mappings`; for the others the
 //! answer says the names are not unified, and the source is left as is.
 //!
-//! The built-in backend runs `asc-dexdec-worker`, found (and installed when
-//! missing) as [`dexdec`] says, looked up again when the file changes.
+//! The built-in backends run `asc-dexdec-worker` and `asc-arkdec-worker`,
+//! found (dexdec's also installed when missing) as [`worker`] says, looked
+//! up again when the file changes.
 
+mod abc_input;
 pub mod dexdec;
+mod harmony;
 #[cfg(feature = "installer")]
 pub mod install;
 mod l3;
 mod outcome;
 mod settings;
 mod source;
+pub mod worker;
 
-pub use asc_decompile::protocol::methods::Language;
-pub use dexdec::{Worker, WorkerOrigin, WorkerSettings};
+pub use asc_decompile::protocol::methods::{Language, MethodReport};
+pub use harmony::{HarmonyRequest, Level};
 pub use outcome::{Attempt, Decompiled, Naming, Status};
-pub use settings::{BUILT_IN, BackendEntry, Origin, Settings};
+pub use settings::{BUILT_IN, BUILT_IN_ARKDEC, BackendEntry, Origin, Settings};
 pub use source::output_path;
+pub use worker::{Tool, Worker, WorkerOrigin, WorkerSettings};
 
+use asc_decompile::protocol::ErrorCode;
 use asc_decompile::protocol::methods::{ClassUnit, InitializeResult, InputKind, Mappings, ProgramInput, ProgramOpenParams, UnitOutcome};
 use asc_decompile::{Backend, CallOptions, CancelToken, DecompileRequest, Priority, ProcessInfo, Program};
 use asc_engine::asc_cache::{ApkKey, DiskCache};
 use asc_engine::names::{self, MappingsHash, NameMappings};
 use asc_engine::{Engine, EngineError, SharedCache, SmaliOptions};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,9 +78,17 @@ pub enum DecompileError {
         /// The configured names.
         known: String,
     },
-    /// A language other than `java` or `kotlin`.
-    #[error("unknown language {0:?}; use java or kotlin")]
+    /// A language other than `java`, `kotlin` or `javascript`.
+    #[error("unknown language {0:?}; use java, kotlin or javascript")]
     UnknownLanguage(String),
+    /// A language or option the program's format does not have: JavaScript
+    /// of a DEX class, Java of a HarmonyOS record, a mapping file there.
+    #[error("{0}")]
+    WrongFormat(String),
+    /// The HarmonyOS record or function, or its ABC entry: not found,
+    /// ambiguous or unreadable; the text says which.
+    #[error("{0}")]
+    Harmony(String),
     /// The mapping file could not be read.
     #[error("cannot read mapping file {path}: {message}")]
     Mapping {
@@ -99,7 +117,7 @@ pub enum DecompileError {
     Cancelled,
 }
 
-/// The language `name` (`java`, `kotlin`, `kt`), case aside.
+/// The language `name` (`java`, `kotlin`, `kt`, `javascript`, `js`), case aside.
 ///
 /// # Errors
 ///
@@ -108,16 +126,22 @@ pub fn parse_language(name: &str) -> Result<Language, DecompileError> {
     match name.trim().to_ascii_lowercase().as_str() {
         "java" => Ok(Language::Java),
         "kotlin" | "kt" => Ok(Language::Kotlin),
+        "javascript" | "js" => Ok(Language::JavaScript),
         _ => Err(DecompileError::UnknownLanguage(name.to_string())),
     }
 }
 
-fn language_name(language: Language) -> &'static str {
+/// `java`, `kotlin` or `javascript`, as messages, the L3 key and MCP say it.
+pub fn language_name(language: Language) -> &'static str {
     match language {
         Language::Kotlin => "kotlin",
+        Language::JavaScript => "javascript",
         _ => "java",
     }
 }
+
+/// What a request on a DEX program says when it asks for JavaScript.
+const DEX_LANGUAGES: &str = "a DEX class decompiles to java or kotlin; javascript is the language of HarmonyOS records";
 
 /// What to decompile.
 #[derive(Debug, Clone, Copy)]
@@ -190,6 +214,8 @@ pub struct BackendProcess {
 struct OpenProgram {
     backend: String,
     files: Vec<PathBuf>,
+    /// Of an ABC input: the content the backend checked the file against.
+    sha256: Option<String>,
     mappings: Option<MappingsHash>,
     program: Arc<Program>,
     used: u64,
@@ -208,7 +234,7 @@ struct LoadedMapping {
     mappings: Arc<NameMappings>,
 }
 
-/// The worker the built-in backend's pool runs, and the install attempts.
+/// The worker a built-in backend's pool runs, and the install attempts.
 #[derive(Default)]
 struct WorkerState {
     /// The file of the pool running now, as it was when the pool started.
@@ -225,19 +251,45 @@ pub struct Decompilers {
     // Programs before backends: their sessions close while the pools still run.
     programs: Mutex<Programs>,
     backends: Mutex<BTreeMap<String, Arc<Backend>>>,
-    worker: Mutex<WorkerState>,
+    /// By backend name: the worker of each built-in backend's pool.
+    workers: Mutex<BTreeMap<String, WorkerState>>,
     mapping: Mutex<Option<LoadedMapping>>,
     disk: Option<DiskCache>,
+    /// Where ABC entries are written for a backend to read.
+    abc_files: abc_input::Store,
+}
+
+/// What a backend is handed.
+enum Input<'a> {
+    /// The files of a DEX program, as they are.
+    Archive(&'a [PathBuf]),
+    /// One ABC file of a HarmonyOS program.
+    Abc(abc_input::AbcFile<'a>),
 }
 
 /// One request on its way down the chain.
 struct Context<'a> {
-    descriptor: &'a str,
+    /// The class descriptor, or the record name.
+    unit: &'a str,
     language: Language,
+    /// The L3 key of the program (of the ABC file's content, for a record).
     apk: Option<&'a ApkKey>,
-    files: &'a [PathBuf],
+    input: Input<'a>,
     mappings: Option<&'a Arc<NameMappings>>,
+    /// Per-request options; a backend must declare each.
+    request: Map<String, Value>,
     options: CallOptions,
+}
+
+/// The first answer down a chain, or why there is none.
+enum Outcome {
+    Answered {
+        name: String,
+        answer: Box<Answer>,
+        attempts: Vec<Attempt>,
+    },
+    /// Every backend failed on the whole unit.
+    Failed(Vec<Attempt>),
 }
 
 /// What a backend answered for the class.
@@ -256,8 +308,9 @@ impl Decompilers {
             settings,
             programs: Mutex::new(Programs::default()),
             backends: Mutex::new(BTreeMap::new()),
-            worker: Mutex::new(WorkerState::default()),
+            workers: Mutex::new(BTreeMap::new()),
             mapping: Mutex::new(None),
+            abc_files: abc_input::Store::new(disk.as_ref().map(DiskCache::dir)),
             disk,
         }
     }
@@ -299,20 +352,22 @@ impl Decompilers {
         if !entry.finds_worker {
             return self.backend(name).ok_or_else(|| "not configured".to_string());
         }
-        let mut state = self.worker.lock().expect("decompiler worker mutex poisoned");
+        let settings = self.settings.worker(entry.tool);
+        let mut workers = self.workers.lock().expect("decompiler worker mutex poisoned");
+        let state = workers.entry(name.to_string()).or_default();
         if let Some(backend) =
-            self.lock_backends().get(name).filter(|b| state.stamp.is_some() && dexdec::stamp(&b.spec().command) == state.stamp)
+            self.lock_backends().get(name).filter(|b| state.stamp.is_some() && worker::stamp(&b.spec().command) == state.stamp)
         {
             return Ok(Arc::clone(backend));
         }
-        let found = self.settings.dexdec.locate();
+        let found = settings.locate();
         let worker = match found {
             Some(worker) => worker,
-            None => self.install_worker(&mut state).inspect_err(|_| {
+            None => self.install_worker(settings, state).inspect_err(|_| {
                 self.lock_backends().remove(name);
             })?,
         };
-        let backend = self.start_worker(name, entry, &worker, &mut state);
+        let backend = self.start_worker(name, entry, &worker, state);
         if worker.origin == WorkerOrigin::Managed || state.protocol_checked {
             return Ok(backend);
         }
@@ -323,14 +378,14 @@ impl Decompilers {
             return Ok(backend);
         };
         state.protocol_checked = true;
-        let managed = self.settings.dexdec.managed().ok_or(()).or_else(|()| self.install_worker(&mut state));
+        let managed = settings.managed().ok_or(()).or_else(|()| self.install_worker(settings, state));
         match managed {
-            Ok(managed) => Ok(self.start_worker(name, entry, &managed, &mut state)),
+            Ok(managed) => Ok(self.start_worker(name, entry, &managed, state)),
             Err(reason) => Err(format!(
                 "{} ({}) speaks decompile protocol {got}, this asc {}; {reason}",
                 worker.path.display(),
                 worker.origin.name(),
-                dexdec::PROTOCOL
+                worker::PROTOCOL
             )),
         }
     }
@@ -339,7 +394,7 @@ impl Decompilers {
     fn start_worker(&self, name: &str, entry: &BackendEntry, worker: &Worker, state: &mut WorkerState) -> Arc<Backend> {
         let mut spec = entry.spec.clone();
         spec.command.clone_from(&worker.path);
-        state.stamp = dexdec::stamp(&worker.path);
+        state.stamp = worker::stamp(&worker.path);
         let backend = Arc::new(Backend::new(name, spec));
         // The sessions of the pool replaced, if any, are on its processes:
         // closed, and the pool shuts down when its last request lets go.
@@ -351,11 +406,11 @@ impl Decompilers {
     /// Installs the worker of asc's protocol version ([`WorkerSettings::auto_install`]),
     /// once an hour at most in this process too (its data directory may not
     /// be writable); `Err` is the reason the request shows.
-    fn install_worker(&self, state: &mut WorkerState) -> Result<Worker, String> {
-        if let Some((_, reason)) = state.failed.as_ref().filter(|(at, _)| at.elapsed() < dexdec::RETRY_AFTER) {
+    fn install_worker(&self, settings: &WorkerSettings, state: &mut WorkerState) -> Result<Worker, String> {
+        if let Some((_, reason)) = state.failed.as_ref().filter(|(at, _)| at.elapsed() < worker::RETRY_AFTER) {
             return Err(reason.clone());
         }
-        self.settings.dexdec.auto_install().inspect_err(|reason| state.failed = Some((Instant::now(), reason.clone())))
+        settings.auto_install().inspect_err(|reason| state.failed = Some((Instant::now(), reason.clone())))
     }
 
     /// Every backend process now running.
@@ -433,9 +488,10 @@ impl Decompilers {
     /// cancellation. A failing backend is not an error: see the module docs.
     pub fn decompile(&self, engine: &Engine, request: &Request<'_>, cancel: &AtomicBool) -> Result<Decompiled, DecompileError> {
         let descriptor = names::format_class_name(request.class)?;
-        if let Some(name) = request.decompiler.filter(|name| !self.settings.backends.contains_key(*name)) {
-            return Err(DecompileError::UnknownDecompiler { name: name.to_string(), known: self.settings.known() });
+        if request.language == Language::JavaScript {
+            return Err(DecompileError::WrongFormat(DEX_LANGUAGES.into()));
         }
+        self.check_decompiler(request.decompiler)?;
         let mappings = self.mapping(request.mapping)?.filter(|m| !m.is_empty());
         let apk = engine.open()?;
         let key = engine.apk_key(&apk);
@@ -446,17 +502,40 @@ impl Decompilers {
             .iter()
             .map(|id| std::path::absolute(id.path).unwrap_or_else(|_| id.path.to_path_buf()))
             .collect();
-        let token = CancelToken::new();
-        let done = AtomicBool::new(false);
-        let options = CallOptions::default().priority(request.priority).cancel(Some(token.clone()));
-        let context = Context {
-            descriptor: &descriptor,
+        let mut context = Context {
+            unit: &descriptor,
             language: request.language,
             apk: key.as_ref(),
-            files: &files,
+            input: Input::Archive(&files),
             mappings: mappings.as_ref(),
-            options,
+            request: Map::new(),
+            options: CallOptions::default().priority(request.priority),
         };
+        let chain = self.settings.chain(request.decompiler);
+        match self.run_chain(&chain, &mut context, cancel)? {
+            Outcome::Answered { name, answer, attempts } => {
+                let text = answer.unit.text().unwrap_or_default();
+                self.answer(&name, &answer, text, attempts, request, &context)
+            }
+            Outcome::Failed(attempts) => self.smali(engine, request, &context, attempts, cancel),
+        }
+    }
+
+    /// `Err` when the request names a backend that is not configured.
+    fn check_decompiler(&self, decompiler: Option<&str>) -> Result<(), DecompileError> {
+        match decompiler.filter(|name| !self.settings.backends.contains_key(*name)) {
+            Some(name) => Err(DecompileError::UnknownDecompiler { name: name.to_string(), known: self.settings.known() }),
+            None => Ok(()),
+        }
+    }
+
+    /// Asks the backends of `chain` in turn for the unit of `context`, until
+    /// one gives source. Raising `cancel` aborts the request in flight.
+    fn run_chain(&self, chain: &[&str], context: &mut Context<'_>, cancel: &AtomicBool) -> Result<Outcome, DecompileError> {
+        let token = CancelToken::new();
+        context.options = context.options.clone().cancel(Some(token.clone()));
+        let done = AtomicBool::new(false);
+        let context = &*context;
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 while !done.load(Ordering::Acquire) {
@@ -467,28 +546,22 @@ impl Decompilers {
                     std::thread::sleep(CANCEL_POLL);
                 }
             });
-            let result = self.run_chain(engine, request, &context, cancel);
+            let result = self.ask_chain(chain, context, cancel);
             done.store(true, Ordering::Release);
             result
         })
     }
 
-    fn run_chain(
-        &self,
-        engine: &Engine,
-        request: &Request<'_>,
-        context: &Context<'_>,
-        cancel: &AtomicBool,
-    ) -> Result<Decompiled, DecompileError> {
+    fn ask_chain(&self, chain: &[&str], context: &Context<'_>, cancel: &AtomicBool) -> Result<Outcome, DecompileError> {
         let mut attempts = Vec::new();
-        for name in self.settings.chain(request.decompiler) {
+        for &name in chain {
             if cancel.load(Ordering::Relaxed) {
                 return Err(DecompileError::Cancelled);
             }
             let reason = match self.ask(name, context) {
                 Ok(answer) => match answer.unit.outcome {
-                    UnitOutcome::Ok { ref text, .. } | UnitOutcome::Partial { ref text, .. } => {
-                        return self.answer(name, &answer, text, attempts, request, context);
+                    UnitOutcome::Ok { .. } | UnitOutcome::Partial { .. } => {
+                        return Ok(Outcome::Answered { name: name.to_string(), answer: Box::new(answer), attempts });
                     }
                     UnitOutcome::Failed { ref reason } if answer.cached => format!("{reason} (cached failure)"),
                     UnitOutcome::Failed { ref reason } => reason.clone(),
@@ -501,10 +574,10 @@ impl Decompilers {
         if cancel.load(Ordering::Relaxed) {
             return Err(DecompileError::Cancelled);
         }
-        self.smali(engine, request, context, attempts, cancel)
+        Ok(Outcome::Failed(attempts))
     }
 
-    /// The class from backend `name`: from L3, or from the backend (stored in
+    /// The unit from backend `name`: from L3, or from the backend (stored in
     /// L3 then); `Err` with the reason when the backend cannot answer at all.
     fn ask(&self, name: &str, context: &Context<'_>) -> Result<Answer, String> {
         let entry = self.settings.backends.get(name).ok_or_else(|| format!("not configured (known: {})", self.settings.known()))?;
@@ -521,8 +594,18 @@ impl Decompilers {
         if !capabilities.supports(context.language) {
             return Err(format!("no {} output", language_name(context.language)));
         }
-        if !(capabilities.accepts(InputKind::Archive) && entry.allows(InputKind::Archive)) {
-            return Err("takes only slices of the program, which asc does not build yet".into());
+        let kind = match context.input {
+            Input::Archive(_) => InputKind::Archive,
+            Input::Abc(_) => InputKind::Abc,
+        };
+        if !(capabilities.accepts(kind) && entry.allows(kind)) {
+            return Err(match kind {
+                InputKind::Abc => "takes no ABC input".into(),
+                _ => "takes only slices of the program, which asc does not build yet".into(),
+            });
+        }
+        if let Some(option) = context.request.keys().find(|option| !capabilities.honours(option)) {
+            return Err(format!("does not take the request option `{option}`"));
         }
         let (mappings, naming) = match context.mappings {
             Some(mappings) if capabilities.mappings => (Some(mappings), Naming::Unified),
@@ -530,25 +613,52 @@ impl Decompilers {
             None => (None, Naming::Dex),
         };
         let mappings_hash = mappings.map(|m| m.hash());
+        let request = if context.request.is_empty() { String::new() } else { Value::Object(context.request.clone()).to_string() };
+        let content = match &context.input {
+            Input::Abc(abc) => Some(abc.sha256.as_str()),
+            Input::Archive(_) => None,
+        };
         let key = |capabilities| l3::UnitKey {
-            descriptor: context.descriptor,
-            input: InputKind::Archive,
+            descriptor: context.unit,
+            content,
+            input: kind,
             backend: name,
             capabilities,
             mappings: mappings_hash,
             language: context.language,
             nested: true,
+            request: &request,
         };
         let cache = self.disk.as_ref().zip(context.apk);
         if let Some(unit) = cache.and_then(|(disk, apk)| l3::get(disk, apk, &key(&capabilities))) {
             return Ok(Answer { unit, capabilities, cached: true, naming });
         }
-        let program = self.program(name, &backend, context.files, mappings, &context.options)?;
-        let mut request = DecompileRequest::java([context.descriptor]).nested(true);
-        request.language = context.language;
-        let mut result = program.decompile(&request, &context.options).map_err(|e| e.to_string())?;
+        let decompile = DecompileRequest::new([context.unit], context.language).nested(true).options(context.request.clone());
+        let mut result = match self.decompile_on(name, &backend, context, mappings, &decompile) {
+            // The file is not what asc hashed (rewritten meanwhile): write the
+            // bytes asc read to a file of asc's own and ask once more.
+            Err(asc_decompile::Error::Rpc(error)) if error.code == ErrorCode::INPUT_MISMATCH => match &context.input {
+                Input::Abc(abc) => {
+                    self.forget_program(name, &abc.sha256);
+                    let file = self.abc_files.rewrite(abc).map_err(|e| format!("{}; rewriting the input: {e}", error.message))?;
+                    let fresh = Context {
+                        unit: context.unit,
+                        language: context.language,
+                        apk: context.apk,
+                        input: Input::Abc(abc.with_file(file)),
+                        mappings: context.mappings,
+                        request: context.request.clone(),
+                        options: context.options.clone(),
+                    };
+                    self.decompile_on(name, &backend, &fresh, mappings, &decompile)
+                }
+                Input::Archive(_) => Err(asc_decompile::Error::Rpc(error)),
+            },
+            result => result,
+        }
+        .map_err(|e| e.to_string())?;
         // A nested class may come as the unit of the class it is folded into (§6.3).
-        let at = result.units.iter().position(|unit| unit.covers(context.descriptor)).or((!result.units.is_empty()).then_some(0));
+        let at = result.units.iter().position(|unit| unit.covers(context.unit)).or((!result.units.is_empty()).then_some(0));
         let unit = at.map(|at| result.units.swap_remove(at)).ok_or("the backend answered without the class")?;
         // The capabilities of the process that answered, which a restart may have changed.
         let answered = backend.last_capabilities().unwrap_or_else(|| Arc::clone(&capabilities));
@@ -558,17 +668,39 @@ impl Decompilers {
         Ok(Answer { unit, capabilities: answered, cached: false, naming })
     }
 
-    /// The program open on `backend` with these files and mappings, opened on a miss.
+    /// `request` on the program of `context` open on `backend`.
+    fn decompile_on(
+        &self,
+        name: &str,
+        backend: &Backend,
+        context: &Context<'_>,
+        mappings: Option<&Arc<NameMappings>>,
+        request: &DecompileRequest,
+    ) -> Result<asc_decompile::protocol::methods::DecompileClassesResult, asc_decompile::Error> {
+        let program = self.program(name, backend, &context.input, mappings, &context.options)?;
+        program.decompile(request, &context.options)
+    }
+
+    /// Closes the programs of `backend` open on ABC content `sha256`.
+    fn forget_program(&self, backend: &str, sha256: &str) {
+        self.lock_programs().open.retain(|open| !(open.backend == backend && open.sha256.as_deref() == Some(sha256)));
+    }
+
+    /// The program open on `backend` with this input and mappings, opened on a miss.
     fn program(
         &self,
         name: &str,
         backend: &Backend,
-        files: &[PathBuf],
+        input: &Input<'_>,
         mappings: Option<&Arc<NameMappings>>,
         options: &CallOptions,
-    ) -> Result<Arc<Program>, String> {
+    ) -> Result<Arc<Program>, asc_decompile::Error> {
         let hash = mappings.map(|m| m.hash());
-        let found = |p: &OpenProgram| p.backend == name && p.files == files && p.mappings == hash;
+        let (files, sha256): (Vec<PathBuf>, Option<&str>) = match input {
+            Input::Archive(files) => (files.to_vec(), None),
+            Input::Abc(abc) => (vec![abc.file.clone()], Some(abc.sha256.as_str())),
+        };
+        let found = |p: &OpenProgram| p.backend == name && p.files == files && p.sha256.as_deref() == sha256 && p.mappings == hash;
         {
             let mut programs = self.lock_programs();
             programs.tick += 1;
@@ -578,10 +710,13 @@ impl Decompilers {
                 return Ok(Arc::clone(&open.program));
             }
         }
-        let input = ProgramInput::Archive { files: files.to_vec() };
+        let input = match input {
+            Input::Archive(files) => ProgramInput::Archive { files: files.to_vec() },
+            Input::Abc(abc) => abc.program_input(),
+        };
         let params = ProgramOpenParams::new(input).mappings(mappings.map(|m| to_protocol(m)));
         // Opened outside the lock: a slow start must not hold up other backends.
-        let program = Arc::new(backend.open_program(params, options).map_err(|e| e.to_string())?);
+        let program = Arc::new(backend.open_program(params, options)?);
         let mut programs = self.lock_programs();
         programs.tick += 1;
         let used = programs.tick;
@@ -594,7 +729,14 @@ impl Decompilers {
         {
             programs.open.swap_remove(oldest);
         }
-        let open = OpenProgram { backend: name.to_string(), files: files.to_vec(), mappings: hash, program: Arc::clone(&program), used };
+        let open = OpenProgram {
+            backend: name.to_string(),
+            files,
+            sha256: sha256.map(String::from),
+            mappings: hash,
+            program: Arc::clone(&program),
+            used,
+        };
         programs.open.push(open);
         Ok(program)
     }
@@ -614,17 +756,16 @@ impl Decompilers {
         };
         // The class whose source the text is: the outer class, when the
         // requested one is nested and folded into it.
-        let unit_class =
-            Some(answer.unit.class.as_str()).filter(|class| *class != context.descriptor && answer.unit.covers(context.descriptor));
-        let source_class = unit_class.unwrap_or(context.descriptor);
+        let unit_class = Some(answer.unit.class.as_str()).filter(|class| *class != context.unit && answer.unit.covers(context.unit));
+        let source_class = unit_class.unwrap_or(context.unit);
         let mappings = context.mappings.filter(|_| answer.naming == Naming::Unified);
         let renamed = |class: &str| mappings.and_then(|mappings| mappings.classes().get(class)).cloned();
         // `--method` on a nested class looks in its declaration, when the outer source has one.
-        let nested_name = renamed(context.descriptor).unwrap_or_else(|| context.descriptor.to_string());
+        let nested_name = renamed(context.unit).unwrap_or_else(|| context.unit.to_string());
         let scope = unit_class.and_then(|_| source::nested_block(text, &nested_name)).unwrap_or(text);
         let text = match request.method {
-            Some(method) => source::pick_methods(scope, method, context.descriptor).ok_or_else(|| DecompileError::NoMethod {
-                class: context.descriptor.to_string(),
+            Some(method) => source::pick_methods(scope, method, context.unit).ok_or_else(|| DecompileError::NoMethod {
+                class: context.unit.to_string(),
                 method: method.to_string(),
                 language: "decompiled source",
                 hint: String::new(),
@@ -646,7 +787,8 @@ impl Decompilers {
         let path =
             unit_path.and_then(|path| source::backend_path(path, extension)).unwrap_or_else(|| source::output_path(shown, extension));
         Ok(Decompiled {
-            class: context.descriptor.to_string(),
+            class: context.unit.to_string(),
+            entry: None,
             folded_into: unit_class.map(String::from),
             backend: Some(name.to_string()),
             version: Some(answer.capabilities.backend.version.clone()),
@@ -654,6 +796,8 @@ impl Decompilers {
             language: Some(context.language),
             text,
             failed_methods: outcome::failed(&answer.unit.methods),
+            functions: Vec::new(),
+            notes: Vec::new(),
             attempts,
             cached: answer.cached,
             naming: answer.naming,
@@ -671,14 +815,14 @@ impl Decompilers {
         attempts: Vec<Attempt>,
         cancel: &AtomicBool,
     ) -> Result<Decompiled, DecompileError> {
-        let source = engine.get_class_method_cancellable(context.descriptor, SmaliOptions::debug_info(false), None, cancel)?.source;
+        let source = engine.get_class_method_cancellable(context.unit, SmaliOptions::debug_info(false), None, cancel)?.source;
         let text = match request.method {
             Some(method) => {
                 let parsed = ClassText::parse(&source);
                 let picked = parsed.select(method);
                 if picked.is_empty() {
                     return Err(DecompileError::NoMethod {
-                        class: context.descriptor.to_string(),
+                        class: context.unit.to_string(),
                         method: method.to_string(),
                         language: "smali",
                         hint: format!("; its methods: {}", parsed.signatures(4 << 10)),
@@ -689,7 +833,8 @@ impl Decompilers {
             None => source,
         };
         Ok(Decompiled {
-            class: context.descriptor.to_string(),
+            class: context.unit.to_string(),
+            entry: None,
             folded_into: None,
             backend: None,
             version: None,
@@ -697,11 +842,13 @@ impl Decompilers {
             language: None,
             text,
             failed_methods: Vec::new(),
+            functions: Vec::new(),
+            notes: Vec::new(),
             attempts,
             cached: false,
             naming: if context.mappings.is_some() { Naming::NotUnified } else { Naming::Dex },
             method: request.method.map(String::from),
-            path: source::output_path(context.descriptor, "smali"),
+            path: source::output_path(context.unit, "smali"),
         })
     }
 }
@@ -746,7 +893,9 @@ mod tests {
     fn languages_parse_by_name() {
         assert_eq!(parse_language("Java").unwrap(), Language::Java);
         assert_eq!(parse_language("kt").unwrap(), Language::Kotlin);
-        assert!(parse_language("smali").unwrap_err().to_string().contains("use java or kotlin"));
+        assert_eq!(parse_language("JS").unwrap(), Language::JavaScript);
+        assert_eq!(parse_language("javascript").unwrap(), Language::JavaScript);
+        assert!(parse_language("smali").unwrap_err().to_string().contains("use java, kotlin or javascript"));
     }
 
     #[test]

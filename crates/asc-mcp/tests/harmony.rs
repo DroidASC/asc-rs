@@ -13,7 +13,7 @@ use asc_fixture::{make_apk, make_dex};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-const TOOLS: &str = "listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, findrefs \
+const TOOLS: &str = "listclass, getclass, getmanifest, manifest_summary, resources, callgraph, hierarchy, decompile, findrefs \
                      kind=string|literal|prop|global|import|method|number|call";
 /// What the error of a class name that finds nothing ends with.
 const CLASSES: &str = "(a class is named as rows print it, RECORD->CLASS, or by its name alone; a parent outside the program by \
@@ -758,7 +758,7 @@ fn tool_definitions_mention_harmony_only_where_it_adds_an_argument() {
             tool["description"].as_str().unwrap().contains("HarmonyOS").then(|| name.to_owned()).into_iter().chain(in_properties)
         })
         .collect();
-    assert_eq!(mentions, ["getclass.entry", "listclass.all"], "schemas are read on every turn");
+    assert_eq!(mentions, ["getclass.entry", "listclass.all", "decompile.entry"], "schemas are read on every turn");
     assert!(replies[1]["result"]["instructions"].as_str().unwrap().contains("HarmonyOS: a .hap / .hsp / .app / .abc path"));
 }
 

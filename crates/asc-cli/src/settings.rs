@@ -57,19 +57,33 @@ fn gib(bytes: u64) -> String {
 }
 
 /// One row per decompiler backend: name, command line, where it is
-/// defined, and its part in the chain (`default`, `fallback N`,
-/// `disabled`, or `-`).
+/// defined, and its part in the chains (`default`, `fallback N`, for
+/// HarmonyOS programs `harmony default`, `harmony fallback N`, joined with
+/// `, `; `disabled`, or `-`).
 fn decompiler_rows(config: &Config) -> Vec<(String, String, &'static str, String)> {
     let decompile = Decompile::from_config(config);
+    let role = |name: &str, default: &str, fallback: &[String], prefix: &str| {
+        if name == default {
+            Some(format!("{prefix}default"))
+        } else {
+            fallback.iter().position(|f| f == name).map(|i| format!("{prefix}fallback {}", i + 1))
+        }
+    };
     decompile
         .backends
         .iter()
         .map(|(name, entry)| {
-            let role = match decompile.fallback.iter().position(|f| f == name) {
+            let roles: Vec<String> = [
+                role(name, &decompile.default, &decompile.fallback, ""),
+                role(name, &decompile.harmony_default, &decompile.harmony_fallback, "harmony "),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let role = match roles.is_empty() {
                 _ if !entry.enabled => "disabled".to_string(),
-                _ if *name == decompile.default => "default".to_string(),
-                Some(i) => format!("fallback {}", i + 1),
-                None => "-".to_string(),
+                true => "-".to_string(),
+                false => roles.join(", "),
             };
             (name.clone(), entry.command_line(), entry.origin.name(), role)
         })

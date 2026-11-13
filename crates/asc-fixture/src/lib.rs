@@ -1259,3 +1259,18 @@ pub fn dexdec_worker() -> Option<std::path::PathBuf> {
     assert!(path.is_file(), "ASC_DEXDEC_WORKER={} is not a file", path.display());
     Some(path)
 }
+
+/// `asc-arkdec-worker`, the real backend behind `arkdec`, if
+/// `ASC_ARKDEC_WORKER` names one.
+///
+/// The worker is built in its own repository (asc-arkdec), not in this
+/// workspace, so the tests that need it skip themselves without it.
+///
+/// # Panics
+///
+/// `ASC_ARKDEC_WORKER` is set to something that is not a file.
+pub fn arkdec_worker() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os("ASC_ARKDEC_WORKER").filter(|path| !path.is_empty())?);
+    assert!(path.is_file(), "ASC_ARKDEC_WORKER={} is not a file", path.display());
+    Some(path)
+}

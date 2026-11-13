@@ -1077,9 +1077,9 @@ fn tool_definitions_stay_small_and_take_the_output_options() {
     let replies = session(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
     let tools = &replies[0]["result"]["tools"];
     // What an agent reads before its first call; it was 16 KB before the
-    // output budget, 9 KB before parameter defaults and output schemas, and
-    // 14 KB before `decompile`.
-    assert!(tools.to_string().len() <= 15 << 10, "{} bytes", tools.to_string().len());
+    // output budget, 9 KB before parameter defaults and output schemas,
+    // 14 KB before `decompile` and 15 KB before it took HarmonyOS records.
+    assert!(tools.to_string().len() <= 31 << 9, "{} bytes", tools.to_string().len());
     for t in tools.as_array().unwrap() {
         let p = &t["inputSchema"]["properties"];
         assert!(p["max_bytes"].is_object() && p["spill"].is_object() && p["page"].is_object(), "{}", t["name"]);
@@ -1349,6 +1349,65 @@ fn decompile_tool_reports_backend_status_and_failures() {
     assert!(text(&replies[3]).contains(".method public static first()V"), "{}", text(&replies[3]));
 
     for (reply, error) in [(&replies[4], "unknown decompiler \"jeb\""), (&replies[5], "unknown language \"smali\"")] {
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+        assert!(text(reply).contains(error), "{}", text(reply));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn decompile_tool_gives_javascript_of_a_harmony_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let hap = dir.path().join("entry.hap");
+    std::fs::write(&hap, asc_fixture::hap::make_hap(&asc_fixture::abc::make_abc())).unwrap();
+    let path = hap.to_str().unwrap();
+    let apk = temp_apk();
+    let mut opts = decompile_opts("mock", &[]);
+    opts.decompile.harmony_default = "abc".into();
+    let mut table = asc_engine::config::Decompiler::new(asc_fixture::mock_backend());
+    table.args = vec!["--abc".into()];
+    opts.decompile.backends.insert("abc".into(), asc_frontend::decompile::BackendEntry::from_config("abc", &table, None));
+    let replies = session_with(
+        opts,
+        &[
+            call(1, "decompile", json!({"apk": path, "class": "pages/Index", "method": "Index.build"})),
+            call(2, "decompile", json!({"apk": path, "class": "pages/Index", "raw": true, "level": "pc-dispatch"})),
+            call(3, "decompile", json!({"apk": path, "class": "pages/Index", "mapping": "m.txt"})),
+            call(4, "decompile", json!({"apk": path, "class": "pages/Index", "decompiler": "mock"})),
+            call(5, "decompile", json!({"apk": apk.path().to_str().unwrap(), "class": "example.Test", "raw": true})),
+            call(6, "decompile", json!({"apk": path, "class": "pages/Nothing"})),
+        ],
+    );
+    let record = "&entry/src/main/ets/pages/Index&";
+    let built = ok(&replies[0]);
+    assert_eq!(
+        (built["backend"].as_str(), built["status"].as_str(), built["language"].as_str()),
+        (Some("abc"), Some("ok"), Some("javascript"))
+    );
+    assert_eq!(
+        (built["class"].as_str(), built["entry"].as_str(), built["method"].as_str()),
+        (Some(record), Some("ets/modules.abc"), Some("#~@0>#build"))
+    );
+    assert_eq!(
+        built["functions"][1],
+        json!({"signature": "#~@0>#build", "restored": "Index.build", "level": "structured", "status": "ok", "reason": null})
+    );
+    assert!(
+        text(&replies[0])
+            .contains(&format!("// decompile {record} | ets/modules.abc | by abc 1.0 | status ok\nfunction build() {{ return 1; }}\n")),
+        "{}",
+        text(&replies[0])
+    );
+    assert!(text(&replies[1]).contains(r#"options={"level":"pcDispatch","raw":true}"#), "{}", text(&replies[1]));
+
+    // A DEX backend writes no javascript: the disassembly answers.
+    let listing = ok(&replies[3]);
+    assert_eq!((listing["backend"].as_str(), listing["status"].as_str()), (Some("disassembly"), Some("failed")));
+    assert_eq!(listing["attempts"], json!([{"backend": "mock", "reason": "no javascript output"}]));
+
+    for (reply, error) in
+        [(&replies[2], "`mapping` is DEX-only"), (&replies[4], "`raw` applies to HarmonyOS programs only"), (&replies[5], "pages/Nothing")]
+    {
         assert_eq!(reply["result"]["isError"], true, "{reply}");
         assert!(text(reply).contains(error), "{}", text(reply));
     }

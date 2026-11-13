@@ -36,6 +36,7 @@ format is detected from the file:
 | `resources` | `resources.arsc` | `resources.index`, same options; QUERY is `0x…`, `string/name`, `$string:name` or `app.string.name` |
 | `xml` | binary XML | prints a text file of the package as it is: `'$profile:main_pages'` (page list, route table) or a path in the package |
 | `getclass --res-names` | resource id constants | appends `# string/name "value"` to the row of a `$r(...)` object |
+| `decompile` | Java / Kotlin (dexdec and others) | JavaScript (arkdec, opt-in: set `$ASC_ARKDEC_WORKER` or `[decompilers.arkdec] command`, or put `asc-arkdec-worker` next to asc / on `PATH`); `--method`, `--entry`, `--raw` (no desugaring), `--level pc-dispatch`; without a worker, or when the backends fail, the `getclass` disassembly (exit status 2). See [decompile-backends.md](decompile-backends.md) §6.5, §9, §12 |
 
 ```sh
 asc manifest-summary entry.hap | grep -E '^(ability|callbacks|uri)'    # exported abilities, callbacks, deep links
@@ -49,6 +50,7 @@ asc findrefs entry.hap call '{string:(?i)oaid}'                        # who cal
 asc hierarchy entry.hap UIAbility --method onCreate                    # who extends UIAbility, who overrides onCreate
 asc xml entry.hap '$profile:main_pages'                                # the page list; the routerMap likewise
 asc resources entry.hap --search 'Sign in' --in value                  # text -> id, then findrefs number ID
+ASC_ARKDEC_WORKER=~/asc-arkdec/target/release/asc-arkdec-worker asc decompile entry.hap pages/Index --method Index.build
 asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
 asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6  # who reaches http
 asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --unless 'string:(?i)mock' --depth 8 --max-nodes 5000
