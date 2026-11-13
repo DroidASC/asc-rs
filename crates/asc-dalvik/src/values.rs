@@ -884,8 +884,8 @@ impl MethodValues<'_> {
         if an.handlers[an.block_handlers(b)].iter().any(|&(_, h)| live.at(an, h as usize)) {
             return ResultUse::Used;
         }
-        for k in first..an.block_end(b) {
-            let pc = an.pcs[k] as usize;
+        for &pc in &an.pcs[first..an.block_end(b)] {
+            let pc = pc as usize;
             let op = opcode(code[pc]).expect("walked instruction has a defined opcode");
             if reads(code, pc, op, r) || (wide && reads(code, pc, op, r + 1)) {
                 return ResultUse::Used;
