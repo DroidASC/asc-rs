@@ -460,7 +460,7 @@ fn abc_records_carry_spans_levels_and_request_options() {
     let unit = &inexact.units[0];
     assert_eq!(unit.status(), UnitStatus::Partial);
     assert_eq!(unit.methods[1].status, MethodStatus::Failed);
-    assert_eq!(unit.methods[1].reason.as_deref(), Some("inexact: opaque operation at 0x12"));
+    assert_eq!(unit.methods[1].reason.as_deref(), Some("inexact: contains an operation of unknown semantics"));
     assert_eq!(unit.diagnostics[0].pc, Some(0x12));
 }
 

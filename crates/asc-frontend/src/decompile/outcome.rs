@@ -242,7 +242,7 @@ mod tests {
     fn header_of_a_record_names_its_entry_and_restored_names() {
         let failed = MethodReport::new("#~@0>#build", MethodStatus::Failed)
             .restored(Some("Index.build".into()))
-            .reason(Some("inexact: opaque operation at 0x12".into()));
+            .reason(Some("inexact: contains an operation of unknown semantics".into()));
         let record = Decompiled {
             class: "&entry/src/main/ets/pages/Index&".into(),
             entry: Some("ets/modules.abc".into()),
@@ -260,7 +260,7 @@ mod tests {
             record.header(),
             "// decompile &entry/src/main/ets/pages/Index& | ets/modules.abc | by arkdec 0.2.0 | status partial\n\
              // failed methods: 1\n\
-             //   #~@0>#build (Index.build): inexact: opaque operation at 0x12\n\
+             //   #~@0>#build (Index.build): inexact: contains an operation of unknown semantics\n\
              // arkdec reported no text of #~@0>#build; the whole record follows\n"
         );
         let listing = Decompiled {

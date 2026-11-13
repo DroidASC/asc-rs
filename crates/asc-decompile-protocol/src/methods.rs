@@ -1085,7 +1085,7 @@ mod tests {
             "path": "entry/src/main/ets/pages/Index.js", "text": text,
             "methods": [
                 {"signature": "func_main_0", "status": "ok", "level": "structured", "span": [0, 26]},
-                {"signature": "#~@0>#build", "status": "failed", "reason": "inexact: opaque operation at 0x12",
+                {"signature": "#~@0>#build", "status": "failed", "reason": "inexact: contains an operation of unknown semantics",
                  "restored": "Index.build", "level": "labelled", "span": [40, 50]}],
             "diagnostics": [{"severity": "warning", "message": "desugar: finally shape not recognized",
                              "method": "#~@0>#build", "pc": 88}],

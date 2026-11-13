@@ -301,7 +301,7 @@ impl Mock {
                         .span(span(header.len() + main.len(), build));
                     let path = Some(format!("{}.js", record.trim_matches('&')));
                     if record == "&inexact&" {
-                        let mut failed = build_report.reason(Some("inexact: opaque operation at 0x12".into()));
+                        let mut failed = build_report.reason(Some("inexact: contains an operation of unknown semantics".into()));
                         failed.status = MethodStatus::Failed;
                         let diagnostic =
                             Diagnostic::new(Severity::Warning, "opaque operation").method(Some("#~@0>#build".into())).pc(Some(0x12));

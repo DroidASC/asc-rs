@@ -250,7 +250,7 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
 → {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,
      "client":{"name":"asc","version":"0.3.0"},"options":{"threads":4}}}
 ← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,
-     "backend":{"name":"arkdec","version":"0.2.0+g1a2b3c4.r9f8e7d6"},"optionsHash":"5d41402abc4b2a76",
+     "backend":{"name":"arkdec","version":"0.1.1+g983ac425dd.rf1c9303b3a"},"optionsHash":"5d41402abc4b2a76",
      "inputs":["abc"],"languages":["javascript"],"mappings":false,"methodStatus":true,
      "maxConcurrency":4,"requestOptions":["raw","level"]}}
 
@@ -270,7 +270,7 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
        {"signature":"func_main_0","status":"ok","level":"structured","span":[0,812]},
        {"signature":"#~@0>#build","status":"ok","reason":"irreducible loop at 0x3c",
         "restored":"Index.build","level":"labelled","span":[46,90]},
-       {"signature":"#~@0>#aboutToAppear","status":"failed","reason":"inexact: opaque operation at 0x12",
+       {"signature":"#~@0>#aboutToAppear","status":"failed","reason":"inexact: contains an operation of unknown semantics",
         "restored":"Index.aboutToAppear","level":"structured","span":[90,160]}],
      "diagnostics":[{"severity":"warning","message":"desugar: finally shape not recognized",
                      "method":"#~@0>#build","pc":88}],
@@ -300,8 +300,11 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
 - 输出只取决于（ABC 内容、record、`initialize` 的 options、请求 `options`、后端版本），所以一个 record 的结果
   按 ABC 文件的 SHA-256 缓存，而不是按整个程序。后端不得按耗时降级：超时只靠取消处理（§6.4）。
 - 错误码：在 §6.4 的基础上加 `-33004`，表示输入与 asc 描述的不符（`sha256` 不匹配）。
-- 样本：`crates/asc-decompile-protocol/tests/data/arkdec-session.jsonl` 是按本节手写的一次会话，`tests/transcripts.rs`
-  把每条消息读成对应的类型再写回，要求结果一致。`asc-decompile` 的 `mock_backend --abc` 按本节回答，供生命周期测试使用。
+- 样本：`crates/asc-decompile-protocol/tests/data/arkdec-session.jsonl` 是从真实 `asc-arkdec-worker` 录下的一次会话
+  （请求按 asc 发的样子构造，输入是 asc-arkdec `tests/diff/abc` 里的两个 ABC；asc-arkdec 目录写成 `$ARKDEC`，
+  `backend.version` 写成 `<version>`，`optionsHash` 写成 `<hash>`，与 asc-arkdec 自己的 `tests/data/session.jsonl`
+  相同；被取消的那个请求靠 worker 的测试钩子 `ASC_ARKDEC_WORKER_FAULT=stall:<record>` 拖住）。`tests/transcripts.rs` 把每条消息读成对应的类型再写回，要求结果一致。
+  `asc-decompile` 的 `mock_backend --abc` 按本节回答，供生命周期测试使用；它不做 §12 所说的 `-32600` 检查。
 
 ## 7. 命名
 
@@ -447,6 +450,12 @@ asc 对它的约定只有下面这些。
   写入时目录超过 2 GiB 就从最久没用的开始删（删不掉的跳过，Windows 上被映射的文件删不掉）。没有磁盘 cache 时写到一个临时目录，
   随 `Decompilers` 一起删除。`program/open` 带上 `sha256` 和 `entry`；asc 打开的程序会话按（后端、文件、sha256）区分。
 - daemon 的身份包含所有 `ASC_*` 环境变量和配置，所以改了 `$ASC_ARKDEC_WORKER` 或 `[decompilers.arkdec]` 就是另一个 daemon。
+- 版本：`initialize` 的 `backend.version` 是 `<包版本>+g<asc-arkdec 提交>.r<asc-rs 提交>`（提交取 10 位短哈希，
+  例如 `0.1.1+g983ac425dd.rf1c9303b3a`）；asc-arkdec 的工作区或它编进来的 asc-rs 部分（asc-abc、asc-arkisa、
+  asc-decompile-protocol）有未提交的改动时后缀 `-dirty`，不在 git 里构建时是 `<包版本>+nogit`。后两种情况下
+  `optionsHash` 还混入构建时间，所以这样的构建之间不共用 L3 条目。`--version` 打印 `asc-arkdec-worker <同一个版本>`。
+- 请求时机：`initialize` 之前收到的请求（除 `initialize` 外）回 `-32600`（`initialize first`）；`shutdown` 之后收到的
+  任何请求回 `-32600`（`shutting down`），直到 stdin 关闭。asc 不会这样发，这只是 worker 对违约客户端的回答。
 - 测试：asc 里的测试只用 mock（`mock_backend --abc`）。需要真 worker 的测试（`crates/asc-cli/tests/decompile_harmony.rs`
   的 `the_built_in_arkdec_daemon_equals_one_shot`）读 `ASC_ARKDEC_WORKER`，没设就跳过。
 

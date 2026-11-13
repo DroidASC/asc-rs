@@ -6,15 +6,21 @@
 //! back to the same JSON. Params and results go on the wire through
 //! `serde_json::Value` (keys sorted), so the same value is the same bytes.
 //!
-//! `arkdec-session.jsonl` is written by hand from `docs/decompile-backends.md`
-//! §6.5 until one is recorded from the real worker. `dexdec-session.jsonl` is
-//! a P1 (DEX) session: the ABC additions must not change a byte of it.
+//! `arkdec-session.jsonl` is recorded from the real `asc-arkdec-worker`
+//! (requests shaped as asc sends them, over two ABC files of asc-arkdec's
+//! `tests/diff/abc`), normalised as asc-arkdec's own `tests/data/session.jsonl`:
+//! the asc-arkdec checkout is written `$ARKDEC`, `backend.version`
+//! `<version>` and `optionsHash` `<hash>`. The cancelled request was held
+//! with the worker's `ASC_ARKDEC_WORKER_FAULT=stall:<record>` test hook.
+//! `dexdec-session.jsonl` is a P1 (DEX) session: the ABC additions must not
+//! change a byte of it.
 
 use std::collections::HashMap;
 
 use asc_decompile_protocol::methods::{
     Cancelled, ClassUnit, DecompileClasses, DecompileClassesParams, DecompileClassesResult, Initialize, InitializeResult, Initialized,
     InputKind, Language, Method, NotificationMethod, ProgramClose, ProgramInput, ProgramOpen, ProgramOpenParams, Progress, Shutdown,
+    UnitStatus,
 };
 use asc_decompile_protocol::{ErrorCode, FrameReader, FrameWriter, Message, Notification, Request, RequestId, Response};
 use serde::Serialize;
@@ -148,29 +154,48 @@ fn arkdec_session_replays() {
     for open in requests::<ProgramOpen>(&entries) {
         let ProgramOpenParams { input: ProgramInput::Abc { files, sha256, .. }, .. } = &open else { panic!("abc input: {open:?}") };
         assert_eq!(files.len(), 1, "one ABC file per program");
-        assert!(sha256.as_ref().is_some_and(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())));
+        assert!(sha256.as_ref().is_none_or(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())));
     }
     let asked: Vec<DecompileClassesParams> = requests::<DecompileClasses>(&entries).collect();
-    assert_eq!(asked.len(), 3);
+    assert_eq!(asked.len(), 5);
     for params in &asked {
-        assert_eq!(params.language, Language::JavaScript);
         assert!(params.options.keys().all(|option| capabilities.honours(option)), "only declared options: {:?}", params.options);
     }
+    assert_eq!(asked.iter().filter(|params| params.language == Language::JavaScript).count(), 4, "one asks for Java");
+    let progress = entries.iter().filter(|entry| matches!(&entry.message, Message::Notification(n) if n.method == Progress::NAME));
+    assert_eq!(progress.count(), 2, "one per request with a progressToken");
 
     let units: Vec<ClassUnit> = results(&entries).flat_map(|result: DecompileClassesResult| result.units).collect();
-    assert_eq!(units.len(), 3);
+    assert_eq!(units.len(), 4);
     for unit in &units {
         let Some(text) = unit.text() else { continue };
+        assert!(!unit.methods.is_empty());
         for method in &unit.methods {
             assert!(method.slice(text).is_some(), "{}: span {:?} not in the text", method.signature, method.span);
+            assert!(method.level.is_some() && method.restored.is_some(), "{method:?}");
+            assert_eq!(method.level.as_deref() == Some("structured"), method.reason.is_none(), "{method:?}");
         }
     }
-    let build = &units[0].methods[1];
-    assert_eq!(build.restored.as_deref(), Some("Index.build"));
-    assert!(build.slice(units[0].text().unwrap()).unwrap().starts_with("  build() {"));
-    assert_eq!(units[0].diagnostics[0].pc, Some(88));
+    let [lib, raw_lib, gone, exceptions] = units.as_slice() else { unreachable!() };
+    let bump = lib.methods.iter().find(|method| method.signature == "#*#bump").unwrap();
+    assert_eq!(bump.restored.as_deref(), Some("bump"));
+    assert!(bump.slice(lib.text().unwrap()).unwrap().starts_with("function bump() {"));
+    assert!(raw_lib.methods.iter().all(|method| method.level.as_deref() == Some("pcDispatch")));
+    assert_eq!(gone.status(), UnitStatus::Failed);
+    assert!(exceptions.methods.iter().any(|method| method.level.as_deref() == Some("labelled")));
+    assert_eq!(exceptions.diagnostics[0].pc, Some(85));
 
-    assert_eq!(errors(&entries), [ErrorCode::INPUT_MISMATCH, ErrorCode::REQUEST_CANCELLED]);
+    assert_eq!(
+        errors(&entries),
+        [
+            ErrorCode::INVALID_REQUEST, // before initialize
+            ErrorCode::INPUT_MISMATCH,
+            ErrorCode::REQUEST_CANCELLED,
+            ErrorCode::INVALID_PARAMS, // language java
+            ErrorCode::PROGRAM_NOT_FOUND,
+            ErrorCode::INVALID_REQUEST, // after shutdown
+        ]
+    );
 }
 
 #[test]

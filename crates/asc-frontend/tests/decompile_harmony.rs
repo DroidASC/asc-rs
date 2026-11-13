@@ -166,7 +166,9 @@ fn partial_and_failed_records_and_a_crash() {
     let partial = run(&decompilers, &engine, &HarmonyRequest::new("&inexact&")).unwrap();
     assert_eq!(partial.status, Status::Partial);
     assert!(
-        partial.header().contains("// failed methods: 1\n//   #~@0>#build (Index.build): inexact: opaque operation at 0x12\n"),
+        partial
+            .header()
+            .contains("// failed methods: 1\n//   #~@0>#build (Index.build): inexact: contains an operation of unknown semantics\n"),
         "{}",
         partial.header()
     );
