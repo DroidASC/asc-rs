@@ -184,6 +184,7 @@ name = "asc-decompile"
 version = "0.2.0"
 dependencies = [
  "asc-decompile-protocol",
+ "asc-fixture",
  "libc",
  "serde",
  "serde_json",

@@ -1,7 +1,7 @@
 //! Lifecycle tests against `examples/mock_backend.rs`.
 //!
-//! `cargo test` builds examples before running integration tests, so the mock is
-//! found next to the test binary.
+//! `cargo test` builds examples before running integration tests; the mock is
+//! found where Cargo put it.
 #![cfg(unix)]
 
 use std::num::NonZeroUsize;
@@ -16,14 +16,7 @@ use asc_decompile::{Backend, BackendSpec, CallOptions, CancelToken, DecompileReq
 use serde_json::json;
 
 fn mock_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let path = exe.parent().unwrap().parent().unwrap().join("examples").join("mock_backend");
-    assert!(
-        path.exists(),
-        "{} is missing; `cargo test` builds it, or run `cargo build -p asc-decompile --example mock_backend`",
-        path.display()
-    );
-    path
+    asc_fixture::mock_backend()
 }
 
 fn spec(args: &[&str]) -> BackendSpec {

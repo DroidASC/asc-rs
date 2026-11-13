@@ -1211,9 +1211,7 @@ pub fn make_truncated_insn_dex() -> Vec<u8> {
 pub fn mock_backend() -> std::path::PathBuf {
     static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
-        // A test runs as target/<profile>/deps/<name>-<hash>.
-        let exe = std::env::current_exe().expect("test executable path");
-        let profile = exe.parent().and_then(std::path::Path::parent).expect("test executable under target/<profile>/deps");
+        let profile = profile_dir();
         let path = profile.join("examples").join(format!("mock_backend{}", std::env::consts::EXE_SUFFIX));
         if !path.exists() {
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -1231,6 +1229,20 @@ pub fn mock_backend() -> std::path::PathBuf {
         path
     })
     .clone()
+}
+
+/// `target/<profile>`, where Cargo puts examples. A test runs as
+/// `<profile>/deps/<name>-<hash>` or, in Cargo's newer build-dir layout, as
+/// `<profile>/build/<package>/<hash>/out/<name>-<hash>`.
+fn profile_dir() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("test executable path");
+    let dir = exe.parent().expect("test executable in a directory");
+    let profile = if dir.file_name().is_some_and(|name| name == "deps") {
+        dir.parent()
+    } else {
+        exe.ancestors().find(|a| a.file_name().is_some_and(|name| name == "build")).and_then(std::path::Path::parent)
+    };
+    profile.expect("test executable under target/<profile>").to_path_buf()
 }
 
 /// `asc-dexdec-worker`, the real backend behind the built-in `dexdec`, if
