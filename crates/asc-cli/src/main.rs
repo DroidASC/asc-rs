@@ -755,7 +755,7 @@ enum Command {
         class: String,
     },
     /// Java or Kotlin source of a class from a decompiler backend (default: the
-    /// built-in dexdec); JavaScript of a HarmonyOS record (arkdec).
+    /// built-in dexdec); JavaScript or ArkTS of a HarmonyOS record (arkdec).
     ///
     /// The first lines (`//` comments; `#` for smali and the disassembly) say
     /// how the answer came about: `decompile CLASS | by BACKEND VERSION |
@@ -796,8 +796,10 @@ enum Command {
         /// of the config file.
         #[arg(long, value_name = "NAME")]
         decompiler: Option<String>,
-        /// Output language: java (default) or kotlin; javascript (js), the
-        /// only one, for a HarmonyOS record.
+        /// Output language: java (default) or kotlin; for a HarmonyOS record
+        /// javascript (js, default) or arkts (ets): the ArkUI DSL recovered
+        /// where arkdec can (-o then writes .ets; a record with nothing to
+        /// recover stays JavaScript, .js).
         #[arg(long, value_enum)]
         language: Option<LanguageArg>,
         /// Show only these methods: a name (every overload) or a signature,
@@ -936,6 +938,8 @@ enum LanguageArg {
     Kotlin,
     #[value(alias = "js")]
     Javascript,
+    #[value(alias = "ets")]
+    Arkts,
 }
 
 impl From<LanguageArg> for Language {
@@ -944,6 +948,7 @@ impl From<LanguageArg> for Language {
             LanguageArg::Java => Language::Java,
             LanguageArg::Kotlin => Language::Kotlin,
             LanguageArg::Javascript => Language::JavaScript,
+            LanguageArg::Arkts => Language::ArkTs,
         }
     }
 }

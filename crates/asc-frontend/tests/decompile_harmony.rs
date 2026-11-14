@@ -125,6 +125,29 @@ fn a_record_decompiles_and_the_second_call_is_cached() {
 }
 
 #[test]
+fn arkts_is_its_own_cache_entry_with_an_ets_path() {
+    let fixture = Fixture::new();
+    let decompilers = fixture.decompilers(&["abc"]);
+    let engine = fixture.engine("entry.hap");
+    let js = run(&decompilers, &engine, &HarmonyRequest::new("pages/Index")).unwrap();
+    let arkts = HarmonyRequest::new("pages/Index").language(Language::ArkTs);
+    let first = run(&decompilers, &engine, &arkts).unwrap();
+    assert_eq!((first.status, first.language, first.cached), (Status::Ok, Some(Language::ArkTs), false), "not the JavaScript entry");
+    assert!(first.text.lines().next().unwrap().ends_with(" language=arkts"), "{}", first.text);
+    assert_eq!(first.path, Path::new("entry/src/main/ets/pages/Index.ets"));
+    assert_eq!(first.header(), format!("// decompile {INDEX_PAGE} | ets/modules.abc | by abc 1.0 | status ok\n"));
+    let second = run(&decompilers, &engine, &arkts).unwrap();
+    assert!(second.cached && second.text == first.text && second.language == Some(Language::ArkTs));
+    let again = run(&decompilers, &engine, &HarmonyRequest::new("pages/Index")).unwrap();
+    assert!(again.cached && again.text == js.text && again.language == Some(Language::JavaScript), "the JavaScript entry is untouched");
+    // A backend without arkts fails the attempt: the disassembly answers.
+    let plain = fixture.decompilers(&["mock"]);
+    let none = run(&plain, &engine, &arkts).unwrap();
+    assert_eq!(none.status, Status::Disassembly);
+    assert!(none.attempts[0].reason.contains("no arkts output"), "{:?}", none.attempts);
+}
+
+#[test]
 fn functions_are_cut_out_by_their_span() {
     let fixture = Fixture::new();
     let decompilers = fixture.decompilers(&["abc"]);
@@ -226,11 +249,13 @@ fn requests_that_cannot_be_asked_say_why() {
     assert!(error(&HarmonyRequest::new("pages/Index").language(Language::Java)).contains("decompiles to javascript"));
     assert!(error(&HarmonyRequest::new("pages/Index").decompiler(Some("jeb"))).starts_with("unknown decompiler \"jeb\""));
 
-    // JavaScript is not a DEX class's language.
+    // JavaScript and ArkTS are not a DEX class's languages.
     let dir = tempfile::tempdir().unwrap();
     let apk = dir.path().join("app.apk");
     std::fs::write(&apk, asc_fixture::make_apk(&[("classes.dex", &asc_fixture::make_dex())], true)).unwrap();
     let dex = asc_engine::Engine::new(&apk);
-    let wrong = decompilers.decompile(&dex, &Request::new("example.Test").language(Language::JavaScript), &AtomicBool::new(false));
-    assert!(wrong.unwrap_err().to_string().contains("javascript is the language of HarmonyOS records"));
+    for language in [Language::JavaScript, Language::ArkTs] {
+        let wrong = decompilers.decompile(&dex, &Request::new("example.Test").language(language), &AtomicBool::new(false));
+        assert!(wrong.unwrap_err().to_string().contains("javascript and arkts are the languages of HarmonyOS records"));
+    }
 }

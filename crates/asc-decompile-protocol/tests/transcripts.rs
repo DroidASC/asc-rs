@@ -8,7 +8,8 @@
 //!
 //! `arkdec-session.jsonl` is recorded from the real `asc-arkdec-worker`
 //! (requests shaped as asc sends them, over two ABC files of asc-arkdec's
-//! `tests/diff/abc`), normalised as asc-arkdec's own `tests/data/session.jsonl`:
+//! `tests/diff/abc` and, for the `arkts` requests, its ArkUI corpus
+//! `tests/arkui/abc/12/modules.abc`), normalised as asc-arkdec's own `tests/data/session.jsonl`:
 //! the asc-arkdec checkout is written `$ARKDEC`, `backend.version`
 //! `<version>` and `optionsHash` `<hash>`. The cancelled request was held
 //! with the worker's `ASC_ARKDEC_WORKER_FAULT=stall:<record>` test hook.
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 use asc_decompile_protocol::methods::{
     Cancelled, ClassUnit, DecompileClasses, DecompileClassesParams, DecompileClassesResult, Initialize, InitializeResult, Initialized,
     InputKind, Language, Method, NotificationMethod, ProgramClose, ProgramInput, ProgramOpen, ProgramOpenParams, Progress, Shutdown,
-    UnitStatus,
+    UnitOutcome, UnitStatus,
 };
 use asc_decompile_protocol::{ErrorCode, FrameReader, FrameWriter, Message, Notification, Request, RequestId, Response};
 use serde::Serialize;
@@ -149,7 +150,7 @@ fn arkdec_session_replays() {
     let capabilities: Vec<InitializeResult> = results(&entries).collect();
     let [capabilities] = capabilities.as_slice() else { panic!("one initialize result") };
     assert_eq!(capabilities.inputs, [InputKind::Abc]);
-    assert_eq!(capabilities.languages, [Language::JavaScript]);
+    assert_eq!(capabilities.languages, [Language::JavaScript, Language::ArkTs]);
 
     for open in requests::<ProgramOpen>(&entries) {
         let ProgramOpenParams { input: ProgramInput::Abc { files, sha256, .. }, .. } = &open else { panic!("abc input: {open:?}") };
@@ -157,26 +158,31 @@ fn arkdec_session_replays() {
         assert!(sha256.as_ref().is_none_or(|sha| sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())));
     }
     let asked: Vec<DecompileClassesParams> = requests::<DecompileClasses>(&entries).collect();
-    assert_eq!(asked.len(), 5);
+    assert_eq!(asked.len(), 7);
     for params in &asked {
         assert!(params.options.keys().all(|option| capabilities.honours(option)), "only declared options: {:?}", params.options);
     }
     assert_eq!(asked.iter().filter(|params| params.language == Language::JavaScript).count(), 4, "one asks for Java");
+    assert_eq!(asked.iter().filter(|params| params.language == Language::ArkTs).count(), 2);
     let progress = entries.iter().filter(|entry| matches!(&entry.message, Message::Notification(n) if n.method == Progress::NAME));
     assert_eq!(progress.count(), 2, "one per request with a progressToken");
 
     let units: Vec<ClassUnit> = results(&entries).flat_map(|result: DecompileClassesResult| result.units).collect();
-    assert_eq!(units.len(), 4);
+    assert_eq!(units.len(), 6);
     for unit in &units {
         let Some(text) = unit.text() else { continue };
         assert!(!unit.methods.is_empty());
+        let ets = matches!(&unit.outcome, UnitOutcome::Ok { path: Some(path), .. } if path.ends_with(".ets"));
         for method in &unit.methods {
-            assert!(method.slice(text).is_some(), "{}: span {:?} not in the text", method.signature, method.span);
+            // ArkTS folds the generated glue into the struct: a function
+            // that is no longer written has no span.
+            let sliced = method.slice(text).is_some() || (ets && method.span.is_none());
+            assert!(sliced, "{}: span {:?} not in the text", method.signature, method.span);
             assert!(method.level.is_some() && method.restored.is_some(), "{method:?}");
             assert_eq!(method.level.as_deref() == Some("structured"), method.reason.is_none(), "{method:?}");
         }
     }
-    let [lib, raw_lib, gone, exceptions] = units.as_slice() else { unreachable!() };
+    let [lib, raw_lib, gone, exceptions, page, lib_arkts] = units.as_slice() else { unreachable!() };
     let bump = lib.methods.iter().find(|method| method.signature == "#*#bump").unwrap();
     assert_eq!(bump.restored.as_deref(), Some("bump"));
     assert!(bump.slice(lib.text().unwrap()).unwrap().starts_with("function bump() {"));
@@ -184,6 +190,16 @@ fn arkdec_session_replays() {
     assert_eq!(gone.status(), UnitStatus::Failed);
     assert!(exceptions.methods.iter().any(|method| method.level.as_deref() == Some("labelled")));
     assert_eq!(exceptions.diagnostics[0].pc, Some(85));
+    // arkts: ArkTS at `.ets` paths, the ArkUI page and also a record
+    // without structs (written in its TypeScript forms).
+    let path = |unit: &ClassUnit| match &unit.outcome {
+        UnitOutcome::Ok { path, .. } => path.clone().unwrap(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(path(page), "entry/src/main/ets/cases/entry_plain.ets");
+    assert!(page.text().unwrap().contains("struct ") && page.text().unwrap().contains("build() {"));
+    assert_eq!((path(lib).as_str(), path(lib_arkts).as_str()), ("entry/src/main/ets/lib.js", "entry/src/main/ets/lib.ets"));
+    assert!(lib_arkts.text().unwrap().contains("export function bump() {"), "{:?}", lib_arkts.text());
 
     assert_eq!(
         errors(&entries),

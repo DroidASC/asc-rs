@@ -1871,12 +1871,12 @@ pub(crate) mod defs {
 
     pub(crate) fn decompile() -> Value {
         json!({
-            "description": "Java source of a class; JavaScript of an abc record. `//` header: decompiler, status (ok, partial, \
+            "description": "Java source of a class; JavaScript (or ArkTS) of an abc record. `//` header: decompiler, status (ok, partial, \
                 failed = smali / disassembly), failures.",
             "inputSchema": {"type": "object", "properties": merge(apk_props(), &[json!({
                 "class": {"type": "string"},
                 "decompiler": {"type": "string", "description": "Only this backend."},
-                "language": {"type": "string", "description": "java or kotlin; javascript (records)."},
+                "language": {"type": "string", "description": "java or kotlin; javascript or arkts (records)."},
                 "method": {"type": "string"},
                 "mapping": {"type": "string"},
                 "entry": {"type": "string", "description": "HarmonyOS: the abc entry."},

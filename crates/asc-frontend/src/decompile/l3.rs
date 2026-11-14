@@ -67,6 +67,7 @@ impl UnitKey<'_> {
             Language::Java => "java",
             Language::Kotlin => "kotlin",
             Language::JavaScript => "javascript",
+            Language::ArkTs => "arkts",
             _ => "other",
         };
         let unit = match self.content {
@@ -266,7 +267,13 @@ mod tests {
             UnitKey { request: raw, ..base },
             UnitKey { request: r#"{"level":"pcDispatch"}"#, ..base },
             UnitKey { content: None, ..base },
+            UnitKey { language: Language::ArkTs, ..base },
         ];
+        assert!(
+            UnitKey { language: Language::ArkTs, request: raw, ..base }.query()
+                == rendered_key(PRODUCER, FORMAT, &expected.replace("language=javascript", "language=arkts")),
+            "arkts is keyed by its name"
+        );
         let mut queries: Vec<String> = variants.iter().map(UnitKey::query).collect();
         queries.push(base.query());
         let count = queries.len();

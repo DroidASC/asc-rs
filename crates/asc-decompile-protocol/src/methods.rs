@@ -312,6 +312,11 @@ pub enum Language {
     /// `javascript`: one ES module per ABC record.
     #[serde(rename = "javascript")]
     JavaScript,
+    /// `arkts`: one module per ABC record, with the ArkUI DSL recovered
+    /// (`struct`, decorators, `build()`) where the backend can; a record
+    /// without it is the JavaScript module (the unit's `path` says which).
+    #[serde(rename = "arkts")]
+    ArkTs,
 }
 
 /// Params of [`ProgramOpen`].
@@ -1046,14 +1051,17 @@ mod tests {
 
         let initialize: InitializeResult = serde_json::from_value(json!({
             "protocolVersion": 1, "backend": {"name": "arkdec", "version": "0.2.0"}, "optionsHash": "5d41",
-            "inputs": ["abc"], "languages": ["javascript", "arkts"], "methodStatus": true, "maxConcurrency": 4,
+            "inputs": ["abc"], "languages": ["javascript", "arkts", "cangjie"], "methodStatus": true, "maxConcurrency": 4,
             "requestOptions": ["raw", "level"]
         }))
         .unwrap();
         assert!(initialize.accepts(InputKind::Abc) && !initialize.accepts(InputKind::Archive));
-        assert_eq!(initialize.languages, [Language::JavaScript], "unknown languages are dropped");
+        assert_eq!(initialize.languages, [Language::JavaScript, Language::ArkTs], "unknown languages are dropped");
+        assert!(initialize.supports(Language::ArkTs));
         assert!(initialize.honours("raw") && initialize.honours("level") && !initialize.honours("mappings"));
         assert_eq!(serde_json::to_value(Language::JavaScript).unwrap(), json!("javascript"));
+        assert_eq!(serde_json::to_value(Language::ArkTs).unwrap(), json!("arkts"));
+        assert_eq!(serde_json::from_value::<Language>(json!("arkts")).unwrap(), Language::ArkTs);
     }
 
     #[test]

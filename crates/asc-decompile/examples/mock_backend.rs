@@ -11,7 +11,7 @@
 //! * `--fail-all`: every class comes back `failed`
 //! * `--version V` (default 1.0): the version reported in `initialize`
 //! * `--abc`: be an ABC backend like arkdec instead: `inputs ["abc"]`,
-//!   `languages ["javascript"]`, `requestOptions ["raw", "level"]`, no mappings
+//!   `languages ["javascript", "arkts"]`, `requestOptions ["raw", "level"]`, no mappings
 //!
 //! Per-class behaviour comes from the requested descriptor:
 //!
@@ -28,7 +28,9 @@
 //!
 //! With `--abc`, `program/open` takes only `kind: "abc"` with one file
 //! (`-33002` / `-32602` otherwise) and answers `-33004` when `sha256` is
-//! `"mismatch"`; `decompile/classes` takes only `javascript`. Per record:
+//! `"mismatch"`; `decompile/classes` takes `javascript` and `arkts` (whose
+//! units have an `.ets` path and say `language=arkts` on their first line).
+//! Per record:
 //!
 //! * `&crash&`: exit 3 mid-request
 //! * `&slow/<ms>&`: work for `ms`, honouring cancellation
@@ -123,7 +125,7 @@ impl Mock {
                 let result = if self.flags.abc {
                     result
                         .inputs(vec![InputKind::Abc])
-                        .languages(vec![Language::JavaScript])
+                        .languages(vec![Language::JavaScript, Language::ArkTs])
                         .request_options(vec!["raw".into(), "level".into()])
                 } else {
                     result
@@ -263,9 +265,11 @@ impl Mock {
 
     /// The `--abc` answer: one unit per record.
     fn records(&self, id: &RequestId, params: &DecompileClassesParams) -> Result<DecompileClassesResult, ErrorObject> {
-        if params.language != Language::JavaScript {
-            return Err(ErrorObject::new(ErrorCode::INVALID_PARAMS, "mock --abc writes javascript only"));
-        }
+        let arkts = match params.language {
+            Language::JavaScript => false,
+            Language::ArkTs => true,
+            _ => return Err(ErrorObject::new(ErrorCode::INVALID_PARAMS, "mock --abc writes javascript or arkts only")),
+        };
         let sha256 = match self.programs.lock().unwrap().get(&params.program_id.0).map(|program| &program.input) {
             Some(ProgramInput::Abc { sha256, .. }) => sha256.clone().unwrap_or_else(|| "-".into()),
             _ => return Err(ErrorObject::new(ErrorCode::PROGRAM_NOT_FOUND, format!("no program {}", params.program_id.0))),
@@ -286,8 +290,11 @@ impl Mock {
                         return Err(ErrorObject::new(ErrorCode::REQUEST_CANCELLED, "cancelled"));
                     }
                     let pid = std::process::id();
-                    let header =
-                        format!("// pid={pid} program={} record={record} sha256={sha256} options={options}\n", params.program_id.0);
+                    let language = if arkts { " language=arkts" } else { "" };
+                    let header = format!(
+                        "// pid={pid} program={} record={record} sha256={sha256} options={options}{language}\n",
+                        params.program_id.0
+                    );
                     let main = "function func_main_0() {}\n";
                     let build = "function build() { return 1; }\n";
                     let text = format!("{header}{main}{build}");
@@ -299,7 +306,7 @@ impl Mock {
                         .restored(Some("Index.build".into()))
                         .level(Some(level.into()))
                         .span(span(header.len() + main.len(), build));
-                    let path = Some(format!("{}.js", record.trim_matches('&')));
+                    let path = Some(format!("{}.{}", record.trim_matches('&'), if arkts { "ets" } else { "js" }));
                     if record == "&inexact&" {
                         let mut failed = build_report.reason(Some("inexact: contains an operation of unknown semantics".into()));
                         failed.status = MethodStatus::Failed;

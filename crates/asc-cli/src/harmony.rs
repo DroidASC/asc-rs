@@ -2,7 +2,7 @@
 //! of the DEX side: `listclass`, `getclass` / `disassemble`, `getmanifest`,
 //! `manifest-summary`, `resources`, `xml` (the text files of a package),
 //! `findrefs` (string, prop, global, import, method, number, call, all,
-//! rules), `callgraph`, `hierarchy` and `decompile` (JavaScript of a record
+//! rules), `callgraph`, `hierarchy` and `decompile` (JavaScript or ArkTS of a record
 //! from arkdec, else its disassembly).
 //!
 //! This is a thin dispatch ahead of the layer both formats will share. The

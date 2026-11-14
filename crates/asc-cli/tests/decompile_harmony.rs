@@ -159,13 +159,23 @@ fn the_body_is_the_unit_text() {
     assert!(stdout(&out).ends_with("// wrote src/entry/src/main/ets/pages/Index.js\n"), "{}", stdout(&out));
     let written = std::fs::read_to_string(env.path("src/entry/src/main/ets/pages/Index.js")).unwrap();
     assert_eq!(written, mock_unit_body(&text));
+    // ArkTS: a unit of its own, written where the backend's .ets path says.
+    let out = env.run(false, &["decompile", "entry.hap", "pages/Index", "--language", "ets", "-o", "src"]);
+    assert_eq!(out.status.code(), Some(0), "{}", both(&out));
+    assert!(stdout(&out).ends_with("| status ok\n// wrote src/entry/src/main/ets/pages/Index.ets\n"), "{}", stdout(&out));
+    let written = std::fs::read_to_string(env.path("src/entry/src/main/ets/pages/Index.ets")).unwrap();
+    assert!(written.lines().next().unwrap().ends_with(" language=arkts"), "{written}");
 }
 
 #[test]
 fn daemon_and_one_shot_outputs_are_identical() {
     let one_shot = Env::new(MOCK);
     let daemon = Env::new(MOCK);
-    for args in [&["decompile", "entry.hap", "pages/Index"][..], &["decompile", "entry.hap", "pages/Index", "--method", "build"][..]] {
+    for args in [
+        &["decompile", "entry.hap", "pages/Index"][..],
+        &["decompile", "entry.hap", "pages/Index", "--method", "build"][..],
+        &["decompile", "entry.hap", "pages/Index", "--language", "arkts"][..],
+    ] {
         let alone = one_shot.run(false, args);
         let served = daemon.run(true, args);
         assert_eq!(alone.status.code(), Some(0), "{}", both(&alone));
@@ -249,7 +259,8 @@ fn arguments_of_the_other_format_are_refused() {
         (&["decompile", "app.apk", "example.Test", "--raw"][..], "--raw applies to HarmonyOS programs only"),
         (&["decompile", "app.apk", "example.Test", "--level", "pc-dispatch"][..], "--level applies to HarmonyOS programs only"),
         (&["decompile", "app.apk", "example.Test", "--entry", "x"][..], "--entry applies to HarmonyOS programs only"),
-        (&["decompile", "app.apk", "example.Test", "--language", "js"][..], "javascript is the language of HarmonyOS records"),
+        (&["decompile", "app.apk", "example.Test", "--language", "js"][..], "javascript and arkts are the languages of HarmonyOS records"),
+        (&["decompile", "app.apk", "example.Test", "--language", "ets"][..], "javascript and arkts are the languages of HarmonyOS records"),
         (&["decompile", "entry.hap", "pages/Index", "--mapping", "m.txt"][..], "--mapping is DEX-only"),
         (&["decompile", "entry.hap", "pages/Index", "--language", "java"][..], "a HarmonyOS record decompiles to javascript"),
         (&["decompile", "entry.hap", "pages/Index", "--level", "structured"][..], "unknown level \"structured\""),

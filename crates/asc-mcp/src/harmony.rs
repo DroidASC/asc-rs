@@ -364,7 +364,7 @@ fn getclass(session: &Session, args: &Value, _: &Call) -> ToolResult {
     Ok((text, structured))
 }
 
-/// JavaScript of a record from a decompiler backend (arkdec), else its
+/// JavaScript or ArkTS of a record from a decompiler backend (arkdec), else its
 /// disassembly; the header says which and why. Not in [`CARRIED`]: it needs
 /// the server's backends.
 pub(crate) fn decompile(session: &Session, decompilers: &Decompilers, args: &Value, call: &Call) -> ToolResult {

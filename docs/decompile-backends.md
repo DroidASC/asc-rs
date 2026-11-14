@@ -1,7 +1,7 @@
 # 反编译后端接入设计
 
 状态：P1 已实现（2026-11-11：配置、进程池、`asc decompile`、MCP `decompile`、L3、内置 dexdec）；P5 的 asc 一侧已实现
-（2026-11-13：HarmonyOS record 交给 arkdec，§6.5、§8、§9、§12）；P2–P4 仍是提案。配套文档：[rebuild-slice.md](rebuild-slice.md)（给后端喂的闭包切片）。
+（2026-11-13：HarmonyOS record 交给 arkdec，§6.5、§8、§9、§12；同日加入 `arkts` 语言）；P2–P4 仍是提案。配套文档：[rebuild-slice.md](rebuild-slice.md)（给后端喂的闭包切片）。
 
 目标：`asc` 能把一个类交给可替换的反编译后端（dexdec、JEB、jadx …）得到 Java / Kotlin 源码，不在进程内
 链接任何后端，并利用 asc-rebuild 的切片让整包加载慢的后端提速。
@@ -242,7 +242,7 @@ fallback N / harmony default / harmony fallback N，同时担任几种时用 `, 
 
 ### 6.5 ABC 程序（HarmonyOS，arkdec）
 
-HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下成员都是在协议版本 1 上追加的：
+HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript 或 ArkTS。以下成员都是在协议版本 1 上追加的：
 `protocolVersion` 不变，新成员都可选，取默认值时不写出。DEX 的消息因此逐字节不变，已有的 L3 条目照常命中
 （`crates/asc-decompile-protocol/tests/data/dexdec-session.jsonl` 固定了这一点）。
 
@@ -251,7 +251,7 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
      "client":{"name":"asc","version":"0.3.0"},"options":{"threads":4}}}
 ← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,
      "backend":{"name":"arkdec","version":"0.1.1+g983ac425dd.rf1c9303b3a"},"optionsHash":"5d41402abc4b2a76",
-     "inputs":["abc"],"languages":["javascript"],"mappings":false,"methodStatus":true,
+     "inputs":["abc"],"languages":["javascript","arkts"],"mappings":false,"methodStatus":true,
      "maxConcurrency":4,"requestOptions":["raw","level"]}}
 
 → {"jsonrpc":"2.0","id":2,"method":"program/open","params":{"input":{"kind":"abc",
@@ -280,7 +280,8 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
 | 成员 | 含义 |
 |---|---|
 | `inputs: ["abc"]` | 接受 ABC 文件。不认识 `abc` 的旧 asc 读 `initialize` 时会丢掉它，也就不会把 HarmonyOS 程序交给这个后端 |
-| `languages: ["javascript"]` | 每个 ABC record 输出一个 ES 模块。`arkts` 留给 ArkUI DSL 还原（P6），现在不定义 |
+| `languages: ["javascript", "arkts"]` | `javascript`：每个 ABC record 输出一个 ES 模块。`arkts`：同一个 record 写成 ArkTS 源码，模块按 es2abc 编译前的 TypeScript 形式写（`enum`、装饰器、字段初始化、`let` / `function` 声明），ArkUI 组件还原成 `struct` + 装饰器 + `build()`（以 struct 为单位，过不了精确性检查的 struct 留作 JS 类）。不认识 `arkts` 的旧 asc 读 `initialize` 时丢掉它 |
+| `path`（单元） | 单元文本的相对路径，扩展名说明文本是什么：arkdec 对 `arkts` 请求给 `.ets`（没有 struct、或 struct 全部回退的 record 也是 `.ets`，因为 TS 形式不是 JS；ets-loader 工程里它们本来就是 `.ets`），只有 `arkts` 加 `raw` 时给 `.js`（这时 arkts 不起作用，单元与 `javascript` 的 raw 单元逐字节相同）。`javascript` 请求总是 `.js` |
 | `requestOptions` | 后端接受的每请求选项名，缺省为空。asc 只发送这里列出的名字；后端没声明时，带这个选项的请求不发出去，这次尝试直接失败（`asc-decompile` 返回 `UnsupportedOption`） |
 | `input.kind = "abc"` | `files` 恰好一个 ABC 文件，后端只读。zip 里的条目、解密后的替身由 asc 先写成文件（按内容寻址） |
 | `input.sha256` | 可选，asc 读到的文件内容的 SHA-256（小写十六进制）。后端收到时要核对，不一致时回 `-33004`（输入与 asc 所见不符），asc 重新落盘后再开一次 |
@@ -300,8 +301,11 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
 - 输出只取决于（ABC 内容、record、`initialize` 的 options、请求 `options`、后端版本），所以一个 record 的结果
   按 ABC 文件的 SHA-256 缓存，而不是按整个程序。后端不得按耗时降级：超时只靠取消处理（§6.4）。
 - 错误码：在 §6.4 的基础上加 `-33004`，表示输入与 asc 描述的不符（`sha256` 不匹配）。
+- ArkTS 单元里，被并进 struct 的生成函数（ets-loader 的胶水）可能没有 `span`，或者 `span` 指向 struct 的开头；
+  `--method` 取这样的函数时给出整个 record（头部注明）。
 - 样本：`crates/asc-decompile-protocol/tests/data/arkdec-session.jsonl` 是从真实 `asc-arkdec-worker` 录下的一次会话
-  （请求按 asc 发的样子构造，输入是 asc-arkdec `tests/diff/abc` 里的两个 ABC；asc-arkdec 目录写成 `$ARKDEC`，
+  （请求按 asc 发的样子构造，输入是 asc-arkdec `tests/diff/abc` 里的两个 ABC，`arkts` 请求另用它的 ArkUI 语料
+  `tests/arkui/abc/12/modules.abc`；asc-arkdec 目录写成 `$ARKDEC`，
   `backend.version` 写成 `<version>`，`optionsHash` 写成 `<hash>`，与 asc-arkdec 自己的 `tests/data/session.jsonl`
   相同；被取消的那个请求靠 worker 的测试钩子 `ASC_ARKDEC_WORKER_FAULT=stall:<record>` 拖住）。`tests/transcripts.rs` 把每条消息读成对应的类型再写回，要求结果一致。
   `asc-decompile` 的 `mock_backend --abc` 按本节回答，供生命周期测试使用；它不做 §12 所说的 `-32600` 检查。
@@ -336,7 +340,8 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
   - `ApkKey::for_content(entry, sha256)`：`<entry 最后一段的文件名主干>-<SHA-256 前 16 个十六进制位>`，例如
     `modules-3a7f0c…`；只用来把文件分散到目录里；
   - 查询串：`input=abc:<完整 SHA-256>:<record>\0backend=arkdec\0version=<版本>\0options=<optionsHash>\0mappings=-\0language=javascript\0nested=true`，
-    有请求 options 时再加 `\0request=<JSON>`。完整的 SHA-256 在查询串里，读出时核对（渲染层存了查询串），前缀撞了也不会串。
+    有请求 options 时再加 `\0request=<JSON>`。`language` 是请求的语言（`javascript` / `arkts`），所以同一个 record 的
+    两种语言各占一个条目，`arkts` 不影响 JavaScript 已有的条目。完整的 SHA-256 在查询串里，读出时核对（渲染层存了查询串），前缀撞了也不会串。
   - SHA-256 是引擎实际读到的字节的哈希（加密条目有解密替身时是替身的字节），由 `asc_ark_engine::Engine::entry_sha256`
     算一次后记住。同一个 ABC 文件放在别的包里、或者包重新打过但 `modules.abc` 没变，都直接命中。
   - `--method` 不进键：整个 record 存一份，取函数时按 `span` 截取。
@@ -347,21 +352,24 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript。以下
 
 ## 9. 选后端与回退
 
-- `asc decompile <apk> <class> [--decompiler NAME] [--language java|kotlin] [--method M]`，MCP 工具
+- `asc decompile <apk> <class> [--decompiler NAME] [--language java|kotlin|javascript|arkts] [--method M]`，MCP 工具
   `decompile` 参数相同。不指定时用 `decompile.default`。
 - 程序的格式决定用哪条链（`asc_frontend::format::ProgramFormat`，和其它命令选引擎的规则相同）：DEX 程序用
   `decompile.default` + `decompile.fallback`；HarmonyOS 程序用 `decompile.harmony_default`（默认 `arkdec`）+
   `decompile.harmony_fallback`（默认空）。`--decompiler NAME` 两边都只用它一个。一个后端得声明这种格式要的输入
-  （DEX：`archive`；HarmonyOS：`abc`）和语言，否则这次尝试失败（`takes no ABC input`、`no javascript output`），链往下走。
+  （DEX：`archive`；HarmonyOS：`abc`）和语言，否则这次尝试失败（`takes no ABC input`、`no javascript output`、
+  `no arkts output`），链往下走。
 - HarmonyOS：`asc decompile <hap|app|abc> <record> [--method F] [--entry E] [--raw] [--level pc-dispatch] [-o DIR]`；
   MCP 的 `decompile` 多了 `entry`、`raw`、`level`。record 和函数的写法与 `getclass` 相同（`pages/Index`、
   `&entry/src/main/ets/pages/Index&`、`RECORD->FUNCTION[+0xPC]`；`--method Index.build` / `#~@0>#build` / `build`），
   先在引擎里定位，名字不对（找不到、几个 entry 都有）直接报错，不启动后端。`--raw` / `--level` 是请求 options
   （后端没在 `requestOptions` 里声明就算这次尝试失败）；`--method` 按函数的 `span` 从整个 record 的文本里截取，
-  后端没给 `span` 时给出整个 record，头部注明。`--language` 只能是 `javascript`（`js`），`--mapping` 只用于 DEX；
-  反过来 `--raw`、`--level`、`--entry`、`--language javascript` 用在 DEX 程序上都报错。
+  后端没给 `span` 时给出整个 record，头部注明。`--language` 是 `javascript`（`js`，默认）或 `arkts`（`ets`），
+  `--mapping` 只用于 DEX；反过来 `--raw`、`--level`、`--entry`、`--language javascript|arkts` 用在 DEX 程序上都报错。
+  `arkts` 的答案按后端给的 `path` 定语言和文件名：`.ets` 是 ArkTS（MCP 的 `language` 报 `arkts`），`.js`（`--raw`）
+  是 JavaScript；后端没给能用的 `path` 时按请求的语言算。
 - 头部（`//` 注释）：`// decompile <record> | <entry> | by arkdec <版本> | status ok|partial`，失败的函数列成
-  `//   #~@0>#build (Index.build): inexact: …`。`-o DIR` 写到 `DIR/<record 路径>.js`（后端给的 `path` 通过 §11 的检查就用它，
+  `//   #~@0>#build (Index.build): inexact: …`。`-o DIR` 写到 `DIR/<record 路径>.js`，`arkts` 时是 `.ets`（后端给的 `path` 通过 §11 的检查就用它，
   否则由 record 名生成，`&entry/src/main/ets/pages/Index&` → `entry/src/main/ets/pages/Index.js`）；程序有多个 ABC entry
   时前面再加 entry 的路径。
 - 回退：默认后端整类失败（`failed`、超时、进程崩溃）时，按 `fallback` 顺序重试，结果头部注明实际用了哪个

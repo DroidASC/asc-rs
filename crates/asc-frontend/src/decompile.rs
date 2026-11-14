@@ -78,11 +78,11 @@ pub enum DecompileError {
         /// The configured names.
         known: String,
     },
-    /// A language other than `java`, `kotlin` or `javascript`.
-    #[error("unknown language {0:?}; use java, kotlin or javascript")]
+    /// A language other than `java`, `kotlin`, `javascript` or `arkts`.
+    #[error("unknown language {0:?}; use java, kotlin, javascript or arkts")]
     UnknownLanguage(String),
     /// A language or option the program's format does not have: JavaScript
-    /// of a DEX class, Java of a HarmonyOS record, a mapping file there.
+    /// or ArkTS of a DEX class, Java of a HarmonyOS record, a mapping file there.
     #[error("{0}")]
     WrongFormat(String),
     /// The HarmonyOS record or function, or its ABC entry: not found,
@@ -117,7 +117,7 @@ pub enum DecompileError {
     Cancelled,
 }
 
-/// The language `name` (`java`, `kotlin`, `kt`, `javascript`, `js`), case aside.
+/// The language `name` (`java`, `kotlin`, `kt`, `javascript`, `js`, `arkts`, `ets`), case aside.
 ///
 /// # Errors
 ///
@@ -127,21 +127,23 @@ pub fn parse_language(name: &str) -> Result<Language, DecompileError> {
         "java" => Ok(Language::Java),
         "kotlin" | "kt" => Ok(Language::Kotlin),
         "javascript" | "js" => Ok(Language::JavaScript),
+        "arkts" | "ets" => Ok(Language::ArkTs),
         _ => Err(DecompileError::UnknownLanguage(name.to_string())),
     }
 }
 
-/// `java`, `kotlin` or `javascript`, as messages, the L3 key and MCP say it.
+/// `java`, `kotlin`, `javascript` or `arkts`, as messages, the L3 key and MCP say it.
 pub fn language_name(language: Language) -> &'static str {
     match language {
         Language::Kotlin => "kotlin",
         Language::JavaScript => "javascript",
+        Language::ArkTs => "arkts",
         _ => "java",
     }
 }
 
-/// What a request on a DEX program says when it asks for JavaScript.
-const DEX_LANGUAGES: &str = "a DEX class decompiles to java or kotlin; javascript is the language of HarmonyOS records";
+/// What a request on a DEX program says when it asks for JavaScript or ArkTS.
+const DEX_LANGUAGES: &str = "a DEX class decompiles to java or kotlin; javascript and arkts are the languages of HarmonyOS records";
 
 /// What to decompile.
 #[derive(Debug, Clone, Copy)]
@@ -488,7 +490,7 @@ impl Decompilers {
     /// cancellation. A failing backend is not an error: see the module docs.
     pub fn decompile(&self, engine: &Engine, request: &Request<'_>, cancel: &AtomicBool) -> Result<Decompiled, DecompileError> {
         let descriptor = names::format_class_name(request.class)?;
-        if request.language == Language::JavaScript {
+        if matches!(request.language, Language::JavaScript | Language::ArkTs) {
             return Err(DecompileError::WrongFormat(DEX_LANGUAGES.into()));
         }
         self.check_decompiler(request.decompiler)?;
@@ -895,7 +897,10 @@ mod tests {
         assert_eq!(parse_language("kt").unwrap(), Language::Kotlin);
         assert_eq!(parse_language("JS").unwrap(), Language::JavaScript);
         assert_eq!(parse_language("javascript").unwrap(), Language::JavaScript);
-        assert!(parse_language("smali").unwrap_err().to_string().contains("use java, kotlin or javascript"));
+        assert_eq!(parse_language("ArkTS").unwrap(), Language::ArkTs);
+        assert_eq!(parse_language("ets").unwrap(), Language::ArkTs);
+        assert_eq!(language_name(Language::ArkTs), "arkts");
+        assert!(parse_language("smali").unwrap_err().to_string().contains("use java, kotlin, javascript or arkts"));
     }
 
     #[test]

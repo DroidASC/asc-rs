@@ -1,5 +1,10 @@
-//! JavaScript of a HarmonyOS record ([`Decompilers::decompile_harmony`];
+//! JavaScript or ArkTS of a HarmonyOS record ([`Decompilers::decompile_harmony`];
 //! docs/decompile-backends.md §6.5, §8, §9).
+//!
+//! ArkTS (`arkts`) is JavaScript with the ArkUI DSL recovered where the
+//! backend can: a record without it comes back as its JavaScript module.
+//! The unit's `path` says which (`.ets` / `.js`), and the answer's
+//! [`language`](Decompiled::language) and `-o` path follow it.
 //!
 //! The record is named as `getclass` names it ([`ClassTarget`]): its
 //! entry, record and function are located first, so a name that is not
@@ -63,7 +68,7 @@ pub struct HarmonyRequest<'a> {
     pub entry: Option<&'a str>,
     /// The backend to use alone; `None`: the HarmonyOS default, then its fallbacks.
     pub decompiler: Option<&'a str>,
-    /// The output language: JavaScript, the only one there is.
+    /// The output language: JavaScript (the default) or ArkTS.
     pub language: Language,
     /// The bytecode as it is, without undoing what the compiler generated (`raw`).
     pub raw: bool,
@@ -158,7 +163,7 @@ impl Decompilers {
     ///
     /// # Errors
     ///
-    /// An unknown backend, a language other than JavaScript, a record or
+    /// An unknown backend, a language other than JavaScript or ArkTS, a record or
     /// function the program does not have (or several entries do: the text
     /// says to name one with [`entry_arg`](HarmonyRequest::entry_arg)), an
     /// entry that cannot be read, or cancellation. A failing backend is not
@@ -169,9 +174,9 @@ impl Decompilers {
         request: &HarmonyRequest<'_>,
         cancel: &AtomicBool,
     ) -> Result<Decompiled, DecompileError> {
-        if request.language != Language::JavaScript {
+        if !matches!(request.language, Language::JavaScript | Language::ArkTs) {
             return Err(DecompileError::WrongFormat(
-                "a HarmonyOS record decompiles to javascript; java and kotlin are for DEX classes".into(),
+                "a HarmonyOS record decompiles to javascript or arkts; java and kotlin are for DEX classes".into(),
             ));
         }
         self.check_decompiler(request.decompiler)?;
@@ -189,7 +194,7 @@ impl Decompilers {
                 let key = ApkKey::for_content(entry, &sha256);
                 let mut context = Context {
                     unit: &location.record,
-                    language: Language::JavaScript,
+                    language: request.language,
                     apk: Some(&key),
                     input: Input::Abc(abc),
                     mappings: None,
@@ -205,15 +210,25 @@ impl Decompilers {
         };
         let several = engine.has_several_entries();
         match outcome {
-            Outcome::Answered { name, answer, attempts } => Ok(record_answer(&name, &answer, attempts, &location, several)),
+            Outcome::Answered { name, answer, attempts } => {
+                Ok(record_answer(&name, &answer, attempts, &location, request.language, several))
+            }
             Outcome::Failed(attempts) => disassembly(engine, &location, attempts, several),
         }
     }
 }
 
-/// The answer of backend `name` for the record at `location`; of its
-/// function, when there is one, cut out by the function's span.
-fn record_answer(name: &str, answer: &Answer, attempts: Vec<Attempt>, location: &Location, several: bool) -> Decompiled {
+/// The answer of backend `name` for the record at `location`, asked for in
+/// `language`; of its function, when there is one, cut out by the
+/// function's span.
+fn record_answer(
+    name: &str,
+    answer: &Answer,
+    attempts: Vec<Attempt>,
+    location: &Location,
+    language: Language,
+    several: bool,
+) -> Decompiled {
     let unit = &answer.unit;
     let status = match unit.outcome {
         UnitOutcome::Partial { .. } => Status::Partial,
@@ -242,7 +257,7 @@ fn record_answer(name: &str, answer: &Answer, attempts: Vec<Attempt>, location: 
         UnitOutcome::Ok { path, .. } | UnitOutcome::Partial { path, .. } => path.as_deref(),
         _ => None,
     };
-    let path = backend_path.and_then(|path| source::backend_path(path, "js")).unwrap_or_else(|| record_path(&location.record, "js"));
+    let (language, path) = text_path(backend_path, &location.record, language);
     Decompiled {
         class: location.record.clone(),
         entry: Some(location.entry.clone()),
@@ -250,7 +265,7 @@ fn record_answer(name: &str, answer: &Answer, attempts: Vec<Attempt>, location: 
         backend: Some(name.to_string()),
         version: Some(answer.capabilities.backend.version.clone()),
         status,
-        language: Some(Language::JavaScript),
+        language: Some(language),
         text: text.to_string(),
         failed_methods: failed,
         functions: unit.methods.clone(),
@@ -293,6 +308,23 @@ fn disassembly(
     })
 }
 
+/// The language of a unit asked for in `requested` and where `-o` writes
+/// it: the backend's `path` when it passes the checks, else one made from
+/// `record`. An ArkTS answer is ArkTS only with an `.ets` path; with a `.js`
+/// one it is the record's JavaScript (nothing to recover in it). Without a
+/// usable path the requested language is taken at its word.
+fn text_path(backend: Option<&str>, record: &str, requested: Language) -> (Language, PathBuf) {
+    let take = |extension: &str| backend.and_then(|path| source::backend_path(path, extension));
+    match requested {
+        Language::ArkTs => match (take("ets"), take("js")) {
+            (Some(path), _) => (Language::ArkTs, path),
+            (None, Some(path)) => (Language::JavaScript, path),
+            (None, None) => (Language::ArkTs, record_path(record, "ets")),
+        },
+        _ => (Language::JavaScript, take("js").unwrap_or_else(|| record_path(record, "js"))),
+    }
+}
+
 /// `entry/src/main/ets/pages/Index.js` for `&entry/src/main/ets/pages/Index&`:
 /// the record's name without the `&` around it and the version after it.
 fn record_path(record: &str, extension: &str) -> PathBuf {
@@ -328,6 +360,24 @@ mod tests {
         assert!(request.options().is_empty());
         let options = request.raw(true).level(Some(Level::PcDispatch)).options();
         assert_eq!(Value::Object(options).to_string(), r#"{"level":"pcDispatch","raw":true}"#, "sorted: one cache key per meaning");
+    }
+
+    #[test]
+    fn arkts_answers_follow_the_path() {
+        let record = "&entry/src/main/ets/pages/Index&";
+        let ets = Some("entry/src/main/ets/pages/Index.ets");
+        let js = Some("entry/src/main/ets/pages/Index.js");
+        let path = |p: &str| PathBuf::from(p);
+        assert_eq!(text_path(ets, record, Language::ArkTs), (Language::ArkTs, path("entry/src/main/ets/pages/Index.ets")));
+        assert_eq!(text_path(js, record, Language::ArkTs), (Language::JavaScript, path("entry/src/main/ets/pages/Index.js")));
+        assert_eq!(text_path(None, record, Language::ArkTs), (Language::ArkTs, path("entry/src/main/ets/pages/Index.ets")));
+        assert_eq!(text_path(Some("../x.ets"), record, Language::ArkTs).1, path("entry/src/main/ets/pages/Index.ets"), "stays inside");
+        assert_eq!(text_path(js, record, Language::JavaScript), (Language::JavaScript, path("entry/src/main/ets/pages/Index.js")));
+        assert_eq!(
+            text_path(ets, record, Language::JavaScript),
+            (Language::JavaScript, path("entry/src/main/ets/pages/Index.js")),
+            "javascript never takes an .ets path"
+        );
     }
 
     #[test]

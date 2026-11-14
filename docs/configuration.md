@@ -24,7 +24,7 @@ agent）。优先级：命令行（`--set KEY=VALUE`）> 环境变量（`$ASC_<K
 | `daemon.idle`、`daemon.wait` | 15m；300ms。`ASC_DAEMON=off` 关闭 daemon |
 | `decompile.default`（`$ASC_DECOMPILER`） | `dexdec`：`asc decompile` 不带 `--decompiler` 时用的后端 |
 | `decompile.fallback`（`$ASC_DECOMPILE_FALLBACK`） | none：默认后端整类失败时依次尝试的后端（文件里写数组，`--set` / 环境变量用 `,` 分隔） |
-| `decompile.harmony_default`（`$ASC_HARMONY_DECOMPILER`） | `arkdec`：HarmonyOS 程序上 `asc decompile` 不带 `--decompiler` 时用的后端；arkdec 只在找到 `asc-arkdec-worker` 时运行（`$ASC_ARKDEC_WORKER`、`[decompilers.arkdec] command`、asc 旁边、`PATH`），否则给出反汇编 |
+| `decompile.harmony_default`（`$ASC_HARMONY_DECOMPILER`） | `arkdec`：HarmonyOS 程序上 `asc decompile` 不带 `--decompiler` 时用的后端；arkdec 只在找到 `asc-arkdec-worker` 时运行（`$ASC_ARKDEC_WORKER`、`[decompilers.arkdec] command`、asc 旁边、`PATH`），否则给出反汇编。它写 `javascript`（默认）和 `arkts`（`--language arkts`）；别的后端要接 `--language arkts`，得在 `languages` 里声明 `arkts`，否则这次尝试失败（`no arkts output`） |
 | `decompile.harmony_fallback`（`$ASC_HARMONY_DECOMPILE_FALLBACK`） | none：它整个 record 失败时依次尝试的后端 |
 | `decompile.mapping`（`--mapping`） | none：R8 / ProGuard `mapping.txt`，反编译源码用其中的名字；文件里请写绝对路径或 `~/` |
 | `decompile.auto_install`（`$ASC_AUTO_INSTALL`） | on：找不到 `asc-dexdec-worker` 时下载最新的、协议版本与本 asc 相同的 worker；off 时退回 smali 并提示 |

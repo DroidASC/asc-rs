@@ -29,7 +29,7 @@
 | `resources` | `resources.arsc` | `resources.index`，参数相同；QUERY 可写 `0x…`、`string/name`、`$string:name`、`app.string.name` |
 | `xml` | 二进制 XML | 原样打印包内的文本文件：`'$profile:main_pages'`（页面清单、路由表）或包内路径 |
 | `getclass --res-names` | 资源 id 常量 | `$r(...)` 对象所在行追加 `# string/name "值"` |
-| `decompile` | Java / Kotlin（dexdec 等） | JavaScript（arkdec，按需启用：设 `$ASC_ARKDEC_WORKER` 或 `[decompilers.arkdec] command`，或把 `asc-arkdec-worker` 放在 asc 旁边 / `PATH` 上）；`--method`、`--entry`、`--raw`（不去语法糖）、`--level pc-dispatch`；没有 worker 或后端失败时给出 `getclass` 的反汇编（退出码 2）。见 [decompile-backends.md](decompile-backends.md) §6.5、§9、§12 |
+| `decompile` | Java / Kotlin（dexdec 等） | JavaScript（arkdec，按需启用：设 `$ASC_ARKDEC_WORKER` 或 `[decompilers.arkdec] command`，或把 `asc-arkdec-worker` 放在 asc 旁边 / `PATH` 上）；`--language arkts`（`ets`）给出 ArkTS：ArkUI 组件还原成 `struct` / `build()`，`-o` 写 `.ets`；`--method`、`--entry`、`--raw`（不去语法糖）、`--level pc-dispatch`；没有 worker 或后端失败时给出 `getclass` 的反汇编（退出码 2）。见 [decompile-backends.md](decompile-backends.md) §6.5、§9、§12 |
 
 ```sh
 asc manifest-summary entry.hap | grep -E '^(ability|callbacks|uri)'    # 导出的 ability、回调、deep link
@@ -44,6 +44,7 @@ asc hierarchy entry.hap UIAbility --method onCreate                         # �
 asc xml entry.hap '$profile:main_pages'                                     # 页面清单；routerMap 同理
 asc resources entry.hap --search '登录' --in value                          # 文案 → id，再 findrefs number ID
 ASC_ARKDEC_WORKER=~/asc-arkdec/target/release/asc-arkdec-worker asc decompile entry.hap pages/Index --method Index.build
+ASC_ARKDEC_WORKER=~/asc-arkdec/target/release/asc-arkdec-worker asc decompile entry.hap pages/Index --language arkts -o src   # src/entry/src/main/ets/pages/Index.ets
 asc callgraph entry.hap entryability/EntryAbility EntryAbility.onCreate --callees --depth 3
 asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6  # 谁能走到 http
 asc callgraph app-dir/ --to 'call:^import:@ohos:net\.http' --from 'method:^EntryAbility\.on' --unless 'string:(?i)mock' --depth 8 --max-nodes 5000
