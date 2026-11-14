@@ -28,7 +28,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/Ylarod/asc-rs"
@@ -45,27 +45,27 @@ missing_panics_doc = "warn"
 undocumented_unsafe_blocks = "warn"
 
 [workspace.dependencies]
-asc-dex = { version = "0.2.0", path = "crates/asc-dex" }
-asc-dalvik = { version = "0.2.0", path = "crates/asc-dalvik" }
-asc-findrefs = { version = "0.2.0", path = "crates/asc-findrefs" }
-asc-rebuild = { version = "0.2.0", path = "crates/asc-rebuild" }
-asc-smali = { version = "0.2.0", path = "crates/asc-smali" }
-asc-apk = { version = "0.2.0", path = "crates/asc-apk" }
-asc-cache = { version = "0.2.0", path = "crates/asc-cache" }
-asc-axml = { version = "0.2.0", path = "crates/asc-axml" }
-asc-arsc = { version = "0.2.0", path = "crates/asc-arsc" }
-asc-query = { version = "0.2.0", path = "crates/asc-query" }
-asc-engine = { version = "0.2.0", path = "crates/asc-engine" }
-asc-frontend = { version = "0.2.0", path = "crates/asc-frontend" }
-asc-mcp = { version = "0.2.0", path = "crates/asc-mcp" }
-asc-decompile-protocol = { version = "0.2.0", path = "crates/asc-decompile-protocol" }
-asc-decompile = { version = "0.2.0", path = "crates/asc-decompile" }
+asc-dex = { version = "0.2.1", path = "crates/asc-dex" }
+asc-dalvik = { version = "0.2.1", path = "crates/asc-dalvik" }
+asc-findrefs = { version = "0.2.1", path = "crates/asc-findrefs" }
+asc-rebuild = { version = "0.2.1", path = "crates/asc-rebuild" }
+asc-smali = { version = "0.2.1", path = "crates/asc-smali" }
+asc-apk = { version = "0.2.1", path = "crates/asc-apk" }
+asc-cache = { version = "0.2.1", path = "crates/asc-cache" }
+asc-axml = { version = "0.2.1", path = "crates/asc-axml" }
+asc-arsc = { version = "0.2.1", path = "crates/asc-arsc" }
+asc-query = { version = "0.2.1", path = "crates/asc-query" }
+asc-engine = { version = "0.2.1", path = "crates/asc-engine" }
+asc-frontend = { version = "0.2.1", path = "crates/asc-frontend" }
+asc-mcp = { version = "0.2.1", path = "crates/asc-mcp" }
+asc-decompile-protocol = { version = "0.2.1", path = "crates/asc-decompile-protocol" }
+asc-decompile = { version = "0.2.1", path = "crates/asc-decompile" }
 asc-fixture = { path = "crates/asc-fixture" }
-asc-abc = { version = "0.2.0", path = "crates/harmony/asc-abc" }
-asc-arkisa = { version = "0.2.0", path = "crates/harmony/asc-arkisa" }
-asc-pasm = { version = "0.2.0", path = "crates/harmony/asc-pasm" }
-asc-ark-engine = { version = "0.2.0", path = "crates/harmony/asc-ark-engine" }
-asc-hap = { version = "0.2.0", path = "crates/harmony/asc-hap" }
+asc-abc = { version = "0.2.1", path = "crates/harmony/asc-abc" }
+asc-arkisa = { version = "0.2.1", path = "crates/harmony/asc-arkisa" }
+asc-pasm = { version = "0.2.1", path = "crates/harmony/asc-pasm" }
+asc-ark-engine = { version = "0.2.1", path = "crates/harmony/asc-ark-engine" }
+asc-hap = { version = "0.2.1", path = "crates/harmony/asc-hap" }
 
 thiserror = "2"
 memmap2 = "0.9"
