@@ -1103,11 +1103,13 @@ fn getclass_names_the_resources_a_function_builds() {
     let inputs = Inputs::new();
     let abc = resource_program().build().bytes;
     let hap = inputs.file("entry.hap", &make_hap(&abc));
-    let plain = inputs.lines(&["getclass", &hap, LABELS_PAGE]);
+    // Without an index nothing is named: the listing as it is.
+    let bare = inputs.file("bare.abc", &abc);
+    let plain = inputs.lines(&["getclass", &bare, LABELS_PAGE]);
     assert!(!plain.iter().any(|line| line.contains("  # ")), "{plain:?}");
     for command in ["getclass", "disassemble"] {
         for function in [None, Some("labels")] {
-            let mut args = vec![command, hap.as_str(), LABELS_PAGE, "--res-names"];
+            let mut args = vec![command, hap.as_str(), LABELS_PAGE];
             args.extend(function.into_iter().flat_map(|function| ["--method", function]));
             let named = inputs.lines(&args);
             let objects: Vec<&str> = named.iter().filter(|line| line.contains("createobjectwithbuffer")).map(String::as_str).collect();
@@ -1125,9 +1127,6 @@ fn getclass_names_the_resources_a_function_builds() {
     let rows = inputs.lines(&["findrefs", &hap, "number", "0x01000000"]);
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert!(rows[0].starts_with(&format!("ets/modules.abc | {LABELS_PAGE}->#*#labels+0x0 | labels | createobjectwithbuffer ")), "{rows:?}");
-    // Without an index the option changes nothing.
-    let bare = inputs.file("bare.abc", &abc);
-    assert_eq!(inputs.lines(&["getclass", &bare, LABELS_PAGE, "--res-names"]), plain);
 }
 
 #[test]

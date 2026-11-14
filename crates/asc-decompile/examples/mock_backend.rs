@@ -8,6 +8,7 @@
 //! * `--ignore-shutdown`: ignore SIGTERM and stdin EOF; only SIGKILL ends it
 //! * `--log FILE`: append `start <pid>` / `open <pid> <programId>` lines
 //! * `--no-mappings`: declare `mappings = false`
+//! * `--resources`: declare `resources = true`
 //! * `--fail-all`: every class comes back `failed`
 //! * `--version V` (default 1.0): the version reported in `initialize`
 //! * `--abc`: be an ABC backend like arkdec instead: `inputs ["abc"]`,
@@ -24,7 +25,8 @@
 //! * `Lfail;` / `Lpartial;`: a failed / partial unit
 //! * `Lprogress;`: send two progress notifications first
 //! * anything else: `ok`, with text naming the pid and program id (and the
-//!   number of mapped classes, when the program was opened with mappings)
+//!   number of mapped classes, when the program was opened with mappings,
+//!   and `resources=<count> <first id>=<name>` with resource names)
 //!
 //! With `--abc`, `program/open` takes only `kind: "abc"` with one file
 //! (`-33002` / `-32602` otherwise) and answers `-33004` when `sha256` is
@@ -37,7 +39,8 @@
 //! * `&inexact&`: a partial unit whose second function failed, with a diagnostic
 //! * `&fail&`: a failed unit
 //! * anything else: `ok`. The text's first line names the pid, program id,
-//!   record, file sha256 and the request's `options`; then two functions,
+//!   record, file sha256, the request's `options` and the resource names, as
+//!   without `--abc`; then two functions,
 //!   each reported in `methods` with its `span`
 
 use std::collections::HashMap;
@@ -65,6 +68,7 @@ struct Flags {
     ignore_shutdown: bool,
     log: Option<PathBuf>,
     no_mappings: bool,
+    resources: bool,
     fail_all: bool,
     version: String,
     abc: bool,
@@ -83,6 +87,7 @@ impl Flags {
                 "--ignore-shutdown" => flags.ignore_shutdown = true,
                 "--log" => flags.log = Some(args.next().unwrap().into()),
                 "--no-mappings" => flags.no_mappings = true,
+                "--resources" => flags.resources = true,
                 "--fail-all" => flags.fail_all = true,
                 "--version" => flags.version = args.next().unwrap(),
                 "--abc" => flags.abc = true,
@@ -127,11 +132,13 @@ impl Mock {
                         .inputs(vec![InputKind::Abc])
                         .languages(vec![Language::JavaScript, Language::ArkTs])
                         .request_options(vec!["raw".into(), "level".into()])
+                        .resources(self.flags.resources)
                 } else {
                     result
                         .inputs(vec![InputKind::Archive, InputKind::Slice])
                         .languages(vec![Language::Java])
                         .mappings(!self.flags.no_mappings)
+                        .resources(self.flags.resources)
                 };
                 self.out.respond(request.id, Ok(result)).unwrap();
             }
@@ -191,11 +198,11 @@ impl Mock {
         if self.flags.abc {
             return self.records(id, params).map(Some);
         }
-        let mapped = match self.programs.lock().unwrap().get(&params.program_id.0) {
-            Some(program) => program.mappings.as_ref().map(|mappings| mappings.classes.len()),
+        let (mapped, named) = match self.programs.lock().unwrap().get(&params.program_id.0) {
+            Some(program) => (program.mappings.as_ref().map(|mappings| mappings.classes.len()), resources_note(program)),
             None => return Err(ErrorObject::new(ErrorCode::PROGRAM_NOT_FOUND, format!("no program {}", params.program_id.0))),
         };
-        let mapped = mapped.map(|n| format!(" mappings={n}")).unwrap_or_default();
+        let mapped = mapped.map(|n| format!(" mappings={n}")).unwrap_or_default() + &named;
         let mut units = Vec::new();
         for class in &params.classes {
             let ok = |text: String| ClassUnit::new(class.clone(), UnitOutcome::Ok { path: None, text });
@@ -270,8 +277,8 @@ impl Mock {
             Language::ArkTs => true,
             _ => return Err(ErrorObject::new(ErrorCode::INVALID_PARAMS, "mock --abc writes javascript or arkts only")),
         };
-        let sha256 = match self.programs.lock().unwrap().get(&params.program_id.0).map(|program| &program.input) {
-            Some(ProgramInput::Abc { sha256, .. }) => sha256.clone().unwrap_or_else(|| "-".into()),
+        let (sha256, named) = match self.programs.lock().unwrap().get(&params.program_id.0).map(|program| (&program.input, program)) {
+            Some((ProgramInput::Abc { sha256, .. }, program)) => (sha256.clone().unwrap_or_else(|| "-".into()), resources_note(program)),
             _ => return Err(ErrorObject::new(ErrorCode::PROGRAM_NOT_FOUND, format!("no program {}", params.program_id.0))),
         };
         let options = serde_json::to_string(&params.options).unwrap();
@@ -292,7 +299,7 @@ impl Mock {
                     let pid = std::process::id();
                     let language = if arkts { " language=arkts" } else { "" };
                     let header = format!(
-                        "// pid={pid} program={} record={record} sha256={sha256} options={options}{language}\n",
+                        "// pid={pid} program={} record={record} sha256={sha256} options={options}{language}{named}\n",
                         params.program_id.0
                     );
                     let main = "function func_main_0() {}\n";
@@ -400,4 +407,12 @@ fn main() {
             thread::sleep(Duration::from_secs(1));
         }
     }
+}
+
+/// ` resources=<count> 0x<first id>=<name>` when `program` was opened with
+/// resource names; empty otherwise.
+fn resources_note(program: &ProgramOpenParams) -> String {
+    let Some(resources) = &program.resources else { return String::new() };
+    let first = resources.names.iter().next().map(|(id, name)| format!(" 0x{id:08x}={name}")).unwrap_or_default();
+    format!(" resources={}{first}", resources.names.len())
 }

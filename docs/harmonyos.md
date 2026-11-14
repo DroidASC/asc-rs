@@ -28,7 +28,7 @@
 | `hierarchy` | ✓ | ✓：父类取自每个类定义处；`CLASS` 可以是类名、`RECORD->CLASS`，或程序外的父类 `import:REGEX` / `global:REGEX`；`--method` 看类的成员（含访问器之后才定义的方法） |
 | `resources` | `resources.arsc` | `resources.index`，参数相同；QUERY 可写 `0x…`、`string/name`、`$string:name`、`app.string.name` |
 | `xml` | 二进制 XML | 原样打印包内的文本文件：`'$profile:main_pages'`（页面清单、路由表）或包内路径 |
-| `getclass --res-names` | 资源 id 常量 | `$r(...)` 对象所在行追加 `# string/name "值"` |
+| `getclass` 的资源名 | 资源 id 常量追加 `# @type/name` | `$r(...)` 对象所在行追加 `# string/name "值"`（按 record 所在模块的 `resources.index`，默认开启） |
 | `decompile` | Java / Kotlin（dexdec 等） | JavaScript（arkdec，按需启用：设 `$ASC_ARKDEC_WORKER` 或 `[decompilers.arkdec] command`，或把 `asc-arkdec-worker` 放在 asc 旁边 / `PATH` 上）；`--language arkts`（`ets`）给出 ArkTS：ArkUI 组件还原成 `struct` / `build()`，`-o` 写 `.ets`；`--method`、`--entry`、`--raw`（不去语法糖）、`--level pc-dispatch`；没有 worker 或后端失败时给出 `getclass` 的反汇编（退出码 2）。见 [decompile-backends.md](decompile-backends.md) §6.5、§9、§12 |
 
 ```sh

@@ -35,7 +35,7 @@ format is detected from the file:
 | `hierarchy` | ✓ | ✓: the parent is read where each class is defined; `CLASS` is a class name, `RECORD->CLASS`, or a parent outside the program, `import:REGEX` / `global:REGEX`; `--method` sees the members (those defined after an accessor too) of the class |
 | `resources` | `resources.arsc` | `resources.index`, same options; QUERY is `0x…`, `string/name`, `$string:name` or `app.string.name` |
 | `xml` | binary XML | prints a text file of the package as it is: `'$profile:main_pages'` (page list, route table) or a path in the package |
-| `getclass --res-names` | resource id constants | appends `# string/name "value"` to the row of a `$r(...)` object |
+| resource names in `getclass` | resource id constants get `# @type/name` | appends `# string/name "value"` to the row of a `$r(...)` object (from the record's module `resources.index`; always on) |
 | `decompile` | Java / Kotlin (dexdec and others) | JavaScript (arkdec, opt-in: set `$ASC_ARKDEC_WORKER` or `[decompilers.arkdec] command`, or put `asc-arkdec-worker` next to asc / on `PATH`); `--method`, `--entry`, `--raw` (no desugaring), `--level pc-dispatch`; without a worker, or when the backends fail, the `getclass` disassembly (exit status 2). See [decompile-backends.md](decompile-backends.md) §6.5, §9, §12 |
 
 ```sh

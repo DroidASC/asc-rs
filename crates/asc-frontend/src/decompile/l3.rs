@@ -5,8 +5,11 @@
 //! ([`ApkKey`], the directory the file sits in), the input (`archive:` and
 //! the class descriptor; a slice would be its SHA-256), the backend's name
 //! and version and the hash of its effective options as `initialize`
-//! reported them, the hash of the mappings sent with `program/open`, the
-//! language, `nested` and the per-request options, when there are any. The
+//! reported them, the hash of the mappings sent with `program/open`,
+//! the resource names sent with it (`1` for a DEX program's table, which
+//! the program key covers; the names' hash for an ABC file, whose key is of
+//! its content while the names come from its module), the language, `nested` and the
+//! per-request options, when there are any. The
 //! payload is the unit as the backend sent it, so a hit renders exactly as
 //! a fresh answer does.
 //!
@@ -48,6 +51,8 @@ pub(super) struct UnitKey<'a> {
     pub(super) capabilities: &'a InitializeResult,
     /// Of the mappings sent; `None` when none were.
     pub(super) mappings: Option<MappingsHash>,
+    /// The token of the resource names `program/open` sent; `None` when none were.
+    pub(super) resources: Option<&'a str>,
     pub(super) language: Language,
     pub(super) nested: bool,
     /// The per-request options as JSON; empty when there are none.
@@ -79,6 +84,11 @@ impl UnitKey<'_> {
             "input={input}:{unit}\0backend={}\0version={}\0options={}\0mappings={mappings}\0language={language}\0nested={}",
             self.backend, self.capabilities.backend.version, self.capabilities.options_hash, self.nested
         );
+        // Only when sent: the keys of backends that take none stay as they were.
+        if let Some(resources) = self.resources {
+            query.push_str("\0resources=");
+            query.push_str(resources);
+        }
         // Only when there are some: the keys of DEX classes stay as they were.
         if !self.request.is_empty() {
             query.push_str("\0request=");
@@ -195,6 +205,7 @@ mod tests {
             backend: "dexdec",
             capabilities: &caps,
             mappings: None,
+            resources: None,
             language: Language::Java,
             nested: true,
             request: "",
@@ -212,6 +223,8 @@ mod tests {
             UnitKey { mappings: Some(mapped.hash()), ..base },
             UnitKey { language: Language::Kotlin, ..base },
             UnitKey { nested: false, ..base },
+            UnitKey { resources: Some("1"), ..base },
+            UnitKey { resources: Some("ab"), ..base },
         ];
         let mut queries: Vec<String> = variants.iter().map(UnitKey::query).collect();
         queries.push(base.query());
@@ -231,6 +244,7 @@ mod tests {
             backend: "dexdec",
             capabilities: &caps,
             mappings: None,
+            resources: None,
             language: Language::Kotlin,
             nested: true,
             request: "",
@@ -253,6 +267,7 @@ mod tests {
             backend: "arkdec",
             capabilities: &caps,
             mappings: None,
+            resources: None,
             language: Language::JavaScript,
             nested: true,
             request: "",
@@ -306,6 +321,7 @@ mod tests {
             backend: "mock",
             capabilities: &caps,
             mappings: None,
+            resources: None,
             language: Language::Java,
             nested: true,
             request: "",
@@ -336,6 +352,7 @@ mod tests {
             backend: "mock",
             capabilities: &caps,
             mappings: None,
+            resources: None,
             language: Language::Java,
             nested: true,
             request: "",

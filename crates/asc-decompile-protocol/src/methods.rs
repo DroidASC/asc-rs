@@ -179,6 +179,10 @@ pub struct InitializeResult {
     /// Whether `program/open` honours `mappings`.
     #[serde(default)]
     pub mappings: bool,
+    /// Whether `program/open` honours `resources`: the backend shows
+    /// resource ids in the source by their names. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resources: bool,
     /// Whether units report per-method failures.
     #[serde(default)]
     pub method_status: bool,
@@ -197,8 +201,8 @@ pub struct InitializeResult {
 
 impl InitializeResult {
     /// `backend` at `protocol_version` with `options_hash`, accepting no
-    /// input and writing no language yet; no mappings, no per-method
-    /// status, one request at a time, no platform.
+    /// input and writing no language yet; no mappings, no resource names,
+    /// no per-method status, one request at a time, no platform.
     pub fn new(protocol_version: u32, backend: Implementation, options_hash: impl Into<String>) -> InitializeResult {
         InitializeResult {
             protocol_version,
@@ -207,6 +211,7 @@ impl InitializeResult {
             inputs: Vec::new(),
             languages: Vec::new(),
             mappings: false,
+            resources: false,
             method_status: false,
             max_concurrency: one(),
             platform: None,
@@ -230,6 +235,12 @@ impl InitializeResult {
     #[must_use]
     pub fn mappings(self, mappings: bool) -> InitializeResult {
         InitializeResult { mappings, ..self }
+    }
+
+    /// This result honouring `resources` in `program/open`, or not.
+    #[must_use]
+    pub fn resources(self, resources: bool) -> InitializeResult {
+        InitializeResult { resources, ..self }
     }
 
     /// This result reporting per-method failures, or not.
@@ -329,12 +340,21 @@ pub struct ProgramOpenParams {
     /// Names asc wants in the output; only sent to backends declaring `mappings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mappings: Option<Mappings>,
+    /// The program's resource names; only sent to backends declaring `resources`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceNames>,
 }
 
 impl ProgramOpenParams {
-    /// Open `input`, with no mappings.
+    /// Open `input`, with no mappings and no resource names.
     pub fn new(input: ProgramInput) -> ProgramOpenParams {
-        ProgramOpenParams { input, mappings: None }
+        ProgramOpenParams { input, mappings: None, resources: None }
+    }
+
+    /// These parameters with the program's resource names.
+    #[must_use]
+    pub fn resources(self, resources: Option<ResourceNames>) -> ProgramOpenParams {
+        ProgramOpenParams { resources, ..self }
     }
 
     /// These parameters with the names asc wants in the output.
@@ -428,6 +448,32 @@ impl Mappings {
     /// Whether no class, field or method is renamed.
     pub fn is_empty(&self) -> bool {
         self.classes.is_empty() && self.fields.is_empty() && self.methods.is_empty()
+    }
+}
+
+/// The names of the resources the program's `resources.arsc` defines, for
+/// the backend to show resource ids (`0x7f0d0001`) in the source by name.
+///
+/// In JSON both maps are objects whose keys are the ids in decimal, as
+/// JSON keys are strings: `{"packages":{"127":"rs.asc"},
+/// "names":{"2131558401":"layout/activity_main"}}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ResourceNames {
+    /// Package id (the top byte of its resource ids: `0x7f` for an app) →
+    /// package name, as the table declares it.
+    #[serde(default)]
+    pub packages: BTreeMap<u8, String>,
+    /// Resource id (`0xPPTTEEEE`) → `type/entry` (`layout/activity_main`,
+    /// `style/Theme.App`), the entry name as the table has it.
+    #[serde(default)]
+    pub names: BTreeMap<u32, String>,
+}
+
+impl ResourceNames {
+    /// Whether no resource is named.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
     }
 }
 
@@ -941,8 +987,30 @@ mod tests {
         assert_eq!(params.input.files(), [PathBuf::from("/c/3a7f.dex")]);
         assert_eq!(serde_json::to_value(&params).unwrap(), wire);
 
-        let archive = ProgramOpenParams { input: ProgramInput::Archive { files: vec!["/a.apk".into()] }, mappings: None };
+        let archive = ProgramOpenParams::new(ProgramInput::Archive { files: vec!["/a.apk".into()] });
         assert_eq!(serde_json::to_value(&archive).unwrap(), json!({"input": {"kind": "archive", "files": ["/a.apk"]}}));
+    }
+
+    #[test]
+    fn resource_names_are_keyed_by_decimal_ids() {
+        let wire = json!({
+            "input": {"kind": "archive", "files": ["/a.apk"]},
+            "resources": {"packages": {"127": "rs.asc"}, "names": {"2131558401": "layout/activity_main"}}
+        });
+        let params: ProgramOpenParams = serde_json::from_value(wire.clone()).unwrap();
+        let resources = params.resources.as_ref().unwrap();
+        assert_eq!(resources.packages[&0x7f], "rs.asc");
+        assert_eq!(resources.names[&0x7f0d_0001], "layout/activity_main");
+        assert_eq!(serde_json::to_value(&params).unwrap(), wire);
+
+        let capable: InitializeResult = serde_json::from_value(json!({
+            "protocolVersion": 1, "backend": {"name": "x", "version": "0"},
+            "optionsHash": "", "inputs": ["archive"], "languages": ["java"], "resources": true
+        }))
+        .unwrap();
+        assert!(capable.resources);
+        let plain = InitializeResult::new(1, Implementation::new("x", "0"), "");
+        assert!(!serde_json::to_value(&plain).unwrap().as_object().unwrap().contains_key("resources"));
     }
 
     #[test]

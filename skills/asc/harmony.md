@@ -32,7 +32,7 @@ functions) -> `asc getclass entry.hap entryability/EntryAbility --method EntryAb
 | who extends X / overrides m | `asc hierarchy entry.hap UIAbility --method onCreate` (a class name, `RECORD->CLASS`, or a parent outside the program: `'import:@ohos:app\.'`, `'^global:ViewPU$'`); `--supers` walks up |
 | pages and routes | `asc manifest-summary entry.hap \| grep -E '^(page\|route) '`: each row has `record=` (and a route its `buildFunction=`) for `getclass RECORD --method F`; `asc xml entry.hap '$profile:NAME'` prints the file itself (`customData`) |
 | resources | `asc resources entry.hap string/app_name` (or `0x...`, `$string:x`, `app.string.x`), `--search REGEX --in value`, `--resolve` |
-| where a text / resource is used | `asc resources entry.hap --search TEXT --in value` gives the id, then `asc findrefs entry.hap number ID`; by-name uses: `findrefs string 'app\.string\.NAME'`; while reading code: `getclass ... --res-names` |
+| where a text / resource is used | `asc resources entry.hap --search TEXT --in value` gives the id, then `asc findrefs entry.hap number ID`; by-name uses: `findrefs string 'app\.string\.NAME'`; while reading code: `getclass` names them (`# string/NAME "value"`) |
 | who reaches a system API | `asc callgraph entry.hap --to 'call:^import:@ohos:net\.http' --depth 6`; only the paths from entry points: add `--from 'method:^EntryAbility\.on'`; `--unless RULE` (repeatable) leaves out matching functions and what only they reach. `--to` / `--from` / `--unless` take any rule (`--to 'string:...'` roots at the functions using it) |
 
 A call names no callee in ArkTS; its origin is tracked inside the function, and output says how

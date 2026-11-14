@@ -17,14 +17,15 @@
 
 use asc_ark_engine::{ClassQuery, Location};
 use asc_decompile::Priority;
-use asc_decompile::protocol::methods::{Language, UnitOutcome};
+use asc_decompile::protocol::methods::{Language, ResourceNames, UnitOutcome};
 use asc_engine::asc_cache::ApkKey;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use super::{
-    Answer, Attempt, CallOptions, Context, DecompileError, Decompiled, Decompilers, Input, Naming, Outcome, Status, outcome, source,
+    Answer, Attempt, CallOptions, Context, DecompileError, Decompiled, Decompilers, Input, Naming, Outcome, ProgramResources, Status,
+    outcome, source,
 };
 use crate::format::ProgramFormat;
 use crate::harmony::ClassTarget;
@@ -192,12 +193,16 @@ impl Decompilers {
         let outcome = match self.abc_files.file(entry, bytes, sha256, engine.entry_file(entry)) {
             Ok(abc) => {
                 let key = ApkKey::for_content(entry, &sha256);
+                let mut names = ResourceNames::default();
+                names.names = engine.resource_names(entry);
+                let resources = ProgramResources::names(names);
                 let mut context = Context {
                     unit: &location.record,
                     language: request.language,
                     apk: Some(&key),
                     input: Input::Abc(abc),
                     mappings: None,
+                    resources: resources.as_ref(),
                     request: request.options(),
                     options: CallOptions::default().priority(request.priority),
                 };
@@ -287,7 +292,9 @@ fn disassembly(
     several: bool,
 ) -> Result<Decompiled, DecompileError> {
     let query = ClassQuery::new(&location.record).function(location.function.as_deref()).entry(Some(&location.entry));
-    let listing = engine.get_class(&query).map_err(|e| DecompileError::Harmony(e.to_string()))?;
+    let mut listing = engine.get_class(&query).map_err(|e| DecompileError::Harmony(e.to_string()))?;
+    // As getclass shows it: the resources the code builds named.
+    engine.annotate_resource_ids(&mut listing);
     Ok(Decompiled {
         class: location.record.clone(),
         entry: Some(location.entry.clone()),

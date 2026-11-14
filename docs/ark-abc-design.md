@@ -220,7 +220,7 @@ ABC 不需要 `asc-rebuild` 的对应物：按 record 反汇编可直接在原�
 | `listclass --all` | 连同注解类、系统模块占位等伪 record 一起列出 |
 | `hierarchy` | 每个 `defineclasswithbuffer`（含 sendable 变体）的父类寄存器按追踪器求值：无父类（hole）、本 record、跨 record（导入 → 导出 → 唯一写入者）、`[external]`、`[unresolved]`；装饰器重新赋值的类标 `[reassigned]`（弱解析）。`--method` 只看类字面量里的成员 |
 | `getmanifest` / `manifest-summary` | `module.json`：abilities / extensionAbilities 的 exported、skills uris（deep link）、requestPermissions |
-| `resources` / `xml` / `getclass --res-names` | `resources.index`（两种布局）；`xml` 原样打印包内文本文件（`$profile:NAME` 或路径，索引里没有的构建生成 profile 按 `resources/base/profile/NAME.json` 回退）；`$r` 对象字面量（`"id", N, "type", T`）按所在包的索引标注 |
+| `resources` / `xml` / `getclass` 的资源名 | `resources.index`（两种布局）；`xml` 原样打印包内文本文件（`$profile:NAME` 或路径，索引里没有的构建生成 profile 按 `resources/base/profile/NAME.json` 回退）；`$r` 对象字面量（`"id", N, "type", T`）按所在包的索引标注 |
 
 与现有边界一致：只做方法内来源追踪，不做过程间污点分析。
 

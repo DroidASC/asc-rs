@@ -238,6 +238,44 @@ fn without_a_harmony_backend_the_disassembly_answers() {
 }
 
 #[test]
+fn resource_names_of_the_module_go_to_backends_that_take_them() {
+    use asc_fixture::hap::{Hap, ResourceTable, resource_type};
+    let fixture = Fixture::new();
+    let decompilers = fixture.decompilers(&["abc+resources", "abc"]);
+    let engine = fixture.engine("entry.hap");
+    let named = run(&decompilers, &engine, &HarmonyRequest::new("pages/Index")).unwrap();
+    assert!(named.text.contains(" resources=6 0x01000000=string/EntryAbility_label\n"), "the module's names were sent: {}", named.text);
+    let again = run(&decompilers, &engine, &HarmonyRequest::new("pages/Index")).unwrap();
+    assert!(again.cached && again.text == named.text);
+
+    let plain = run(&decompilers, &engine, &HarmonyRequest::new("pages/Index").decompiler(Some("abc"))).unwrap();
+    assert!(!plain.text.contains("resources="), "a backend that does not declare them gets none: {}", plain.text);
+
+    // The same modules.abc in a package whose index differs: neither the
+    // cached unit nor the open session of the first package answers.
+    let other = ResourceTable::new().value(0x0100_0000, resource_type::STRING, "other_label", &[], "Other");
+    std::fs::write(fixture.path("other.hap"), Hap::new().modules_abc(&program()).resource_index(&other).build()).unwrap();
+    let renamed = run(&decompilers, &fixture.engine("other.hap"), &HarmonyRequest::new("pages/Index")).unwrap();
+    assert!(!renamed.cached, "the names are part of the key");
+    assert!(renamed.text.contains(" resources=1 0x01000000=string/other_label\n"), "{}", renamed.text);
+
+    // A bare file has no index: nothing to send.
+    let bare = run(&decompilers, &fixture.engine("bare/modules.abc"), &HarmonyRequest::new("pages/Index")).unwrap();
+    assert!(!bare.text.contains("resources="), "{}", bare.text);
+}
+
+#[test]
+fn the_disassembly_names_the_resources_as_getclass_does() {
+    use asc_fixture::hap::{LABELS_PAGE, resource_program};
+    let fixture = Fixture::new();
+    std::fs::write(fixture.path("labels.hap"), make_hap(&resource_program().build().bytes)).unwrap();
+    let engine = fixture.engine("labels.hap");
+    let answer = run(&fixture.decompilers(&["mock"]), &engine, &HarmonyRequest::new(LABELS_PAGE)).unwrap();
+    assert_eq!(answer.status, Status::Disassembly);
+    assert!(answer.text.contains("  # string/EntryAbility_label \"Sample\"\n"), "{}", answer.text);
+}
+
+#[test]
 fn requests_that_cannot_be_asked_say_why() {
     let fixture = Fixture::new();
     let decompilers = fixture.decompilers(&["abc"]);

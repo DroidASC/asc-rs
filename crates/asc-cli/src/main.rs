@@ -112,7 +112,6 @@ examples (Android):
   asc getclass app.apk rs.asc.Main --dump-dex Main.dex
   asc disassemble app.apk rs.asc.Main --debuginfo
   asc disassemble app.apk rs.asc.Main --method 'run(I)V'
-  asc getclass app.apk rs.asc.Main --res-names
   asc listclass app.apk -o classes.txt
   asc listclass app.apk --prefix rs.asc
   asc getmanifest app.apk -o AndroidManifest.xml
@@ -383,6 +382,12 @@ enum Command {
     /// Locate a class (HarmonyOS: a record) and disassemble it.
     ///
     /// Android: rebuild the class and its `$` nested classes into a minimal DEX in memory first.
+    ///
+    /// Resource ids are named when the program has a resource table that
+    /// reads: a constant that is a resource of resources.arsc gets
+    /// `# @type/name`; HarmonyOS: the instruction that creates a
+    /// `$r('app.type.name')` object gets `# type/name "value"` (from the
+    /// resources.index of the record's module).
     Getclass {
         /// Also write the output to this file.
         #[arg(short, long)]
@@ -397,11 +402,6 @@ enum Command {
         /// signature, e.g. run or run(I)V.
         #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method_signature: Option<String>,
-        /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
-        /// HarmonyOS: `# type/name "value"` after the instruction that creates
-        /// a `$r('app.type.name')` object (from resources.index).
-        #[arg(long)]
-        res_names: bool,
         /// HarmonyOS: take the record from this ABC entry (ets/modules.abc), when
         /// several define it.
         #[arg(long, value_name = "NAME")]
@@ -415,7 +415,7 @@ enum Command {
         /// The Dalvik format class name to extract (e.g., Lrs/asc/Main; or rs.asc.Main).
         dalvik_class: String,
     },
-    /// Like getclass, without debug directives unless --debuginfo.
+    /// Like getclass (resource ids named the same way), without debug directives unless --debuginfo.
     Disassemble {
         /// Write disassembly to this file; default is stdout.
         #[arg(short, long)]
@@ -427,11 +427,6 @@ enum Command {
         /// signature, e.g. run or run(I)V.
         #[arg(long = "method", value_name = "NAME|SIGNATURE")]
         method_signature: Option<String>,
-        /// Append `# @type/name` to constants that are resource ids (from resources.arsc).
-        /// HarmonyOS: `# type/name "value"` after the instruction that creates
-        /// a `$r('app.type.name')` object (from resources.index).
-        #[arg(long)]
-        res_names: bool,
         /// Write the rebuilt DEX (the class and its `$` nested classes) to this file.
         #[arg(long)]
         dump_dex: Option<PathBuf>,
@@ -770,7 +765,10 @@ enum Command {
     /// fallback = ["jadx"]; [decompilers.NAME] command = ..., args = [...]). A
     /// backend failing on the whole class (failed, crashed, timed out) hands
     /// over to the next; a partial class does not. When every backend failed,
-    /// the class is shown as smali (status failed).
+    /// the class is shown as smali, resource ids named as getclass names
+    /// them (status failed). Backends that take them get the program's
+    /// resource names (resources.arsc; of a record, its module's
+    /// resources.index) to show resource ids by name.
     ///
     /// HarmonyOS programs (.hap, .hsp, .app, .abc) go down
     /// decompile.harmony_default (arkdec) and decompile.harmony_fallback.
@@ -1399,7 +1397,6 @@ struct ClassArgs {
     debug_info: bool,
     dump_dex: Option<PathBuf>,
     method_signature: Option<String>,
-    res_names: bool,
     /// `--entry`: the ABC entry of a HarmonyOS program to look in.
     entry: Option<String>,
     /// `--lines`: every line change in the listing of a HarmonyOS program.
@@ -1449,9 +1446,7 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: ClassArgs, t_start: Instant)
     let engine = io.engine(common, &args.apk_path);
     let opts = asc_engine::SmaliOptions::debug_info(args.debug_info);
     let mut src = class_methods(&engine, &descriptor, opts, args.method_signature.as_deref(), io.cancel)?;
-    if args.res_names {
-        src.source = engine.annotate_resource_ids(&src.source);
-    }
+    src.source = engine.annotate_resource_ids(&src.source);
     if let Some(w) = &src.warning {
         io.note(format_args!("Warning: {w}"));
     }
@@ -1499,16 +1494,14 @@ fn run_query(io: &mut Io<'_>, common: &Common, command: Command, t_start: Instan
         }
     }
     match command {
-        Command::Getclass { output, no_debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class } => {
+        Command::Getclass { output, no_debug_info, dump_dex, method_signature, entry, lines, apk_path, dalvik_class } => {
             let debug_info = !no_debug_info;
-            let args =
-                ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
+            let args = ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, entry, lines, apk_path, dalvik_class };
             getclass(io, common, args, t_start)?;
         }
-        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, entry, lines, apk_path, dalvik_class } => {
+        Command::Disassemble { output, debuginfo, method_signature, dump_dex, entry, lines, apk_path, dalvik_class } => {
             let debug_info = debuginfo;
-            let args =
-                ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
+            let args = ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, entry, lines, apk_path, dalvik_class };
             getclass(io, common, args, t_start)?;
         }
         Command::Listclass { prefix, all, entry, output, apk_path } => {

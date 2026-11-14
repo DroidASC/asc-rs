@@ -240,6 +240,31 @@ fn mappings_go_to_backends_that_take_them_and_are_noted_otherwise() {
 }
 
 #[test]
+fn resource_names_go_to_backends_that_take_them() {
+    use asc_fixture::res::{Res, Val, arsc};
+    let fixture = Fixture::new();
+    let table =
+        arsc("example", &[Res::new("string", "app_name", Val::Str("App")), Res::new("layout", "main", Val::Str("res/layout/main.xml"))]);
+    let apk = fixture.dir.path().join("res.apk");
+    std::fs::write(&apk, make_apk(&[("classes.dex", &make_dex()), ("resources.arsc", &table)], true)).unwrap();
+    let config = CacheConfig::default().disk(Some(DiskCache::open(fixture.cache_dir())));
+    let engine = Engine::new(&apk).with_cache(config);
+    let decompilers = fixture.decompilers("resources", &["mock"]);
+
+    let named = run(&decompilers, &engine, &Request::new("example.Test")).unwrap();
+    assert!(named.text.contains(" resources=2 0x7f010000=string/app_name"), "the table's names were sent: {}", named.text);
+    let again = run(&decompilers, &engine, &Request::new("example.Test")).unwrap();
+    assert!(again.cached && again.text == named.text);
+
+    let plain = run(&decompilers, &engine, &Request::new("example.Test").decompiler(Some("mock"))).unwrap();
+    assert!(!plain.text.contains("resources="), "a backend that does not declare them gets none: {}", plain.text);
+
+    // No resources.arsc: nothing to send.
+    let bare = run(&decompilers, &fixture.engine(), &Request::new("example.Test")).unwrap();
+    assert!(!bare.text.contains("resources="), "{}", bare.text);
+}
+
+#[test]
 fn a_language_the_backend_lacks_is_a_failure_of_that_backend() {
     let fixture = Fixture::new();
     let decompilers = fixture.decompilers("mock", &[]);

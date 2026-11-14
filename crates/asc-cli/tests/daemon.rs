@@ -319,9 +319,8 @@ fn daemon_output_is_byte_identical_for_harmony_programs() {
         &["xml", "entry.hap", "res/xml/nothing.xml"],
         &["xml", "shop.app", "$profile:main_pages"],
         &["xml", "calls.abc", "module.json"],
-        &["getclass", "entry.hap", "pages/Index", "--res-names"],
-        &["getclass", "labels.hap", "pages/Labels", "--res-names"],
-        &["getclass", "labels.hap", "pages/Labels", "--method", "labels", "--res-names"],
+        &["getclass", "labels.hap", "pages/Labels"],
+        &["getclass", "labels.hap", "pages/Labels", "--method", "labels"],
         &["getmanifest", "entry.hap", "--resolve"],
         // A bare ABC file; its errors name the path as given.
         &["listclass", "calls.abc"],

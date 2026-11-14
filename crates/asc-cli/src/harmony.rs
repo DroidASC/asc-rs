@@ -58,19 +58,17 @@ pub(crate) fn run(io: &mut Io<'_>, common: &Common, command: Command, t_start: I
             listclass(io, &engine, &options, output.as_ref())?;
             EXIT_OK
         }
-        Command::Getclass { output, no_debug_info: _, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class } => {
+        Command::Getclass { output, no_debug_info: _, dump_dex, method_signature, entry, lines, apk_path, dalvik_class } => {
             // `--no-debug-info` holds as it is: without `--lines` the listing has no line of its own for the debug info.
             let debug_info = false;
-            let args =
-                ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
+            let args = ClassArgs { output, tee: true, debug_info, dump_dex, method_signature, entry, lines, apk_path, dalvik_class };
             getclass(io, common, &args)?;
             EXIT_OK
         }
-        Command::Disassemble { output, debuginfo, method_signature, res_names, dump_dex, entry, lines, apk_path, dalvik_class } => {
+        Command::Disassemble { output, debuginfo, method_signature, dump_dex, entry, lines, apk_path, dalvik_class } => {
             // The debug directives of a listing are its `; line N` lines.
             let (debug_info, lines) = (false, lines || debuginfo);
-            let args =
-                ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, res_names, entry, lines, apk_path, dalvik_class };
+            let args = ClassArgs { output, tee: false, debug_info, dump_dex, method_signature, entry, lines, apk_path, dalvik_class };
             getclass(io, common, &args)?;
             EXIT_OK
         }
@@ -430,9 +428,7 @@ fn getclass(io: &mut Io<'_>, common: &Common, args: &ClassArgs) -> Result<(), St
     let entry = args.entry.as_deref();
     let style = ListingStyle::default().lines(args.lines);
     let mut source = target.listing(&engine, entry, style).map_err(|e| target.explain(&engine, entry, &e, "--entry"))?;
-    if args.res_names {
-        engine.annotate_resource_ids(&mut source);
-    }
+    engine.annotate_resource_ids(&mut source);
     if common.debug {
         io.note(format_args!("[DEBUG] Hit ABC: {}", source.entry));
     }

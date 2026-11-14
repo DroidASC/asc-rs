@@ -22,6 +22,10 @@
 //! Names come only from a mapping file the user gives (§7): it is sent with
 //! `program/open` to backends that declare `mappings`; for the others the
 //! answer says the names are not unified, and the source is left as is.
+//! The program's resource names (id → `type/entry`: from `resources.arsc`;
+//! of a HarmonyOS record, from the `resources.index` of its module) go with
+//! `program/open` to backends that declare `resources`, for them to show
+//! resource ids in the source by name.
 //!
 //! The built-in backends run `asc-dexdec-worker` and `asc-arkdec-worker`,
 //! found (dexdec's also installed when missing) as [`worker`] says, looked
@@ -46,8 +50,11 @@ pub use source::output_path;
 pub use worker::{Tool, Worker, WorkerOrigin, WorkerSettings};
 
 use asc_decompile::protocol::ErrorCode;
-use asc_decompile::protocol::methods::{ClassUnit, InitializeResult, InputKind, Mappings, ProgramInput, ProgramOpenParams, UnitOutcome};
+use asc_decompile::protocol::methods::{
+    ClassUnit, InitializeResult, InputKind, Mappings, ProgramInput, ProgramOpenParams, ResourceNames, UnitOutcome,
+};
 use asc_decompile::{Backend, CallOptions, CancelToken, DecompileRequest, Priority, ProcessInfo, Program};
+use asc_engine::asc_arsc::ResTable;
 use asc_engine::asc_cache::{ApkKey, DiskCache};
 use asc_engine::names::{self, MappingsHash, NameMappings};
 use asc_engine::{Engine, EngineError, SharedCache, SmaliOptions};
@@ -219,6 +226,8 @@ struct OpenProgram {
     /// Of an ABC input: the content the backend checked the file against.
     sha256: Option<String>,
     mappings: Option<MappingsHash>,
+    /// The [`ProgramResources::token`] of the names it was opened with.
+    resources: Option<String>,
     program: Arc<Program>,
     used: u64,
 }
@@ -278,9 +287,46 @@ struct Context<'a> {
     apk: Option<&'a ApkKey>,
     input: Input<'a>,
     mappings: Option<&'a Arc<NameMappings>>,
+    /// The program's resource names, for backends that take them.
+    resources: Option<&'a ProgramResources>,
     /// Per-request options; a backend must declare each.
     request: Map<String, Value>,
     options: CallOptions,
+}
+
+/// The resource names a program has to send with `program/open`.
+enum ProgramResources {
+    /// The `resources.arsc` of a DEX program; its names are made when a
+    /// program opens.
+    Arsc(Arc<ResTable>),
+    /// The names of the module of an ABC file, and their hash.
+    Names { names: ResourceNames, hash: String },
+}
+
+impl ProgramResources {
+    /// The names of a module, `None` when there are none.
+    fn names(names: ResourceNames) -> Option<ProgramResources> {
+        (!names.is_empty()).then(|| ProgramResources::Names { hash: names_hash(&names), names })
+    }
+
+    /// What tells the names apart in the L3 key and among open programs:
+    /// `1` for a DEX program's table, which the program key covers already;
+    /// the hash of the names for an ABC file, whose key is of its content
+    /// alone while the names come from its module.
+    fn token(&self) -> &str {
+        match self {
+            ProgramResources::Arsc(_) => "1",
+            ProgramResources::Names { hash, .. } => hash,
+        }
+    }
+
+    /// The §6.2 `resources` object.
+    fn to_protocol(&self) -> ResourceNames {
+        match self {
+            ProgramResources::Arsc(table) => resource_names(table),
+            ProgramResources::Names { names, .. } => names.clone(),
+        }
+    }
 }
 
 /// The first answer down a chain, or why there is none.
@@ -495,6 +541,8 @@ impl Decompilers {
         }
         self.check_decompiler(request.decompiler)?;
         let mappings = self.mapping(request.mapping)?.filter(|m| !m.is_empty());
+        // A table that cannot be read names nothing; it does not fail the class.
+        let resources = engine.resources().ok().flatten().filter(|table| !table.packages().is_empty()).map(ProgramResources::Arsc);
         let apk = engine.open()?;
         let key = engine.apk_key(&apk);
         // Absolute: a backend runs in a working directory of its own.
@@ -510,6 +558,7 @@ impl Decompilers {
             apk: key.as_ref(),
             input: Input::Archive(&files),
             mappings: mappings.as_ref(),
+            resources: resources.as_ref(),
             request: Map::new(),
             options: CallOptions::default().priority(request.priority),
         };
@@ -615,6 +664,7 @@ impl Decompilers {
             None => (None, Naming::Dex),
         };
         let mappings_hash = mappings.map(|m| m.hash());
+        let resources = context.resources.filter(|_| capabilities.resources);
         let request = if context.request.is_empty() { String::new() } else { Value::Object(context.request.clone()).to_string() };
         let content = match &context.input {
             Input::Abc(abc) => Some(abc.sha256.as_str()),
@@ -627,6 +677,7 @@ impl Decompilers {
             backend: name,
             capabilities,
             mappings: mappings_hash,
+            resources: resources.map(ProgramResources::token),
             language: context.language,
             nested: true,
             request: &request,
@@ -636,7 +687,7 @@ impl Decompilers {
             return Ok(Answer { unit, capabilities, cached: true, naming });
         }
         let decompile = DecompileRequest::new([context.unit], context.language).nested(true).options(context.request.clone());
-        let mut result = match self.decompile_on(name, &backend, context, mappings, &decompile) {
+        let mut result = match self.decompile_on(name, &backend, context, mappings, resources, &decompile) {
             // The file is not what asc hashed (rewritten meanwhile): write the
             // bytes asc read to a file of asc's own and ask once more.
             Err(asc_decompile::Error::Rpc(error)) if error.code == ErrorCode::INPUT_MISMATCH => match &context.input {
@@ -649,10 +700,11 @@ impl Decompilers {
                         apk: context.apk,
                         input: Input::Abc(abc.with_file(file)),
                         mappings: context.mappings,
+                        resources: context.resources,
                         request: context.request.clone(),
                         options: context.options.clone(),
                     };
-                    self.decompile_on(name, &backend, &fresh, mappings, &decompile)
+                    self.decompile_on(name, &backend, &fresh, mappings, resources, &decompile)
                 }
                 Input::Archive(_) => Err(asc_decompile::Error::Rpc(error)),
             },
@@ -677,9 +729,10 @@ impl Decompilers {
         backend: &Backend,
         context: &Context<'_>,
         mappings: Option<&Arc<NameMappings>>,
+        resources: Option<&ProgramResources>,
         request: &DecompileRequest,
     ) -> Result<asc_decompile::protocol::methods::DecompileClassesResult, asc_decompile::Error> {
-        let program = self.program(name, backend, &context.input, mappings, &context.options)?;
+        let program = self.program(name, backend, &context.input, mappings, resources, &context.options)?;
         program.decompile(request, &context.options)
     }
 
@@ -688,13 +741,15 @@ impl Decompilers {
         self.lock_programs().open.retain(|open| !(open.backend == backend && open.sha256.as_deref() == Some(sha256)));
     }
 
-    /// The program open on `backend` with this input and mappings, opened on a miss.
+    /// The program open on `backend` with this input, mappings and
+    /// resource names, opened on a miss.
     fn program(
         &self,
         name: &str,
         backend: &Backend,
         input: &Input<'_>,
         mappings: Option<&Arc<NameMappings>>,
+        resources: Option<&ProgramResources>,
         options: &CallOptions,
     ) -> Result<Arc<Program>, asc_decompile::Error> {
         let hash = mappings.map(|m| m.hash());
@@ -702,7 +757,10 @@ impl Decompilers {
             Input::Archive(files) => (files.to_vec(), None),
             Input::Abc(abc) => (vec![abc.file.clone()], Some(abc.sha256.as_str())),
         };
-        let found = |p: &OpenProgram| p.backend == name && p.files == files && p.sha256.as_deref() == sha256 && p.mappings == hash;
+        let named = resources.map(ProgramResources::token);
+        let found = |p: &OpenProgram| {
+            p.backend == name && p.files == files && p.sha256.as_deref() == sha256 && p.mappings == hash && p.resources.as_deref() == named
+        };
         {
             let mut programs = self.lock_programs();
             programs.tick += 1;
@@ -716,7 +774,9 @@ impl Decompilers {
             Input::Archive(files) => ProgramInput::Archive { files: files.to_vec() },
             Input::Abc(abc) => abc.program_input(),
         };
-        let params = ProgramOpenParams::new(input).mappings(mappings.map(|m| to_protocol(m)));
+        let params = ProgramOpenParams::new(input)
+            .mappings(mappings.map(|m| to_protocol(m)))
+            .resources(resources.map(ProgramResources::to_protocol));
         // Opened outside the lock: a slow start must not hold up other backends.
         let program = Arc::new(backend.open_program(params, options)?);
         let mut programs = self.lock_programs();
@@ -736,6 +796,7 @@ impl Decompilers {
             files,
             sha256: sha256.map(String::from),
             mappings: hash,
+            resources: named.map(String::from),
             program: Arc::clone(&program),
             used,
         };
@@ -818,6 +879,8 @@ impl Decompilers {
         cancel: &AtomicBool,
     ) -> Result<Decompiled, DecompileError> {
         let source = engine.get_class_method_cancellable(context.unit, SmaliOptions::debug_info(false), None, cancel)?.source;
+        // As getclass shows it: resource ids named.
+        let source = engine.annotate_resource_ids(&source);
         let text = match request.method {
             Some(method) => {
                 let parsed = ClassText::parse(&source);
@@ -874,6 +937,34 @@ fn to_protocol(mappings: &NameMappings) -> Mappings {
     out.fields = mappings.fields().clone();
     out.methods = mappings.methods().clone();
     out
+}
+
+/// The §6.2 `resources` object of `table`: every id it defines, by `type/entry`.
+fn resource_names(table: &ResTable) -> ResourceNames {
+    let mut names = ResourceNames::default();
+    names.packages = table.packages().iter().map(|package| (package.id, package.name.clone())).collect();
+    names.names = table.ids().into_iter().filter_map(|id| Some((id, table.name(id)?.short()))).collect();
+    names
+}
+
+/// SHA-256 of `names`, lower-case hex. The tag changes with the encoding.
+fn names_hash(names: &ResourceNames) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"asc-resource-names/1");
+    for (tag, map) in [
+        (b'p', names.packages.iter().map(|(id, name)| (u32::from(*id), name)).collect::<Vec<_>>()),
+        (b'n', names.names.iter().map(|(id, name)| (*id, name)).collect()),
+    ] {
+        h.update([tag]);
+        h.update((map.len() as u64).to_le_bytes());
+        for (id, name) in map {
+            h.update(id.to_le_bytes());
+            h.update((name.len() as u64).to_le_bytes());
+            h.update(name.as_bytes());
+        }
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The resident memory of process `pid` (`VmRSS`), 0 where the system does not say.

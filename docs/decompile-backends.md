@@ -160,6 +160,7 @@ fallback N / harmony default / harmony fallback N，同时担任几种时用 `, 
 | `inputs` | `archive`（原始 APK / DEX 路径）和 / 或 `slice`（闭包切片）；两个都有时 asc 优先用 `archive` |
 | `languages` | `java`、`kotlin` |
 | `mappings` | 是否接受 `program/open` 里的命名映射 |
+| `resources` | 是否接受 `program/open` 里的资源名（§6.2），用来在源码里把资源 id 显示成名字；可省略，默认 false，为 false 时 asc 也不写出 |
 | `methodStatus` | 能否逐方法报告失败；不能时 asc 只记整个类的状态 |
 | `maxConcurrency` | 一个进程能同时处理多少个 `decompile/classes`；超出的请求由 asc 排队 |
 | `platform` | 后端自带的平台 classpath，只作提示 |
@@ -192,6 +193,25 @@ fallback N / harmony default / harmony fallback N，同时担任几种时用 `, 
   的二进制名（`Lpkg/Outer$Inner;`）；类换了包时，结果的 `path` 跟着新名字走；后端不得不放弃某个类的改名时
   （见 §12 dexdec），`path` 仍按 DEX 名字给出，`-o` 的文件名也随之用 DEX 名字（`-o` 何时采用后端的 `path` 见 §11）。`fields` / `methods` 的值是简单名，
   构造器（`<init>` / `<clinit>`）不出现。没有映射时三个表都为空。
+- `resources`（可选，只发给声明了 `resources` 的后端，且程序有能读的资源表）：程序资源表里定义的每个
+  资源。DEX 程序取 `resources.arsc`；ABC 文件（§6.5）取它所在模块的 `resources.index`（裸 `.abc` 没有索引，不发）。`packages` 是包 id（资源 id 的最高字节，应用是 `0x7f`）→ 包名，`names` 是资源 id（`0xPPTTEEEE`）→
+  `type/entry`，entry 名按表里原样（`style/Theme.App` 里的点不转换）。JSON 对象的键只能是字符串，两张表的键都写成
+  十进制的 id：
+
+  ```json
+  "resources":{"packages":{"127":"rs.asc"},
+               "names":{"2131558401":"layout/activity_main","2131689472":"string/app_name"}}
+  ```
+
+  表里只有 APK 自己的包；框架资源（`0x01…`，`android.R`）不在其中，后端要用就自己带。怎么显示由后端决定，
+  asc 只要求：源码里原来的常量（agent 拿它去 `findrefs number`）不丢，能看出是哪个 id。资源表读不出来时 asc
+  不发这一项，反编译照常进行。
+- ABC 文件的 `resources`：`packages` 为空（鸿蒙的 id 没有按包分的最高字节），`names` 是模块索引里的每个 id →
+  `type/name`（`string/app_name`、`color/brand`，与 `getclass` 的标注一致；同一 id 的多个限定词取第一条的名字）。
+  代码里的资源是 `$r('app.string.x')` 编译成的对象字面量 `{id: 16777236, type: 10003, params: [], bundleName, moduleName}`，
+  后端按 `id` 查名字、用 `type` 核对类型（类型码与 `getclass` 用的相同，见 asc-hap `ResourceType::from_object_code`），
+  不要按数值去猜别的 int。建议的显示：ArkTS 还原成 `$r('app.string.x')`；JavaScript 保留对象字面量，在后面加
+  `/* app.string.x */`。
 - 切片会话的生命周期由 asc 管：一次请求开一个，用完就关。archive 会话按程序常驻，被进程池的 LRU 淘汰
   时才关。后端必须真正释放会话（JEB 是 `unloadProject`），否则项目越积越多。
 
@@ -327,10 +347,15 @@ HarmonyOS 程序以 ABC 文件为单位交给后端，输出 JavaScript 或 ArkT
 
 ## 8. 结果缓存
 
-结果写入 L3，键为 `(ApkKey, 输入指纹, backend.name, backend.version, optionsHash, mappings 哈希, language, nested, 请求 options)`。
+结果写入 L3，键为 `(ApkKey, 输入指纹, backend.name, backend.version, optionsHash, mappings 哈希, 是否下发资源名, language, nested, 请求 options)`。
 
 - mappings 哈希：`NameMappings::hash`，对 `program/open` 实际下发的（按请求裁剪后的）条目计算，与插入顺序无关；
   编码改动时提升其中的版本标签（当前 `asc-name-mappings/2`）。
+
+- 资源名：下发了才在查询串末尾（请求 options 之前）加 `\0resources=<值>`，没下发时查询串不变，已有条目照常命中。
+  DEX 程序的值是 `1`：表由程序决定，`ApkKey` 已经包含。ABC 文件的值是资源名的 SHA-256（`asc-resource-names/1`
+  标签）：它的键只按文件内容算，而名字来自所在模块的索引，同一个 `modules.abc` 放在索引不同的包里不能串。
+  已打开的程序会话也按这个值区分。
 
 - 输入指纹：切片用切片的 SHA-256。切片输出是规范化的（id 表排序固定），所以同一个类闭包每次得到相同的哈希。
   archive 用 `ApkKey` 加类描述符。

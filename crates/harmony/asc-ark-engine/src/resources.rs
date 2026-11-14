@@ -16,7 +16,7 @@
 //! the page list; `$profile:router_map`, the route table).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use asc_abc::{Abc, Literal, Method};
@@ -596,6 +596,18 @@ impl Engine {
         if !names.is_empty() {
             source.text = annotate(&source.text, &names);
         }
+    }
+
+    /// The resources of the module ABC entry `entry` is part of, as
+    /// `type/name` by id (`string/app_name`); of the one module that has an
+    /// index, for a bare file. Empty when there is no index that reads.
+    pub fn resource_names(&self, entry: &str) -> BTreeMap<u32, String> {
+        let Some(index) = self.index_of_entry(entry) else { return BTreeMap::new() };
+        let mut names = BTreeMap::new();
+        for resource in index.iter() {
+            names.entry(resource.id()).or_insert_with(|| format!("{}/{}", resource.kind(), resource.name()));
+        }
+        names
     }
 
     /// The index of the package ABC entry `entry` is part of; of the one
